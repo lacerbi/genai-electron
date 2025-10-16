@@ -85,13 +85,13 @@ examples/electron-control-panel/
 **Dependencies to install:**
 
 Core:
-- `electron` ^34.0.0 (matches library peer dependency >=25.0.0)
+- `electron` ^35.0.0 (latest stable, Jan 2025)
 - `genai-electron` file:../.. (from parent directory)
 - `genai-lite` latest (for test chat functionality)
 
 Frontend:
-- `react` ^18.3.0
-- `react-dom` ^18.3.0
+- `react` ^18.3.1 (React 19 available but using 18.3 for stability)
+- `react-dom` ^18.3.1
 
 TypeScript:
 - `typescript` ^5.7.2 (match library version)
@@ -100,16 +100,29 @@ TypeScript:
 - `@types/node` ^22.10.0
 
 Build tools:
-- `vite` ^6.0.0
-- `@vitejs/plugin-react` ^4.3.0
-- `electron-forge` packages for packaging
+- `vite` ^7.0.0 (requires Node 20.19+/22.12+, matches our Node 22)
+- `@vitejs/plugin-react` ^5.0.4
+- `concurrently` ^9.2.1 (required for dev script)
+
+Electron Forge (packaging):
+- `@electron-forge/cli` ^7.9.0
+- `@electron-forge/plugin-vite` ^7.9.0
+- `@electron-forge/maker-squirrel` ^7.9.0 (Windows)
+- `@electron-forge/maker-zip` ^7.9.0 (macOS)
+- `@electron-forge/maker-deb` ^7.9.0 (Linux)
+
+Code Quality:
+- `eslint` ^9.17.0 (match main project)
+- `typescript-eslint` ^8.18.2
+- `eslint-config-prettier` ^9.1.0
+- `prettier` ^3.4.2
 
 **package.json scripts:**
 
 ```json
 {
   "scripts": {
-    "dev": "concurrently \"vite\" \"electron-forge start\"",
+    "dev": "electron-forge start",
     "build": "tsc && vite build",
     "start": "electron-forge start",
     "package": "electron-forge package",
@@ -1052,7 +1065,7 @@ These will be added in subsequent phases as the genai-electron library implement
 | Common Components | 6 | StatusIndicator, ProgressBar, ActionButton, LogViewer, Card, Spinner |
 | System Info | 2 | SystemInfo.tsx, useSystemInfo.ts |
 | Models | 4 | ModelManager.tsx, ModelList.tsx, ModelDownloadForm.tsx, useModels.ts |
-| Server | 4 | LlamaServerControl.tsx, ServerConfig.tsx, TestChat.tsx, useServerStatus.ts, useServerLogs.ts |
+| Server | 5 | LlamaServerControl.tsx, ServerConfig.tsx, TestChat.tsx, useServerStatus.ts, useServerLogs.ts |
 | Types | 3 | index.ts, api.ts, ui.ts |
 | Styles | 3 | variables.css, components.css, layout.css |
 | Documentation | 2 | README.md, SCREENSHOTS.md |
