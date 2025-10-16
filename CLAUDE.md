@@ -163,6 +163,33 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 - **docs/API.md**: Complete API reference with examples
 - **docs/SETUP.md**: Development environment setup for all platforms
 
+## Critical: Electron + ES Modules Gotcha
+
+**IMPORTANT for Electron apps with `"type": "module"`:**
+
+The electron-control-panel example uses `"type": "module"` in package.json, which tells Node.js to treat all `.js` files as ES modules. However, **Electron requires CommonJS for main and preload scripts**.
+
+**Solution (already implemented in electron-control-panel):**
+1. **Output `.cjs` extension** for main and preload builds
+   - `vite.main.config.ts`: `fileName: () => 'main.cjs'`
+   - `vite.preload.config.ts`: `fileName: () => 'preload.cjs'`
+2. **Force CommonJS format** in rollupOptions:
+   ```typescript
+   rollupOptions: {
+     output: { format: 'cjs' }
+   }
+   ```
+3. **Update package.json**: `"main": ".vite/build/main.cjs"`
+4. **Update preload path**: `join(__dirname, 'preload.cjs')`
+
+**Why this matters:**
+- Without `.cjs` extension, Node sees `.js` files as ES modules
+- ES module main process can't properly load CommonJS preload scripts
+- Results in "Unable to load preload script" or "exports is not defined" errors
+- `window.api` will be undefined in renderer
+
+This is documented in the electron-control-panel example for reference.
+
 ## Working with This Codebase
 
 **When Adding New Features**:
