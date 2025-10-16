@@ -1,0 +1,91 @@
+.server-config {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.config-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+.config-group label {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.config-hint {
+  display: block;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: normal;
+  text-transform: none;
+  letter-spacing: normal;
+  margin-top: var(--spacing-xs);
+}
+
+.config-group input[type='number'],
+.config-group input[type='text'],
+.config-group select {
+  padding: var(--spacing-sm) var(--spacing-md);
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  transition: border-color var(--transition-fast);
+}
+
+.config-group input:focus,
+.config-group select:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.config-group input:disabled,
+.config-group select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Checkbox styling */
+.config-checkbox {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: var(--spacing-sm);
+}
+
+.config-checkbox input[type='checkbox'] {
+  margin-top: 2px;
+  cursor: pointer;
+}
+
+.config-checkbox input[type='checkbox']:disabled {
+  cursor: not-allowed;
+}
+
+.config-checkbox label {
+  cursor: pointer;
+  user-select: none;
+}
+
+/* Manual config section */
+.manual-config {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+  padding: var(--spacing-lg);
+  background-color: rgba(255, 255, 255, 0.02);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+}
+
+.manual-config.disabled {
+  opacity: 0.6;
+  pointer-events: none;
+}

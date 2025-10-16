@@ -1,0 +1,69 @@
+.llama-server-control {
+  max-width: 1200px;
+}
+
+.error-banner {
+  padding: var(--spacing-md) var(--spacing-lg);
+  background-color: rgba(244, 67, 54, 0.1);
+  border: 1px solid var(--status-red);
+  border-radius: var(--radius-sm);
+  color: var(--status-red);
+  margin-bottom: var(--spacing-lg);
+}
+
+.error-banner strong {
+  font-weight: 600;
+}
+
+.status-display {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-lg);
+}
+
+.server-details {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--spacing-md);
+  padding: var(--spacing-lg);
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+}
+
+.detail-row {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.detail-label {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  min-width: 60px;
+}
+
+.detail-value {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 14px;
+}
+
+.server-actions {
+  display: flex;
+  gap: var(--spacing-md);
+  padding-top: var(--spacing-lg);
+  margin-top: var(--spacing-lg);
+  border-top: 1px solid var(--border-color);
+}
+
+.test-chat-description {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin-bottom: var(--spacing-lg);
+  padding-bottom: var(--spacing-lg);
+  border-bottom: 1px solid var(--border-color);
+}

@@ -1,0 +1,91 @@
+.log-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.log-viewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: var(--spacing-sm);
+}
+
+.log-viewer-title {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.log-viewer-content {
+  background-color: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-md);
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.log-empty {
+  color: var(--text-tertiary);
+  text-align: center;
+  padding: var(--spacing-xl);
+  font-style: italic;
+}
+
+.log-entry {
+  display: flex;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-xs) 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.log-entry:last-child {
+  border-bottom: none;
+}
+
+.log-timestamp {
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+  min-width: 80px;
+}
+
+.log-level {
+  flex-shrink: 0;
+  min-width: 60px;
+  font-weight: 600;
+}
+
+.log-message {
+  flex: 1;
+  word-break: break-word;
+}
+
+/* Log level colors */
+.log-info .log-level {
+  color: var(--text-primary);
+}
+
+.log-info .log-message {
+  color: var(--text-primary);
+}
+
+.log-warn .log-level {
+  color: var(--status-yellow);
+}
+
+.log-warn .log-message {
+  color: var(--status-yellow);
+}
+
+.log-error .log-level {
+  color: var(--status-red);
+}
+
+.log-error .log-message {
+  color: var(--status-red);
+}

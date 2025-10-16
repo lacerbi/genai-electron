@@ -1,0 +1,50 @@
+{
+  "name": "electron-control-panel",
+  "version": "0.1.0",
+  "description": "Developer control panel for genai-electron - demonstrates runtime management capabilities",
+  "main": ".vite/build/main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "electron-forge start",
+    "build": "tsc && vite build",
+    "start": "electron-forge start",
+    "package": "electron-forge package",
+    "make": "electron-forge make",
+    "lint": "eslint . --ext .ts,.tsx",
+    "format": "prettier --write ."
+  },
+  "keywords": [
+    "electron",
+    "genai",
+    "ai",
+    "llm",
+    "control-panel"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "genai-electron": "file:../..",
+    "genai-lite": "^0.8.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "^7.9.0",
+    "@electron-forge/maker-deb": "^7.9.0",
+    "@electron-forge/maker-squirrel": "^7.9.0",
+    "@electron-forge/maker-zip": "^7.9.0",
+    "@electron-forge/plugin-vite": "^7.9.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "concurrently": "^9.2.1",
+    "electron": "^35.0.0",
+    "eslint": "^9.17.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.2",
+    "vite": "^7.0.0"
+  }
+}
