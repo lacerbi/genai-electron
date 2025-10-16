@@ -2,9 +2,10 @@ import { app, BrowserWindow } from 'electron';
 import { join } from 'path';
 import { registerIpcHandlers } from './ipc-handlers.js';
 import { cleanupServers } from './genai-api.js';
+import squirrelStartup from 'electron-squirrel-startup';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling
-if (require('electron-squirrel-startup')) {
+if (squirrelStartup) {
   app.quit();
 }
 
