@@ -151,17 +151,13 @@ export function getPlatformDescription(): string {
   const platform = getPlatform();
   const arch = getArchitecture();
 
-  const platformNames: Record<NodeJS.Platform, string> = {
+  const platformNames: Partial<Record<NodeJS.Platform, string>> = {
     darwin: 'macOS',
     win32: 'Windows',
     linux: 'Linux',
-    // @ts-expect-error - Other platforms are rarely used
     freebsd: 'FreeBSD',
-    // @ts-expect-error
     openbsd: 'OpenBSD',
-    // @ts-expect-error
     sunos: 'SunOS',
-    // @ts-expect-error
     aix: 'AIX',
   };
 

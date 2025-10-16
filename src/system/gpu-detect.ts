@@ -59,7 +59,7 @@ async function detectMacGPU(): Promise<GPUInfo> {
       'system_profiler SPDisplaysDataType | grep "Chipset Model"'
     );
     const match = stdout.match(/Chipset Model:\s*(.+)/);
-    if (match) {
+    if (match && match[1]) {
       gpuInfo.name = match[1].trim();
     }
   } catch {
@@ -86,7 +86,7 @@ async function detectWindowsGPU(): Promise<GPUInfo> {
     );
 
     const parts = stdout.trim().split(',');
-    if (parts.length >= 2) {
+    if (parts.length >= 2 && parts[0] && parts[1]) {
       const name = parts[0].trim();
       const vramMB = parseInt(parts[1].trim(), 10);
 
@@ -146,7 +146,7 @@ async function detectLinuxNvidiaGPU(): Promise<GPUInfo> {
     );
 
     const parts = stdout.trim().split(',');
-    if (parts.length >= 2) {
+    if (parts.length >= 2 && parts[0] && parts[1]) {
       const name = parts[0].trim();
       const vramMB = parseInt(parts[1].trim(), 10);
 
@@ -180,22 +180,29 @@ async function detectLinuxAMDGPU(): Promise<GPUInfo> {
     const { stdout } = await execAsync('rocm-smi --showproductname --csv');
     const lines = stdout.split('\n');
 
-    if (lines.length > 1) {
-      const name = lines[1].split(',')[0].trim();
+    if (lines.length > 1 && lines[1]) {
+      const namePart = lines[1].split(',')[0];
+      if (!namePart) {
+        return { available: false };
+      }
+      const name = namePart.trim();
 
       // Try to get VRAM info
       try {
         const { stdout: vramOut } = await execAsync('rocm-smi --showmeminfo vram --csv');
         const vramLines = vramOut.split('\n');
-        if (vramLines.length > 1) {
-          const vramMB = parseInt(vramLines[1].split(',')[0], 10);
-          return {
-            available: true,
-            type: 'amd',
-            name,
-            vram: !isNaN(vramMB) ? vramMB * 1024 * 1024 : undefined,
-            rocm: true,
-          };
+        if (vramLines.length > 1 && vramLines[1]) {
+          const vramPart = vramLines[1].split(',')[0];
+          if (vramPart) {
+            const vramMB = parseInt(vramPart, 10);
+            return {
+              available: true,
+              type: 'amd',
+              name,
+              vram: !isNaN(vramMB) ? vramMB * 1024 * 1024 : undefined,
+              rocm: true,
+            };
+          }
         }
       } catch {
         // VRAM info not available, but GPU is detected
@@ -233,7 +240,7 @@ async function detectLinuxIntelGPU(): Promise<GPUInfo> {
           'lspci | grep -i vga | grep -i intel'
         );
         const match = deviceInfo.match(/Intel.*?:\s*(.+)/);
-        const name = match ? match[1].trim() : 'Intel GPU';
+        const name = match && match[1] ? match[1].trim() : 'Intel GPU';
 
         return {
           available: true,

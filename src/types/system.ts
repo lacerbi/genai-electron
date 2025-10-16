@@ -68,7 +68,7 @@ export interface SystemRecommendations {
   maxModelSize: string;
 
   /** Recommended quantization levels (e.g., ["Q4_K_M", "Q5_K_M"]) */
-  recommendedQuantization: string[];
+  recommendedQuantization: readonly string[];
 
   /** Recommended number of CPU threads */
   threads: number;

@@ -16,7 +16,6 @@ import {
   fileExists,
   deleteFile,
   calculateChecksum,
-  getFileSize,
 } from '../utils/file-utils.js';
 
 /**

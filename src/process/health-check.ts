@@ -71,7 +71,7 @@ export async function checkHealth(
         return data;
       }
       // Invalid status, default to unknown
-      return { status: 'unknown', ...data };
+      return { ...data, status: 'unknown' };
     } catch {
       // Failed to parse JSON - server might not be llama-server
       return { status: response.status === 200 ? 'ok' : 'unknown' };

@@ -86,11 +86,13 @@ export async function estimateVRAM(gpu: GPUInfo): Promise<number | null> {
       const { stdout } = await execAsync('rocm-smi --showmeminfo vram --csv');
       // Parse CSV output to extract VRAM size
       const lines = stdout.split('\n');
-      if (lines.length > 1) {
+      if (lines.length > 1 && lines[1]) {
         const values = lines[1].split(',');
-        const vramMB = parseInt(values[0], 10);
-        if (!isNaN(vramMB)) {
-          return vramMB * 1024 * 1024;
+        if (values[0]) {
+          const vramMB = parseInt(values[0], 10);
+          if (!isNaN(vramMB)) {
+            return vramMB * 1024 * 1024;
+          }
         }
       }
     } catch {

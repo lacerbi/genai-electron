@@ -10,10 +10,10 @@ import type {
   ServerConfig,
 } from '../types/index.js';
 import { getCPUInfo, getRecommendedThreads } from './cpu-detect.js';
-import { getMemoryInfo, estimateVRAM, hasSufficientMemory } from './memory-detect.js';
+import { getMemoryInfo, estimateVRAM } from './memory-detect.js';
 import { detectGPU, calculateGPULayers } from './gpu-detect.js';
 import { getPlatform } from '../utils/platform-utils.js';
-import { MODEL_SIZE_ESTIMATES, RECOMMENDED_QUANTIZATIONS } from '../config/defaults.js';
+import { RECOMMENDED_QUANTIZATIONS } from '../config/defaults.js';
 
 /**
  * System information singleton
@@ -213,7 +213,7 @@ export class SystemInfo {
 
     // Determine max model size based on available resources
     let maxModelSize: string;
-    let recommendedQuantization: string[];
+    let recommendedQuantization: readonly string[];
 
     if (gpu.available && vramGB >= 24) {
       maxModelSize = '70B';

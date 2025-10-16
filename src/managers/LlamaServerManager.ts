@@ -31,7 +31,6 @@ import { PATHS, getBinaryPath } from '../config/paths.js';
 import { BINARY_VERSIONS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
 import { getPlatformKey } from '../utils/platform-utils.js';
 import { fileExists, ensureDirectory, calculateChecksum } from '../utils/file-utils.js';
-import { ChildProcess } from 'child_process';
 import path from 'path';
 
 /**
@@ -71,7 +70,6 @@ export class LlamaServerManager extends ServerManager {
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
   private logManager?: LogManager;
-  private _childProcess?: ChildProcess;
   private binaryPath?: string;
 
   /**
@@ -156,7 +154,7 @@ export class LlamaServerManager extends ServerManager {
       const args = this.buildCommandLineArgs(finalConfig, modelInfo.path);
 
       // 8. Spawn the process
-      const { process: childProcess, pid } = this.processManager.spawn(
+      const { pid } = this.processManager.spawn(
         this.binaryPath,
         args,
         {
@@ -166,7 +164,6 @@ export class LlamaServerManager extends ServerManager {
         }
       );
 
-      this._childProcess = childProcess;
       this._pid = pid;
       this._port = finalConfig.port;
 
@@ -246,7 +243,6 @@ export class LlamaServerManager extends ServerManager {
       this.setStatus('stopped');
       this._pid = undefined;
       this._port = 0;
-      this._childProcess = undefined;
 
       if (this.logManager) {
         await this.logManager.write('Server stopped', 'info');
@@ -558,6 +554,5 @@ export class LlamaServerManager extends ServerManager {
     // Cleanup
     this._pid = undefined;
     this._port = 0;
-    this._childProcess = undefined;
   }
 }

@@ -183,11 +183,13 @@ export class LogManager {
   static parseEntry(line: string): LogEntry | null {
     // Format: [timestamp] [LEVEL] message
     const match = line.match(/^\[([^\]]+)\] \[(\w+)\s*\] (.+)$/);
-    if (!match) {
+    if (!match || !match[1] || !match[2] || !match[3]) {
       return null;
     }
 
-    const [, timestamp, levelStr, message] = match;
+    const timestamp = match[1];
+    const levelStr = match[2];
+    const message = match[3];
     const level = levelStr.trim().toLowerCase() as LogLevel;
 
     // Validate level
