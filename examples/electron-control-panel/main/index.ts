@@ -17,12 +17,15 @@ if (squirrelStartup) {
 let mainWindow: BrowserWindow | null = null;
 
 const createWindow = (): void => {
+  const preloadPath = join(__dirname, 'preload.js');
+  console.log('[MAIN] Preload path:', preloadPath);
+
   // Create the browser window
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     webPreferences: {
-      preload: join(__dirname, 'preload.js'),
+      preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false, // Required for some Electron Forge features
