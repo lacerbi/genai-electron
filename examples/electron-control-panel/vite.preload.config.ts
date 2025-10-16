@@ -10,7 +10,11 @@ export default defineConfig({
       fileName: () => 'preload.js',
     },
     rollupOptions: {
-      external: ['electron', 'genai-electron', 'genai-lite'],
+      external: ['electron'],
+      output: {
+        format: 'commonjs',
+        interop: 'compat',
+      },
     },
   },
 });
