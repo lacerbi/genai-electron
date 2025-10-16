@@ -2,7 +2,7 @@
   "name": "electron-control-panel",
   "version": "0.1.0",
   "description": "Developer control panel for genai-electron - demonstrates runtime management capabilities",
-  "main": ".vite/build/main.js",
+  "main": ".vite/build/main.cjs",
   "type": "module",
   "scripts": {
     "dev": "electron-forge start",

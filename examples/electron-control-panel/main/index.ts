@@ -17,7 +17,7 @@ if (squirrelStartup) {
 let mainWindow: BrowserWindow | null = null;
 
 const createWindow = (): void => {
-  const preloadPath = join(__dirname, 'preload.js');
+  const preloadPath = join(__dirname, 'preload.cjs');
   console.log('[MAIN] Preload path:', preloadPath);
 
   // Create the browser window

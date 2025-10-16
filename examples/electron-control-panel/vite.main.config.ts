@@ -7,7 +7,7 @@ export default defineConfig({
     lib: {
       entry: resolve(__dirname, 'main/index.ts'),
       formats: ['cjs'],
-      fileName: () => 'main.js',
+      fileName: () => 'main.cjs',
     },
     rollupOptions: {
       external: ['electron', 'genai-electron', 'genai-lite'],
