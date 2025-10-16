@@ -47,6 +47,12 @@ export function useServerStatus() {
 
   // Listen to server events
   useEffect(() => {
+    // Safety check: ensure window.api exists
+    if (!window.api || !window.api.on) {
+      console.error('window.api not available');
+      return;
+    }
+
     window.api.on('server:started', () => {
       fetchStatus();
     });
@@ -61,9 +67,11 @@ export function useServerStatus() {
     });
 
     return () => {
-      window.api.off('server:started');
-      window.api.off('server:stopped');
-      window.api.off('server:crashed');
+      if (window.api && window.api.off) {
+        window.api.off('server:started');
+        window.api.off('server:stopped');
+        window.api.off('server:crashed');
+      }
     };
   }, [fetchStatus]);
 

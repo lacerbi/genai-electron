@@ -57,6 +57,12 @@ export function useModels() {
 
   // Listen to download progress events
   useEffect(() => {
+    // Safety check: ensure window.api exists
+    if (!window.api || !window.api.on) {
+      console.error('window.api not available');
+      return;
+    }
+
     window.api.on('download:progress', (progress: DownloadProgress) => {
       setDownloadProgress(progress);
     });
@@ -74,9 +80,11 @@ export function useModels() {
     });
 
     return () => {
-      window.api.off('download:progress');
-      window.api.off('download:complete');
-      window.api.off('download:error');
+      if (window.api && window.api.off) {
+        window.api.off('download:progress');
+        window.api.off('download:complete');
+        window.api.off('download:error');
+      }
     };
   }, [fetchModels]);
 
