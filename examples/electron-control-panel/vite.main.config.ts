@@ -6,11 +6,14 @@ export default defineConfig({
     outDir: '.vite/build',
     lib: {
       entry: resolve(__dirname, 'main/index.ts'),
-      formats: ['es'],
+      formats: ['cjs'],
       fileName: () => 'main.js',
     },
     rollupOptions: {
       external: ['electron', 'genai-electron', 'genai-lite'],
+      output: {
+        format: 'cjs',
+      },
     },
   },
   resolve: {
