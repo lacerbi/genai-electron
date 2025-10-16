@@ -10,7 +10,7 @@ export default defineConfig({
       fileName: () => 'main.js',
     },
     rollupOptions: {
-      external: ['electron'],
+      external: ['electron', 'genai-electron', 'genai-lite'],
     },
   },
   resolve: {

@@ -8,6 +8,9 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, '.vite/renderer'),
     emptyOutDir: true,
+    rollupOptions: {
+      external: ['electron', 'genai-electron', 'genai-lite'],
+    },
   },
   server: {
     port: 3000,
