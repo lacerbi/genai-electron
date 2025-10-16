@@ -9,7 +9,6 @@ import { Readable } from 'node:stream';
 import type { DownloadProgressCallback } from '../types/index.js';
 import { DownloadError } from '../errors/index.js';
 import { moveFile, deleteFile, fileExists } from '../utils/file-utils.js';
-import { DEFAULT_TIMEOUTS } from '../config/defaults.js';
 
 /**
  * Download configuration
@@ -66,7 +65,8 @@ export class Downloader {
    * ```
    */
   public async download(options: DownloadOptions): Promise<void> {
-    const { url, destination, onProgress, timeout = DEFAULT_TIMEOUTS.download, headers } = options;
+    const { url, destination, onProgress, headers } = options;
+    // Note: timeout handling deferred to Phase 3
 
     // Check if already downloading
     if (this.isDownloading) {
