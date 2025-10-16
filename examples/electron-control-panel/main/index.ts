@@ -1,8 +1,13 @@
 import { app, BrowserWindow } from 'electron';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { registerIpcHandlers } from './ipc-handlers.js';
 import { cleanupServers } from './genai-api.js';
 import squirrelStartup from 'electron-squirrel-startup';
+
+// ES module compatibility: Define __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling
 if (squirrelStartup) {
