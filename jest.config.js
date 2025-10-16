@@ -45,7 +45,7 @@ export default {
 
   coverageDirectory: 'coverage',
 
-  coverageThresholds: {
+  coverageThreshold: {
     global: {
       branches: 60,
       functions: 60,
