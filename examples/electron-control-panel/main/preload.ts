@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
+console.log('[PRELOAD] Script is running');
+console.log('[PRELOAD] contextBridge available:', !!contextBridge);
+console.log('[PRELOAD] ipcRenderer available:', !!ipcRenderer);
+
 // Expose protected methods that allow the renderer process to use ipcRenderer
 contextBridge.exposeInMainWorld('api', {
   // System Info APIs
@@ -57,6 +61,8 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.removeAllListeners(channel);
   },
 });
+
+console.log('[PRELOAD] window.api exposed successfully');
 
 // Type declaration for the window object (to be used in renderer)
 export type WindowAPI = {
