@@ -36,6 +36,15 @@ export function useSystemInfo() {
   const fetchSystemInfo = async () => {
     setLoading(true);
     setError(null);
+
+    // Safety check: ensure window.api exists
+    if (!window.api || !window.api.system) {
+      console.error('window.api not available');
+      setError('System API not available');
+      setLoading(false);
+      return;
+    }
+
     try {
       const data = await window.api.system.detect();
       setCapabilities(data as SystemCapabilities);

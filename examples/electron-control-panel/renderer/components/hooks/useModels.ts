@@ -39,6 +39,14 @@ export function useModels() {
   const [error, setError] = useState<string | null>(null);
 
   const fetchModels = useCallback(async () => {
+    // Safety check: ensure window.api exists
+    if (!window.api || !window.api.models) {
+      console.error('window.api not available');
+      setError('Models API not available');
+      setLoading(false);
+      return;
+    }
+
     try {
       const data = await window.api.models.list('llm');
       setModels(data as ModelInfo[]);

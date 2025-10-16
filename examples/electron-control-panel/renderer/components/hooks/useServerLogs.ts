@@ -12,6 +12,13 @@ export function useServerLogs() {
 
   useEffect(() => {
     const fetchLogs = async () => {
+      // Safety check: ensure window.api exists
+      if (!window.api || !window.api.server) {
+        console.error('window.api not available');
+        setLoading(false);
+        return;
+      }
+
       try {
         const newLogs = await window.api.server.logs(100);
         setLogs(newLogs as LogEntry[]);

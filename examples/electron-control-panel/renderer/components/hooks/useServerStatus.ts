@@ -23,6 +23,12 @@ export function useServerStatus() {
   const [error, setError] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
+    // Safety check: ensure window.api exists
+    if (!window.api || !window.api.server) {
+      console.error('window.api not available');
+      return;
+    }
+
     try {
       const newStatus = await window.api.server.status();
       setStatus(newStatus as ServerStatus);
