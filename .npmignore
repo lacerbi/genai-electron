@@ -1,0 +1,39 @@
+# Source files (only ship compiled dist/)
+src/
+
+# Tests
+tests/
+*.test.ts
+*.spec.ts
+coverage/
+
+# Development files
+.github/
+.vscode/
+.idea/
+
+# Configuration files
+tsconfig.json
+jest.config.js
+eslint.config.mjs
+.prettierrc
+.prettierignore
+.eslintignore
+
+# Documentation (keep README.md and LICENSE)
+DESIGN.md
+PLAN.md
+PROGRESS.md
+docs/SETUP.md
+examples/
+
+# Logs and temporary files
+*.log
+.DS_Store
+.env
+.env.*
+
+# Package manager
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
