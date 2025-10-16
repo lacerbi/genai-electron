@@ -146,7 +146,7 @@ const SystemInfo: React.FC = () => {
           <div className="recommendation-item recommendation-models">
             <h4>Suggested Models</h4>
             <ul className="model-suggestions">
-              {capabilities.recommendations.recommendedModels.map((model, index) => (
+              {capabilities.recommendations.recommendedModels?.map((model, index) => (
                 <li key={index} className="model-suggestion">
                   <span className={model.supported ? 'model-supported' : 'model-marginal'}>
                     {model.supported ? '✓' : '⚠'}
