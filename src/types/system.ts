@@ -16,8 +16,11 @@ export interface GPUInfo {
   /** GPU model name */
   name?: string;
 
-  /** VRAM in bytes */
+  /** VRAM in bytes (total) */
   vram?: number;
+
+  /** Available VRAM in bytes (free) */
+  vramAvailable?: number;
 
   /** NVIDIA CUDA support */
   cuda?: boolean;

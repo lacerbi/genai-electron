@@ -82,19 +82,21 @@ async function detectWindowsGPU(): Promise<GPUInfo> {
   // Try NVIDIA GPU detection via nvidia-smi
   try {
     const { stdout } = await execAsync(
-      'nvidia-smi --query-gpu=name,memory.total --format=csv,noheader'
+      'nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader'
     );
 
     const parts = stdout.trim().split(',');
-    if (parts.length >= 2 && parts[0] && parts[1]) {
+    if (parts.length >= 3 && parts[0] && parts[1] && parts[2]) {
       const name = parts[0].trim();
-      const vramMB = parseInt(parts[1].trim(), 10);
+      const vramTotalMB = parseInt(parts[1].trim(), 10);
+      const vramFreeMB = parseInt(parts[2].trim(), 10);
 
       return {
         available: true,
         type: 'nvidia',
         name,
-        vram: !isNaN(vramMB) ? vramMB * 1024 * 1024 : undefined,
+        vram: !isNaN(vramTotalMB) ? vramTotalMB * 1024 * 1024 : undefined,
+        vramAvailable: !isNaN(vramFreeMB) ? vramFreeMB * 1024 * 1024 : undefined,
         cuda: true,
       };
     }
@@ -142,19 +144,21 @@ async function detectLinuxGPU(): Promise<GPUInfo> {
 async function detectLinuxNvidiaGPU(): Promise<GPUInfo> {
   try {
     const { stdout } = await execAsync(
-      'nvidia-smi --query-gpu=name,memory.total --format=csv,noheader'
+      'nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader'
     );
 
     const parts = stdout.trim().split(',');
-    if (parts.length >= 2 && parts[0] && parts[1]) {
+    if (parts.length >= 3 && parts[0] && parts[1] && parts[2]) {
       const name = parts[0].trim();
-      const vramMB = parseInt(parts[1].trim(), 10);
+      const vramTotalMB = parseInt(parts[1].trim(), 10);
+      const vramFreeMB = parseInt(parts[2].trim(), 10);
 
       return {
         available: true,
         type: 'nvidia',
         name,
-        vram: !isNaN(vramMB) ? vramMB * 1024 * 1024 : undefined,
+        vram: !isNaN(vramTotalMB) ? vramTotalMB * 1024 * 1024 : undefined,
+        vramAvailable: !isNaN(vramFreeMB) ? vramFreeMB * 1024 * 1024 : undefined,
         cuda: true,
       };
     }
