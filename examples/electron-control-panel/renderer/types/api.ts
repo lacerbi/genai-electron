@@ -104,10 +104,13 @@ export interface ServerConfig {
 }
 
 export interface ServerStatus {
-  status: 'running' | 'stopped' | 'starting' | 'error';
-  modelId?: string;
-  port?: number;
+  status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
+  health: 'unknown' | 'healthy' | 'unhealthy';
+  modelId: string;
+  port: number;
   pid?: number;
+  startedAt?: string;
+  error?: string;
 }
 
 // Log Types

@@ -152,7 +152,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('server:status', () => {
     try {
-      return llamaServer.getStatus();
+      return llamaServer.getInfo();
     } catch (error) {
       throw new Error(`Failed to get server status: ${(error as Error).message}`);
     }

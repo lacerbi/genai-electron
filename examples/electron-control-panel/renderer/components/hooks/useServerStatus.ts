@@ -1,10 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 
-interface ServerStatus {
-  status: 'running' | 'stopped' | 'starting' | 'error';
-  modelId?: string;
-  port?: number;
+interface ServerInfo {
+  status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
+  health: 'unknown' | 'healthy' | 'unhealthy';
+  modelId: string;
+  port: number;
   pid?: number;
+  startedAt?: string;
+  error?: string;
 }
 
 interface ServerConfig {
@@ -18,7 +21,12 @@ interface ServerConfig {
 }
 
 export function useServerStatus() {
-  const [status, setStatus] = useState<ServerStatus>({ status: 'stopped' });
+  const [status, setStatus] = useState<ServerInfo>({
+    status: 'stopped',
+    health: 'unknown',
+    modelId: '',
+    port: 0,
+  });
   const [isHealthy, setIsHealthy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -31,9 +39,9 @@ export function useServerStatus() {
 
     try {
       const newStatus = await window.api.server.status();
-      setStatus(newStatus as ServerStatus);
+      setStatus(newStatus as ServerInfo);
 
-      if ((newStatus as ServerStatus).status === 'running') {
+      if ((newStatus as ServerInfo).status === 'running') {
         const health = await window.api.server.health();
         setIsHealthy(health);
       } else {
