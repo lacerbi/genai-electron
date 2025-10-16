@@ -110,13 +110,8 @@ export function registerIpcHandlers(): void {
     }
   });
 
-  ipcMain.handle('models:getStorageInfo', async () => {
-    try {
-      return await modelManager.getStorageInfo();
-    } catch (error) {
-      throw new Error(`Failed to get storage info: ${(error as Error).message}`);
-    }
-  });
+  // Note: getStorageInfo will be added in a future version of genai-electron
+  // For now, storage info can be calculated from model list
 
   // ========================================
   // Server Control Handlers

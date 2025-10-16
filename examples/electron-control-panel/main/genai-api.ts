@@ -4,7 +4,7 @@ import { BrowserWindow } from 'electron';
 /**
  * Forward download progress events to renderer
  */
-export function setupDownloadProgressForwarding(downloadId: string): void {
+export function setupDownloadProgressForwarding(_downloadId: string): void {
   const mainWindow = BrowserWindow.getAllWindows()[0];
   if (!mainWindow) return;
 
@@ -43,7 +43,7 @@ export function setupServerEventForwarding(): void {
 export async function cleanupServers(): Promise<void> {
   try {
     const status = llamaServer.getStatus();
-    if (status.status === 'running') {
+    if (status === 'running') {
       await llamaServer.stop();
     }
   } catch (error) {
