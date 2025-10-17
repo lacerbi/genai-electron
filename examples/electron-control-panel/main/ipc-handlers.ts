@@ -9,6 +9,7 @@ import {
   sendDownloadError,
 } from './genai-api.js';
 import { LogManager } from 'genai-electron';
+import { LLMService } from 'genai-lite';
 
 /**
  * Register all IPC handlers
@@ -196,6 +197,37 @@ export function registerIpcHandlers(): void {
       await llamaServer.clearLogs();
     } catch (error) {
       throw new Error(`Failed to clear logs: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('server:testMessage', async (_event, message: string, settings?: any) => {
+    try {
+      // Create LLMService instance (llama.cpp doesn't need real API keys)
+      const llmService = new LLMService(async () => 'not-needed');
+
+      // Get server info to determine the port
+      const serverInfo = llamaServer.getInfo();
+
+      if (serverInfo.status !== 'running' || !serverInfo.port) {
+        throw new Error('Server is not running');
+      }
+
+      // Send message using genai-lite
+      const response = await llmService.sendMessage({
+        providerId: 'llamacpp',
+        modelId: serverInfo.modelId || 'unknown-model',
+        messages: [
+          {
+            role: 'user',
+            content: message,
+          },
+        ],
+        settings: settings || {},
+      });
+
+      return response;
+    } catch (error) {
+      throw new Error(`Failed to send test message: ${(error as Error).message}`);
     }
   });
 }

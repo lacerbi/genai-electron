@@ -34,6 +34,8 @@ contextBridge.exposeInMainWorld('api', {
     health: () => ipcRenderer.invoke('server:health'),
     logs: (limit: number) => ipcRenderer.invoke('server:logs', limit),
     clearLogs: () => ipcRenderer.invoke('server:clearLogs'),
+    testMessage: (message: string, settings?: unknown) =>
+      ipcRenderer.invoke('server:testMessage', message, settings),
   },
 
   // Event listeners
@@ -89,6 +91,7 @@ export type WindowAPI = {
     health: () => Promise<boolean>;
     logs: (limit: number) => Promise<unknown[]>;
     clearLogs: () => Promise<void>;
+    testMessage: (message: string, settings?: unknown) => Promise<unknown>;
   };
   on: (channel: string, callback: (...args: unknown[]) => void) => void;
   off: (channel: string) => void;
