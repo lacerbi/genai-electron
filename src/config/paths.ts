@@ -25,8 +25,13 @@ export const PATHS = {
     /** Diffusion models directory */
     diffusion: path.join(BASE_DIR, 'models', 'diffusion'),
   },
-  /** Binary executables directory */
-  binaries: path.join(BASE_DIR, 'binaries'),
+  /** Binary executables directories (separated by type) */
+  binaries: {
+    /** llama.cpp binaries (llama-server.exe and DLLs) */
+    llama: path.join(BASE_DIR, 'binaries', 'llama'),
+    /** stable-diffusion.cpp binaries (Phase 2) */
+    diffusion: path.join(BASE_DIR, 'binaries', 'diffusion'),
+  },
   /** Log files directory */
   logs: path.join(BASE_DIR, 'logs'),
   /** Configuration files directory */
@@ -49,7 +54,8 @@ export async function ensureDirectories(): Promise<void> {
   const directories = [
     PATHS.models.llm,
     PATHS.models.diffusion,
-    PATHS.binaries,
+    PATHS.binaries.llama,
+    PATHS.binaries.diffusion,
     PATHS.logs,
     PATHS.config,
   ];
@@ -100,20 +106,21 @@ export function getModelFilePath(type: 'llm' | 'diffusion', filename: string): s
  *
  * Automatically adds .exe extension on Windows platforms.
  *
- * @param binaryName - Binary name (e.g., "llama-server", "diffusion-cpp")
+ * @param type - Binary type ('llama' or 'diffusion')
+ * @param binaryName - Binary name (e.g., "llama-server", "stable-diffusion")
  * @returns Absolute path to binary file
  *
  * @example
  * ```typescript
- * const binaryPath = getBinaryPath('llama-server');
- * // Returns: /path/to/userData/binaries/llama-server (Unix)
- * // Returns: C:\...\userData\binaries\llama-server.exe (Windows)
+ * const binaryPath = getBinaryPath('llama', 'llama-server');
+ * // Returns: /path/to/userData/binaries/llama/llama-server (Unix)
+ * // Returns: C:\...\userData\binaries\llama\llama-server.exe (Windows)
  * ```
  */
-export function getBinaryPath(binaryName: string): string {
+export function getBinaryPath(type: 'llama' | 'diffusion', binaryName: string): string {
   // On Windows, executables need .exe extension
   const filename = process.platform === 'win32' ? `${binaryName}.exe` : binaryName;
-  return path.join(PATHS.binaries, filename);
+  return path.join(PATHS.binaries[type], filename);
 }
 
 /**
