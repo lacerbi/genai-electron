@@ -1,1176 +1,1825 @@
-# Implementation Plan: electron-control-panel (Phase 1)
+# Implementation Plan: Phase 2 - Image Generation
 
-> **Status**: In Progress
-> **Created**: 2025-10-16
-> **Phase**: 1 - MVP (LLM Support Only)
+> **Status**: Ready for Implementation
+> **Created**: 2025-10-17
+> **Phase**: 2 - Image Generation Support
+> **Prerequisites**: Phase 1 MVP Complete ✅
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Phase 2 Goals](#phase-2-goals)
+3. [Architecture Overview](#architecture-overview)
+4. [Implementation Steps](#implementation-steps)
+5. [Testing Strategy](#testing-strategy)
+6. [Documentation Updates](#documentation-updates)
+7. [Timeline & Success Criteria](#timeline--success-criteria)
+8. [Appendix](#appendix)
 
 ---
 
 ## Overview
 
-Create a full-featured Electron application demonstrating genai-electron's Phase 1 capabilities: system detection, model management, and LLM server lifecycle. This developer-focused control panel will serve as both a testing tool and reference implementation.
+### What is Phase 2?
 
-## Design Philosophy
+Phase 2 adds **image generation capabilities** to genai-electron by integrating stable-diffusion.cpp. This enables Electron applications to generate images locally using GGUF diffusion models, complementing the existing LLM support from Phase 1.
 
-This is a **developer/admin tool**, not a consumer application:
+### Key Differences from Phase 1
 
-- **Aesthetic**: Think "system monitor" or "admin panel" rather than "chat app"
-  - Functional interface focused on clarity and information density
-  - Not polished for consumers - built for developers testing genai-electron
-- **Focus**: Infrastructure management, not AI conversation
-  - Model downloads, server lifecycle, resource monitoring
-  - Clear status indicators, detailed logs, configuration options
-- **Purpose**: Test and demonstrate genai-electron runtime management
-  - Showcase the library's capabilities
-  - Serve as reference implementation for developers
-- **Relationship to chat-demo**: Different focus areas
-  - **chat-demo** (genai-lite): Showcases API features (templates, reasoning, multi-provider)
-  - **control-panel** (genai-electron): Showcases infrastructure (downloads, servers, resources)
-- **genai-lite usage**: Minimal and intentional
-  - Only used in TestChat to verify llama-server works
-  - Simple single-message test (NOT a full chat UI - that's chat-demo's purpose)
-  - Demonstrates integration but doesn't replicate chat-demo features
+**Phase 1 (LLM)**: llama-server is a native HTTP server from llama.cpp. We spawn it and connect to its HTTP API.
 
-## Scope
+**Phase 2 (Image Generation)**: stable-diffusion.cpp is a **one-shot executable** (not a server). It generates an image and exits. We need to create an **HTTP wrapper server** that:
+1. Starts an HTTP server on a port (like llama-server)
+2. Receives image generation requests via HTTP
+3. Spawns stable-diffusion.cpp executable on-demand with appropriate arguments
+4. Monitors progress and returns results
+5. Provides the same HTTP interface pattern for symmetry with llama-server
 
-### Phase 1 Features (Included)
+### Why an HTTP Wrapper?
 
-- ✅ **System Info Tab** - Hardware detection and recommendations
-  - Display CPU, RAM, GPU, VRAM information
-  - Show status indicators (green/yellow/red)
-  - Provide model recommendations based on hardware
+From genai-lite's perspective, both llama-server and diffusion should be HTTP endpoints on localhost. This clean separation means:
+- genai-lite doesn't know which servers are native vs. wrappers
+- Consistent API patterns for both LLM and image generation
+- Easy to swap backends without affecting the API layer
+- Future-proof if stable-diffusion.cpp adds native server support
 
-- ✅ **Model Management Tab** - Download, list, delete models
-  - List installed models with metadata
-  - Download from HuggingFace or direct URLs
-  - Real-time download progress
-  - Delete models with confirmation
-  - Show disk usage statistics
+### Resource Orchestration
 
-- ✅ **LLM Server Tab** - Start/stop server, configuration, test chat
-  - Start/stop llama-server with visual status
-  - Auto-configuration mode (recommended)
-  - Manual configuration mode (advanced)
-  - Real-time log viewer
-  - Simple test chat interface (verify server works)
-  - Health check monitoring
+When system resources (RAM or VRAM) are constrained, we need **automatic resource management**:
 
-### Explicitly Out of Scope
+**Scenario**: User has 8GB VRAM, LLM uses 6GB, diffusion needs 5GB → Not enough for both
 
-- ❌ **Diffusion/image generation** (Phase 2)
-- ❌ **Resource monitoring** (Phase 2)
-- ❌ **Advanced download features** (pause/resume in Phase 3)
-- ❌ **Event log viewer** (Phase 3)
-- ❌ **Storage configuration** (Phase 4)
+**Solution**:
+1. **Offload LLM**: Save state, stop llama-server gracefully, free 6GB VRAM
+2. **Generate Image**: Start diffusion, generate image, stop diffusion
+3. **Reload LLM**: Restart llama-server with saved config, restore to previous state
+4. **Queue Management**: LLM requests during image generation are queued (with timeout)
+
+This happens **automatically** and **transparently** to the user.
+
+---
+
+## Phase 2 Goals
+
+### Functional Requirements
+
+- ✅ **DiffusionServerManager**: HTTP wrapper for stable-diffusion.cpp
+- ✅ **Image Generation API**: Request/response types, parameter validation
+- ✅ **Binary Management**: Download stable-diffusion.cpp binaries on first use
+- ✅ **Progress Tracking**: Real-time progress callbacks during generation
+- ✅ **Resource Orchestration**: Automatic LLM offload/reload when needed
+- ✅ **CPU and GPU Support**: Generate images on both CPU and GPU
+- ✅ **Error Handling**: Comprehensive error types and recovery suggestions
+
+### Non-Goals (Future Phases)
+
+- ❌ **Advanced Resource Monitoring**: Real-time VRAM/RAM usage graphs (Phase 3+)
+- ❌ **Multi-Model Support**: Running multiple models simultaneously (Phase 5)
+- ❌ **Advanced Queue Management**: Priority queues, request cancellation (Phase 3)
+- ❌ **Model Conversion**: Converting models to GGUF format (out of scope)
+
+---
+
+## Architecture Overview
+
+### Component Diagram
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   genai-electron                        │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  ┌────────────────┐  ┌─────────────────┐  ┌──────────┐  │
+│  │ ModelManager   │  │  ServerManager  │  │SystemInfo│  │
+│  │                │  │                 │  │          │  │
+│  │ • listModels   │  │ • LlamaServer   │  │ • getRAM │  │
+│  │ • download     │  │ • DiffusionSrv  │  │ • getGPU │  │
+│  │ • delete       │  │ • start/stop    │  │ • getVRAM│  │
+│  └────────────────┘  └─────────────────┘  └──────────┘  │
+│           │                   │                  │      │
+│           └───────────────────┴──────────────────┘      │
+│                               │                         │
+│                    ┌──────────▼──────────┐              │
+│                    │  ResourceOrchestrator│             │
+│                    │                     │              │
+│                    │ • orchestrate()     │              │
+│                    │ • offloadLLM()      │              │
+│                    │ • reloadLLM()       │              │
+│                    └─────────────────────┘              │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+         │                                   │
+         │ spawns                            │ spawns & monitors
+         ▼                                   ▼
+┌─────────────────────┐         ┌─────────────────────────┐
+│  llama-server       │         │  HTTP Wrapper (Node)    │
+│  (port 8080)        │         │  (port 8081)            │
+│  [native server]    │         │    ↓ spawns on request  │
+│                     │         │  stable-diffusion.cpp   │
+└─────────────────────┘         └─────────────────────────┘
+```
+
+### HTTP Wrapper Architecture
+
+```
+┌────────────────────────────────────────────────────────────┐
+│              DiffusionServerManager                        │
+├────────────────────────────────────────────────────────────┤
+│                                                            │
+│  start() → Creates HTTP server (Node's built-in http)     │
+│            └─ Listens on port 8081                        │
+│            └─ Provides endpoints:                         │
+│                • GET  /health                             │
+│                • POST /v1/images/generations             │
+│                                                            │
+│  generateImage() → On HTTP POST request:                  │
+│    1. Validate parameters                                 │
+│    2. Spawn stable-diffusion.cpp with CLI args            │
+│    3. Monitor stdout for progress                         │
+│    4. Wait for completion                                 │
+│    5. Read generated image from disk                      │
+│    6. Return image data in HTTP response                  │
+│    7. Executable exits                                    │
+│                                                            │
+│  stop() → Shuts down HTTP server                          │
+│           └─ Kills any running stable-diffusion.cpp       │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Resource Orchestration Flow
+
+```
+State 1: LLM Running
+┌────────────────────────┐
+│ llama-server           │
+│ 6GB VRAM, 1GB RAM      │
+└────────────────────────┘
+    ↓ User requests image generation
+    ↓ ResourceOrchestrator.orchestrate()
+    ↓ Check: Enough resources? NO (need 5GB VRAM, only 2GB available)
+
+State 2: Offload LLM
+┌────────────────────────┐
+│ Save LLM state:        │
+│ - modelId              │
+│ - config (GPU layers)  │
+│ - port                 │
+└────────────────────────┘
+    ↓ llamaServer.stop()
+    ↓ Free 6GB VRAM
+
+State 3: Generate Image
+┌────────────────────────┐
+│ diffusionServer.start()│
+│ generateImage()        │
+│ 5GB VRAM, 2GB RAM      │
+└────────────────────────┘
+    ↓ Image complete
+    ↓ diffusionServer.stop()
+    ↓ Free 5GB VRAM
+
+State 4: Reload LLM
+┌────────────────────────┐
+│ llamaServer.start()    │
+│ (with saved config)    │
+│ 6GB VRAM, 1GB RAM      │
+└────────────────────────┘
+    ↓ Process queued requests
+    ↓ Back to normal state
+```
 
 ---
 
 ## Implementation Steps
 
-### Step 1: Project Initialization (2-3 hours)
+### Step 0: Update Binary Configuration (2-3 hours)
 
-**Create basic project structure:**
+**Goal**: Update `BINARY_VERSIONS` with actual stable-diffusion.cpp release URLs and checksums.
 
-```
-examples/electron-control-panel/
-├── package.json               # Dependencies and scripts
-├── tsconfig.json              # TypeScript config for main process
-├── tsconfig.renderer.json     # TypeScript config for renderer
-├── vite.config.ts             # Vite config
-├── forge.config.js            # Electron Forge packaging
-├── .gitignore                 # Git ignore
-└── README.md                  # Setup and usage docs
-```
+**Files to modify**:
+- `src/config/defaults.ts`
 
-**Dependencies to install:**
-
-Core:
-- `electron` ^35.0.0 (latest stable, Jan 2025)
-- `genai-electron` file:../.. (from parent directory)
-- `genai-lite` latest (for test chat functionality)
-
-Frontend:
-- `react` ^18.3.1 (React 19 available but using 18.3 for stability)
-- `react-dom` ^18.3.1
-
-TypeScript:
-- `typescript` ^5.7.2 (match library version)
-- `@types/react` ^18.3.0
-- `@types/react-dom` ^18.3.0
-- `@types/node` ^22.10.0
-
-Build tools:
-- `vite` ^7.0.0 (requires Node 20.19+/22.12+, matches our Node 22)
-- `@vitejs/plugin-react` ^5.0.4
-- `concurrently` ^9.2.1 (required for dev script)
-
-Electron Forge (packaging):
-- `@electron-forge/cli` ^7.9.0
-- `@electron-forge/plugin-vite` ^7.9.0
-- `@electron-forge/maker-squirrel` ^7.9.0 (Windows)
-- `@electron-forge/maker-zip` ^7.9.0 (macOS)
-- `@electron-forge/maker-deb` ^7.9.0 (Linux)
-
-Code Quality:
-- `eslint` ^9.17.0 (match main project)
-- `typescript-eslint` ^8.18.2
-- `eslint-config-prettier` ^9.1.0
-- `prettier` ^3.4.2
-
-**package.json scripts:**
-
-```json
-{
-  "scripts": {
-    "dev": "electron-forge start",
-    "build": "tsc && vite build",
-    "start": "electron-forge start",
-    "package": "electron-forge package",
-    "make": "electron-forge make",
-    "lint": "eslint . --ext .ts,.tsx",
-    "format": "prettier --write ."
-  }
+**Current State**: Placeholder values exist:
+```typescript
+diffusionCpp: {
+  version: 'v1.0.0', // Example version
+  urls: {
+    'darwin-arm64': 'https://github.com/leejet/stable-diffusion.cpp/releases/...',
+    // ... placeholder URLs
+  },
+  checksums: {
+    'darwin-arm64': 'sha256:placeholder_checksum_darwin_arm64',
+    // ... placeholder checksums
+  },
 }
 ```
 
-### Step 2: Main Process Setup (3-4 hours)
+**Action Required**:
+1. Visit https://github.com/leejet/stable-diffusion.cpp/releases
+2. Find latest stable release (e.g., master-db6f479 or later)
+3. **Click "Show more assets"** to expand full list (GitHub truncates long lists!)
+4. Identify binaries for all platforms and variants
+5. Extract SHA256 checksums (see instructions below)
+6. Update `BINARY_VERSIONS.diffusionCpp` with real URLs and checksums
 
-**Files to create:**
+**How to Extract SHA256 Checksums**:
 
-```
-main/
-├── index.ts                   # Main entry, window creation
-├── preload.ts                 # Context bridge for IPC
-├── ipc-handlers.ts            # IPC handler registration
-└── genai-api.ts               # Wrapper for genai-electron calls
-```
+```bash
+# Method: Parse GitHub release page
+1. Navigate to release page (e.g., .../releases/tag/master-db6f479)
+2. Click "Show more assets" to expand full list
+3. For each binary file, find the "sha256:" text that appears after the filename
+4. Copy the 64-character hexadecimal hash
 
-**Key implementations:**
-
-**1. main/index.ts** - Window creation, app lifecycle
-- Create BrowserWindow (1200x800, dev tools in dev mode)
-- Load renderer from Vite dev server (dev) or built files (prod)
-- Register IPC handlers on app ready
-- Cleanup on quit (stop servers gracefully)
-
-**2. main/preload.ts** - Expose safe IPC API to renderer
-- Use `contextBridge` to expose `window.api`
-- Namespaces: `system`, `models`, `server`, `logs`
-- Type-safe `invoke`/`on` patterns
-- Example:
-  ```typescript
-  contextBridge.exposeInMainWorld('api', {
-    system: {
-      detect: () => ipcRenderer.invoke('system:detect'),
-      getMemory: () => ipcRenderer.invoke('system:getMemory')
-    },
-    // ... more namespaces
-  });
-  ```
-
-**3. main/ipc-handlers.ts** - Handle all IPC calls
-- `system:detect` → `systemInfo.detect()`
-- `system:getMemory` → `systemInfo.getMemoryInfo()`
-- `system:canRunModel` → `systemInfo.canRunModel(modelInfo)`
-- `system:getOptimalConfig` → `systemInfo.getOptimalConfig(modelInfo)`
-- `models:list` → `modelManager.listModels(type)`
-- `models:download` → `modelManager.downloadModel(config)` with progress events
-- `models:delete` → `modelManager.deleteModel(modelId)`
-- `models:getInfo` → `modelManager.getModelInfo(modelId)`
-- `models:verify` → `modelManager.verifyModel(modelId)`
-- `server:start` → `llamaServer.start(config)`
-- `server:stop` → `llamaServer.stop()`
-- `server:restart` → `llamaServer.restart()`
-- `server:status` → `llamaServer.getStatus()`
-- `server:health` → `llamaServer.isHealthy()`
-- `server:logs` → `llamaServer.getLogs(limit)`
-
-**4. main/genai-api.ts** - Helper functions
-- Progress tracking for downloads (emit to renderer via `webContents.send`)
-- Event forwarding from `llamaServer` events to renderer
-- Error normalization for renderer consumption
-- Event types: `download:progress`, `download:complete`, `server:started`, `server:stopped`, `server:crashed`
-
-### Step 3: Renderer Base Setup (2-3 hours)
-
-**Files to create:**
-
-```
-renderer/
-├── index.html                 # Entry point
-├── index.tsx                  # React mount
-├── App.tsx                    # Root component with tabs
-├── global.css                 # Global styles
-└── vite-env.d.ts             # Vite types
+# Example pattern in HTML:
+<span>sd-master-db6f479-bin-win-cuda12-x64.zip</span>
+...
+<span>sha256:abc123...def456</span>  ← This is the checksum
 ```
 
-**Key implementations:**
+**See `docs/dev/UPDATING-BINARIES.md` for detailed extraction methods** (WebFetch, HTML parsing script, etc.)
 
-**1. index.html** - Basic HTML template
-```html
-<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="UTF-8" />
-    <title>genai-electron Control Panel</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/index.tsx"></script>
-  </body>
-</html>
-```
+**Important**: Like llama.cpp, stable-diffusion.cpp **has multiple variants per platform**. Windows has the most variants (CUDA12, Vulkan, AVX512, AVX2, AVX, No-AVX). macOS and Linux typically have single Metal/CPU binaries.
 
-**2. index.tsx** - React entry point
+**Variant Structure** (from latest releases):
+
+**Windows (win32-x64)** - Multiple variants with fallback priority:
+- CUDA 12: `sd-master-db6f479-bin-win-cuda12-x64.zip` (NVIDIA GPUs with CUDA runtime)
+- Vulkan: `sd-master-db6f479-bin-win-vulkan-x64.zip` (Any GPU with Vulkan drivers)
+- AVX512: `sd-master-db6f479-bin-win-avx512-x64.zip` (Modern CPUs)
+- AVX2: `sd-master-db6f479-bin-win-avx2-x64.zip` (Most CPUs)
+- AVX: `sd-master-db6f479-bin-win-avx-x64.zip` (Older CPUs)
+- No-AVX: `sd-master-db6f479-bin-win-noavx-x64.zip` (Very old CPUs, final fallback)
+
+**macOS (darwin-arm64)** - Single binary:
+- Metal: `sd-master--bin-Darwin-macOS-15.6.1-arm64.zip` (Apple Silicon with Metal)
+
+**Linux (linux-x64)** - Single binary:
+- CPU/CUDA: `sd-master--bin-Linux-Ubuntu-24.04-x86_64.zip` (Ubuntu/Debian)
+
+**Update Format** (use variants array pattern like llama.cpp):
 ```typescript
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import App from './App';
-import './global.css';
-
-const root = ReactDOM.createRoot(document.getElementById('root')!);
-root.render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
-```
-
-**3. App.tsx** - Tab navigation skeleton
-
-**Overall App Structure:**
-```
-┌──────────────────────────────────────────────┐
-│  genai-electron Control Panel                │  ← Header with title
-├──────────────────────────────────────────────┤
-│  [System Info] [Models] [LLM Server]         │  ← Tab navigation
-├──────────────────────────────────────────────┤
-│                                              │
-│  (Active tab content renders here)           │  ← Content area
-│                                              │
-└──────────────────────────────────────────────┘
-```
-
-**Implementation:**
-- State for active tab (`'system' | 'models' | 'server'`)
-- Tab buttons with active state styling (underline or background highlight)
-- Conditional rendering based on active tab
-- Layout structure: header, tab bar, scrollable content area
-
-**4. global.css** - CSS variables, reset, dark theme
-- CSS custom properties for colors, spacing, fonts
-- Basic reset (box-sizing, margins, etc.)
-- Dark theme defaults
-- Typography setup
-
-### Step 4: Common Components (3-4 hours)
-
-**Files to create:**
-
-```
-renderer/components/common/
-├── StatusIndicator.tsx        # Colored dot + label
-├── ProgressBar.tsx           # Progress visualization
-├── ActionButton.tsx          # Styled button variants
-├── LogViewer.tsx             # Log display with scroll
-├── Card.tsx                  # Container component
-└── Spinner.tsx               # Loading spinner
-```
-
-**Component specifications:**
-
-**1. StatusIndicator**
-```typescript
-interface Props {
-  status: 'running' | 'stopped' | 'error' | 'loading' | 'healthy' | 'unhealthy';
-  label: string;
-}
-```
-- Colored circle (●) before label
-- Green: running/healthy, Yellow: loading, Red: error/unhealthy, Gray: stopped
-
-**2. ProgressBar**
-```typescript
-interface Props {
-  current: number;
-  total: number;
-  showPercentage?: boolean;
-  label?: string;
-  className?: string;
-}
-```
-- Visual bar showing progress
-- Optional percentage text
-- Optional label above bar
-
-**3. ActionButton**
-```typescript
-interface Props {
-  variant: 'primary' | 'danger' | 'secondary';
-  loading?: boolean;
-  disabled?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}
-```
-- Primary: blue/prominent
-- Danger: red (for delete, force stop)
-- Secondary: gray/subtle
-- Loading state: spinner + disabled
-- Disabled state: grayed out
-
-**4. LogViewer**
-```typescript
-interface Props {
-  logs: Array<{ level: string; message: string; timestamp: string }>;
-  autoScroll?: boolean;
-  onClear?: () => void;
-  height?: string;
-}
-```
-- Monospace font
-- Auto-scroll to bottom (optional)
-- Color-coded by level (Info: white, Warn: yellow, Error: red)
-- Clear button
-- Fixed height with scrollbar
-
-**5. Card**
-```typescript
-interface Props {
-  title?: string;
-  children: React.ReactNode;
-  className?: string;
-}
-```
-- Simple wrapper with padding, border, background
-- Optional title header
-
-**6. Spinner**
-```typescript
-interface Props {
-  size?: 'small' | 'medium' | 'large';
-  inline?: boolean;
-}
-```
-- Rotating circle animation
-- Size variants
-- Inline or block display
-
-### Step 5: System Info Tab (3-4 hours)
-
-**Files to create:**
-
-```
-renderer/components/
-├── SystemInfo.tsx             # Main component
-└── hooks/
-    └── useSystemInfo.ts       # Data fetching hook
-```
-
-**SystemInfo.tsx sections:**
-
-**1. Hardware Display**
-```typescript
-<Card title="System Capabilities">
-  <StatusIndicator status="healthy" label={`CPU: ${cores} cores (${arch})`} />
-  <MemoryBar total={ramTotal} available={ramAvailable} label="RAM" />
-  <StatusIndicator
-    status={gpu.available ? 'healthy' : 'stopped'}
-    label={`GPU: ${gpu.name || 'None'}`}
-  />
-  {gpu.available && (
-    <MemoryBar total={vramTotal} available={vramAvailable} label="VRAM" />
-  )}
-  <ActionButton variant="secondary" onClick={refresh}>
-    Refresh
-  </ActionButton>
-</Card>
-```
-
-**2. Recommendations**
-```typescript
-<Card title="Recommendations">
-  <p>Maximum model size: {maxModelSize}</p>
-  <p>Optimal GPU layers: {gpuLayers}</p>
-  <h4>Suggested models:</h4>
-  <ul>
-    {recommendedModels.map(model => (
-      <li key={model.name}>
-        {model.name} {model.supported ? '✓ Supported' : '⚠ Marginal'}
-      </li>
-    ))}
-  </ul>
-</Card>
-```
-
-**3. Refresh functionality**
-- Re-fetch system info
-- Update display
-- Show loading state during fetch
-
-**useSystemInfo.ts hook:**
-```typescript
-function useSystemInfo() {
-  const [capabilities, setCapabilities] = useState<SystemCapabilities | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetch = async () => {
-    setLoading(true);
-    try {
-      const data = await window.api.system.detect();
-      setCapabilities(data);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => { fetch(); }, []);
-
-  return { capabilities, loading, error, refresh: fetch };
+diffusionCpp: {
+  version: 'master-db6f479', // Actual version from release
+  variants: {
+    'darwin-arm64': [
+      {
+        type: 'metal' as BinaryVariant,
+        url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-db6f479/sd-master--bin-Darwin-macOS-15.6.1-arm64.zip',
+        checksum: 'actual_sha256_checksum_here', // Extract from GitHub
+      },
+    ],
+    'win32-x64': [
+      // Priority order: CUDA → Vulkan → AVX variants (fastest to slowest)
+      {
+        type: 'cuda' as BinaryVariant,
+        url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-db6f479/sd-master-db6f479-bin-win-cuda12-x64.zip',
+        checksum: 'actual_checksum',
+      },
+      {
+        type: 'vulkan' as BinaryVariant,
+        url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-db6f479/sd-master-db6f479-bin-win-vulkan-x64.zip',
+        checksum: 'actual_checksum',
+      },
+      {
+        type: 'cpu' as BinaryVariant, // AVX2 variant (most compatible CPU version)
+        url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-db6f479/sd-master-db6f479-bin-win-avx2-x64.zip',
+        checksum: 'actual_checksum',
+      },
+      // Optional: Add more CPU variants if needed (avx512, avx, noavx)
+    ],
+    'linux-x64': [
+      {
+        type: 'cpu' as BinaryVariant, // Works with both CPU and CUDA
+        url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-db6f479/sd-master--bin-Linux-Ubuntu-24.04-x86_64.zip',
+        checksum: 'actual_checksum',
+      },
+    ],
+  },
 }
 ```
 
-### Step 6: Model Management Tab (4-5 hours)
+**Fallback Priority Strategy**:
+- **Windows**: CUDA (fastest) → Vulkan (cross-GPU) → AVX2 (CPU fallback)
+- **macOS**: Metal only (all modern Macs support it)
+- **Linux**: Single binary (detects CUDA at runtime if available)
 
-**Files to create:**
+**Testing Strategy**: BinaryManager will test each variant with `--version` and use the first one that works (has required drivers/CPU features).
 
-```
-renderer/components/
-├── ModelManager.tsx           # Main component
-├── ModelList.tsx             # List of installed models
-├── ModelDownloadForm.tsx     # Download form
-└── hooks/
-    └── useModels.ts          # Model state management
-```
+**Important Note - Binary Name Verification**:
+When implementing, verify the actual executable name from downloaded binaries. It may be:
+- `stable-diffusion` or `sd` or `stable-diffusion.cpp`
+- Platform-specific variations (e.g., `sd.exe` on Windows)
 
-**ModelManager.tsx layout:**
+Check the actual release and update `binaryName` parameter accordingly.
 
-**1. Installed Models Section**
+---
+
+### Step 1: Image Generation Types (2-3 hours)
+
+**Goal**: Define TypeScript types for image generation API.
+
+**Files to create**:
+- `src/types/images.ts`
+
+**Files to modify**:
+- `src/types/index.ts` (export new types)
+
+#### 1.1 Create `src/types/images.ts`
+
 ```typescript
-<Card title="Installed Models (LLM)">
-  {models.length === 0 ? (
-    <p>No models installed. Download one below.</p>
-  ) : (
-    <ModelList
-      models={models}
-      onDelete={handleDelete}
-      onVerify={handleVerify}
-    />
-  )}
-  <p>Disk Usage: {formatBytes(diskUsed)} / {formatBytes(diskTotal)}</p>
-</Card>
-```
+/**
+ * Image generation types
+ * @module types/images
+ */
 
-**2. Download Section**
-```typescript
-<Card title="Download Model">
-  <ModelDownloadForm
-    onDownload={handleDownload}
-    downloading={downloading}
-    progress={downloadProgress}
-  />
-</Card>
-```
+/**
+ * Image generation request configuration
+ */
+export interface ImageGenerationConfig {
+  /** Text prompt describing the image */
+  prompt: string;
 
-**ModelList.tsx:**
-- Table with columns: Name, Size, Downloaded, Actions
-- Delete button (with confirmation dialog)
-- Verify button (shows checksum status)
-- Format dates and file sizes nicely
+  /** Negative prompt (what to avoid) */
+  negativePrompt?: string;
 
-**ModelDownloadForm.tsx:**
-- Form fields:
-  - Source: Dropdown (URL / HuggingFace)
-  - If URL: URL field
-  - If HuggingFace: Repo field, File field
-  - Name: Display name
-  - Checksum (optional): For verification
-- Submit button (disabled during download)
-- Progress bar (visible during download)
-- Status message (downloading, verifying, complete, error)
+  /** Image width in pixels (default: 512) */
+  width?: number;
 
-**useModels.ts hook:**
-```typescript
-function useModels() {
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [downloading, setDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState({ current: 0, total: 0 });
+  /** Image height in pixels (default: 512) */
+  height?: number;
 
-  const fetchModels = async () => {
-    const data = await window.api.models.list('llm');
-    setModels(data);
-  };
+  /** Number of inference steps (default: 20, more = better quality but slower) */
+  steps?: number;
 
-  const handleDownload = async (config: DownloadConfig) => {
-    setDownloading(true);
-    // Listen to progress events
-    window.api.on('download:progress', (downloaded, total) => {
-      setDownloadProgress({ current: downloaded, total });
-    });
+  /** Guidance scale (default: 7.5, higher = closer to prompt) */
+  cfgScale?: number;
 
-    try {
-      await window.api.models.download(config);
-      await fetchModels(); // Refresh list
-    } catch (err) {
-      // Handle error
-    } finally {
-      setDownloading(false);
-    }
-  };
+  /** Random seed for reproducibility (-1 = random) */
+  seed?: number;
 
-  const handleDelete = async (modelId: string) => {
-    if (confirm('Delete this model?')) {
-      await window.api.models.delete(modelId);
-      await fetchModels();
-    }
-  };
+  /** Sampler algorithm (default: 'euler_a') */
+  sampler?: ImageSampler;
 
-  useEffect(() => { fetchModels(); }, []);
-
-  return { models, downloading, downloadProgress, handleDownload, handleDelete };
-}
-```
-
-### Step 7: LLM Server Control Tab (5-6 hours)
-
-**Files to create:**
-
-```
-renderer/components/
-├── LlamaServerControl.tsx     # Main component
-├── ServerConfig.tsx          # Configuration form
-├── TestChat.tsx              # Simple test interface
-└── hooks/
-    ├── useServerStatus.ts    # Status polling
-    └── useServerLogs.ts      # Log fetching
-```
-
-**LlamaServerControl.tsx sections:**
-
-**1. Status Display**
-```typescript
-<Card title="Server Status">
-  <StatusIndicator status={status.status} label={status.status} />
-  {status.status === 'running' && (
-    <>
-      <p>Model: {status.modelId}</p>
-      <p>Port: {status.port}</p>
-      <p>PID: {status.pid}</p>
-      <StatusIndicator
-        status={isHealthy ? 'healthy' : 'unhealthy'}
-        label={isHealthy ? 'Healthy' : 'Unhealthy'}
-      />
-    </>
-  )}
-</Card>
-```
-
-**2. Configuration Form**
-```typescript
-<Card title="Configuration">
-  <ServerConfig
-    models={models}
-    config={serverConfig}
-    onChange={setServerConfig}
-    autoConfig={autoConfig}
-    onAutoConfigChange={setAutoConfig}
-  />
-  <ActionButton
-    variant="primary"
-    onClick={handleStart}
-    disabled={status.status === 'running'}
-  >
-    Start Server
-  </ActionButton>
-  <ActionButton
-    variant="danger"
-    onClick={handleStop}
-    disabled={status.status !== 'running'}
-  >
-    Stop Server
-  </ActionButton>
-  <ActionButton
-    variant="secondary"
-    onClick={handleRestart}
-    disabled={status.status !== 'running'}
-  >
-    Restart
-  </ActionButton>
-</Card>
-```
-
-**ServerConfig.tsx:**
-- Model dropdown (list of installed models)
-- Auto-configure checkbox (default checked)
-- Manual fields (disabled when auto-configure is on):
-  - Context size (number input)
-  - GPU layers (number input, 0 for CPU-only)
-  - Thread count (number input)
-  - Parallel slots (number input)
-  - Flash attention (checkbox)
-- Tooltips explaining each setting
-
-**3. Logs Section**
-```typescript
-<Card title="Server Logs">
-  <LogViewer
-    logs={logs}
-    autoScroll={true}
-    onClear={handleClearLogs}
-    height="300px"
-  />
-</Card>
-```
-
-**4. Test Chat**
-```typescript
-<Card title="Test Chat">
-  <TestChat
-    serverRunning={status.status === 'running'}
-    port={status.port}
-  />
-</Card>
-```
-
-**TestChat.tsx:**
-
-**Purpose**: Verify llama-server is working correctly (NOT a full chat UI - that's what genai-lite's chat-demo is for)
-
-**Implementation:**
-- Simple single-message interface (no conversation history)
-- Input field for test message
-- Send button (disabled when server not running)
-- Response display area (shows single response, replaced on each test)
-- Uses genai-lite's `LLMService` to send message to `localhost:${port}`
-- Loading spinner during request
-- Clear error display if server not responding
-- Example message placeholder: "Hello, how are you?" or "Test: 2+2=?"
-
-**useServerStatus.ts:**
-```typescript
-function useServerStatus() {
-  const [status, setStatus] = useState<ServerStatus | null>(null);
-  const [isHealthy, setIsHealthy] = useState(false);
-
-  // Poll status every 3 seconds
-  useEffect(() => {
-    const fetchStatus = async () => {
-      const newStatus = await window.api.server.status();
-      setStatus(newStatus);
-
-      if (newStatus.status === 'running') {
-        const health = await window.api.server.health();
-        setIsHealthy(health);
-      }
-    };
-
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 3000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const start = async (config: ServerConfig) => {
-    await window.api.server.start(config);
-  };
-
-  const stop = async () => {
-    await window.api.server.stop();
-  };
-
-  const restart = async () => {
-    await window.api.server.restart();
-  };
-
-  // Listen to server events from main process
-  useEffect(() => {
-    window.api.on('server:started', () => {
-      // Refresh status
-    });
-    window.api.on('server:stopped', () => {
-      // Refresh status
-    });
-    window.api.on('server:crashed', (error) => {
-      // Show error notification
-    });
-  }, []);
-
-  return { status, isHealthy, start, stop, restart };
-}
-```
-
-**useServerLogs.ts:**
-```typescript
-function useServerLogs() {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-
-  useEffect(() => {
-    const fetchLogs = async () => {
-      const newLogs = await window.api.server.logs(100);
-      setLogs(newLogs);
-    };
-
-    fetchLogs();
-    const interval = setInterval(fetchLogs, 5000); // Every 5 seconds
-    return () => clearInterval(interval);
-  }, []);
-
-  const clearLogs = () => {
-    setLogs([]);
-  };
-
-  return { logs, clearLogs };
-}
-```
-
-### Step 8: Type Definitions (1-2 hours)
-
-**Files to create:**
-
-```
-renderer/types/
-├── index.ts                   # Main type exports
-├── api.ts                    # IPC API types
-└── ui.ts                     # UI-specific types
-```
-
-**api.ts** - Window API interface:
-```typescript
-export interface WindowAPI {
-  system: {
-    detect: () => Promise<SystemCapabilities>;
-    getMemory: () => Promise<MemoryInfo>;
-    canRunModel: (modelInfo: ModelInfo) => Promise<{ canRun: boolean; reason?: string }>;
-    getOptimalConfig: (modelInfo: ModelInfo) => Promise<ServerConfig>;
-  };
-  models: {
-    list: (type: 'llm' | 'diffusion') => Promise<ModelInfo[]>;
-    download: (config: DownloadConfig) => Promise<void>;
-    delete: (modelId: string) => Promise<void>;
-    getInfo: (modelId: string) => Promise<ModelInfo>;
-    verify: (modelId: string) => Promise<boolean>;
-  };
-  server: {
-    start: (config: ServerConfig) => Promise<void>;
-    stop: () => Promise<void>;
-    restart: () => Promise<void>;
-    status: () => Promise<ServerStatus>;
-    health: () => Promise<boolean>;
-    logs: (limit: number) => Promise<LogEntry[]>;
-  };
-  on: (channel: string, callback: (...args: any[]) => void) => void;
+  /** Progress callback (step, totalSteps) */
+  onProgress?: (currentStep: number, totalSteps: number) => void;
 }
 
-declare global {
-  interface Window {
-    api: WindowAPI;
-  }
+/**
+ * Available sampler algorithms
+ */
+export type ImageSampler =
+  | 'euler_a'
+  | 'euler'
+  | 'heun'
+  | 'dpm2'
+  | 'dpm++2s_a'
+  | 'dpm++2m'
+  | 'dpm++2mv2'
+  | 'lcm';
+
+/**
+ * Image generation result
+ */
+export interface ImageGenerationResult {
+  /** Generated image data (Buffer) */
+  image: Buffer;
+
+  /** Image format (always 'png' for stable-diffusion.cpp) */
+  format: 'png';
+
+  /** Time taken in milliseconds */
+  timeTaken: number;
+
+  /** Seed used (for reproducibility) */
+  seed: number;
+
+  /** Image dimensions */
+  width: number;
+  height: number;
 }
-```
 
-**ui.ts** - UI-specific types:
-```typescript
-export type TabName = 'system' | 'models' | 'server';
-
-export interface ServerConfigForm {
+/**
+ * Diffusion server configuration
+ */
+export interface DiffusionServerConfig {
+  /** Model ID to load */
   modelId: string;
-  port: number;
-  contextSize?: number;
-  gpuLayers?: number;
+
+  /** Port to listen on (default: 8081) */
+  port?: number;
+
+  /** Number of CPU threads (auto-detected if not specified) */
   threads?: number;
-  parallelSlots?: number;
-  flashAttention?: boolean;
+
+  /** Number of GPU layers to offload (auto-detected if not specified, 0 = CPU-only) */
+  gpuLayers?: number;
+
+  /** VRAM budget in MB (optional, stable-diffusion.cpp will try to fit within this) */
+  vramBudget?: number;
 }
 
-export interface DownloadFormData {
-  source: 'url' | 'huggingface';
-  url?: string;
-  repo?: string;
-  file?: string;
-  name: string;
-  checksum?: string;
-}
-```
+/**
+ * Diffusion server status
+ */
+export interface DiffusionServerInfo {
+  /** Current server status */
+  status: ServerStatus;
 
-### Step 9: Styling (2-3 hours)
+  /** Health check status */
+  health: HealthStatus;
 
-**Files to create:**
+  /** Process ID (if running) */
+  pid?: number;
 
-```
-renderer/styles/
-├── variables.css              # CSS custom properties
-├── components.css            # Component-specific styles
-└── layout.css                # Layout and grid
-```
+  /** Port server is listening on */
+  port: number;
 
-**Design system (variables.css):**
+  /** Model ID being served */
+  modelId: string;
 
-```css
-:root {
-  /* Colors - Dark Theme */
-  --bg-primary: #1e1e1e;
-  --bg-secondary: #252525;
-  --bg-tertiary: #2d2d2d;
+  /** When server was started (ISO timestamp, if running) */
+  startedAt?: string;
 
-  --text-primary: #e0e0e0;
-  --text-secondary: #b0b0b0;
-  --text-tertiary: #808080;
+  /** Last error message (if crashed) */
+  error?: string;
 
-  --border-color: #3d3d3d;
-
-  /* Status Colors */
-  --status-green: #4caf50;
-  --status-yellow: #ffc107;
-  --status-red: #f44336;
-  --status-gray: #9e9e9e;
-
-  /* Accent Colors */
-  --accent-blue: #2196f3;
-  --accent-blue-hover: #1976d2;
-
-  /* Spacing */
-  --spacing-xs: 4px;
-  --spacing-sm: 8px;
-  --spacing-md: 12px;
-  --spacing-lg: 16px;
-  --spacing-xl: 24px;
-  --spacing-xxl: 32px;
-
-  /* Border Radius */
-  --radius-sm: 4px;
-  --radius-md: 8px;
-
-  /* Fonts */
-  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  --font-mono: 'SF Mono', Monaco, 'Courier New', monospace;
+  /** Whether currently generating an image */
+  busy?: boolean;
 }
 ```
 
-**Global styles:**
-- Dark theme by default
-- Smooth transitions
-- Focus styles for accessibility
-- Scrollbar styling (dark theme)
-
-**Component styles:**
-- Card component: background, border, padding, shadow
-- Button variants: primary (blue), danger (red), secondary (gray)
-- Status indicators: colored dots with labels
-- Progress bars: filled/unfilled styling
-- Tabs: active/inactive states
-- Log viewer: monospace, line numbers, color coding
-
-### Step 10: Testing & Documentation (2-3 hours)
-
-**Files to create:**
-
-```
-examples/electron-control-panel/
-├── README.md                  # Setup, usage, features
-└── docs/
-    └── SCREENSHOTS.md        # Screenshots and walkthroughs
-```
-
-**README.md sections:**
-
-1. **Overview**
-   - Purpose of the app
-   - What it demonstrates
-   - Relationship to genai-electron library
-
-2. **Prerequisites**
-   - Node.js 22+
-   - Platform-specific requirements (GPU drivers, etc.)
-
-3. **Installation**
-   ```bash
-   cd examples/electron-control-panel
-   npm install
-   ```
-
-4. **Running in Development**
-   ```bash
-   npm run dev
-   ```
-
-5. **Building for Production**
-   ```bash
-   npm run build
-   npm run package  # Creates distributable
-   ```
-
-6. **First-Run Walkthrough**
-   - Step 1: Explore System Info
-   - Step 2: Download a Model
-   - Step 3: Start LLM Server
-   - Step 4: Test the Server
-   - Step 5: View Logs
-   - Step 6: Stop the Server
-
-7. **Features**
-   - System Info Tab: Hardware detection
-   - Models Tab: Download, manage models
-   - Server Tab: Control llama-server
-
-8. **Troubleshooting**
-   - Common errors and solutions
-   - Platform-specific issues
-   - How to report bugs
-
-**Manual testing checklist:**
-
-**System Info Tab:**
-- [ ] Detects CPU cores and architecture correctly
-- [ ] Shows total and available RAM
-- [ ] Detects GPU (Metal on macOS, CUDA on Windows/Linux if present)
-- [ ] Shows VRAM (if GPU present)
-- [ ] Status indicators display correct colors
-- [ ] Recommendations are sensible for the system
-- [ ] Refresh button updates values
-
-**Models Tab:**
-- [ ] Lists installed models (or shows empty state)
-- [ ] Download from direct URL works
-- [ ] Download from HuggingFace works (repo + file)
-- [ ] Progress bar updates during download
-- [ ] Download completes and model appears in list
-- [ ] Model info is accurate (size, date)
-- [ ] Delete with confirmation works
-- [ ] Disk usage shows correctly
-
-**Server Tab:**
-- [ ] Status indicator shows "stopped" initially
-- [ ] Model dropdown populates with installed models
-- [ ] Auto-configure is checked by default
-- [ ] Manual config fields are disabled when auto is on
-- [ ] Manual config fields enable when auto is off
-- [ ] Start button works (server starts)
-- [ ] Status changes to "running" with health check
-- [ ] Port and PID display correctly
-- [ ] Logs appear in real-time
-- [ ] Test chat sends message and receives response
-- [ ] Stop button works (server stops gracefully)
-- [ ] Restart button works
-
-**Error Handling:**
-- [ ] Network failure during download shows error
-- [ ] Insufficient disk space shows clear error
-- [ ] Port already in use shows error
-- [ ] Server crash displays error message
-- [ ] Invalid model file shows error
-
-**UI/UX:**
-- [ ] No console errors in dev tools
-- [ ] All buttons have clear labels
-- [ ] Loading states visible during async operations
-- [ ] Transitions are smooth
-- [ ] Tab switching works correctly
-- [ ] Responsive layout (no overflow issues)
-
----
-
-## Timeline Estimate
-
-**Total: 28-37 hours (3.5 to 5 days full-time)**
-
-| Step | Description | Estimate |
-|------|-------------|----------|
-| 1 | Project Initialization | 2-3h |
-| 2 | Main Process Setup | 3-4h |
-| 3 | Renderer Base | 2-3h |
-| 4 | Common Components | 3-4h |
-| 5 | System Info Tab | 3-4h |
-| 6 | Models Tab | 4-5h |
-| 7 | Server Tab | 5-6h |
-| 8 | Type Definitions | 1-2h |
-| 9 | Styling | 2-3h |
-| 10 | Testing & Docs | 2-3h |
-
-**Development approach:** Sequential implementation - complete each step before moving to the next to avoid dependency issues.
-
----
-
-## Success Criteria
-
-### Functional Requirements
-
-- ✅ **System Info**: Detects CPU, RAM, GPU, VRAM correctly on macOS, Windows, Linux
-- ✅ **Model Download**: Downloads from URLs and HuggingFace with progress tracking
-- ✅ **Model Management**: Lists, deletes models; shows disk usage
-- ✅ **Server Control**: Starts, stops, restarts llama-server successfully
-- ✅ **Configuration**: Auto-configure works; manual override works
-- ✅ **Health Monitoring**: Health checks update correctly
-- ✅ **Logs**: Real-time log display with auto-scroll
-- ✅ **Test Chat**: Sends message to server and displays response
-- ✅ **Error Handling**: All error states handled with clear messages
-
-### Technical Requirements
-
-- ✅ **Zero TypeScript Errors**: All code compiles without errors
-- ✅ **Clean Build**: No warnings during build
-- ✅ **Cross-Platform**: Works on macOS, Windows, Linux
-- ✅ **Security**: IPC uses contextBridge (no nodeIntegration)
-- ✅ **Performance**: No memory leaks during long sessions
-- ✅ **Code Quality**: Follows library conventions and style
-
-### UI/UX Requirements
-
-- ✅ **Developer Aesthetic**: Functional, not consumer-polished
-- ✅ **Status Indicators**: Update correctly and clearly
-- ✅ **Loading States**: Visible for all async operations
-- ✅ **Error Messages**: Clear, actionable recovery suggestions
-- ✅ **Accessibility**: Keyboard navigation, focus styles
-- ✅ **Responsiveness**: Layout works at different window sizes
-
----
-
-## Future Work (Phase 2+)
-
-**Not included in this implementation:**
-
-### Phase 2 Features (Future)
-- Diffusion Server tab
-- Resource Monitor tab
-- Automatic resource management (offload/reload)
-- VRAM/RAM usage graphs
-- Event timeline
-
-### Phase 3 Features (Future)
-- Pause/resume downloads
-- Download queue
-- Event log viewer
-- Enhanced checksum verification
-
-### Phase 4 Features (Future)
-- Storage mode configuration (isolated/shared/custom)
-- Binary version management
-- Port conflict resolution
-- Advanced restart policies
-
-These will be added in subsequent phases as the genai-electron library implements those capabilities.
-
----
-
-## File Summary
-
-**Total: ~40 files to create**
-
-| Category | Count | Files |
-|----------|-------|-------|
-| Project Config | 6 | package.json, tsconfig.json, vite.config.ts, forge.config.js, .gitignore, README.md |
-| Main Process | 4 | index.ts, preload.ts, ipc-handlers.ts, genai-api.ts |
-| Renderer Base | 4 | index.html, index.tsx, App.tsx, global.css |
-| Common Components | 6 | StatusIndicator, ProgressBar, ActionButton, LogViewer, Card, Spinner |
-| System Info | 2 | SystemInfo.tsx, useSystemInfo.ts |
-| Models | 4 | ModelManager.tsx, ModelList.tsx, ModelDownloadForm.tsx, useModels.ts |
-| Server | 5 | LlamaServerControl.tsx, ServerConfig.tsx, TestChat.tsx, useServerStatus.ts, useServerLogs.ts |
-| Types | 3 | index.ts, api.ts, ui.ts |
-| Styles | 3 | variables.css, components.css, layout.css |
-| Documentation | 2 | README.md, SCREENSHOTS.md |
-
----
-
-## Implementation Notes
-
-### IPC Communication Pattern
-
-**Main Process → Renderer:**
+**Import from servers.ts**:
 ```typescript
-// In ipc-handlers.ts
-ipcMain.handle('system:detect', async () => {
-  return await systemInfo.detect();
-});
+import type { ServerStatus, HealthStatus } from './servers.js';
+```
 
-// In preload.ts
-contextBridge.exposeInMainWorld('api', {
-  system: {
-    detect: () => ipcRenderer.invoke('system:detect')
+#### 1.2 Update `src/types/index.ts`
+
+Add exports:
+```typescript
+// Image generation types
+export type {
+  ImageGenerationConfig,
+  ImageGenerationResult,
+  ImageSampler,
+  DiffusionServerConfig,
+  DiffusionServerInfo,
+} from './images.js';
+```
+
+---
+
+### Step 2: HTTP Wrapper Implementation (6-8 hours)
+
+**Goal**: Create DiffusionServerManager that wraps stable-diffusion.cpp with an HTTP server.
+
+**Files to create**:
+- `src/managers/DiffusionServerManager.ts`
+
+**Dependencies**: Use Node.js built-in `http` module (zero new dependencies).
+
+#### 2.1 Create `src/managers/DiffusionServerManager.ts`
+
+**Key Implementation Points**:
+1. Extends `ServerManager` base class (like LlamaServerManager)
+2. Creates HTTP server using Node's built-in `http` module
+3. Implements endpoints: `GET /health`, `POST /v1/images/generations`
+4. Spawns `stable-diffusion.cpp` on image generation requests
+5. Monitors stdout for progress updates
+6. Returns generated image in HTTP response
+
+**Structure**:
+```typescript
+/**
+ * DiffusionServerManager - Manages diffusion server lifecycle
+ *
+ * Creates an HTTP wrapper server for stable-diffusion.cpp executable.
+ * Unlike llama-server (native HTTP server), stable-diffusion.cpp is a
+ * one-shot executable, so we create our own HTTP server that spawns
+ * the executable on-demand.
+ *
+ * @module managers/DiffusionServerManager
+ */
+
+import { ServerManager } from './ServerManager.js';
+import { ModelManager } from './ModelManager.js';
+import { SystemInfo } from '../system/SystemInfo.js';
+import { ProcessManager } from '../process/ProcessManager.js';
+import { LogManager } from '../process/log-manager.js';
+import { BinaryManager } from './BinaryManager.js';
+import http from 'http';
+import path from 'path';
+import { promises as fs } from 'fs';
+import { PATHS } from '../config/paths.js';
+import { BINARY_VERSIONS, DEFAULT_PORTS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
+import { getPlatformKey } from '../utils/platform-utils.js';
+import { fileExists, deleteFile } from '../utils/file-utils.js';
+import {
+  ServerError,
+  ModelNotFoundError,
+  PortInUseError,
+  InsufficientResourcesError,
+  BinaryError,
+} from '../errors/index.js';
+import type {
+  DiffusionServerConfig,
+  DiffusionServerInfo,
+  ImageGenerationConfig,
+  ImageGenerationResult,
+  ModelInfo,
+} from '../types/index.js';
+
+/**
+ * DiffusionServerManager class
+ *
+ * Manages the lifecycle of diffusion HTTP wrapper server.
+ */
+export class DiffusionServerManager extends ServerManager {
+  private processManager: ProcessManager;
+  private modelManager: ModelManager;
+  private systemInfo: SystemInfo;
+  private logManager?: LogManager;
+  private binaryPath?: string;
+  private httpServer?: http.Server;
+  private currentGeneration?: {
+    promise: Promise<ImageGenerationResult>;
+    cancel: () => void;
+  };
+
+  constructor(
+    modelManager: ModelManager = ModelManager.getInstance(),
+    systemInfo: SystemInfo = SystemInfo.getInstance()
+  ) {
+    super();
+    this.processManager = new ProcessManager();
+    this.modelManager = modelManager;
+    this.systemInfo = systemInfo;
   }
-});
 
-// In renderer
-const capabilities = await window.api.system.detect();
-```
-
-**Renderer → Main Process (Events):**
-```typescript
-// In main process
-webContents.send('download:progress', downloaded, total);
-
-// In preload
-window.api.on('download:progress', (callback) => {
-  ipcRenderer.on('download:progress', (_, ...args) => callback(...args));
-});
-
-// In renderer
-window.api.on('download:progress', (downloaded, total) => {
-  setProgress({ current: downloaded, total });
-});
-```
-
-### State Management
-
-Use simple React hooks - no Redux/Zustand needed for this app:
-
-```typescript
-// Global state via Context (if needed)
-const AppContext = React.createContext<AppState>(/* ... */);
-
-// Feature-specific hooks
-const useServerStatus = () => {
-  // Poll status, manage server state
-};
-
-const useModels = () => {
-  // Manage model list, download state
-};
-```
-
-### Error Handling
-
-**In Main Process:**
-```typescript
-ipcMain.handle('server:start', async (_, config) => {
-  try {
-    await llamaServer.start(config);
-  } catch (error) {
-    if (error instanceof InsufficientResourcesError) {
-      throw new Error(`Not enough RAM: ${error.details.suggestion}`);
+  /**
+   * Start diffusion HTTP wrapper server
+   *
+   * Creates an HTTP server that will spawn stable-diffusion.cpp on-demand
+   * when image generation requests are received.
+   */
+  async start(config: DiffusionServerConfig): Promise<DiffusionServerInfo> {
+    if (this._status === 'running') {
+      throw new ServerError('Server is already running', {
+        suggestion: 'Stop the server first with stop()',
+      });
     }
-    throw error;
-  }
-});
-```
 
-**In Renderer:**
-```typescript
-try {
-  await window.api.server.start(config);
-} catch (error) {
-  setError(error.message);
-  // Show toast notification or inline error
+    this.setStatus('starting');
+    this._config = config;
+
+    try {
+      // 1. Validate model exists
+      const modelInfo = await this.modelManager.getModelInfo(config.modelId);
+      if (modelInfo.type !== 'diffusion') {
+        throw new ModelNotFoundError(
+          `Model ${config.modelId} is not a diffusion model`,
+          { expectedType: 'diffusion', actualType: modelInfo.type }
+        );
+      }
+
+      // 2. Check if system can run this model
+      const canRun = await this.systemInfo.canRunModel(modelInfo);
+      if (!canRun.possible) {
+        throw new InsufficientResourcesError(
+          `System cannot run model: ${canRun.reason || 'Insufficient resources'}`,
+          {
+            required: `Model size: ${Math.round(modelInfo.size / 1024 / 1024 / 1024)}GB`,
+            available: `Available RAM: ${Math.round(
+              (await this.systemInfo.getMemoryInfo()).available / 1024 / 1024 / 1024
+            )}GB`,
+            suggestion: canRun.suggestion || canRun.reason || 'Try a smaller model',
+          }
+        );
+      }
+
+      // 3. Ensure binary is downloaded
+      this.binaryPath = await this.ensureBinary();
+
+      // 4. Check if port is in use
+      const port = config.port || DEFAULT_PORTS.diffusion;
+      const { isServerResponding } = await import('../process/health-check.js');
+      if (await isServerResponding(port, 2000)) {
+        throw new PortInUseError(port);
+      }
+
+      // 5. Initialize log manager
+      const logPath = path.join(PATHS.logs, 'diffusion-server.log');
+      this.logManager = new LogManager(logPath);
+      await this.logManager.initialize();
+      await this.logManager.write(`Starting diffusion server on port ${port}`, 'info');
+
+      // 6. Create HTTP server
+      await this.createHTTPServer(config, modelInfo);
+
+      this._port = port;
+      this._startedAt = new Date();
+      this.setStatus('running');
+
+      await this.logManager.write('Diffusion server is running', 'info');
+      this.emitEvent('started', this.getInfo());
+
+      return this.getInfo() as DiffusionServerInfo;
+    } catch (error) {
+      this.setStatus('stopped');
+      if (this.httpServer) {
+        this.httpServer.close();
+        this.httpServer = undefined;
+      }
+
+      if (this.logManager) {
+        await this.logManager.write(
+          `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        );
+      }
+
+      // Re-throw typed errors
+      if (
+        error instanceof ModelNotFoundError ||
+        error instanceof PortInUseError ||
+        error instanceof BinaryError ||
+        error instanceof InsufficientResourcesError ||
+        error instanceof ServerError
+      ) {
+        throw error;
+      }
+
+      throw new ServerError(
+        `Failed to start diffusion server: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+  }
+
+  /**
+   * Stop diffusion server
+   */
+  async stop(): Promise<void> {
+    if (this._status === 'stopped') {
+      return;
+    }
+
+    this.setStatus('stopping');
+
+    try {
+      if (this.logManager) {
+        await this.logManager.write('Stopping diffusion server...', 'info');
+      }
+
+      // Cancel any ongoing generation
+      if (this.currentGeneration) {
+        this.currentGeneration.cancel();
+        this.currentGeneration = undefined;
+      }
+
+      // Close HTTP server
+      if (this.httpServer) {
+        await new Promise<void>((resolve) => {
+          this.httpServer!.close(() => resolve());
+        });
+        this.httpServer = undefined;
+      }
+
+      this.setStatus('stopped');
+      this._port = 0;
+
+      if (this.logManager) {
+        await this.logManager.write('Diffusion server stopped', 'info');
+      }
+
+      this.emitEvent('stopped');
+    } catch (error) {
+      this.setStatus('stopped');
+      throw new ServerError(
+        `Failed to stop server: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
+  }
+
+  /**
+   * Generate an image
+   *
+   * Spawns stable-diffusion.cpp executable with the provided configuration.
+   *
+   * Note: Cancellation API (cancelImageGeneration) is deferred to Phase 3.
+   * For Phase 2, once started, generation runs to completion or error.
+   */
+  async generateImage(config: ImageGenerationConfig): Promise<ImageGenerationResult> {
+    if (this._status !== 'running') {
+      throw new ServerError('Server is not running', {
+        suggestion: 'Start the server first with start()',
+      });
+    }
+
+    if (this.currentGeneration) {
+      throw new ServerError('Server is busy generating another image', {
+        suggestion: 'Wait for current generation to complete',
+      });
+    }
+
+    // Implementation in private method
+    return this.executeImageGeneration(config);
+  }
+
+  /**
+   * Check if server is healthy
+   */
+  async isHealthy(): Promise<boolean> {
+    return this._status === 'running' && this.httpServer !== undefined;
+  }
+
+  /**
+   * Get recent server logs
+   */
+  async getLogs(lines: number = 100): Promise<string[]> {
+    if (!this.logManager) {
+      return [];
+    }
+    try {
+      return await this.logManager.getRecent(lines);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Clear all server logs
+   */
+  async clearLogs(): Promise<void> {
+    if (!this.logManager) {
+      return;
+    }
+    try {
+      await this.logManager.clear();
+    } catch {
+      // Ignore errors
+    }
+  }
+
+  /**
+   * Ensure stable-diffusion.cpp binary is downloaded
+   * @private
+   */
+  private async ensureBinary(): Promise<string> {
+    const platformKey = getPlatformKey();
+    const binaryConfig = BINARY_VERSIONS.diffusionCpp;
+    const variants = binaryConfig.variants[platformKey];
+
+    const binaryManager = new BinaryManager({
+      type: 'diffusion',
+      binaryName: 'stable-diffusion',
+      platformKey,
+      variants: variants || [],
+      log: this.logManager
+        ? (message, level = 'info') => {
+            this.logManager?.write(message, level).catch(() => {});
+          }
+        : undefined,
+    });
+
+    return await binaryManager.ensureBinary();
+  }
+
+  /**
+   * Create HTTP server
+   * @private
+   */
+  private async createHTTPServer(
+    config: DiffusionServerConfig,
+    modelInfo: ModelInfo
+  ): Promise<void> {
+    const port = config.port || DEFAULT_PORTS.diffusion;
+
+    this.httpServer = http.createServer(async (req, res) => {
+      // Enable CORS
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+      if (req.method === 'OPTIONS') {
+        res.writeHead(200);
+        res.end();
+        return;
+      }
+
+      try {
+        // Health endpoint
+        if (req.url === '/health' && req.method === 'GET') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ status: 'ok', busy: !!this.currentGeneration }));
+          return;
+        }
+
+        // Image generation endpoint
+        if (req.url === '/v1/images/generations' && req.method === 'POST') {
+          // Parse request body
+          const body = await this.parseRequestBody(req);
+          const imageConfig: ImageGenerationConfig = JSON.parse(body);
+
+          // Validate required fields
+          if (!imageConfig.prompt) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Missing required field: prompt' }));
+            return;
+          }
+
+          // Generate image
+          const result = await this.generateImage(imageConfig);
+
+          // Return result
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            image: result.image.toString('base64'),
+            format: result.format,
+            timeTaken: result.timeTaken,
+            seed: result.seed,
+            width: result.width,
+            height: result.height,
+          }));
+          return;
+        }
+
+        // Not found
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not found' }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          error: error instanceof Error ? error.message : 'Internal server error',
+        }));
+      }
+    });
+
+    // Start listening
+    await new Promise<void>((resolve, reject) => {
+      this.httpServer!.listen(port, () => resolve());
+      this.httpServer!.on('error', reject);
+    });
+
+    await this.logManager?.write(`HTTP server listening on port ${port}`, 'info');
+  }
+
+  /**
+   * Parse request body
+   * @private
+   */
+  private parseRequestBody(req: http.IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let body = '';
+      req.on('data', (chunk) => {
+        body += chunk.toString();
+      });
+      req.on('end', () => resolve(body));
+      req.on('error', reject);
+    });
+  }
+
+  /**
+   * Execute image generation by spawning stable-diffusion.cpp
+   * @private
+   */
+  private async executeImageGeneration(
+    config: ImageGenerationConfig
+  ): Promise<ImageGenerationResult> {
+    const startTime = Date.now();
+    const modelInfo = await this.modelManager.getModelInfo(this._config!.modelId);
+
+    // Build command-line arguments
+    const args = this.buildDiffusionArgs(config, modelInfo);
+
+    // Output file path
+    const outputPath = path.join(PATHS.temp || '/tmp', `sd-output-${Date.now()}.png`);
+    args.push('-o', outputPath);
+
+    await this.logManager?.write(
+      `Generating image: ${this.binaryPath} ${args.join(' ')}`,
+      'info'
+    );
+
+    // Spawn stable-diffusion.cpp
+    let cancelled = false;
+    const generationPromise = new Promise<ImageGenerationResult>((resolve, reject) => {
+      const { pid } = this.processManager.spawn(this.binaryPath!, args, {
+        onStdout: (data) => {
+          // Parse progress from stdout
+          // stable-diffusion.cpp outputs: "step 5/20"
+          const match = data.match(/step (\d+)\/(\d+)/i);
+          if (match && config.onProgress) {
+            const current = parseInt(match[1], 10);
+            const total = parseInt(match[2], 10);
+            config.onProgress(current, total);
+          }
+          this.logManager?.write(data, 'info').catch(() => {});
+        },
+        onStderr: (data) => {
+          this.logManager?.write(data, 'warn').catch(() => {});
+        },
+        onExit: async (code) => {
+          if (cancelled) {
+            reject(new Error('Image generation cancelled'));
+            return;
+          }
+
+          if (code !== 0) {
+            reject(new ServerError(`stable-diffusion.cpp exited with code ${code}`));
+            return;
+          }
+
+          // Read generated image
+          try {
+            const imageBuffer = await fs.readFile(outputPath);
+            await deleteFile(outputPath).catch(() => {});
+
+            resolve({
+              image: imageBuffer,
+              format: 'png',
+              timeTaken: Date.now() - startTime,
+              seed: config.seed || -1,
+              width: config.width || 512,
+              height: config.height || 512,
+            });
+          } catch (error) {
+            reject(new ServerError('Failed to read generated image', {
+              error: error instanceof Error ? error.message : String(error),
+            }));
+          }
+        },
+        onError: (error) => {
+          reject(new ServerError('Failed to spawn stable-diffusion.cpp', {
+            error: error.message,
+          }));
+        },
+      });
+
+      // Store cancellation function
+      this.currentGeneration = {
+        promise: generationPromise,
+        cancel: () => {
+          cancelled = true;
+          this.processManager.kill(pid, 5000).catch(() => {});
+        },
+      };
+    });
+
+    try {
+      const result = await generationPromise;
+      this.currentGeneration = undefined;
+      return result;
+    } catch (error) {
+      this.currentGeneration = undefined;
+      throw error;
+    }
+  }
+
+  /**
+   * Build command-line arguments for stable-diffusion.cpp
+   * @private
+   */
+  private buildDiffusionArgs(config: ImageGenerationConfig, modelInfo: ModelInfo): string[] {
+    const args: string[] = [];
+
+    // Model path
+    args.push('-m', modelInfo.path);
+
+    // Prompt
+    args.push('-p', config.prompt);
+
+    // Negative prompt
+    if (config.negativePrompt) {
+      args.push('-n', config.negativePrompt);
+    }
+
+    // Image dimensions
+    if (config.width) {
+      args.push('-W', String(config.width));
+    }
+    if (config.height) {
+      args.push('-H', String(config.height));
+    }
+
+    // Steps
+    if (config.steps) {
+      args.push('--steps', String(config.steps));
+    }
+
+    // CFG scale
+    if (config.cfgScale) {
+      args.push('--cfg-scale', String(config.cfgScale));
+    }
+
+    // Seed
+    if (config.seed !== undefined && config.seed !== -1) {
+      args.push('-s', String(config.seed));
+    }
+
+    // Sampler
+    if (config.sampler) {
+      args.push('--sampling-method', config.sampler);
+    }
+
+    // GPU layers (if configured)
+    const serverConfig = this._config as DiffusionServerConfig;
+    if (serverConfig.gpuLayers !== undefined && serverConfig.gpuLayers > 0) {
+      args.push('--n-gpu-layers', String(serverConfig.gpuLayers));
+    }
+
+    // Threads
+    if (serverConfig.threads) {
+      args.push('-t', String(serverConfig.threads));
+    }
+
+    return args;
+  }
 }
 ```
 
 ---
 
-## Next Steps
+### Step 3: Resource Orchestrator (4-5 hours)
 
-After plan approval:
+**Goal**: Implement automatic resource management that offloads LLM when needed for image generation.
 
-1. ✅ Create `PLAN.md` (this document)
-2. Create `examples/electron-control-panel/` directory
-3. Initialize `package.json` with dependencies
-4. Set up TypeScript configurations (main + renderer)
-5. Implement Steps 2-10 sequentially
-6. Test on all platforms (macOS, Windows, Linux)
-7. Document usage and features
-8. Commit to repository
+**Files to create**:
+- `src/managers/ResourceOrchestrator.ts`
+
+#### 3.1 Create `src/managers/ResourceOrchestrator.ts`
+
+```typescript
+/**
+ * ResourceOrchestrator - Manages resource allocation between servers
+ *
+ * Automatically offloads and reloads servers when resources are constrained.
+ * For example, if VRAM is limited, it will stop the LLM server before
+ * starting image generation, then restart the LLM after completion.
+ *
+ * @module managers/ResourceOrchestrator
+ */
+
+import { SystemInfo } from '../system/SystemInfo.js';
+import { LlamaServerManager } from './LlamaServerManager.js';
+import { DiffusionServerManager } from './DiffusionServerManager.js';
+import type {
+  ServerConfig,
+  ImageGenerationConfig,
+  ImageGenerationResult,
+} from '../types/index.js';
+import { ServerError } from '../errors/index.js';
+
+/**
+ * Saved LLM state for restoration
+ */
+interface SavedLLMState {
+  config: ServerConfig;
+  wasRunning: boolean;
+  savedAt: Date;
+}
+
+/**
+ * Resource requirements for a server
+ */
+interface ResourceRequirements {
+  ram: number;
+  vram?: number;
+}
+
+/**
+ * ResourceOrchestrator class
+ *
+ * Manages resource allocation and automatic offload/reload logic.
+ */
+export class ResourceOrchestrator {
+  private systemInfo: SystemInfo;
+  private llamaServer: LlamaServerManager;
+  private diffusionServer: DiffusionServerManager;
+  private savedLLMState?: SavedLLMState;
+
+  constructor(
+    systemInfo: SystemInfo = SystemInfo.getInstance(),
+    llamaServer: LlamaServerManager,
+    diffusionServer: DiffusionServerManager
+  ) {
+    this.systemInfo = systemInfo;
+    this.llamaServer = llamaServer;
+    this.diffusionServer = diffusionServer;
+  }
+
+  /**
+   * Orchestrate image generation with automatic resource management
+   *
+   * Checks if there are enough resources. If not, offloads LLM first,
+   * generates image, then reloads LLM.
+   *
+   * @param config - Image generation configuration
+   * @returns Generated image result
+   */
+  async orchestrateImageGeneration(
+    config: ImageGenerationConfig
+  ): Promise<ImageGenerationResult> {
+    // Check if we need to offload LLM
+    const needsOffload = await this.needsOffloadForImage();
+
+    if (needsOffload && this.llamaServer.isRunning()) {
+      // Save LLM state and offload
+      await this.offloadLLM();
+
+      try {
+        // Generate image
+        const result = await this.diffusionServer.generateImage(config);
+        return result;
+      } finally {
+        // Always reload LLM if it was running before
+        await this.reloadLLM();
+      }
+    } else {
+      // Enough resources, generate directly
+      return await this.diffusionServer.generateImage(config);
+    }
+  }
+
+  /**
+   * Check if we need to offload LLM for image generation
+   *
+   * Determines the bottleneck resource (RAM or VRAM) and checks if
+   * there's enough space for both servers to run simultaneously.
+   *
+   * @returns True if offload is needed
+   * @private
+   */
+  private async needsOffloadForImage(): Promise<boolean> {
+    const memory = this.systemInfo.getMemoryInfo();
+    const capabilities = await this.systemInfo.detect();
+
+    // Estimate resource usage
+    const llamaUsage = await this.estimateLLMUsage();
+    const diffusionUsage = await this.estimateDiffusionUsage();
+
+    // Determine bottleneck resource
+    const isGPUSystem = capabilities.gpu.available && capabilities.gpu.vram;
+
+    if (isGPUSystem) {
+      // VRAM is the bottleneck
+      const totalVRAM = capabilities.gpu.vram || 0;
+      const vramNeeded = (llamaUsage.vram || 0) + (diffusionUsage.vram || 0);
+
+      // Need offload if combined VRAM usage > 75% of total
+      return vramNeeded > totalVRAM * 0.75;
+    } else {
+      // RAM is the bottleneck
+      const ramNeeded = llamaUsage.ram + diffusionUsage.ram;
+
+      // Need offload if combined RAM usage > 75% of available
+      return ramNeeded > memory.available * 0.75;
+    }
+  }
+
+  /**
+   * Estimate LLM resource usage
+   * @private
+   */
+  private async estimateLLMUsage(): Promise<ResourceRequirements> {
+    if (!this.llamaServer.isRunning()) {
+      return { ram: 0, vram: 0 };
+    }
+
+    const config = this.llamaServer.getConfig();
+    if (!config) {
+      return { ram: 0, vram: 0 };
+    }
+
+    // Rough estimates (would be better with actual monitoring)
+    const modelInfo = await import('./ModelManager.js').then((m) =>
+      m.ModelManager.getInstance().getModelInfo(config.modelId)
+    );
+
+    const gpuLayers = config.gpuLayers || 0;
+    const totalLayers = 32; // Rough estimate
+
+    if (gpuLayers > 0) {
+      // Mixed GPU/CPU
+      const gpuRatio = gpuLayers / totalLayers;
+      return {
+        ram: modelInfo.size * (1 - gpuRatio) * 1.2,
+        vram: modelInfo.size * gpuRatio * 1.2,
+      };
+    } else {
+      // CPU only
+      return {
+        ram: modelInfo.size * 1.2,
+        vram: 0,
+      };
+    }
+  }
+
+  /**
+   * Estimate diffusion resource usage
+   * @private
+   */
+  private async estimateDiffusionUsage(): Promise<ResourceRequirements> {
+    const config = this.diffusionServer.getConfig();
+    if (!config) {
+      // Default estimate for typical SDXL model
+      return { ram: 5 * 1024 ** 3, vram: 5 * 1024 ** 3 };
+    }
+
+    const modelInfo = await import('./ModelManager.js').then((m) =>
+      m.ModelManager.getInstance().getModelInfo(config.modelId)
+    );
+
+    // Diffusion models typically need similar VRAM/RAM as their size
+    return {
+      ram: modelInfo.size * 1.2,
+      vram: modelInfo.size * 1.2,
+    };
+  }
+
+  /**
+   * Offload LLM (save state and stop)
+   * @private
+   */
+  private async offloadLLM(): Promise<void> {
+    if (!this.llamaServer.isRunning()) {
+      return;
+    }
+
+    // Save current state
+    const config = this.llamaServer.getConfig();
+    if (!config) {
+      throw new ServerError('Cannot offload LLM: no configuration found');
+    }
+
+    this.savedLLMState = {
+      config,
+      wasRunning: true,
+      savedAt: new Date(),
+    };
+
+    // Stop LLM server gracefully
+    await this.llamaServer.stop();
+  }
+
+  /**
+   * Reload LLM (restore from saved state)
+   * @private
+   */
+  private async reloadLLM(): Promise<void> {
+    if (!this.savedLLMState || !this.savedLLMState.wasRunning) {
+      return;
+    }
+
+    try {
+      // Restart with saved configuration
+      await this.llamaServer.start(this.savedLLMState.config);
+      this.savedLLMState = undefined;
+    } catch (error) {
+      // Log error but don't throw - image generation succeeded
+      console.error('Failed to reload LLM:', error);
+    }
+  }
+
+  /**
+   * Clear saved LLM state
+   */
+  clearSavedState(): void {
+    this.savedLLMState = undefined;
+  }
+}
+```
+
+**Phase 2 Scope Notes**:
+
+This implementation provides the **core resource orchestration** mechanism (offload/reload). The following advanced features are **deferred to Phase 3**:
+
+1. **LLM Request Queuing**: Phase 2 simply blocks new LLM requests during image generation. Phase 3 will add request queuing with timeouts so LLM requests made during image generation are queued and processed after LLM reload (see DESIGN.md lines 378-380).
+
+2. **Advanced Queue Management**: Phase 2 has basic "wait for LLM to reload" behavior. Phase 3 will add:
+   - Request queue with configurable timeout (default 5 minutes)
+   - Queue cancellation API
+   - Per-request timeout tracking
+   - Queue status monitoring
+
+3. **Concurrent Resource Scenarios**: Phase 2 focuses on the simple case (not enough resources → offload → reload). Phase 3 will handle:
+   - Partial resource conflicts (LLM on CPU, diffusion on GPU)
+   - Multi-model resource allocation
+   - Dynamic resource reallocation
+
+**For Phase 2, focus on proving the offload/reload mechanism works correctly.**
+
+---
+
+### Step 4: Update Exports (30 minutes)
+
+**Goal**: Export new classes and types from main index.
+
+**Files to modify**:
+- `src/index.ts`
+
+#### 4.1 Update `src/index.ts`
+
+Add singleton export:
+```typescript
+import { DiffusionServerManager } from './managers/DiffusionServerManager.js';
+
+/**
+ * Diffusion server manager singleton
+ */
+export const diffusionServer = new DiffusionServerManager();
+```
+
+Add class exports:
+```typescript
+export { DiffusionServerManager } from './managers/DiffusionServerManager.js';
+export { ResourceOrchestrator } from './managers/ResourceOrchestrator.js';
+```
+
+Add type exports:
+```typescript
+// Image generation types already exported from types/index.ts
+// (added in Step 1)
+```
+
+---
+
+### Step 5: Add Temp Directory Support (1 hour)
+
+**Goal**: Add temporary directory for intermediate files.
+
+**Files to modify**:
+- `src/config/paths.ts`
+
+#### 5.1 Update `src/config/paths.ts`
+
+Add temp directory:
+```typescript
+export const PATHS = {
+  // ... existing paths
+  logs: path.join(BASE_DIR, 'logs'),
+  config: path.join(BASE_DIR, 'config'),
+
+  // Add temp directory for intermediate files
+  temp: path.join(BASE_DIR, 'temp'),
+} as const;
+```
+
+Update `getBinaryPath` if needed for diffusion binaries.
+
+---
+
+### Step 6: Error Types (30 minutes)
+
+**Goal**: Add any new error types needed for image generation.
+
+**Files to modify**:
+- `src/errors/index.ts` (if new error types needed)
+
+**Review**: Check if existing error types cover all Phase 2 scenarios:
+- `ModelNotFoundError` ✅
+- `ServerError` ✅
+- `InsufficientResourcesError` ✅
+- `PortInUseError` ✅
+- `BinaryError` ✅
+
+**Conclusion**: Likely no new error types needed. Existing types should cover image generation scenarios.
+
+---
+
+### Step 7: Integration Testing (3-4 hours)
+
+**Goal**: Create tests for DiffusionServerManager and ResourceOrchestrator.
+
+**Files to create**:
+- `tests/unit/DiffusionServerManager.test.ts`
+- `tests/unit/ResourceOrchestrator.test.ts`
+
+#### 7.1 Test Strategy
+
+Follow Phase 1 pattern:
+- Mock file system operations
+- Mock process spawning
+- Mock HTTP server creation
+- Test error scenarios comprehensively
+
+Example test structure:
+```typescript
+describe('DiffusionServerManager', () => {
+  describe('start()', () => {
+    it('should create HTTP server on specified port', async () => {
+      // Test implementation
+    });
+
+    it('should throw ModelNotFoundError if model does not exist', async () => {
+      // Test implementation
+    });
+
+    it('should throw PortInUseError if port is already in use', async () => {
+      // Test implementation
+    });
+  });
+
+  describe('generateImage()', () => {
+    it('should spawn stable-diffusion.cpp with correct arguments', async () => {
+      // Test implementation
+    });
+
+    it('should track progress during generation', async () => {
+      // Test implementation
+    });
+
+    it('should throw ServerError if not running', async () => {
+      // Test implementation
+    });
+  });
+
+  describe('stop()', () => {
+    it('should close HTTP server and cleanup', async () => {
+      // Test implementation
+    });
+  });
+});
+
+describe('ResourceOrchestrator', () => {
+  describe('orchestrateImageGeneration()', () => {
+    it('should generate image directly if resources available', async () => {
+      // Test implementation
+    });
+
+    it('should offload LLM if resources constrained', async () => {
+      // Test implementation
+    });
+
+    it('should reload LLM after image generation', async () => {
+      // Test implementation
+    });
+  });
+});
+```
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+**Coverage Target**: 80%+ for new code
+
+**Key Test Files**:
+1. `tests/unit/DiffusionServerManager.test.ts`
+   - Test HTTP server creation
+   - Test image generation flow
+   - Test error scenarios
+   - Mock stable-diffusion.cpp execution
+
+2. `tests/unit/ResourceOrchestrator.test.ts`
+   - Test resource estimation
+   - Test offload/reload logic
+   - Test different resource scenarios (RAM-bound, VRAM-bound)
+
+3. `tests/unit/images.test.ts` (optional)
+   - Test type validation
+   - Test parameter defaults
+
+### Integration Tests (Manual)
+
+**Test Scenarios**:
+1. **Basic Image Generation**
+   - Start diffusion server
+   - Generate simple image (512x512, 20 steps)
+   - Verify image file created
+   - Stop server
+
+2. **Resource Orchestration**
+   - Start LLM server (occupy VRAM)
+   - Request image generation
+   - Verify LLM stops automatically
+   - Verify image generates successfully
+   - Verify LLM restarts automatically
+
+3. **Error Handling**
+   - Invalid model ID
+   - Port already in use
+   - Insufficient resources
+   - Binary not found
+
+4. **Platform Testing**
+   - Test on macOS (Metal)
+   - Test on Windows (CUDA/Vulkan/CPU)
+   - Test on Linux (CUDA/Vulkan)
+
+---
+
+## Documentation Updates
+
+### Files to Update
+
+1. **README.md**
+   - Add Phase 2 status (complete)
+   - Add image generation to feature list
+   - Add basic usage example for diffusion
+
+2. **docs/API.md**
+   - Document `DiffusionServerManager` API
+   - Document `ResourceOrchestrator` API
+   - Add image generation examples
+   - Document new types (ImageGenerationConfig, etc.)
+
+3. **PROGRESS.md**
+   - Update Phase 2 status to complete
+   - Summarize what was implemented
+
+### Example Documentation Snippet (README.md)
+
+```markdown
+## Image Generation (Phase 2)
+
+Generate images locally using stable-diffusion.cpp:
+
+```typescript
+import { modelManager, diffusionServer } from 'genai-electron';
+
+// Download a diffusion model
+await modelManager.downloadModel({
+  source: 'url',
+  url: 'https://huggingface.co/..../sdxl-turbo-q4.gguf',
+  name: 'SDXL Turbo',
+  type: 'diffusion'
+});
+
+// Start diffusion server
+await diffusionServer.start({
+  modelId: 'sdxl-turbo',
+  port: 8081
+});
+
+// Generate an image
+const result = await diffusionServer.generateImage({
+  prompt: 'A serene mountain landscape at sunset',
+  negativePrompt: 'blurry, low quality',
+  width: 1024,
+  height: 1024,
+  steps: 30,
+  onProgress: (step, total) => {
+    console.log(`Progress: ${step}/${total}`);
+  }
+});
+
+// Save image
+await fs.writeFile('output.png', result.image);
+```
+
+### Resource Management
+
+The library automatically manages resources between LLM and image generation:
+
+```typescript
+// LLM is running and using 6GB VRAM
+await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
+
+// Request image generation
+// Library detects insufficient VRAM (only 2GB available, need 5GB)
+// Automatically stops LLM, generates image, then restarts LLM
+const result = await diffusionServer.generateImage({
+  prompt: 'Beautiful sunset over mountains'
+});
+
+// LLM is running again with original configuration
+```
+```
+
+---
+
+## Timeline & Success Criteria
+
+### Timeline Estimate
+
+**Total: 20-27 hours (2.5-3.5 weeks at 1-2 hours/day)**
+
+| Step | Task | Estimate |
+|------|------|----------|
+| 0 | Update Binary Config (variants + checksums) | 2-3h |
+| 1 | Image Generation Types | 2-3h |
+| 2 | DiffusionServerManager | 6-8h |
+| 3 | ResourceOrchestrator | 4-5h |
+| 4 | Update Exports | 0.5h |
+| 5 | Temp Directory Support | 1h |
+| 6 | Error Types Review | 0.5h |
+| 7 | Testing | 3-4h |
+| 8 | Documentation | 2-3h |
+
+### Success Criteria
+
+#### Functional Requirements ✅
+
+- [ ] DiffusionServerManager creates HTTP server successfully
+- [ ] Can download stable-diffusion.cpp binaries for all platforms
+- [ ] Can generate images with various parameters (size, steps, cfg)
+- [ ] Progress tracking works during generation
+- [ ] ResourceOrchestrator detects when offload is needed
+- [ ] LLM offload/reload works automatically
+- [ ] HTTP wrapper provides same interface as llama-server
+- [ ] All error scenarios handled with clear messages
+
+#### Technical Requirements ✅
+
+- [ ] Zero new dependencies (uses Node built-in http module)
+- [ ] TypeScript compiles with zero errors
+- [ ] Follows established patterns from Phase 1
+- [ ] 80%+ test coverage for new code
+- [ ] ESM module system (`.js` extensions in imports)
+- [ ] Singleton pattern for diffusionServer export
+
+#### Platform Requirements ✅
+
+- [ ] Works on macOS (Metal)
+- [ ] Works on Windows (CUDA/Vulkan/CPU fallback)
+- [ ] Works on Linux (CUDA/Vulkan)
+- [ ] Binary variant testing works correctly
+
+#### Documentation Requirements ✅
+
+- [ ] README.md updated with Phase 2 features
+- [ ] API.md documents all new classes and methods
+- [ ] PROGRESS.md reflects Phase 2 completion
+- [ ] Code examples demonstrate image generation
+
+---
+
+## Appendix
+
+### A. stable-diffusion.cpp Command-Line Reference
+
+**Basic Usage**:
+```bash
+stable-diffusion -m model.gguf -p "prompt text" -o output.png
+```
+
+**Key Arguments**:
+- `-m, --model`: Path to model file
+- `-p, --prompt`: Text prompt
+- `-n, --negative-prompt`: Negative prompt
+- `-W, --width`: Image width (default: 512)
+- `-H, --height`: Image height (default: 512)
+- `--steps`: Number of sampling steps (default: 20)
+- `--cfg-scale`: Classifier-free guidance scale (default: 7.5)
+- `-s, --seed`: Random seed (-1 for random)
+- `--sampling-method`: Sampler (euler_a, euler, heun, etc.)
+- `-o, --output`: Output file path
+- `-t, --threads`: Number of threads
+- `--n-gpu-layers`: Number of layers to offload to GPU
+
+**Progress Output**:
+```
+step 1/20
+step 2/20
+...
+```
+
+### B. Comparison with LlamaServerManager
+
+| Aspect | LlamaServerManager | DiffusionServerManager |
+|--------|-------------------|------------------------|
+| Binary Type | Native HTTP server | One-shot executable |
+| HTTP Server | Spawned directly | Created by us (Node http) |
+| Process Lifecycle | Long-running | Short-lived (per generation) |
+| Health Check | Via /health endpoint | HTTP server availability |
+| Progress Tracking | Via streaming response | Parse stdout |
+| Resource Usage | Continuous | Per-request |
+
+### C. Binary Variants and SHA Extraction
+
+**stable-diffusion.cpp Binary Structure** (Similar to llama.cpp):
+
+Like llama.cpp, stable-diffusion.cpp provides **multiple variants per platform** with different acceleration backends:
+
+| Platform | Variants Available | Notes |
+|----------|-------------------|-------|
+| Windows x64 | CUDA12, Vulkan, AVX512, AVX2, AVX, No-AVX | 6 variants for different GPUs/CPUs |
+| macOS ARM64 | Metal (single binary) | All Apple Silicon Macs support Metal |
+| Linux x64 | CPU/CUDA hybrid (single binary) | Detects CUDA at runtime if available |
+
+**Example Release Files** (master-db6f479):
+```
+sd-master-db6f479-bin-win-cuda12-x64.zip     (Windows CUDA)
+sd-master-db6f479-bin-win-vulkan-x64.zip     (Windows Vulkan)
+sd-master-db6f479-bin-win-avx2-x64.zip       (Windows CPU AVX2)
+sd-master--bin-Darwin-macOS-15.6.1-arm64.zip (macOS Metal)
+sd-master--bin-Linux-Ubuntu-24.04-x86_64.zip (Linux CPU/CUDA)
+```
+
+**How to Extract SHA256 Checksums from GitHub**:
+
+stable-diffusion.cpp releases display checksums on the release page:
+
+1. **Navigate** to release page (e.g., `.../releases/tag/master-db6f479`)
+2. **Click "Show more assets"** to expand full list (GitHub truncates long lists!)
+3. **Locate each binary file** in the expanded list
+4. **Find the `sha256:` text** that appears below each filename
+5. **Copy the 64-character hex hash** that follows `sha256:`
+
+**Example pattern in GitHub UI**:
+```html
+sd-master-db6f479-bin-win-cuda12-x64.zip
+sha256:abc123...def456 (64 characters)
+```
+
+**Detailed Extraction Methods**:
+- **WebFetch**: Use Claude's WebFetch tool to fetch the release page
+- **Manual HTML**: Download page HTML after clicking "Show more assets"
+- **Parse Script**: Use Node.js script to extract from saved HTML
+
+See `docs/dev/UPDATING-BINARIES.md` for:
+- WebFetch prompt templates
+- HTML parsing scripts
+- Troubleshooting truncated asset lists
+- Common checksum extraction issues
+
+**Fallback Priority (BinaryManager Pattern)**:
+
+BinaryManager tests each variant with `--version` and uses the first one that works:
+
+```typescript
+// Windows: Try GPU variants first, fall back to CPU
+'win32-x64': [
+  { type: 'cuda', url: '...cuda12-x64.zip', checksum: '...' },    // Test first
+  { type: 'vulkan', url: '...vulkan-x64.zip', checksum: '...' },  // Test second
+  { type: 'cpu', url: '...avx2-x64.zip', checksum: '...' },       // Test last
+]
+
+// macOS: Single variant (Metal)
+'darwin-arm64': [
+  { type: 'metal', url: '...arm64.zip', checksum: '...' },
+]
+
+// Linux: Single variant (CPU/CUDA hybrid)
+'linux-x64': [
+  { type: 'cpu', url: '...x86_64.zip', checksum: '...' },
+]
+```
+
+**Why Variants Matter**:
+- **CUDA**: Best performance on NVIDIA GPUs (requires CUDA runtime)
+- **Vulkan**: Works on any GPU vendor (NVIDIA/AMD/Intel) with Vulkan drivers
+- **AVX2/AVX512**: CPU-only fallback with SIMD optimizations
+- **No-AVX**: Final fallback for very old CPUs (rare)
+
+### D. Resource Estimation Formulas
+
+**LLM (llama-server)**:
+```
+RAM usage = model_size * (1 - gpu_ratio) * 1.2  (20% overhead)
+VRAM usage = model_size * gpu_ratio * 1.2
+where gpu_ratio = gpu_layers / total_layers
+```
+
+**Diffusion (stable-diffusion.cpp)**:
+```
+RAM/VRAM usage = model_size * 1.2  (20% overhead)
+```
+
+**Offload Decision**:
+```
+if (is_gpu_system) {
+  offload_needed = (llm_vram + diffusion_vram) > (total_vram * 0.75)
+} else {
+  offload_needed = (llm_ram + diffusion_ram) > (available_ram * 0.75)
+}
+```
+
+### E. Testing Checklist
+
+**Before Merging**:
+- [ ] All TypeScript compiles (`npm run build`)
+- [ ] All tests pass (`npm test`)
+- [ ] Test coverage meets target (80%+)
+- [ ] Manual testing on at least 2 platforms
+- [ ] Documentation is complete
+- [ ] No console warnings or errors
+- [ ] Example app works (if testing with control-panel)
+
+**Platform Testing**:
+- [ ] macOS: Binary downloads, image generation works
+- [ ] Windows: Variant testing (CUDA → Vulkan → CPU)
+- [ ] Linux: CUDA variant works (if NVIDIA GPU available)
+
+**Functional Testing**:
+- [ ] Simple image generation (512x512, 20 steps)
+- [ ] Large image generation (1024x1024, 50 steps)
+- [ ] CPU-only generation works
+- [ ] GPU-accelerated generation works
+- [ ] Progress callbacks fire correctly
+- [ ] Resource orchestration triggers when needed
+- [ ] LLM restarts after image generation
 
 ---
 
 **Document Version**: 1.0
-**Last Updated**: 2025-10-16
-**Status**: Ready for Implementation
+**Last Updated**: 2025-10-17
+**Status**: Ready for Implementation ✅

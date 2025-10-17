@@ -1273,25 +1273,31 @@ If a variant fails (e.g., Vulkan DLL missing), it tries the next variant automat
 **Goal**: Add diffusion.cpp support for local image generation
 
 **Scope**:
-- ✅ diffusion.cpp integration
-- ✅ Image generation API
-- ✅ Resource management between LLM and diffusion (offload/reload flow)
+- ✅ diffusion.cpp integration (HTTP wrapper for stable-diffusion.cpp executable)
+- ✅ Image generation API (basic generateImage with progress callbacks)
+- ✅ Core resource orchestration (offload/reload mechanism when resources constrained)
 - ✅ Support for both CPU and GPU image generation
 - ✅ Progress tracking for image generation
 - ✅ Basic documentation for image features
+- ⏭️ Advanced features deferred to Phase 3:
+  - LLM request queuing during image generation
+  - Cancellation API (cancelImageGeneration)
+  - Advanced queue management with timeouts
 
 **Timeline**: 2-3 weeks
 
 **Deliverables**:
-- Full diffusion.cpp support
+- Full diffusion.cpp support with HTTP wrapper
 - Updated electron-control-panel with Diffusion Server and Resource Monitor tabs
 - Documentation on resource management and automatic offload/reload
+- Core ResourceOrchestrator implementation
 
 **Success Criteria**:
 - Can download diffusion models
 - Can generate images locally
-- Automatic resource management works (offload LLM when needed)
+- Automatic resource management works (core offload/reload when needed)
 - Handles both scenarios: sufficient resources and constrained resources
+- Phase 2 focuses on proving the offload/reload mechanism; advanced queuing in Phase 3
 
 ### Phase 3: Production Core
 
@@ -1307,6 +1313,12 @@ If a variant fails (e.g., Vulkan DLL missing), it tries the next variant automat
 - ✅ Comprehensive error types
 - ✅ Unit tests for all modules
 - ✅ Integration tests
+- ✅ Advanced resource orchestration features (from Phase 2):
+  - LLM request queuing during image generation (with timeout: 5 min default)
+  - Queue status monitoring and management
+  - Cancellation API for image generation (cancelImageGeneration)
+  - Per-request timeout tracking in queue
+  - Queue cancellation via API
 
 **Timeline**: 2-3 weeks
 
@@ -1315,12 +1327,14 @@ If a variant fails (e.g., Vulkan DLL missing), it tries the next variant automat
 - Production-ready error handling
 - Test coverage for core functionality
 - Complete API documentation
+- Advanced resource orchestration with request queuing
 
 **Success Criteria**:
 - Can resume interrupted downloads
 - 60%+ test coverage
 - Clean error messages for all common failures
 - No critical bugs in core functionality
+- Request queuing works correctly (LLM requests during image gen are queued and processed)
 
 ### Phase 4: Production Polish
 
