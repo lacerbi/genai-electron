@@ -19,6 +19,32 @@
   letter-spacing: 0.5px;
 }
 
+.log-viewer-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.debug-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.debug-toggle input[type='checkbox'] {
+  cursor: pointer;
+  width: 14px;
+  height: 14px;
+}
+
+.debug-toggle:hover {
+  color: var(--text-primary);
+}
+
 .log-viewer-content {
   background-color: var(--bg-tertiary);
   border: 1px solid var(--border-color);

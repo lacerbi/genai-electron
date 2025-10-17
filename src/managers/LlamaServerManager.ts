@@ -14,6 +14,7 @@ import { ProcessManager } from '../process/ProcessManager.js';
 import { LogManager } from '../process/log-manager.js';
 import { checkHealth, waitForHealthy } from '../process/health-check.js';
 import { BinaryManager } from './BinaryManager.js';
+import { parseLlamaCppLogLevel } from '../process/llama-log-parser.js';
 import {
   ServerConfig,
   ServerInfo,
@@ -472,6 +473,10 @@ export class LlamaServerManager extends ServerManager {
   /**
    * Handle stderr from llama-server
    *
+   * Parses llama.cpp output to determine actual log levels.
+   * llama.cpp logs everything to stderr as [ERROR], but we intelligently
+   * categorize based on content (HTTP requests, slot operations, etc.)
+   *
    * @param data - Stderr data
    * @private
    */
@@ -479,7 +484,9 @@ export class LlamaServerManager extends ServerManager {
     if (this.logManager) {
       const lines = data.split('\n').filter((line) => line.trim() !== '');
       for (const line of lines) {
-        this.logManager.write(line, 'error').catch(() => {});
+        // Parse llama.cpp output to determine actual log level
+        const level = parseLlamaCppLogLevel(line);
+        this.logManager.write(line, level).catch(() => {});
       }
     }
   }

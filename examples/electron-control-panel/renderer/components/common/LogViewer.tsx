@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ActionButton from './ActionButton';
 import './LogViewer.css';
 
@@ -22,6 +22,7 @@ const LogViewer: React.FC<LogViewerProps> = ({
   height = '300px',
 }) => {
   const logContainerRef = useRef<HTMLDivElement>(null);
+  const [showDebug, setShowDebug] = useState(false);
 
   // Auto-scroll to bottom when new logs arrive
   useEffect(() => {
@@ -30,77 +31,66 @@ const LogViewer: React.FC<LogViewerProps> = ({
     }
   }, [logs, autoScroll]);
 
-  const getLevelClass = (level: string | undefined, message: string): string => {
-    // Defensive: handle undefined or null levels
+  /**
+   * Get CSS class for log level
+   *
+   * Library now provides correct log levels, so we just map them to CSS classes
+   */
+  const getLevelClass = (level: string | undefined): string => {
     if (!level) return 'log-info';
 
     const lowerLevel = level.toLowerCase();
-    const lowerMessage = message.toLowerCase();
+    if (lowerLevel === 'debug') return 'log-debug';
+    if (lowerLevel === 'info') return 'log-info';
+    if (lowerLevel === 'warn') return 'log-warn';
+    if (lowerLevel === 'error') return 'log-error';
 
-    // Special handling for llama.cpp logs which log everything as [ERROR]
-    if (lowerLevel.includes('error')) {
-      // HTTP requests with 200 status are successful operations, not errors
-      if (lowerMessage.includes('request:') && lowerMessage.includes(' 200')) {
-        return 'log-info';
-      }
-
-      // Slot operations are internal state management, not errors
-      if (
-        lowerMessage.includes('slot') &&
-        (lowerMessage.includes('update_slots') ||
-          lowerMessage.includes('launch_slot') ||
-          lowerMessage.includes('release') ||
-          lowerMessage.includes('get_availabl') ||
-          lowerMessage.includes('print_timing'))
-      ) {
-        return 'log-debug';
-      }
-
-      // Server state changes are informational
-      if (
-        lowerMessage.includes('all slots are idle') ||
-        lowerMessage.includes('params_from_') ||
-        lowerMessage.includes('srv ')
-      ) {
-        return 'log-info';
-      }
-
-      // Actual errors (4xx, 5xx status codes, failure messages)
-      if (
-        /\s[45]\d{2}(\s|$)/.test(lowerMessage) ||
-        lowerMessage.includes('failed') ||
-        lowerMessage.includes('error:') ||
-        lowerMessage.includes('exception')
-      ) {
-        return 'log-error';
-      }
-
-      // Default for other [ERROR] messages: treat as info
-      return 'log-info';
-    }
-
-    if (lowerLevel.includes('warn')) return 'log-warn';
     return 'log-info';
   };
+
+  /**
+   * Filter logs based on debug toggle
+   */
+  const visibleLogs = logs.filter((log) => {
+    // Hide debug logs unless toggle is on
+    if (log.level?.toLowerCase() === 'debug' && !showDebug) {
+      return false;
+    }
+    return true;
+  });
 
   return (
     <div className="log-viewer">
       <div className="log-viewer-header">
-        <span className="log-viewer-title">Logs ({logs.length})</span>
-        {onClear && (
-          <ActionButton variant="secondary" onClick={onClear}>
-            Clear
-          </ActionButton>
-        )}
+        <span className="log-viewer-title">
+          Logs ({visibleLogs.length}{showDebug ? '' : ` of ${logs.length}`})
+        </span>
+        <div className="log-viewer-controls">
+          <label className="debug-toggle">
+            <input
+              type="checkbox"
+              checked={showDebug}
+              onChange={(e) => setShowDebug(e.target.checked)}
+            />
+            <span>Show Debug</span>
+          </label>
+          {onClear && (
+            <ActionButton variant="secondary" onClick={onClear}>
+              Clear
+            </ActionButton>
+          )}
+        </div>
       </div>
       <div className="log-viewer-content" ref={logContainerRef} style={{ height }}>
-        {logs.length === 0 ? (
-          <div className="log-empty">No logs to display</div>
+        {visibleLogs.length === 0 ? (
+          <div className="log-empty">
+            {logs.length === 0 ? 'No logs to display' : 'No logs match current filter'}
+          </div>
         ) : (
-          logs.map((log, index) => (
-            <div key={index} className={`log-entry ${getLevelClass(log.level, log.message)}`}>
+          visibleLogs.map((log, index) => (
+            <div key={index} className={`log-entry ${getLevelClass(log.level)}`}>
               <span className="log-timestamp">{log.timestamp}</span>
-              <span className="log-level">[{log.level || 'INFO'}]</span>
+              <span className="log-level">[{log.level?.toUpperCase() || 'INFO'}]</span>
               <span className="log-message">{log.message}</span>
             </div>
           ))
