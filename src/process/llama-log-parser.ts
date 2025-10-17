@@ -134,3 +134,38 @@ export function shouldFilterLlamaCppLog(line: string, includeDebug: boolean): bo
 
   return false;
 }
+
+/**
+ * Strip llama.cpp's timestamp and level prefix from log line
+ *
+ * llama.cpp logs include their own formatting with timestamp and level.
+ * We strip these to avoid duplicate timestamps when LogManager adds its own.
+ *
+ * @param line - Raw log line from llama-server
+ * @returns Clean message without llama.cpp's timestamp/level prefix
+ *
+ * @example
+ * ```typescript
+ * // llama.cpp formatted log
+ * stripLlamaCppFormatting('[2025-10-17T12:26:20.354Z] [ERROR] slot release: id 7')
+ * // Returns: 'slot release: id 7'
+ *
+ * // Already clean (shouldn't happen)
+ * stripLlamaCppFormatting('Server started')
+ * // Returns: 'Server started'
+ * ```
+ */
+export function stripLlamaCppFormatting(line: string): string {
+  // Match llama.cpp format: [timestamp] [LEVEL] message
+  // Supports various timestamp formats llama.cpp might use
+  const match = line.match(/^\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.+)$/);
+
+  if (match && match[3]) {
+    // Return just the message part (group 3)
+    return match[3].trim();
+  }
+
+  // If no match, return original line
+  // (shouldn't happen with llama.cpp output, but handles edge cases)
+  return line;
+}
