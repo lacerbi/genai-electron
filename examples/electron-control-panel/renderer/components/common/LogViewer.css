@@ -66,6 +66,15 @@
 }
 
 /* Log level colors */
+.log-debug .log-level {
+  color: var(--text-tertiary);
+}
+
+.log-debug .log-message {
+  color: var(--text-tertiary);
+  opacity: 0.7;
+}
+
 .log-info .log-level {
   color: var(--text-primary);
 }

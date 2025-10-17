@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import ActionButton from './common/ActionButton';
 import Spinner from './common/Spinner';
 import './TestChat.css';
@@ -13,6 +13,16 @@ const TestChat: React.FC<TestChatProps> = ({ serverRunning, port = 8080 }) => {
   const [response, setResponse] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
   const handleSend = async () => {
     if (!message.trim()) return;
@@ -20,6 +30,12 @@ const TestChat: React.FC<TestChatProps> = ({ serverRunning, port = 8080 }) => {
     setLoading(true);
     setError(null);
     setResponse('');
+
+    // Create new AbortController for this request
+    abortControllerRef.current = new AbortController();
+    const timeoutId = setTimeout(() => {
+      abortControllerRef.current?.abort();
+    }, 30000); // 30 second timeout
 
     try {
       // Make a direct fetch request to the llama-server
@@ -37,8 +53,12 @@ const TestChat: React.FC<TestChatProps> = ({ serverRunning, port = 8080 }) => {
           ],
           max_tokens: 100,
           temperature: 0.7,
+          stream: false, // CRITICAL: Prevent streaming response that causes hangs
         }),
+        signal: abortControllerRef.current.signal,
       });
+
+      clearTimeout(timeoutId);
 
       if (!res.ok) {
         throw new Error(`Server returned ${res.status}: ${res.statusText}`);
@@ -52,9 +72,19 @@ const TestChat: React.FC<TestChatProps> = ({ serverRunning, port = 8080 }) => {
         throw new Error('Invalid response format from server');
       }
     } catch (err) {
-      setError((err as Error).message);
+      clearTimeout(timeoutId);
+
+      // Better error messages
+      if ((err as Error).name === 'AbortError') {
+        setError('Request timed out after 30 seconds. Check server logs for issues.');
+      } else if ((err as Error).message.includes('fetch')) {
+        setError('Cannot connect to server. Make sure the server is running.');
+      } else {
+        setError((err as Error).message);
+      }
     } finally {
       setLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
