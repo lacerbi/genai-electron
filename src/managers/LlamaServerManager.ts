@@ -485,12 +485,26 @@ export class LlamaServerManager extends ServerManager {
     if (this.logManager) {
       const lines = data.split('\n').filter((line) => line.trim() !== '');
       for (const line of lines) {
+        // DEBUG: Log raw line before processing
+        console.log('[DEBUG LlamaServerManager] STDOUT raw line:', JSON.stringify(line));
+
         // Parse llama.cpp output to determine actual log level
         const level = parseLlamaCppLogLevel(line);
+        console.log('[DEBUG LlamaServerManager] Parsed level:', level);
 
         // Strip llama.cpp's formatting (timestamp + level prefix)
         // so LogManager doesn't create duplicate timestamps
         const cleanMessage = stripLlamaCppFormatting(line);
+
+        // Validate that stripping worked
+        if (cleanMessage === line && (line.includes('[') && line.includes(']'))) {
+          console.warn(
+            '[WARN LlamaServerManager] Stripping may have failed - clean message equals original:',
+            JSON.stringify(line.substring(0, 100))
+          );
+        }
+
+        console.log('[DEBUG LlamaServerManager] Clean message:', JSON.stringify(cleanMessage.substring(0, 100)));
 
         this.logManager.write(cleanMessage, level).catch(() => {});
       }
@@ -512,12 +526,26 @@ export class LlamaServerManager extends ServerManager {
     if (this.logManager) {
       const lines = data.split('\n').filter((line) => line.trim() !== '');
       for (const line of lines) {
+        // DEBUG: Log raw line before processing
+        console.log('[DEBUG LlamaServerManager] STDERR raw line:', JSON.stringify(line));
+
         // Parse llama.cpp output to determine actual log level
         const level = parseLlamaCppLogLevel(line);
+        console.log('[DEBUG LlamaServerManager] Parsed level:', level);
 
         // Strip llama.cpp's formatting (timestamp + level prefix)
         // so LogManager doesn't create duplicate timestamps
         const cleanMessage = stripLlamaCppFormatting(line);
+
+        // Validate that stripping worked
+        if (cleanMessage === line && (line.includes('[') && line.includes(']'))) {
+          console.warn(
+            '[WARN LlamaServerManager] Stripping may have failed - clean message equals original:',
+            JSON.stringify(line.substring(0, 100))
+          );
+        }
+
+        console.log('[DEBUG LlamaServerManager] Clean message:', JSON.stringify(cleanMessage.substring(0, 100)));
 
         this.logManager.write(cleanMessage, level).catch(() => {});
       }
