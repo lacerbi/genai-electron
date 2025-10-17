@@ -28,10 +28,16 @@ import {
   InsufficientResourcesError,
 } from '../errors/index.js';
 import { PATHS, getBinaryPath } from '../config/paths.js';
-import { BINARY_VERSIONS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
+import { BINARY_VERSIONS, DEFAULT_TIMEOUTS, type BinaryVariantConfig } from '../config/defaults.js';
 import { getPlatformKey } from '../utils/platform-utils.js';
-import { fileExists, ensureDirectory, calculateChecksum } from '../utils/file-utils.js';
+import { fileExists, ensureDirectory, calculateChecksum, moveFile, deleteFile } from '../utils/file-utils.js';
+import { extractLlamaServerBinary, cleanupExtraction } from '../utils/zip-utils.js';
 import path from 'path';
+import { promises as fs } from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 /**
  * LlamaServerManager class
@@ -325,19 +331,23 @@ export class LlamaServerManager extends ServerManager {
   /**
    * Ensure llama-server binary is downloaded
    *
-   * Downloads binary from GitHub releases if not present, verifies checksum.
+   * Downloads binary from GitHub releases if not present. Tries multiple variants
+   * in priority order (CUDA → Vulkan → CPU) and uses the first one that works.
+   * Caches which variant worked for faster startup next time.
    *
    * @returns Path to the binary
-   * @throws {BinaryError} If download or verification fails
+   * @throws {BinaryError} If download or verification fails for all variants
    * @private
    */
   private async ensureBinary(): Promise<string> {
     const platformKey = getPlatformKey();
     const binaryConfig = BINARY_VERSIONS.llamaServer;
 
-    if (!binaryConfig.urls[platformKey]) {
+    // Get variants for this platform
+    const variants = binaryConfig.variants[platformKey];
+    if (!variants) {
       throw new BinaryError(
-        `No llama-server binary available for platform: ${platformKey}`,
+        `No llama-server binary variants available for platform: ${platformKey}`,
         {
           platform: platformKey,
           suggestion: 'Check platform support in DESIGN.md',
@@ -349,78 +359,191 @@ export class LlamaServerManager extends ServerManager {
     await ensureDirectory(PATHS.binaries);
 
     const binaryPath = getBinaryPath('llama-server');
+    const variantCachePath = path.join(PATHS.binaries, '.variant.json');
 
-    // Check if binary already exists
+    // Check if binary already exists and works
     if (await fileExists(binaryPath)) {
-      // TODO: Version checking - for Phase 1, assume existing binary is good
-      return binaryPath;
+      // Try to use existing binary
+      const works = await this.testBinary(binaryPath);
+      if (works) {
+        if (this.logManager) {
+          await this.logManager.write('Using existing llama-server binary', 'info');
+        }
+        return binaryPath;
+      } else {
+        // Existing binary doesn't work, delete it and re-download
+        if (this.logManager) {
+          await this.logManager.write('Existing binary not working, re-downloading...', 'warn');
+        }
+        await deleteFile(binaryPath).catch(() => {});
+      }
     }
 
-    // Download binary
-    const url = binaryConfig.urls[platformKey];
-    const expectedChecksum = binaryConfig.checksums[platformKey];
+    // Check if we have a cached variant preference
+    let cachedVariant: string | undefined;
+    try {
+      const cache = await fs.readFile(variantCachePath, 'utf-8');
+      cachedVariant = JSON.parse(cache).variant;
+    } catch {
+      // No cache or invalid cache
+    }
 
-    if (!url) {
-      throw new BinaryError(`No download URL for platform: ${platformKey}`, {
+    // Reorder variants to try cached one first
+    const orderedVariants = [...variants];
+    if (cachedVariant) {
+      const cachedIndex = orderedVariants.findIndex(v => v.type === cachedVariant);
+      if (cachedIndex > 0) {
+        const cached = orderedVariants.splice(cachedIndex, 1)[0];
+        if (cached) {
+          orderedVariants.unshift(cached);
+        }
+      }
+    }
+
+    // Try each variant until one works
+    const errors: string[] = [];
+    for (const variant of orderedVariants) {
+      if (this.logManager) {
+        await this.logManager.write(
+          `Trying ${variant.type} variant for ${platformKey}...`,
+          'info'
+        );
+      }
+
+      try {
+        const success = await this.downloadAndTestVariant(variant, binaryPath);
+        if (success) {
+          // Cache this variant for next time
+          await fs.writeFile(
+            variantCachePath,
+            JSON.stringify({ variant: variant.type, platform: platformKey }),
+            'utf-8'
+          );
+
+          if (this.logManager) {
+            await this.logManager.write(
+              `Successfully installed ${variant.type} variant`,
+              'info'
+            );
+          }
+
+          return binaryPath;
+        }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        errors.push(`${variant.type}: ${errorMsg}`);
+        if (this.logManager) {
+          await this.logManager.write(
+            `Failed to use ${variant.type} variant: ${errorMsg}`,
+            'warn'
+          );
+        }
+      }
+    }
+
+    // All variants failed
+    throw new BinaryError(
+      `Failed to download llama-server binary. Tried all variants for ${platformKey}.`,
+      {
         platform: platformKey,
-      });
-    }
+        errors: errors.join('; '),
+        suggestion: 'Check your GPU drivers are installed, or the system may not support any variant',
+      }
+    );
+  }
+
+  /**
+   * Download and test a binary variant
+   *
+   * @param variant - Binary variant configuration
+   * @param finalBinaryPath - Where to install the binary if successful
+   * @returns True if variant works, false otherwise
+   * @private
+   */
+  private async downloadAndTestVariant(
+    variant: BinaryVariantConfig,
+    finalBinaryPath: string
+  ): Promise<boolean> {
+    const downloader = new Downloader();
+    const zipPath = `${finalBinaryPath}.${variant.type}.zip`;
+    const extractDir = `${finalBinaryPath}.${variant.type}.extract`;
 
     try {
-      const downloader = new Downloader();
-
-      // Download to temporary file first
-      const tempPath = `${binaryPath}.download`;
-
+      // Download ZIP
       await downloader.download({
-        url,
-        destination: tempPath,
+        url: variant.url,
+        destination: zipPath,
         onProgress: (downloaded, total) => {
           const percent = ((downloaded / total) * 100).toFixed(1);
           if (this.logManager) {
-            this.logManager.write(
-              `Downloading llama-server binary: ${percent}%`,
-              'info'
-            ).catch(() => {});
+            this.logManager
+              .write(`Downloading ${variant.type} binary: ${percent}%`, 'info')
+              .catch(() => {});
           }
-        }
+        },
       });
 
-      // Verify checksum if provided
-      if (expectedChecksum) {
-        const actualChecksum = await calculateChecksum(tempPath);
-        if (actualChecksum !== expectedChecksum) {
-          throw new BinaryError('Binary checksum verification failed', {
-            expected: expectedChecksum,
-            actual: actualChecksum,
-            suggestion: 'Try deleting the binary and downloading again',
-          });
+      // Verify checksum
+      const actualChecksum = await calculateChecksum(zipPath);
+      if (actualChecksum !== variant.checksum) {
+        throw new BinaryError('Binary checksum verification failed', {
+          expected: variant.checksum,
+          actual: actualChecksum,
+          suggestion: 'The downloaded file may be corrupted',
+        });
+      }
+
+      // Extract ZIP
+      const extractedBinaryPath = await extractLlamaServerBinary(zipPath, extractDir);
+
+      // Test if binary works (has required drivers, etc.)
+      const works = await this.testBinary(extractedBinaryPath);
+
+      if (works) {
+        // Copy to final location
+        await moveFile(extractedBinaryPath, finalBinaryPath);
+
+        // Make executable (Unix-like systems)
+        if (process.platform !== 'win32') {
+          await fs.chmod(finalBinaryPath, 0o755);
         }
+
+        // Cleanup
+        await deleteFile(zipPath).catch(() => {});
+        await cleanupExtraction(extractDir).catch(() => {});
+
+        return true;
+      } else {
+        // Binary doesn't work (missing drivers, etc.)
+        // Cleanup and return false to try next variant
+        await deleteFile(zipPath).catch(() => {});
+        await cleanupExtraction(extractDir).catch(() => {});
+        return false;
       }
-
-      // Move to final location and make executable
-      const { moveFile } = await import('../utils/file-utils.js');
-      await moveFile(tempPath, binaryPath);
-
-      // Make executable (Unix-like systems)
-      if (process.platform !== 'win32') {
-        const { chmod } = await import('fs/promises');
-        await chmod(binaryPath, 0o755);
-      }
-
-      if (this.logManager) {
-        await this.logManager.write('Binary downloaded and verified', 'info');
-      }
-
-      return binaryPath;
     } catch (error) {
-      if (error instanceof BinaryError) {
-        throw error;
-      }
-      throw new BinaryError(
-        `Failed to download llama-server binary: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        { url, error: error instanceof Error ? error.message : String(error) }
-      );
+      // Cleanup on error
+      await deleteFile(zipPath).catch(() => {});
+      await cleanupExtraction(extractDir).catch(() => {});
+      throw error;
+    }
+  }
+
+  /**
+   * Test if a binary works by running it with --version
+   *
+   * @param binaryPath - Path to binary to test
+   * @returns True if binary executes successfully
+   * @private
+   */
+  private async testBinary(binaryPath: string): Promise<boolean> {
+    try {
+      // Try to execute binary with --version flag
+      // If it exits successfully, the binary works (drivers are present)
+      await execFileAsync(binaryPath, ['--version'], { timeout: 5000 });
+      return true;
+    } catch {
+      // Binary failed to execute (missing drivers, wrong architecture, etc.)
+      return false;
     }
   }
 

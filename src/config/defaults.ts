@@ -42,31 +42,74 @@ export const DEFAULT_SERVER_CONFIG: Partial<ServerConfig> = {
 } as const;
 
 /**
+ * Binary variant type
+ */
+export type BinaryVariant = 'cuda' | 'vulkan' | 'metal' | 'cpu';
+
+/**
+ * Binary variant configuration
+ */
+export interface BinaryVariantConfig {
+  /** Variant type (cuda/vulkan/metal/cpu) */
+  type: BinaryVariant;
+  /** Download URL for this variant */
+  url: string;
+  /** SHA256 checksum for verification */
+  checksum: string;
+}
+
+/**
  * Binary version configuration
  * Pinned to specific releases for stability
+ *
+ * Each platform has an array of variants in priority order.
+ * The library will try each variant until one works (has required drivers).
  */
 export const BINARY_VERSIONS = {
   /** llama-server (llama.cpp) configuration */
   llamaServer: {
     /** Version/commit tag */
-    version: 'b4313', // Example: llama.cpp commit or release tag
-    /** Download URLs for each platform */
-    urls: {
-      'darwin-arm64':
-        'https://github.com/ggml-org/llama.cpp/releases/download/b4313/llama-server-darwin-arm64',
-      'darwin-x64':
-        'https://github.com/ggml-org/llama.cpp/releases/download/b4313/llama-server-darwin-x64',
-      'win32-x64':
-        'https://github.com/ggml-org/llama.cpp/releases/download/b4313/llama-server-win32-x64.exe',
-      'linux-x64':
-        'https://github.com/ggml-org/llama.cpp/releases/download/b4313/llama-server-linux-x64',
-    },
-    /** SHA256 checksums for verification */
-    checksums: {
-      'darwin-arm64': 'sha256:placeholder_checksum_darwin_arm64',
-      'darwin-x64': 'sha256:placeholder_checksum_darwin_x64',
-      'win32-x64': 'sha256:placeholder_checksum_win32_x64',
-      'linux-x64': 'sha256:placeholder_checksum_linux_x64',
+    version: 'b6783',
+    /** Binary variants for each platform (in priority order for fallback) */
+    variants: {
+      'darwin-arm64': [
+        {
+          type: 'metal' as BinaryVariant,
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-macos-arm64.zip',
+          checksum: '73f33ae440aa55ae0bbf25bf1449ef0c54b396c9c49c27cf15a3a4ba8e43b65f',
+        },
+      ],
+      'darwin-x64': [
+        {
+          type: 'cpu' as BinaryVariant,
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-macos-x64.zip',
+          checksum: '49f5e9111e58a305b41be39ae7d37d65a69be9a9f69cc4e10e27e25086873799',
+        },
+      ],
+      'win32-x64': [
+        {
+          type: 'cuda' as BinaryVariant,
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-win-cuda-12.4-x64.zip',
+          checksum: '07fea357cfb1770b7ec2c882b2b2d8f3e0aeffc5f8e5ceec9a1c2db5eb6ef0e5',
+        },
+        {
+          type: 'cpu' as BinaryVariant,
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-win-cpu-x64.zip',
+          checksum: 'dde30575966804d477ac77b6d925a15cc77c30ab57eedba44dfdd0dbf4f8f6b3',
+        },
+      ],
+      'linux-x64': [
+        {
+          type: 'cuda' as BinaryVariant,
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-ubuntu-x64.zip',
+          checksum: '8f935e2b8d7ee8f38d933413c99e3813a0d8c2d1f1a6926cdcc7a91a6c43e8eb',
+        },
+        {
+          type: 'vulkan' as BinaryVariant,
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-ubuntu-vulkan-x64.zip',
+          checksum: '8cfb1d5ad0d35c388f96fda79e01a10d9d3d06f81afe34fc12a8aef8e1c1e94e',
+        },
+      ],
     },
   },
   /** diffusion-cpp configuration (Phase 2) */
