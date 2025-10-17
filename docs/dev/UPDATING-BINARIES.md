@@ -157,15 +157,17 @@ The order matters! Users' systems will try variants in this order:
 
 ## Step 3: Verify Variant Availability
 
-**IMPORTANT**: Some releases may be missing variants!
+**IMPORTANT**: Variants appearing "missing" are almost always just hidden by GitHub's UI!
 
-- Example: b6783 initially appeared to lack `win-vulkan-x64` (but was actually hidden by GitHub's "Show more" truncation)
-- Always verify ALL required variants exist before updating
+**Common Issue**: GitHub truncates long asset lists with a "Show more assets" button. If a variant seems missing:
 
-If a critical variant is missing:
-- Check the previous release (e.g., b6782)
-- Wait for the next release
-- Or remove that variant from the fallback chain (not recommended)
+1. **First**: Click "Show more assets" on the release page
+2. **Second**: Download the full HTML after expanding the list
+3. **Last resort**: If truly missing (extremely rare), file an issue with llama.cpp
+
+**Example**: b6783 and b6784 initially appeared to lack `win-vulkan-x64`, but it was just hidden by truncation.
+
+**Always verify ALL required variants exist** by checking the expanded asset list before updating.
 
 ## Step 4: Build and Test
 
@@ -229,14 +231,20 @@ Checksums:
 
 **Solution**: Download HTML manually after clicking "Show more assets", then parse
 
-### Issue: Variant Not Available
+### Issue: Variant Appears Not Available
 
-**Symptom**: A critical variant (e.g., win-vulkan-x64) doesn't exist in release
+**Symptom**: A critical variant (e.g., win-vulkan-x64) doesn't appear in release
 
-**Solutions**:
-1. Check previous release (may be available there)
-2. Wait for next release
-3. Remove from fallback chain (not recommended - reduces compatibility)
+**Cause**: 99% of the time - GitHub UI truncation! The asset list is cut off with "Show more assets" button.
+
+**Solution**:
+1. **Click "Show more assets"** on the release page to expand full list
+2. **Download full HTML** after expanding to ensure you see all assets
+3. **Parse the complete HTML** to extract all checksums
+
+**If truly missing** (extremely rare):
+- File an issue with llama.cpp project
+- They may have accidentally skipped building that variant
 
 ### Issue: Checksum Mismatch
 
