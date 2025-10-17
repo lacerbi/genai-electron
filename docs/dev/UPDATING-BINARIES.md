@@ -105,7 +105,7 @@ files.forEach(filename => {
     return;
   }
 
-  const checksum = html.substr(sha256Index + 7, 64);
+  const checksum = html.slice(sha256Index + 7, sha256Index + 7 + 64);
   console.log(`${filename} | ${checksum}`);
 });
 ```
@@ -243,8 +243,8 @@ Checksums:
 3. **Parse the complete HTML** to extract all checksums
 
 **If truly missing** (extremely rare):
-- File an issue with llama.cpp project
-- They may have accidentally skipped building that variant
+- Discuss with project developer/maintainer
+- May need to wait for next release or use alternative variant
 
 ### Issue: Checksum Mismatch
 
@@ -274,8 +274,8 @@ Checksums:
 ## Update Checklist
 
 - [ ] Check new release exists on GitHub
-- [ ] Extract SHA256 checksums for ALL variants
-- [ ] Verify all required variants are available (especially win-vulkan-x64)
+- [ ] Click "Show more assets" to expand full asset list on GitHub
+- [ ] Extract SHA256 checksums for ALL variants (all 7 files)
 - [ ] Update version in `src/config/defaults.ts`
 - [ ] Update all 7 URLs to new version
 - [ ] Update all 7 checksums with correct hashes
