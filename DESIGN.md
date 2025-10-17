@@ -512,7 +512,7 @@ Manages the llama-server process lifecycle for LLM inference.
 - Event notifications (started, stopped, crashed, restarted)
 - Automatic crash recovery with configurable restart policy
 
-**Core Operations**: `start()`, `stop()`, `restart()`, `getStatus()`, `isHealthy()`, `getLogs()`
+**Core Operations**: `start()`, `stop()`, `restart()`, `getStatus()`, `isHealthy()`, `getLogs()`, `clearLogs()`
 
 #### DiffusionServer
 
@@ -973,9 +973,11 @@ function getHuggingFaceURL(repo: string, file: string): string {
 
 **Log Management**:
 - Capture server output to rotating log files
+- **Intelligent parsing**: llama.cpp logs everything as [ERROR]; library automatically categorizes as debug/info/error based on content
+- **Clean formatting**: Strips llama.cpp's duplicate timestamps and levels before storage
 - Max log size: 10MB per file
 - Keep last 5 log files
-- Provide API to retrieve recent logs
+- Provide API to retrieve and clear logs (`getLogs()`, `clearLogs()`)
 
 ### 4. System Capability Detection
 
@@ -1396,7 +1398,8 @@ genai-electron/
 │   ├── process/                    # Process management
 │   │   ├── ProcessManager.ts       # Spawn and monitor processes
 │   │   ├── health-check.ts         # Health checking utilities
-│   │   └── log-manager.ts          # Log capture and rotation
+│   │   ├── log-manager.ts          # Log capture and rotation
+│   │   └── llama-log-parser.ts     # Intelligent llama.cpp log parsing
 │   │
 │   ├── config/                     # Configuration
 │   │   ├── paths.ts                # Path constants
