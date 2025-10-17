@@ -27,6 +27,16 @@
 
 **Status**: Phase 1 complete. Example app functional and ready for development use.
 
+**Recent Fixes (2025-10-17): Log Display & TestChat**
+- Fixed TestChat hanging issue: Added `stream: false` to prevent llama.cpp streaming response conflicts
+- Added AbortController with 30s timeout to prevent indefinite hangs
+- Implemented intelligent llama.cpp log parsing at library level (`llama-log-parser.ts`)
+  - llama.cpp logs everything as [ERROR]; library now categorizes as debug/info/error based on content
+  - HTTP 200 requests → info, slot operations → debug, actual failures → error
+  - Strips llama.cpp's duplicate timestamps before storage (clean single-timestamp display)
+- Wired up Clear Logs button to truncate log file (full IPC chain: renderer → main → library)
+- Known issue: TestChat still has ~50-70% random failure rate (needs investigation with clean logs)
+
 **Next**: Phase 2 - Image Generation (diffusion.cpp integration, resource orchestration)
 
 **Detailed Records**: See `docs/dev/phase1/` for complete Phase 1 planning and progress logs.
