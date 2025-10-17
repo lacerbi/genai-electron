@@ -181,8 +181,12 @@ export class LogManager {
    * @returns Parsed log entry or null if parsing fails
    */
   static parseEntry(line: string): LogEntry | null {
+    // Trim any trailing whitespace including \r\n (llama.cpp outputs \r at end)
+    // This was causing regex to fail and fallback to showing entire line with new timestamp
+    const trimmedLine = line.trim();
+
     // Format: [timestamp] [LEVEL] message
-    const match = line.match(/^\[([^\]]+)\] \[(\w+)\s*\] (.+)$/);
+    const match = trimmedLine.match(/^\[([^\]]+)\] \[(\w+)\s*\] (.+)$/);
     if (!match || !match[1] || !match[2] || !match[3]) {
       return null;
     }
