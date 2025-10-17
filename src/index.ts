@@ -175,6 +175,7 @@ export { SystemInfo } from './system/SystemInfo.js';
 export { ModelManager } from './managers/ModelManager.js';
 export { LlamaServerManager } from './managers/LlamaServerManager.js';
 export { DiffusionServerManager } from './managers/DiffusionServerManager.js';
+export { ResourceOrchestrator } from './managers/ResourceOrchestrator.js';
 export { ServerManager } from './managers/ServerManager.js';
 export { StorageManager } from './managers/StorageManager.js';
 export { ProcessManager } from './process/ProcessManager.js';
