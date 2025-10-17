@@ -24,6 +24,8 @@ export interface SpawnOptions {
   onStderr?: (data: string) => void;
   /** Callback for process exit */
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+  /** Callback for spawn errors (e.g., ENOENT when binary not found) */
+  onError?: (error: Error) => void;
 }
 
 /**
@@ -107,12 +109,14 @@ export class ProcessManager {
         }
       });
 
-      // Handle spawn errors
+      // Handle spawn errors (e.g., ENOENT when binary doesn't exist)
       childProcess.on('error', (error) => {
-        throw new ServerError(
-          `Process error: ${error.message}`,
-          { command, args, error: error.message }
-        );
+        // Call error callback if provided
+        if (options.onError) {
+          options.onError(error);
+        }
+        // Note: We don't throw here because event handlers can't throw synchronously.
+        // The error will be handled by the caller through the exit event or onError callback.
       });
 
       return {

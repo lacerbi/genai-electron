@@ -159,7 +159,29 @@ export class LlamaServerManager extends ServerManager {
       // 7. Build command-line arguments
       const args = this.buildCommandLineArgs(finalConfig, modelInfo.path);
 
-      // 8. Spawn the process
+      // 8. Verify binary exists before spawning
+      if (!this.binaryPath) {
+        throw new ServerError('Binary path is not set', {
+          suggestion: 'This is an internal error - binary should have been downloaded',
+        });
+      }
+
+      if (!(await fileExists(this.binaryPath))) {
+        throw new ServerError(
+          `Binary file not found: ${this.binaryPath}`,
+          {
+            path: this.binaryPath,
+            suggestion: 'Try deleting the binaries directory and restarting the app',
+          }
+        );
+      }
+
+      await this.logManager.write(
+        `Spawning llama-server: ${this.binaryPath} with args: ${args.join(' ')}`,
+        'info'
+      );
+
+      // 9. Spawn the process
       const { pid } = this.processManager.spawn(
         this.binaryPath,
         args,
@@ -167,6 +189,7 @@ export class LlamaServerManager extends ServerManager {
           onStdout: (data) => this.handleStdout(data),
           onStderr: (data) => this.handleStderr(data),
           onExit: (code, signal) => this.handleExit(code, signal),
+          onError: (error) => this.handleSpawnError(error),
         }
       );
 
@@ -178,7 +201,7 @@ export class LlamaServerManager extends ServerManager {
         'info'
       );
 
-      // 9. Wait for server to be healthy
+      // 10. Wait for server to be healthy
       await waitForHealthy(finalConfig.port, DEFAULT_TIMEOUTS.serverStart);
 
       this._startedAt = new Date();
@@ -362,6 +385,22 @@ export class LlamaServerManager extends ServerManager {
 
     const binaryPath = getBinaryPath('llama-server');
     const variantCachePath = path.join(PATHS.binaries, '.variant.json');
+
+    // WINDOWS FIX: Clean up old binary without .exe extension if it exists
+    if (process.platform === 'win32') {
+      const oldBinaryPath = path.join(PATHS.binaries, 'llama-server');
+      if (await fileExists(oldBinaryPath)) {
+        if (this.logManager) {
+          await this.logManager.write(
+            'Removing old binary without .exe extension',
+            'info'
+          );
+        }
+        await deleteFile(oldBinaryPath).catch(() => {
+          // Ignore errors - we'll download fresh anyway
+        });
+      }
+    }
 
     // Check if binary already exists and works
     if (await fileExists(binaryPath)) {
@@ -649,6 +688,22 @@ export class LlamaServerManager extends ServerManager {
         this.logManager.write(line, 'error').catch(() => {});
       }
     }
+  }
+
+  /**
+   * Handle spawn errors (e.g., ENOENT when binary not found)
+   *
+   * @param error - Spawn error
+   * @private
+   */
+  private handleSpawnError(error: Error): void {
+    if (this.logManager) {
+      this.logManager
+        .write(`Spawn error: ${error.message}`, 'error')
+        .catch(() => {});
+    }
+    // The error will be handled by the exit handler
+    // which will emit a 'crashed' event
   }
 
   /**

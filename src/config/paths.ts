@@ -98,17 +98,22 @@ export function getModelFilePath(type: 'llm' | 'diffusion', filename: string): s
 /**
  * Get the binary file path
  *
+ * Automatically adds .exe extension on Windows platforms.
+ *
  * @param binaryName - Binary name (e.g., "llama-server", "diffusion-cpp")
  * @returns Absolute path to binary file
  *
  * @example
  * ```typescript
  * const binaryPath = getBinaryPath('llama-server');
- * // Returns: /path/to/userData/binaries/llama-server
+ * // Returns: /path/to/userData/binaries/llama-server (Unix)
+ * // Returns: C:\...\userData\binaries\llama-server.exe (Windows)
  * ```
  */
 export function getBinaryPath(binaryName: string): string {
-  return path.join(PATHS.binaries, binaryName);
+  // On Windows, executables need .exe extension
+  const filename = process.platform === 'win32' ? `${binaryName}.exe` : binaryName;
+  return path.join(PATHS.binaries, filename);
 }
 
 /**
