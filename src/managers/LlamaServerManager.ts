@@ -338,6 +338,24 @@ export class LlamaServerManager extends ServerManager {
   }
 
   /**
+   * Clear all server logs
+   *
+   * Removes all log entries by truncating the log file.
+   * This is useful for clearing old/corrupted logs and starting fresh.
+   */
+  async clearLogs(): Promise<void> {
+    if (!this.logManager) {
+      return;
+    }
+
+    try {
+      await this.logManager.clear();
+    } catch {
+      // Ignore errors - log clearing is not critical
+    }
+  }
+
+  /**
    * Get log file path
    *
    * @returns Path to log file (undefined if log manager not initialized)

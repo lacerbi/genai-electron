@@ -190,4 +190,12 @@ export function registerIpcHandlers(): void {
       throw new Error(`Failed to get server logs: ${(error as Error).message}`);
     }
   });
+
+  ipcMain.handle('server:clearLogs', async () => {
+    try {
+      await llamaServer.clearLogs();
+    } catch (error) {
+      throw new Error(`Failed to clear logs: ${(error as Error).message}`);
+    }
+  });
 }

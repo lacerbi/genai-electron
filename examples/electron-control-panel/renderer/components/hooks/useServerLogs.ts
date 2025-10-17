@@ -38,8 +38,15 @@ export function useServerLogs() {
     return () => clearInterval(interval);
   }, []);
 
-  const clearLogs = () => {
-    setLogs([]);
+  const clearLogs = async () => {
+    try {
+      // Clear the log file on disk
+      await window.api.server.clearLogs();
+      // Clear UI state
+      setLogs([]);
+    } catch (err) {
+      console.error('Failed to clear logs:', err);
+    }
   };
 
   return {
