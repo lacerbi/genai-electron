@@ -731,7 +731,7 @@ Before submitting PR:
 - [API.md](API.md) - Complete API reference
 - [DESIGN.md](../DESIGN.md) - Architecture and design
 - [PROGRESS.md](../PROGRESS.md) - Current progress
-- [docs/phase1/](../docs/phase1/) - Phase 1 detailed planning and logs
+- [docs/dev/phase1/](../docs/dev/phase1/) - Phase 1 detailed planning and logs
 
 ### External Resources
 

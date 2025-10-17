@@ -327,7 +327,7 @@ llamaServer.on('crashed', (error) => {
 - **[SETUP.md](docs/SETUP.md)** - Development setup guide
 - **[DESIGN.md](DESIGN.md)** - Complete architecture and design document
 - **[PROGRESS.md](PROGRESS.md)** - Current implementation progress
-- **[docs/phase1/](docs/phase1/)** - Phase 1 detailed planning and progress logs
+- **[docs/dev/phase1/](docs/dev/phase1/)** - Phase 1 detailed planning and progress logs
 
 ## Error Handling
 

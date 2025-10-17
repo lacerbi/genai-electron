@@ -159,7 +159,7 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 - **DESIGN.md**: Complete architecture, all 5 phases, technical decisions
 - **DESIGN-EXAMPLE-APP.md**: Detailed design for electron-control-panel example app
 - **PROGRESS.md**: Current status (concise summary)
-- **docs/phase1/**: Archived Phase 1 detailed planning and logs
+- **docs/dev/phase1/**: Archived Phase 1 detailed planning and logs
 - **docs/API.md**: Complete API reference with examples
 - **docs/SETUP.md**: Development environment setup for all platforms
 

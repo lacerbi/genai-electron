@@ -29,4 +29,4 @@
 
 **Next**: Phase 2 - Image Generation (diffusion.cpp integration, resource orchestration)
 
-**Detailed Records**: See `docs/phase1/` for complete Phase 1 planning and progress logs.
+**Detailed Records**: See `docs/dev/phase1/` for complete Phase 1 planning and progress logs.
