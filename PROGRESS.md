@@ -40,11 +40,43 @@
   - Exported ResourceOrchestrator class from main index
   - TypeScript compiles with zero errors ✅
 
-**Next Steps**:
-- Step 7: Testing and validation (~3-4 hours)
-- Documentation updates (API examples, usage patterns)
+**Remaining Work**:
 
-**Timeline**: Estimated 20-27 hours total for Phase 2 (16-17 hours completed, ~65-70% done)
+**Option A: Documentation & Examples** (~1-2 hours)
+- Update README.md with Phase 2 usage examples
+  - DiffusionServerManager basic usage (start server, generate image)
+  - ResourceOrchestrator integration (automatic resource management)
+  - Complete end-to-end example with LLM + image generation
+- Update docs/API.md with Phase 2 APIs
+  - DiffusionServerManager: start(), stop(), generateImage(), getInfo()
+  - ResourceOrchestrator: orchestrateImageGeneration(), wouldNeedOffload(), getSavedState()
+  - All image generation types documentation
+- Add practical code patterns
+  - Error handling for image generation
+  - Progress tracking during generation
+  - Resource management strategies
+
+**Option B: Testing & Validation** (~3-4 hours)
+- Unit tests for DiffusionServerManager
+  - Test HTTP server creation and endpoints
+  - Test stable-diffusion.cpp spawning logic
+  - Test progress parsing from stdout
+  - Test error scenarios (model not found, port in use, etc.)
+- Unit tests for ResourceOrchestrator
+  - Test resource estimation formulas (LLM and diffusion)
+  - Test offload/reload logic with mocked servers
+  - Test bottleneck detection (RAM vs VRAM)
+  - Test state preservation and recovery
+  - Test edge cases (no resources, partial offload, etc.)
+- Integration tests (optional)
+  - Test actual binary download and execution
+  - Test real model loading (if test models available)
+
+**Timeline**:
+- Estimated 20-27 hours total for Phase 2
+- 16-17 hours completed (~65-70% done)
+- Remaining: 4-6 hours for documentation + testing
+- Core functionality: 100% complete ✅
 
 ---
 
