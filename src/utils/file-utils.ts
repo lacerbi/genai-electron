@@ -5,7 +5,7 @@
 
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { access, mkdir, stat, unlink, rename, constants } from 'node:fs/promises';
+import { access, mkdir, stat, unlink, rename, constants, cp } from 'node:fs/promises';
 import { FileSystemError } from '../errors/index.js';
 
 /**
@@ -122,6 +122,38 @@ export async function moveFile(fromPath: string, toPath: string): Promise<void> 
     throw new FileSystemError(`Failed to move file from ${fromPath} to ${toPath}`, {
       fromPath,
       toPath,
+      error,
+    });
+  }
+}
+
+/**
+ * Copy all contents of a directory to another directory
+ *
+ * Recursively copies all files and subdirectories from source to destination.
+ * Creates the destination directory if it doesn't exist.
+ *
+ * @param fromDir - Source directory path
+ * @param toDir - Destination directory path
+ * @throws {FileSystemError} If copy fails
+ *
+ * @example
+ * ```typescript
+ * await copyDirectory('/path/to/source', '/path/to/dest');
+ * console.log('Directory copied');
+ * ```
+ */
+export async function copyDirectory(fromDir: string, toDir: string): Promise<void> {
+  try {
+    // Ensure destination directory exists
+    await ensureDirectory(toDir);
+
+    // Copy all contents recursively
+    await cp(fromDir, toDir, { recursive: true });
+  } catch (error) {
+    throw new FileSystemError(`Failed to copy directory from ${fromDir} to ${toDir}`, {
+      fromPath: fromDir,
+      toPath: toDir,
       error,
     });
   }

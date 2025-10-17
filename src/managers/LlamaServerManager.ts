@@ -30,7 +30,7 @@ import {
 import { PATHS, getBinaryPath } from '../config/paths.js';
 import { BINARY_VERSIONS, DEFAULT_TIMEOUTS, type BinaryVariantConfig } from '../config/defaults.js';
 import { getPlatformKey } from '../utils/platform-utils.js';
-import { fileExists, ensureDirectory, calculateChecksum, moveFile, deleteFile } from '../utils/file-utils.js';
+import { fileExists, ensureDirectory, calculateChecksum, deleteFile, copyDirectory } from '../utils/file-utils.js';
 import { extractLlamaServerBinary, cleanupExtraction } from '../utils/zip-utils.js';
 import path from 'path';
 import { promises as fs } from 'fs';
@@ -541,8 +541,9 @@ export class LlamaServerManager extends ServerManager {
       const works = await this.testBinary(extractedBinaryPath);
 
       if (works) {
-        // Copy to final location
-        await moveFile(extractedBinaryPath, finalBinaryPath);
+        // Copy ALL extracted files to binaries directory
+        // This includes the .exe AND all required DLLs
+        await copyDirectory(extractDir, PATHS.binaries);
 
         // Make executable (Unix-like systems)
         if (process.platform !== 'win32') {
