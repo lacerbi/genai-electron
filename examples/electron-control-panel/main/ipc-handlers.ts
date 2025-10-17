@@ -8,6 +8,7 @@ import {
   sendDownloadComplete,
   sendDownloadError,
 } from './genai-api.js';
+import { LogManager } from 'genai-electron';
 
 /**
  * Register all IPC handlers
@@ -168,7 +169,23 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('server:logs', async (_event, limit: number) => {
     try {
-      return await llamaServer.getLogs(limit);
+      const logStrings = await llamaServer.getLogs(limit);
+
+      // Parse log strings into LogEntry objects
+      return logStrings.map((logLine) => {
+        const parsed = LogManager.parseEntry(logLine);
+
+        // If parsing fails, create a fallback entry
+        if (!parsed) {
+          return {
+            timestamp: new Date().toISOString(),
+            level: 'info',
+            message: logLine,
+          };
+        }
+
+        return parsed;
+      });
     } catch (error) {
       throw new Error(`Failed to get server logs: ${(error as Error).message}`);
     }

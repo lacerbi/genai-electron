@@ -3,7 +3,7 @@ import ActionButton from './ActionButton';
 import './LogViewer.css';
 
 interface LogEntry {
-  level: string;
+  level?: string; // Optional to handle edge cases
   message: string;
   timestamp: string;
 }
@@ -30,7 +30,10 @@ const LogViewer: React.FC<LogViewerProps> = ({
     }
   }, [logs, autoScroll]);
 
-  const getLevelClass = (level: string): string => {
+  const getLevelClass = (level: string | undefined): string => {
+    // Defensive: handle undefined or null levels
+    if (!level) return 'log-info';
+
     const lowerLevel = level.toLowerCase();
     if (lowerLevel.includes('error')) return 'log-error';
     if (lowerLevel.includes('warn')) return 'log-warn';
@@ -54,7 +57,7 @@ const LogViewer: React.FC<LogViewerProps> = ({
           logs.map((log, index) => (
             <div key={index} className={`log-entry ${getLevelClass(log.level)}`}>
               <span className="log-timestamp">{log.timestamp}</span>
-              <span className="log-level">[{log.level}]</span>
+              <span className="log-level">[{log.level || 'INFO'}]</span>
               <span className="log-message">{log.message}</span>
             </div>
           ))
