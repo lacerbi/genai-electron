@@ -457,15 +457,24 @@ export class LlamaServerManager extends ServerManager {
   /**
    * Handle stdout from llama-server
    *
+   * Parses llama.cpp output to determine actual log levels and strips
+   * llama.cpp's formatting to avoid duplicate timestamps.
+   *
    * @param data - Stdout data
    * @private
    */
   private handleStdout(data: string): void {
     if (this.logManager) {
-      // Split by newlines and log each line
       const lines = data.split('\n').filter((line) => line.trim() !== '');
       for (const line of lines) {
-        this.logManager.write(line, 'info').catch(() => {});
+        // Parse llama.cpp output to determine actual log level
+        const level = parseLlamaCppLogLevel(line);
+
+        // Strip llama.cpp's formatting (timestamp + level prefix)
+        // so LogManager doesn't create duplicate timestamps
+        const cleanMessage = stripLlamaCppFormatting(line);
+
+        this.logManager.write(cleanMessage, level).catch(() => {});
       }
     }
   }
