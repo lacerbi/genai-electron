@@ -69,50 +69,50 @@ export const BINARY_VERSIONS = {
   /** llama-server (llama.cpp) configuration */
   llamaServer: {
     /** Version/commit tag */
-    version: 'b6783',
+    version: 'b6784',
     /** Binary variants for each platform (in priority order for fallback) */
     variants: {
       'darwin-arm64': [
         {
           type: 'metal' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-macos-arm64.zip',
-          checksum: '73f33ae440aa55ae0bbf25bf1449ef0c54b396c9c49c27cf15a3a4ba8e43b65f',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/llama-b6784-bin-macos-arm64.zip',
+          checksum: 'ea4be04a6de5348868730eb8665e62de40c469bc53d78ec44295ce29cf08fea1',
         },
       ],
       'darwin-x64': [
         {
           type: 'cpu' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-macos-x64.zip',
-          checksum: '49f5e9111e58a305b41be39ae7d37d65a69be9a9f69cc4e10e27e25086873799',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/llama-b6784-bin-macos-x64.zip',
+          checksum: '56d5c1c629c7bdcdbdb17c5a03fcec8cfabe2136f9ba8938cb22df6cdb5192cb',
         },
       ],
       'win32-x64': [
         {
           type: 'cuda' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-win-cuda-12.4-x64.zip',
-          checksum: '07fea357cfb1770b7ec2c882b2b2d8f3e0aeffc5f8e5ceec9a1c2db5eb6ef0e5',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/llama-b6784-bin-win-cuda-12.4-x64.zip',
+          checksum: 'a7a8981f742cdc0e1c93c02caa955fb2ad2716407fb3556cbc71e7e4e44f7d72',
         },
         {
           type: 'vulkan' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-win-vulkan-x64.zip',
-          checksum: 'placeholder', // TODO: Get full SHA256 from GitHub release
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/llama-b6784-bin-win-vulkan-x64.zip',
+          checksum: 'b1e3cfa3a248424b171a9fa58ca2fe69f988516d03881270c116760566c95540',
         },
         {
           type: 'cpu' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-win-cpu-x64.zip',
-          checksum: 'dde30575966804d477ac77b6d925a15cc77c30ab57eedba44dfdd0dbf4f8f6b3',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/llama-b6784-bin-win-cpu-x64.zip',
+          checksum: 'b6523cd0e87f2508a7b9d3f542850c0d04ffdeb143c79ca938b7d6fa28e2e15d',
         },
       ],
       'linux-x64': [
         {
           type: 'cuda' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-ubuntu-x64.zip',
-          checksum: '8f935e2b8d7ee8f38d933413c99e3813a0d8c2d1f1a6926cdcc7a91a6c43e8eb',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/llama-b6784-bin-ubuntu-x64.zip',
+          checksum: 'c853d5e85e012d869f308d4a329c8ccfd762dc600f44a7abdbae315b4f14d823',
         },
         {
           type: 'vulkan' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6783/llama-b6783-bin-ubuntu-vulkan-x64.zip',
-          checksum: '8cfb1d5ad0d35c388f96fda79e01a10d9d3d06f81afe34fc12a8aef8e1c1e94e',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/llama-b6784-bin-ubuntu-vulkan-x64.zip',
+          checksum: '3f1ba3be1dd9beda20989348cf881d725b33a8b04c74d7beefc98aa77ace6e7c',
         },
       ],
     },
