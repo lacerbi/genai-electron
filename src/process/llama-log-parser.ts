@@ -141,70 +141,57 @@ export function shouldFilterLlamaCppLog(line: string, includeDebug: boolean): bo
  * llama.cpp logs include their own formatting with timestamp and level.
  * We strip these to avoid duplicate timestamps when LogManager adds its own.
  *
+ * Note: Current llama.cpp versions output plain text without brackets,
+ * so this function typically returns the input unchanged. However, we
+ * keep the stripping logic for compatibility with different llama.cpp
+ * versions or future changes.
+ *
  * @param line - Raw log line from llama-server
  * @returns Clean message without llama.cpp's timestamp/level prefix
  *
  * @example
  * ```typescript
- * // llama.cpp formatted log
+ * // llama.cpp formatted log (older versions)
  * stripLlamaCppFormatting('[2025-10-17T12:26:20.354Z] [ERROR] slot release: id 7')
  * // Returns: 'slot release: id 7'
  *
- * // Already clean (shouldn't happen)
- * stripLlamaCppFormatting('Server started')
- * // Returns: 'Server started'
+ * // Plain text (current llama.cpp)
+ * stripLlamaCppFormatting('srv  log_server_r: request: GET /health 200')
+ * // Returns: 'srv  log_server_r: request: GET /health 200'
  * ```
  */
 export function stripLlamaCppFormatting(line: string): string {
-  // DEBUG: Log the raw input to understand actual format
-  // TODO: Remove this after identifying the format issue
-  console.log('[DEBUG llama-log-parser] Raw line:', JSON.stringify(line));
-
   // Try multiple patterns to handle different llama.cpp versions
+
   // Pattern 1: Standard format - [timestamp] [LEVEL] message
   const pattern1 = /^\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.+)$/;
   const match1 = line.match(pattern1);
-
   if (match1 && match1[3]) {
-    console.log('[DEBUG llama-log-parser] Matched pattern 1 (standard)');
-    console.log('[DEBUG llama-log-parser] Timestamp:', match1[1]);
-    console.log('[DEBUG llama-log-parser] Level:', match1[2]);
-    console.log('[DEBUG llama-log-parser] Message:', match1[3]);
     return match1[3].trim();
   }
 
   // Pattern 2: Relaxed spacing - handles extra spaces/tabs
   const pattern2 = /^\[\s*([^\]]+?)\s*\]\s*\[\s*([^\]]+?)\s*\]\s*(.+)$/;
   const match2 = line.match(pattern2);
-
   if (match2 && match2[3]) {
-    console.log('[DEBUG llama-log-parser] Matched pattern 2 (relaxed spacing)');
-    console.log('[DEBUG llama-log-parser] Message:', match2[3]);
     return match2[3].trim();
   }
 
   // Pattern 3: With possible prefix before brackets
   const pattern3 = /^.*?\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.+)$/;
   const match3 = line.match(pattern3);
-
   if (match3 && match3[3]) {
-    console.log('[DEBUG llama-log-parser] Matched pattern 3 (with prefix)');
-    console.log('[DEBUG llama-log-parser] Message:', match3[3]);
     return match3[3].trim();
   }
 
   // Pattern 4: Just timestamp in brackets, no level tag
   const pattern4 = /^\[([^\]]+)\]\s*(.+)$/;
   const match4 = line.match(pattern4);
-
   if (match4 && match4[2]) {
-    console.log('[DEBUG llama-log-parser] Matched pattern 4 (timestamp only)');
-    console.log('[DEBUG llama-log-parser] Message:', match4[2]);
     return match4[2].trim();
   }
 
   // No pattern matched - return original line
-  console.log('[DEBUG llama-log-parser] NO PATTERN MATCHED - returning original line');
-  console.log('[DEBUG llama-log-parser] This means stripping FAILED!');
+  // (This is normal for current llama.cpp versions that output plain text)
   return line;
 }
