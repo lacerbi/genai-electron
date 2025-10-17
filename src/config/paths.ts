@@ -36,6 +36,8 @@ export const PATHS = {
   logs: path.join(BASE_DIR, 'logs'),
   /** Configuration files directory */
   config: path.join(BASE_DIR, 'config'),
+  /** Temporary files directory (for intermediate image generation outputs, etc.) */
+  temp: path.join(BASE_DIR, 'temp'),
 } as const;
 
 /**
@@ -58,6 +60,7 @@ export async function ensureDirectories(): Promise<void> {
     PATHS.binaries.diffusion,
     PATHS.logs,
     PATHS.config,
+    PATHS.temp,
   ];
 
   await Promise.all(
@@ -153,4 +156,20 @@ export function getLogPath(logName: string): string {
  */
 export function getConfigPath(configName: string): string {
   return path.join(PATHS.config, configName);
+}
+
+/**
+ * Get the temp file path
+ *
+ * @param filename - Temporary file name (e.g., "sd-output-12345.png")
+ * @returns Absolute path to temp file
+ *
+ * @example
+ * ```typescript
+ * const tempPath = getTempPath('sd-output-12345.png');
+ * // Returns: /path/to/userData/temp/sd-output-12345.png
+ * ```
+ */
+export function getTempPath(filename: string): string {
+  return path.join(PATHS.temp, filename);
 }

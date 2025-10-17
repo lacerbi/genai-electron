@@ -119,24 +119,51 @@ export const BINARY_VERSIONS = {
       ],
     },
   },
-  /** diffusion-cpp configuration (Phase 2) */
+  /** stable-diffusion.cpp configuration (Phase 2) */
   diffusionCpp: {
-    version: 'v1.0.0', // Example version
-    urls: {
-      'darwin-arm64':
-        'https://github.com/leejet/stable-diffusion.cpp/releases/download/v1.0.0/diffusion-darwin-arm64',
-      'darwin-x64':
-        'https://github.com/leejet/stable-diffusion.cpp/releases/download/v1.0.0/diffusion-darwin-x64',
-      'win32-x64':
-        'https://github.com/leejet/stable-diffusion.cpp/releases/download/v1.0.0/diffusion-win32-x64.exe',
-      'linux-x64':
-        'https://github.com/leejet/stable-diffusion.cpp/releases/download/v1.0.0/diffusion-linux-x64',
-    },
-    checksums: {
-      'darwin-arm64': 'sha256:placeholder_checksum_darwin_arm64',
-      'darwin-x64': 'sha256:placeholder_checksum_darwin_x64',
-      'win32-x64': 'sha256:placeholder_checksum_win32_x64',
-      'linux-x64': 'sha256:placeholder_checksum_linux_x64',
+    /** Version/commit tag */
+    version: 'master-330-db6f479',
+    /** Binary variants for each platform (in priority order for fallback) */
+    variants: {
+      'darwin-arm64': [
+        {
+          type: 'metal' as BinaryVariant,
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master--bin-Darwin-macOS-15.6.1-arm64.zip',
+          checksum: '63be1220757cb895432847967c3e17dd1fbcac8abdd77c100bee46c7d1a7c2a2',
+        },
+      ],
+      'darwin-x64': [
+        // No darwin-x64 builds available in this release
+      ],
+      'win32-x64': [
+        // Priority order: CUDA (fastest) → Vulkan (cross-GPU) → AVX2 (CPU fallback)
+        {
+          type: 'cuda' as BinaryVariant,
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master-db6f479-bin-win-cuda12-x64.zip',
+          checksum: '5f15a0f08e2b34eaf8aa8b1bb50dd0b6a194bf21176ab9512ecacf0ccc8f1532',
+        },
+        {
+          type: 'vulkan' as BinaryVariant,
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master-db6f479-bin-win-vulkan-x64.zip',
+          checksum: 'fbd737e427741d36abd5807b4b06920d0c4fa66423a0fc257e16586ed255621d',
+        },
+        {
+          type: 'cpu' as BinaryVariant, // AVX2 variant (most compatible CPU version)
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master-db6f479-bin-win-avx2-x64.zip',
+          checksum: '908428c5f4e3743ceba5958157fc397c2a588acbf85d339ef0108a0a05611786',
+        },
+        // Additional CPU variants available if needed:
+        // AVX512: 58aa48de2f67f1628365f8f3284a43903d3cd5880353c8d67060d60a257d5f4f
+        // AVX: a1c5b5271e1256da68e9ccb931802f16fb3d150e73a829909b18314ddaaaf4dd
+        // No-AVX: 884d86f534136feed662fb7c13f7f303e28c2960b119cd4b6bb6444bf69b6a7e
+      ],
+      'linux-x64': [
+        {
+          type: 'cpu' as BinaryVariant, // Works with both CPU and CUDA (auto-detects)
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master--bin-Linux-Ubuntu-24.04-x86_64.zip',
+          checksum: 'eb886cbd37cf927095255bc406858a5a131fcc141e04e68007be80a9156566c3',
+        },
+      ],
     },
   },
 } as const;

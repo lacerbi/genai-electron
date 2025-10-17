@@ -33,6 +33,15 @@ export type {
   ServerEventData,
 } from './servers.js';
 
+// Image generation types
+export type {
+  ImageSampler,
+  ImageGenerationConfig,
+  ImageGenerationResult,
+  DiffusionServerConfig,
+  DiffusionServerInfo,
+} from './images.js';
+
 /**
  * Utility type to make all properties of T optional
  */

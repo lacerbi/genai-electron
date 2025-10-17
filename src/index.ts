@@ -52,6 +52,7 @@
 import { SystemInfo } from './system/SystemInfo.js';
 import { ModelManager } from './managers/ModelManager.js';
 import { LlamaServerManager } from './managers/LlamaServerManager.js';
+import { DiffusionServerManager } from './managers/DiffusionServerManager.js';
 
 /**
  * System information singleton
@@ -132,6 +133,40 @@ export const modelManager = ModelManager.getInstance();
  */
 export const llamaServer = new LlamaServerManager();
 
+/**
+ * Diffusion server manager singleton (Phase 2)
+ *
+ * Manages diffusion HTTP wrapper server for stable-diffusion.cpp,
+ * including image generation, binary downloads, and resource management.
+ *
+ * @example
+ * ```typescript
+ * import { diffusionServer } from 'genai-electron';
+ *
+ * // Start server
+ * await diffusionServer.start({
+ *   modelId: 'sdxl-turbo',
+ *   port: 8081
+ * });
+ *
+ * // Generate image
+ * const result = await diffusionServer.generateImage({
+ *   prompt: 'A serene mountain landscape at sunset',
+ *   width: 1024,
+ *   height: 1024,
+ *   steps: 30,
+ *   onProgress: (step, total) => console.log(`Step ${step}/${total}`)
+ * });
+ *
+ * // Save image
+ * await fs.writeFile('output.png', result.image);
+ *
+ * // Stop server
+ * await diffusionServer.stop();
+ * ```
+ */
+export const diffusionServer = new DiffusionServerManager();
+
 // ============================================================================
 // Classes (For advanced usage or custom instances)
 // ============================================================================
@@ -139,6 +174,7 @@ export const llamaServer = new LlamaServerManager();
 export { SystemInfo } from './system/SystemInfo.js';
 export { ModelManager } from './managers/ModelManager.js';
 export { LlamaServerManager } from './managers/LlamaServerManager.js';
+export { DiffusionServerManager } from './managers/DiffusionServerManager.js';
 export { ServerManager } from './managers/ServerManager.js';
 export { StorageManager } from './managers/StorageManager.js';
 export { ProcessManager } from './process/ProcessManager.js';
@@ -216,6 +252,12 @@ export type {
   LlamaServerConfig,
   ServerEvent,
   ServerEventData,
+  // Image generation types (Phase 2)
+  ImageSampler,
+  ImageGenerationConfig,
+  ImageGenerationResult,
+  DiffusionServerConfig,
+  DiffusionServerInfo,
   // Utility types
   Optional,
   RequiredKeys,
