@@ -768,16 +768,28 @@ interface SystemRecommendations {
 
 ```typescript
 interface ModelInfo {
-  id: string;              // Unique model identifier
-  name: string;            // Display name
-  type: ModelType;         // 'llm' or 'diffusion'
-  size: number;            // File size in bytes
-  path: string;            // Absolute path to model file
-  downloadedAt: string;    // ISO 8601 timestamp
-  source: ModelSource;     // Download source info
-  checksum?: string;       // SHA256 checksum (if provided)
+  id: string;                 // Unique model identifier
+  name: string;               // Display name
+  type: ModelType;            // 'llm' or 'diffusion'
+  size: number;               // File size in bytes
+  path: string;               // Absolute path to model file
+  downloadedAt: string;       // ISO 8601 timestamp
+  source: ModelSource;        // Download source info
+  checksum?: string;          // SHA256 checksum (if provided)
+  supportsReasoning?: boolean; // Whether model supports reasoning (auto-detected)
 }
 ```
+
+**Reasoning Support Detection:**
+
+The `supportsReasoning` field is automatically detected based on GGUF filename patterns during model download. When `true`, llama-server will be started with `--jinja --reasoning-format deepseek` flags to enable extraction of reasoning content from `<think>...</think>` tags.
+
+Supported model families:
+- **Qwen3**: All sizes (0.6B, 1.7B, 4B, 8B, 14B, 30B)
+- **DeepSeek-R1**: All variants including distilled models
+- **GPT-OSS**: OpenAI's open-source reasoning model
+
+See [Reasoning Model Detection](#reasoning-model-detection) for details.
 
 ### ModelType
 
@@ -1022,6 +1034,74 @@ console.log('SHA256:', checksum);
 // Format bytes for display
 const size = 4368769024;
 console.log('Size:', formatBytes(size)); // '4.07 GB'
+```
+
+### Reasoning Model Detection
+
+genai-electron automatically detects reasoning-capable GGUF models and configures llama-server appropriately.
+
+```typescript
+import { detectReasoningSupport, REASONING_MODEL_PATTERNS } from 'genai-electron';
+
+// Check if a model supports reasoning based on filename
+const filename = 'Qwen3-8B-Instruct-Q4_K_M.gguf';
+const supportsReasoning = detectReasoningSupport(filename);
+console.log('Supports reasoning:', supportsReasoning); // true
+
+// View known patterns
+console.log('Known reasoning patterns:', REASONING_MODEL_PATTERNS);
+// ['qwen3', 'deepseek-r1', 'gpt-oss']
+```
+
+**How it works:**
+
+1. **During download**: ModelManager detects reasoning support from GGUF filename
+2. **Metadata storage**: `supportsReasoning` flag is saved with model metadata
+3. **Server startup**: LlamaServerManager adds `--jinja --reasoning-format deepseek` when starting models with `supportsReasoning: true`
+4. **Automatic extraction**: llama.cpp extracts `<think>...</think>` content into separate field
+5. **API integration**: Use with genai-lite to access reasoning content
+
+**Supported models:**
+- **Qwen3**: All variants (0.6B-30B) with conditional reasoning support
+- **DeepSeek-R1**: All sizes with always-on reasoning
+- **GPT-OSS**: OpenAI's open-source reasoning model
+
+**Example workflow:**
+
+```typescript
+// 1. Download a reasoning model
+const model = await modelManager.downloadModel({
+  source: 'huggingface',
+  repo: 'Qwen/Qwen3-8B-Instruct-GGUF',
+  file: 'qwen3-8b-instruct-q4_k_m.gguf',
+  name: 'Qwen3 8B',
+  type: 'llm'
+});
+
+console.log('Supports reasoning:', model.supportsReasoning); // true
+
+// 2. Start server (reasoning flags added automatically)
+await llamaServer.start({
+  modelId: model.id,
+  port: 8080
+});
+// llama-server started with: --jinja --reasoning-format deepseek
+
+// 3. Use with genai-lite to access reasoning
+import { LLMService } from 'genai-lite';
+const service = new LLMService(async () => 'not-needed');
+
+const response = await service.sendMessage({
+  providerId: 'llamacpp',
+  modelId: model.id,
+  messages: [{ role: 'user', content: 'What is 2+2?' }],
+  settings: { reasoning: { enabled: true } }
+});
+
+if (response.object === 'chat.completion') {
+  console.log('Answer:', response.choices[0].message.content);
+  console.log('Reasoning:', response.choices[0].reasoning); // Model's thinking process
+}
 ```
 
 ---

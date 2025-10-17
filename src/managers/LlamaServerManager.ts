@@ -20,6 +20,7 @@ import {
   ServerInfo,
   LlamaServerConfig,
   HealthStatus,
+  ModelInfo,
 } from '../types/index.js';
 import {
   ServerError,
@@ -152,7 +153,7 @@ export class LlamaServerManager extends ServerManager {
       await this.logManager.write(`Starting llama-server on port ${finalConfig.port}`, 'info');
 
       // 7. Build command-line arguments
-      const args = this.buildCommandLineArgs(finalConfig, modelInfo.path);
+      const args = this.buildCommandLineArgs(finalConfig, modelInfo);
 
       // 8. Verify binary exists before spawning
       if (!this.binaryPath) {
@@ -430,16 +431,26 @@ export class LlamaServerManager extends ServerManager {
   /**
    * Build command-line arguments for llama-server
    *
+   * Automatically adds --jinja --reasoning-format deepseek flags
+   * for models that support reasoning (based on supportsReasoning flag).
+   *
    * @param config - Server configuration
-   * @param modelPath - Path to model file
+   * @param modelInfo - Model information (includes path and supportsReasoning)
    * @returns Array of command-line arguments
    * @private
    */
-  private buildCommandLineArgs(config: LlamaServerConfig, modelPath: string): string[] {
+  private buildCommandLineArgs(config: LlamaServerConfig, modelInfo: ModelInfo): string[] {
     const args: string[] = [];
 
     // Model path
-    args.push('-m', modelPath);
+    args.push('-m', modelInfo.path);
+
+    // Reasoning support flags (must come before other options)
+    // These enable extraction of <think>...</think> tags for models like Qwen3, DeepSeek-R1
+    if (modelInfo.supportsReasoning) {
+      args.push('--jinja');
+      args.push('--reasoning-format', 'deepseek');
+    }
 
     // Port
     args.push('--port', String(config.port));

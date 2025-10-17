@@ -178,6 +178,10 @@ export {
   formatBytes,
   sanitizeFilename,
 } from './utils/file-utils.js';
+export {
+  detectReasoningSupport,
+  REASONING_MODEL_PATTERNS,
+} from './config/reasoning-models.js';
 
 // ============================================================================
 // Configuration and Paths

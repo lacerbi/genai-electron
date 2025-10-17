@@ -37,6 +37,15 @@
   - llama.cpp outputs lines with `\r` at end, which broke regex parsing and caused fallback to duplicate formatting
 - Wired up Clear Logs button to truncate log file (full IPC chain: renderer → main → library)
 
+**Reasoning Model Detection (2025-10-17)**
+- Implemented automatic detection of reasoning-capable GGUF models
+- Created simple pattern-matching system for known reasoning models (Qwen3, DeepSeek-R1, GPT-OSS)
+- Added `supportsReasoning` field to ModelInfo type (automatically detected and persisted)
+- LlamaServerManager now adds `--jinja --reasoning-format deepseek` flags when starting reasoning models
+- Exported `detectReasoningSupport()` and `REASONING_MODEL_PATTERNS` for public use
+- Updated API documentation with reasoning detection section
+- Zero configuration required - works automatically based on GGUF filename patterns
+
 **Next**: Phase 2 - Image Generation (diffusion.cpp integration, resource orchestration)
 
 **Detailed Records**: See `docs/dev/phase1/` for complete Phase 1 planning and progress logs.

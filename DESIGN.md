@@ -254,6 +254,7 @@
 - Port conflict detection
 - Resource monitoring
 - Structured logging
+- Automatic reasoning flag injection for compatible models
 
 #### 3. SystemInfo
 
@@ -1251,6 +1252,7 @@ If a variant fails (e.g., Vulkan DLL missing), it tries the next variant automat
 - ✅ Basic error handling
 - ✅ TypeScript types and interfaces
 - ✅ Basic documentation
+- ✅ Automatic reasoning model detection (Qwen3, DeepSeek-R1, etc.)
 
 **Timeline**: 2-3 weeks
 

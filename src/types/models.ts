@@ -52,6 +52,16 @@ export interface ModelInfo {
 
   /** SHA256 checksum (if available) */
   checksum?: string;
+
+  /**
+   * Whether this model supports reasoning/thinking capabilities
+   *
+   * When true, llama-server will be started with --jinja --reasoning-format deepseek
+   * to extract reasoning content from <think>...</think> tags.
+   *
+   * Automatically detected based on GGUF filename patterns (e.g., qwen3, deepseek-r1).
+   */
+  supportsReasoning?: boolean;
 }
 
 /**

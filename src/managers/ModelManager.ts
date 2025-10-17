@@ -11,6 +11,7 @@ import { Downloader } from '../download/Downloader.js';
 import { getHuggingFaceURL } from '../download/huggingface.js';
 import { calculateSHA256, formatChecksum } from '../download/checksum.js';
 import { fileExists, getFileSize, sanitizeFilename } from '../utils/file-utils.js';
+import { detectReasoningSupport } from '../config/reasoning-models.js';
 
 /**
  * Model manager for downloading and managing AI models
@@ -183,6 +184,9 @@ export class ModelManager {
       checksum = formatChecksum(calculatedChecksum);
     }
 
+    // Detect reasoning support based on filename
+    const supportsReasoning = detectReasoningSupport(filename);
+
     // Create model info
     const modelInfo: ModelInfo = {
       id: modelId,
@@ -198,6 +202,7 @@ export class ModelManager {
         file: sourceFile,
       },
       checksum,
+      supportsReasoning,
     };
 
     // Save metadata
