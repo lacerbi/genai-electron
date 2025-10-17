@@ -291,8 +291,13 @@ This structure exists **within each Electron app's userData directory**. For exa
 │   └── diffusion/
 │       └── sdxl-turbo-q4.gguf
 ├── binaries/
-│   ├── llama-server      (platform-specific)
-│   └── diffusion-cpp     (platform-specific)
+│   ├── llama/                    (llama.cpp binaries + DLLs)
+│   │   ├── llama-server
+│   │   ├── ggml-metal.metal      (macOS Metal shader)
+│   │   └── .variant.json         (variant cache)
+│   └── diffusion/                (stable-diffusion.cpp binaries + DLLs, Phase 2)
+│       ├── stable-diffusion
+│       └── .variant.json
 ├── logs/
 │   ├── llama-server.log
 │   └── diffusion-cpp.log
@@ -1037,7 +1042,10 @@ export const PATHS = {
     llm: path.join(BASE_DIR, 'models', 'llm'),
     diffusion: path.join(BASE_DIR, 'models', 'diffusion')
   },
-  binaries: path.join(BASE_DIR, 'binaries'),
+  binaries: {
+    llama: path.join(BASE_DIR, 'binaries', 'llama'),
+    diffusion: path.join(BASE_DIR, 'binaries', 'diffusion')
+  },
   logs: path.join(BASE_DIR, 'logs'),
   config: path.join(BASE_DIR, 'config')
 };
@@ -1159,6 +1167,69 @@ We evaluated existing solutions before deciding on a custom HTTP wrapper:
 - Monitor stable-diffusion.cpp repository for potential native server implementation
 - If a native server is added (similar to llama-server), the abstraction layer design makes it straightforward to switch backends
 - The well-defined HTTP interface ensures minimal disruption when transitioning from wrapper to native server
+
+### 8. BinaryManager Pattern (Reusable Binary Management)
+
+**Design Goal**: Extract binary download/variant testing logic into a reusable module that works for both llama.cpp and stable-diffusion.cpp (and future binaries).
+
+**Architecture**:
+
+The `BinaryManager` class provides generic functionality for:
+1. Downloading pre-compiled binaries from GitHub releases
+2. Testing multiple binary variants (CUDA, Vulkan, Metal, CPU)
+3. Selecting the first variant that works on the current system
+4. Copying all files (executable + DLLs) to the correct location
+5. Caching which variant worked for faster startup next time
+
+**Separate Storage by Binary Type**:
+
+Binaries are stored in type-specific subdirectories to prevent conflicts:
+
+```
+binaries/
+├── llama/                    # llama.cpp binaries and dependencies
+│   ├── llama-server.exe      # Windows executable
+│   ├── vulkan-1.dll          # Vulkan DLL for Windows
+│   ├── ggml-vulkan.dll       # GGML Vulkan backend
+│   └── .variant.json         # Cached variant selection
+└── diffusion/                # stable-diffusion.cpp binaries (Phase 2)
+    ├── stable-diffusion.exe
+    ├── vulkan-1.dll          # Separate copy, no conflicts
+    └── .variant.json
+```
+
+**Benefits**:
+- **No DLL conflicts**: Each binary type has its own isolated directory
+- **Clean separation**: llama.cpp and stable-diffusion.cpp don't interfere
+- **Reusable code**: Single BinaryManager used by both LlamaServerManager and DiffusionServerManager
+- **Easy to extend**: Adding new binary types requires minimal code
+
+**Usage Pattern**:
+
+```typescript
+// In LlamaServerManager.ensureBinary():
+const binaryManager = new BinaryManager({
+  type: 'llama',
+  binaryName: 'llama-server',
+  platformKey: 'win32-x64',
+  variants: [...], // CUDA, Vulkan, CPU variants
+  log: (message, level) => this.logManager.write(message, level)
+});
+
+const binaryPath = await binaryManager.ensureBinary();
+// Returns: C:\...\binaries\llama\llama-server.exe
+```
+
+**Variant Testing**:
+
+The BinaryManager tests each variant by running `--version` to ensure:
+1. The executable runs without errors
+2. Required DLLs are present (no missing dependency errors)
+3. GPU drivers are available (for CUDA/Vulkan/Metal variants)
+
+If a variant fails (e.g., Vulkan DLL missing), it tries the next variant automatically (e.g., CPU-only).
+
+**Implementation Location**: `src/managers/BinaryManager.ts`
 
 ---
 
