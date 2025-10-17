@@ -33,9 +33,9 @@
 - Implemented intelligent llama.cpp log parsing at library level (`llama-log-parser.ts`)
   - llama.cpp logs everything as [ERROR]; library now categorizes as debug/info/error based on content
   - HTTP 200 requests → info, slot operations → debug, actual failures → error
-  - Strips llama.cpp's duplicate timestamps before storage (clean single-timestamp display)
+- Fixed log display showing duplicate timestamps/levels: `LogManager.parseEntry()` now trims `\r` carriage returns
+  - llama.cpp outputs lines with `\r` at end, which broke regex parsing and caused fallback to duplicate formatting
 - Wired up Clear Logs button to truncate log file (full IPC chain: renderer → main → library)
-- Known issue: TestChat still has ~50-70% random failure rate (needs investigation with clean logs)
 
 **Next**: Phase 2 - Image Generation (diffusion.cpp integration, resource orchestration)
 

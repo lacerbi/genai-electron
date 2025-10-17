@@ -975,6 +975,7 @@ function getHuggingFaceURL(repo: string, file: string): string {
 - Capture server output to rotating log files
 - **Intelligent parsing**: llama.cpp logs everything as [ERROR]; library automatically categorizes as debug/info/error based on content
 - **Clean formatting**: Strips llama.cpp's duplicate timestamps and levels before storage
+- **Carriage return handling**: `LogManager.parseEntry()` trims `\r\n` before parsing (llama.cpp outputs `\r` at line end)
 - Max log size: 10MB per file
 - Keep last 5 log files
 - Provide API to retrieve and clear logs (`getLogs()`, `clearLogs()`)
