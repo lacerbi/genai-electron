@@ -335,6 +335,8 @@ export class LlamaServerManager extends ServerManager {
    * in priority order (CUDA → Vulkan → CPU) and uses the first one that works.
    * Caches which variant worked for faster startup next time.
    *
+   * For updating to new llama.cpp releases, see docs/dev/UPDATING-BINARIES.md
+   *
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails for all variants
    * @private

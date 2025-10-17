@@ -64,6 +64,8 @@ export interface BinaryVariantConfig {
  *
  * Each platform has an array of variants in priority order.
  * The library will try each variant until one works (has required drivers).
+ *
+ * **For updating to new llama.cpp releases, see docs/dev/UPDATING-BINARIES.md**
  */
 export const BINARY_VERSIONS = {
   /** llama-server (llama.cpp) configuration */
