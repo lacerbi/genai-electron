@@ -79,6 +79,28 @@
 5. **Phase 1 Abandoned Tests**: Fixed platform-utils.test.ts and file-utils.test.ts (31 tests now passing)
 6. **Documentation**: Created comprehensive ESM-TESTING-GUIDE.md documenting all patterns and solutions
 
+**Code Quality Improvements (2025-10-18)**:
+
+### Refactoring: Eliminate Code Duplication ✅
+
+Eliminated ~121 lines of duplication between LlamaServerManager and DiffusionServerManager by moving
+shared functionality to ServerManager base class.
+
+**Changes Made**:
+- Moved `getLogs()` and `clearLogs()` to ServerManager (100% duplicate)
+- Added `logManager` property to ServerManager base class
+- Extracted `checkPortAvailability()` helper (100% duplicate)
+- Extracted `initializeLogManager()` helper (95% duplicate)
+- Extracted `handleStartupError()` helper (90% duplicate)
+
+**Impact**:
+- LlamaServerManager: 583 → 519 lines (-64 lines, -11%)
+- DiffusionServerManager: 649 → 592 lines (-57 lines, -8.8%)
+- ServerManager: 239 → 352 lines (+113 lines of reusable helpers)
+- **Key Win**: Changes to logging, port checking, and error handling now only need to be made in ONE place
+
+**Test Results**: All 95 tests passing after refactoring (45 Phase 1 + 50 Phase 2)
+
 **Bug Fixed During Testing**:
 - **File**: `src/managers/DiffusionServerManager.ts:459`
 - **Error**: `ReferenceError: Cannot access 'generationPromise' before initialization`
