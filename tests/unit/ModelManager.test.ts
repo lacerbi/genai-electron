@@ -20,6 +20,7 @@ const mockStorageManager = {
 
 jest.unstable_mockModule('../../src/managers/StorageManager.js', () => ({
   StorageManager: jest.fn(() => mockStorageManager),
+  storageManager: mockStorageManager,
 }));
 
 // Mock Downloader
@@ -43,23 +44,30 @@ jest.unstable_mockModule('../../src/download/huggingface.js', () => ({
 
 // Mock checksum utils
 const mockVerifyChecksum = jest.fn();
+const mockCalculateSHA256 = jest.fn();
+const mockFormatChecksum = jest.fn();
 
 jest.unstable_mockModule('../../src/download/checksum.js', () => ({
   verifyChecksum: mockVerifyChecksum,
+  calculateSHA256: mockCalculateSHA256,
+  formatChecksum: mockFormatChecksum,
 }));
 
 // Mock file-utils
 const mockFileExists = jest.fn();
 const mockGetFileSize = jest.fn();
+const mockSanitizeFilename = jest.fn((filename: string) => filename);
 
 jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
   fileExists: mockFileExists,
   getFileSize: mockGetFileSize,
+  sanitizeFilename: mockSanitizeFilename,
 }));
 
 // Mock paths
 jest.unstable_mockModule('../../src/config/paths.js', () => ({
-  getModelPath: (type: string, filename: string) => `/test/models/${type}/${filename}`,
+  getModelFilePath: (type: string, filename: string) => `/test/models/${type}/${filename}`,
+  getModelMetadataPath: (type: string, modelId: string) => `/test/models/${type}/${modelId}.json`,
 }));
 
 // Import after mocking

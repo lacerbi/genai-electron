@@ -45,7 +45,7 @@ jest.unstable_mockModule('../../src/config/paths.js', () => ({
     logs: '/test/logs',
     config: '/test/config',
   },
-  getModelPath: (type: string, filename: string) => `/test/models/${type}/${filename}`,
+  getModelFilePath: (type: string, filename: string) => `/test/models/${type}/${filename}`,
   getModelMetadataPath: (type: string, modelId: string) =>
     `/test/models/${type}/${modelId}.json`,
   ensureDirectories: jest.fn().mockResolvedValue(undefined),

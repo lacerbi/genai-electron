@@ -14,15 +14,17 @@ const mockArch = jest.fn();
 const mockPlatform = jest.fn();
 const mockExec = jest.fn();
 
-jest.unstable_mockModule('os', () => ({
-  cpus: mockCpus,
-  totalmem: mockTotalmem,
-  freemem: mockFreemem,
-  arch: mockArch,
-  platform: mockPlatform,
+jest.unstable_mockModule('node:os', () => ({
+  default: {
+    cpus: mockCpus,
+    totalmem: mockTotalmem,
+    freemem: mockFreemem,
+    arch: mockArch,
+    platform: mockPlatform,
+  },
 }));
 
-jest.unstable_mockModule('child_process', () => ({
+jest.unstable_mockModule('node:child_process', () => ({
   exec: mockExec,
 }));
 

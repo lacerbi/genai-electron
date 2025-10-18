@@ -9,8 +9,10 @@ import type { LlamaServerConfig, ModelInfo } from '../../src/types/index.js';
 
 // Mock child_process
 const mockSpawn = jest.fn();
+const mockExecFile = jest.fn();
 jest.unstable_mockModule('child_process', () => ({
   spawn: mockSpawn,
+  execFile: mockExecFile,
 }));
 
 // Mock fetch for health checks
@@ -22,8 +24,11 @@ const mockModelManager = {
   getModelInfo: jest.fn(),
 };
 
+const MockModelManager = jest.fn(() => mockModelManager);
+(MockModelManager as any).getInstance = jest.fn(() => mockModelManager);
+
 jest.unstable_mockModule('../../src/managers/ModelManager.js', () => ({
-  ModelManager: jest.fn(() => mockModelManager),
+  ModelManager: MockModelManager,
 }));
 
 // Mock SystemInfo
@@ -34,8 +39,11 @@ const mockSystemInfo = {
   getMemoryInfo: jest.fn(),
 };
 
+const MockSystemInfo = jest.fn(() => mockSystemInfo);
+(MockSystemInfo as any).getInstance = jest.fn(() => mockSystemInfo);
+
 jest.unstable_mockModule('../../src/system/SystemInfo.js', () => ({
-  SystemInfo: jest.fn(() => mockSystemInfo),
+  SystemInfo: MockSystemInfo,
 }));
 
 // Mock ProcessManager
@@ -71,8 +79,18 @@ jest.unstable_mockModule('../../src/process/log-manager.js', () => ({
 
 // Mock file-utils
 const mockFileExists = jest.fn();
+const mockCalculateChecksum = jest.fn();
 jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
+  ensureDirectory: jest.fn().mockResolvedValue(undefined),
   fileExists: mockFileExists,
+  getFileSize: jest.fn().mockResolvedValue(0),
+  deleteFile: jest.fn().mockResolvedValue(undefined),
+  moveFile: jest.fn().mockResolvedValue(undefined),
+  copyDirectory: jest.fn().mockResolvedValue(undefined),
+  calculateChecksum: mockCalculateChecksum,
+  formatBytes: jest.fn((bytes: number) => `${bytes} bytes`),
+  isAbsolutePath: jest.fn().mockReturnValue(true),
+  sanitizeFilename: jest.fn((filename: string) => filename),
 }));
 
 // Mock Downloader for binary downloads
@@ -82,6 +100,25 @@ const mockDownloader = {
 
 jest.unstable_mockModule('../../src/download/Downloader.js', () => ({
   Downloader: jest.fn(() => mockDownloader),
+}));
+
+// Mock paths (which imports electron)
+jest.unstable_mockModule('../../src/config/paths.js', () => ({
+  PATHS: {
+    models: {
+      llm: '/test/models/llm',
+      diffusion: '/test/models/diffusion',
+    },
+    binaries: {
+      llama: '/test/binaries/llama',
+      diffusion: '/test/binaries/diffusion',
+    },
+    logs: '/test/logs',
+    config: '/test/config',
+    temp: '/test/temp',
+  },
+  getBinaryPath: (type: string) => `/test/binaries/${type}`,
+  ensureDirectories: jest.fn().mockResolvedValue(undefined),
 }));
 
 // Import after mocking
