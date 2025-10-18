@@ -315,7 +315,7 @@ describe('DiffusionServerManager', () => {
 
       expect(mockLogInitialize).toHaveBeenCalled();
       expect(mockLogWrite).toHaveBeenCalledWith(
-        expect.stringContaining('Starting diffusion server'),
+        expect.stringContaining('Starting server on port'),
         'info'
       );
     });

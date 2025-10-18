@@ -71,7 +71,6 @@ export class LlamaServerManager extends ServerManager {
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
-  private logManager?: LogManager;
   private binaryPath?: string;
 
   /**
@@ -138,19 +137,13 @@ export class LlamaServerManager extends ServerManager {
       this.binaryPath = await this.ensureBinary();
 
       // 4. Check if port is in use
-      const { isServerResponding } = await import('../process/health-check.js');
-      if (await isServerResponding(config.port, 2000)) {
-        throw new PortInUseError(config.port);
-      }
+      await this.checkPortAvailability(config.port);
 
       // 5. Auto-configure if needed
       const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo);
 
       // 6. Initialize log manager
-      const logPath = path.join(PATHS.logs, 'llama-server.log');
-      this.logManager = new LogManager(logPath);
-      await this.logManager.initialize();
-      await this.logManager.write(`Starting llama-server on port ${finalConfig.port}`, 'info');
+      await this.initializeLogManager('llama-server.log', finalConfig.port);
 
       // 7. Build command-line arguments
       const args = this.buildCommandLineArgs(finalConfig, modelInfo);
@@ -216,29 +209,8 @@ export class LlamaServerManager extends ServerManager {
         await this.processManager.kill(this._pid, 5000);
       }
 
-      if (this.logManager) {
-        await this.logManager.write(
-          `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
-          'error'
-        );
-      }
-
-      // Re-throw typed errors
-      if (
-        error instanceof ModelNotFoundError ||
-        error instanceof PortInUseError ||
-        error instanceof BinaryError ||
-        error instanceof InsufficientResourcesError ||
-        error instanceof ServerError
-      ) {
-        throw error;
-      }
-
-      // Wrap unknown errors
-      throw new ServerError(
-        `Failed to start llama-server: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        { error: error instanceof Error ? error.message : String(error) }
-      );
+      // Handle error using base class helper
+      await this.handleStartupError(error, 'llama-server');
     }
   }
 
@@ -317,42 +289,6 @@ export class LlamaServerManager extends ServerManager {
       return health.status;
     } catch {
       return 'unknown';
-    }
-  }
-
-  /**
-   * Get recent server logs
-   *
-   * @param lines - Number of lines to retrieve (default: 100)
-   * @returns Array of log lines
-   */
-  async getLogs(lines: number = 100): Promise<string[]> {
-    if (!this.logManager) {
-      return [];
-    }
-
-    try {
-      return await this.logManager.getRecent(lines);
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * Clear all server logs
-   *
-   * Removes all log entries by truncating the log file.
-   * This is useful for clearing old/corrupted logs and starting fresh.
-   */
-  async clearLogs(): Promise<void> {
-    if (!this.logManager) {
-      return;
-    }
-
-    try {
-      await this.logManager.clear();
-    } catch {
-      // Ignore errors - log clearing is not critical
     }
   }
 
