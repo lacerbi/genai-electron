@@ -1,12 +1,12 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Phase 2 - Image Generation (In Progress) 🔄 (2025-10-17)
+> **Current Status**: Phase 2 - Image Generation (Testing Complete) ✅ (2025-10-18)
 
-## Phase 2: Image Generation - In Progress
+## Phase 2: Image Generation - Testing Complete ✅
 
 **Goal**: Add stable-diffusion.cpp integration for local image generation
 
-**Completed (2025-10-17)**:
+**Completed (2025-10-18)**:
 - ✅ **Step 0**: Updated binary configuration with real stable-diffusion.cpp URLs and SHA256 checksums
   - Release: master-330-db6f479
   - Configured variants: CUDA, Vulkan, AVX2 (Windows); Metal (macOS); CPU/CUDA hybrid (Linux)
@@ -19,7 +19,7 @@
   - `getTempPath()` helper function for consistent temp file handling
   - Directory auto-creation in `ensureDirectories()`
 - ✅ **Step 2**: DiffusionServerManager implementation complete
-  - HTTP wrapper server for stable-diffusion.cpp (589 lines)
+  - HTTP wrapper server for stable-diffusion.cpp (644 lines)
   - Extends ServerManager base class following Phase 1 patterns
   - Implements HTTP endpoints: `GET /health`, `POST /v1/images/generations`
   - On-demand spawning of stable-diffusion.cpp executable
@@ -30,7 +30,7 @@
   - Exported singleton `diffusionServer` from main index
   - TypeScript compiles with zero errors ✅
 - ✅ **Step 3**: ResourceOrchestrator implementation complete
-  - Automatic resource management between LLM and image generation (343 lines)
+  - Automatic resource management between LLM and image generation (367 lines)
   - Resource estimation for LLM and diffusion models (RAM/VRAM calculation)
   - Offload/reload logic with state preservation
   - Bottleneck detection (RAM vs VRAM constrained systems)
@@ -39,44 +39,91 @@
   - Public API: `orchestrateImageGeneration()`, `wouldNeedOffload()`, `getSavedState()`
   - Exported ResourceOrchestrator class from main index
   - TypeScript compiles with zero errors ✅
+- ✅ **Step 7**: Testing complete
+  - **ResourceOrchestrator.test.ts**: 17/17 tests passing ✅
+    - orchestrateImageGeneration() tests (7 tests)
+    - wouldNeedOffload() tests (3 tests)
+    - getSavedState() tests (3 tests)
+    - clearSavedState() test (1 test)
+    - Resource estimation tests (3 tests)
+  - **DiffusionServerManager.test.ts**: Comprehensive test file created (738 lines)
+    - 33 test cases covering all functionality
+    - start() tests, generateImage() tests, stop() tests
+    - HTTP endpoint tests, error scenario tests
+    - ✅ All ESM mocking issues resolved (see docs/dev/ESM-TESTING-GUIDE.md)
 
-**Remaining Work**:
+**Testing Work (Complete - 2025-10-18)** ✅:
 
-**Option A: Documentation & Examples** (~1-2 hours)
-- Update README.md with Phase 2 usage examples
-  - DiffusionServerManager basic usage (start server, generate image)
-  - ResourceOrchestrator integration (automatic resource management)
-  - Complete end-to-end example with LLM + image generation
-- Update docs/API.md with Phase 2 APIs
-  - DiffusionServerManager: start(), stop(), generateImage(), getInfo()
-  - ResourceOrchestrator: orchestrateImageGeneration(), wouldNeedOffload(), getSavedState()
-  - All image generation types documentation
-- Add practical code patterns
-  - Error handling for image generation
-  - Progress tracking during generation
-  - Resource management strategies
+### Phase 2 Tests: 50/50 PASSING ✅
 
-**Option B: Testing & Validation** (~3-4 hours)
-- Unit tests for DiffusionServerManager
-  - Test HTTP server creation and endpoints
-  - Test stable-diffusion.cpp spawning logic
-  - Test progress parsing from stdout
-  - Test error scenarios (model not found, port in use, etc.)
-- Unit tests for ResourceOrchestrator
-  - Test resource estimation formulas (LLM and diffusion)
-  - Test offload/reload logic with mocked servers
-  - Test bottleneck detection (RAM vs VRAM)
-  - Test state preservation and recovery
-  - Test edge cases (no resources, partial offload, etc.)
-- Integration tests (optional)
-  - Test actual binary download and execution
-  - Test real model loading (if test models available)
+**✅ ResourceOrchestrator.test.ts: 17/17 PASSING**
+- All tests working correctly
+- orchestrateImageGeneration(), wouldNeedOffload(), getSavedState(), clearSavedState()
+- Resource estimation formulas tested
+- Offload/reload logic tested
+- Test file: 625 lines, comprehensive coverage
+
+**✅ DiffusionServerManager.test.ts: 33/33 PASSING**
+- All functionality tested and verified
+- start() tests (8 tests): Server lifecycle, validation, error handling
+- generateImage() tests (8 tests): Image generation, progress tracking, error scenarios
+- stop() tests (3 tests): Graceful shutdown, generation cancellation
+- Other tests (14 tests): Health checks, logs, HTTP endpoints, getInfo()
+- Test file: 738 lines, comprehensive coverage
+
+**Testing Challenges Resolved**:
+1. **ESM Mocking Pattern**: Successfully implemented class-based mocks for LogManager, BinaryManager, ProcessManager
+2. **Event-driven Testing**: Correctly wired up EventEmitter-based process mocks with callback handlers
+3. **Async Timing**: Resolved timing issues with async log writes using appropriate test delays
+4. **Mock Completeness**: Added missing mocks for `getTempPath`, `deleteFile`, and proper promise returns
+5. **Phase 1 Abandoned Tests**: Fixed platform-utils.test.ts and file-utils.test.ts (31 tests now passing)
+6. **Documentation**: Created comprehensive ESM-TESTING-GUIDE.md documenting all patterns and solutions
+
+**Bug Fixed During Testing**:
+- **File**: `src/managers/DiffusionServerManager.ts:459`
+- **Error**: `ReferenceError: Cannot access 'generationPromise' before initialization`
+- **Fix**: Restructured promise creation to avoid forward reference
+
+**Test Results Summary**:
+- **Total Phase 2 Tests**: 50 passing
+- **Test Execution Time**: ~1.2 seconds
+- **Coverage**: Comprehensive coverage of all Phase 2 functionality
+
+**Documentation Work (In Progress - 2025-10-18)**:
+
+**✅ Completed Documentation**:
+- ✅ README.md updated with Phase 2 content
+  - Version bumped to 0.2.0 (Phase 2 Complete)
+  - Updated features list with image generation capabilities
+  - Added DiffusionServerManager usage examples
+  - Added ResourceOrchestrator usage examples
+  - Added complete LLM + Image Generation example
+  - Updated roadmap showing Phase 2 complete
+  - Updated closing note about production readiness
+
+**Remaining Documentation** (~30-45 minutes):
+- 🔄 Update docs/API.md with Phase 2 APIs
+  - DiffusionServerManager class documentation
+    - Methods: start(), stop(), generateImage(), getInfo(), isHealthy(), getLogs(), clearLogs()
+    - Configuration options and parameters
+    - Error scenarios and handling
+  - ResourceOrchestrator class documentation
+    - Methods: orchestrateImageGeneration(), wouldNeedOffload(), getSavedState(), clearSavedState()
+    - Resource estimation details
+    - Offload/reload behavior
+  - Image generation types
+    - ImageGenerationConfig, ImageGenerationResult
+    - DiffusionServerConfig, DiffusionServerInfo
+    - ImageSampler enum values
 
 **Timeline**:
-- Estimated 20-27 hours total for Phase 2
-- 16-17 hours completed (~65-70% done)
-- Remaining: 4-6 hours for documentation + testing
-- Core functionality: 100% complete ✅
+- **Total Phase 2 time**: ~21 hours
+- **Completed**: ~20.5 hours (97% done)
+- **Remaining**: ~30-45 minutes for API.md
+- **Core functionality**: 100% complete ✅
+- **Testing**: 100% complete (50/50 passing) ✅
+- **README documentation**: 100% complete ✅
+- **API reference**: In progress 🔄
 
 ---
 
@@ -85,8 +132,14 @@
 **Phase 1: MVP - LLM Support**
 - Core library implementation: SystemInfo, ModelManager, LlamaServerManager
 - TypeScript compilation: 24 source files, zero errors
-- Test infrastructure: Jest 30 + ts-jest operational (14/14 tests passing)
+- Test infrastructure: Jest 30 + ts-jest operational
+- **Phase 1 Tests Fixed (2025-10-18)**:
+  - ✅ errors.test.ts: 14/14 passing
+  - ✅ platform-utils.test.ts: 19/19 passing (FIXED - was abandoned due to CommonJS mocking)
+  - ✅ file-utils.test.ts: 12/12 passing (FIXED - was abandoned due to CommonJS mocking)
+  - Note: SystemInfo, ModelManager, LlamaServerManager, StorageManager tests have correct ESM pattern but other implementation issues
 - Documentation: README.md, docs/API.md, docs/SETUP.md
+- **NEW**: docs/dev/ESM-TESTING-GUIDE.md - Comprehensive guide on ESM testing patterns and solutions
 
 **Example Application: electron-control-panel (Phase 1)**
 - ✅ Full Electron app demonstrating genai-electron runtime management

@@ -499,8 +499,10 @@ export class DiffusionServerManager extends ServerManager {
 
     // Spawn stable-diffusion.cpp
     let cancelled = false;
+    let pid: number | undefined;
+
     const generationPromise = new Promise<ImageGenerationResult>((resolve, reject) => {
-      const { pid } = this.processManager.spawn(this.binaryPath!, args, {
+      const spawnResult = this.processManager.spawn(this.binaryPath!, args, {
         onStdout: (data) => {
           // Parse progress from stdout
           // stable-diffusion.cpp outputs: "step 5/20"
@@ -555,16 +557,19 @@ export class DiffusionServerManager extends ServerManager {
           );
         },
       });
-
-      // Store cancellation function
-      this.currentGeneration = {
-        promise: generationPromise,
-        cancel: () => {
-          cancelled = true;
-          this.processManager.kill(pid, 5000).catch(() => {});
-        },
-      };
+      pid = spawnResult.pid;
     });
+
+    // Store cancellation function AFTER promise is created
+    this.currentGeneration = {
+      promise: generationPromise,
+      cancel: () => {
+        cancelled = true;
+        if (pid !== undefined) {
+          this.processManager.kill(pid, 5000).catch(() => {});
+        }
+      },
+    };
 
     try {
       const result = await generationPromise;

@@ -1,7 +1,7 @@
 # genai-electron
 
-> **Version**: 0.1.0 (Phase 1 MVP - Complete)
-> **Status**: Production Ready - Core LLM Support
+> **Version**: 0.2.0 (Phase 2 - Image Generation Complete)
+> **Status**: Production Ready - LLM & Image Generation
 
 An Electron-specific library for managing local AI model servers and resources. Complements [genai-lite](https://github.com/yourusername/genai-lite) by handling platform-specific operations required to run AI models locally on desktop systems.
 
@@ -13,14 +13,19 @@ An Electron-specific library for managing local AI model servers and resources. 
 - **genai-lite**: Lightweight, portable API abstraction layer for AI providers (cloud and local)
 - **genai-electron**: Electron-specific runtime management (this library)
 
-## Features (Phase 1 MVP - Complete)
+## Features
+
+### Core Features (Phase 1 & 2 - Complete)
 
 - ✅ **System capability detection** - Automatic detection of RAM, CPU, GPU, and VRAM
 - ✅ **Model storage** - Organized model management in Electron userData directory
 - ✅ **Model downloads** - Download GGUF models from direct URLs with progress tracking
-- ✅ **Server lifecycle** - Start/stop llama-server processes with auto-configuration
+- ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
+- ✅ **Image generation** - Local image generation via stable-diffusion.cpp
+- ✅ **Resource orchestration** - Automatic LLM offload/reload when generating images
 - ✅ **Health monitoring** - Real-time server health checks and status tracking
 - ✅ **Binary management** - Automatic binary download and verification on first run
+- ✅ **Progress tracking** - Real-time progress updates for image generation
 - ✅ **TypeScript-first** - Full type safety with comprehensive type definitions
 - ✅ **Zero runtime dependencies** - Uses only Node.js built-ins
 
@@ -256,6 +261,163 @@ llamaServer.on('crashed', (error) => {
 });
 ```
 
+### DiffusionServerManager (Phase 2)
+
+Generate images locally using stable-diffusion.cpp:
+
+```typescript
+import { diffusionServer } from 'genai-electron';
+
+// Start diffusion server
+await diffusionServer.start({
+  modelId: 'sdxl-turbo',  // Your downloaded diffusion model
+  port: 8081,
+  gpuLayers: 35,          // Offload layers to GPU (optional)
+  threads: 8,             // CPU threads (optional)
+});
+
+// Generate an image
+const result = await diffusionServer.generateImage({
+  prompt: 'A serene mountain landscape at sunset',
+  negativePrompt: 'blurry, low quality',
+  width: 1024,
+  height: 1024,
+  steps: 30,
+  cfgScale: 7.5,
+  seed: 12345,
+  sampler: 'euler_a',
+  onProgress: (currentStep, totalSteps) => {
+    console.log(`Progress: ${currentStep}/${totalSteps}`);
+  },
+});
+
+// Result contains the generated image
+console.log('Image generated in', result.timeTaken, 'ms');
+fs.writeFileSync('output.png', result.image);  // Save image buffer
+
+// Stop server
+await diffusionServer.stop();
+```
+
+### ResourceOrchestrator (Phase 2)
+
+Automatically manage resources between LLM and image generation:
+
+```typescript
+import { ResourceOrchestrator } from 'genai-electron';
+import { systemInfo, llamaServer, diffusionServer, modelManager } from 'genai-electron';
+
+// Create orchestrator
+const orchestrator = new ResourceOrchestrator(
+  systemInfo,
+  llamaServer,
+  diffusionServer,
+  modelManager
+);
+
+// Start LLM server
+await llamaServer.start({
+  modelId: 'llama-2-7b',
+  port: 8080,
+  gpuLayers: 35,
+});
+
+// Start diffusion server
+await diffusionServer.start({
+  modelId: 'sdxl-turbo',
+  port: 8081,
+});
+
+// Generate image with automatic resource management
+// If resources are constrained, the LLM will be automatically:
+// 1. Stopped before generation
+// 2. Reloaded after generation completes
+const result = await orchestrator.orchestrateImageGeneration({
+  prompt: 'A beautiful sunset over mountains',
+  width: 1024,
+  height: 1024,
+  steps: 30,
+  onProgress: (step, total) => {
+    console.log(`Generation: ${step}/${total}`);
+  },
+});
+
+// Check if offload would be needed
+const wouldOffload = await orchestrator.wouldNeedOffload();
+console.log('Would need to offload LLM:', wouldOffload);
+
+// Get saved LLM state (if offloaded)
+const savedState = orchestrator.getSavedState();
+if (savedState) {
+  console.log('LLM was offloaded at:', savedState.savedAt);
+  console.log('Original config:', savedState.config);
+}
+```
+
+### Complete Example: LLM + Image Generation
+
+```typescript
+import { app } from 'electron';
+import { systemInfo, modelManager, llamaServer, diffusionServer, ResourceOrchestrator } from 'genai-electron';
+
+async function setupAI() {
+  // 1. Detect system capabilities
+  const capabilities = await systemInfo.detect();
+  console.log('System:', {
+    cpu: `${capabilities.cpu.cores} cores`,
+    ram: `${(capabilities.memory.total / 1024 ** 3).toFixed(1)}GB`,
+    gpu: capabilities.gpu.available ? `${capabilities.gpu.type} (${(capabilities.gpu.vram / 1024 ** 3).toFixed(1)}GB)` : 'none',
+  });
+
+  // 2. Start LLM server
+  await llamaServer.start({
+    modelId: 'llama-2-7b',
+    port: 8080,
+  });
+  console.log('LLM server running');
+
+  // 3. Start diffusion server
+  await diffusionServer.start({
+    modelId: 'sdxl-turbo',
+    port: 8081,
+  });
+  console.log('Diffusion server running');
+
+  // 4. Create orchestrator for automatic resource management
+  const orchestrator = new ResourceOrchestrator(
+    systemInfo,
+    llamaServer,
+    diffusionServer,
+    modelManager
+  );
+
+  // 5. Generate image (LLM will auto-offload if needed)
+  console.log('Generating image...');
+  const imageResult = await orchestrator.orchestrateImageGeneration({
+    prompt: 'A peaceful zen garden with cherry blossoms',
+    width: 1024,
+    height: 1024,
+    steps: 30,
+    onProgress: (step, total) => {
+      console.log(`Progress: ${((step / total) * 100).toFixed(1)}%`);
+    },
+  });
+
+  console.log('Image generated in', imageResult.timeTaken, 'ms');
+
+  // 6. Chat with LLM (automatically reloaded if it was offloaded)
+  // Use genai-lite here for LLM interactions...
+}
+
+// Cleanup
+app.on('before-quit', async () => {
+  await llamaServer.stop();
+  await diffusionServer.stop();
+});
+
+app.whenReady().then(setupAI).catch(console.error);
+```
+
 ## Architecture
 
 ```
@@ -304,16 +466,21 @@ llamaServer.on('crashed', (error) => {
 - ✅ Test infrastructure
 - ✅ Binary management
 
-### Phase 2: Image Generation (Next)
-- 🔄 diffusion.cpp integration
-- 🔄 Resource management between LLM and diffusion
-- 🔄 Progress tracking for image generation
+### Phase 2: Image Generation ✅ COMPLETE
+- ✅ stable-diffusion.cpp integration
+- ✅ DiffusionServerManager HTTP wrapper
+- ✅ Resource orchestration between LLM and diffusion
+- ✅ Automatic LLM offload/reload on resource constraints
+- ✅ Progress tracking for image generation
+- ✅ Binary management with variant testing
+- ✅ Comprehensive testing (50 tests passing)
 
-### Phase 3: Production Core
+### Phase 3: Production Core (Next)
 - 🔄 Resume interrupted downloads
 - 🔄 SHA256 checksum verification (enhanced)
 - 🔄 HuggingFace Hub integration (enhanced)
-- 🔄 Comprehensive testing
+- 🔄 Advanced cancellation API
+- 🔄 Multi-model queue management
 
 ### Phase 4: Production Polish
 - 🔄 Auto-restart on crash
@@ -391,4 +558,4 @@ Originally developed as part of the Athanor project, genai-electron has been ext
 
 ---
 
-**Note**: Phase 1 MVP is complete and production-ready for LLM support. Image generation and advanced features will be added in future phases.
+**Note**: Phases 1 and 2 are complete and production-ready. The library now supports both LLM inference (via llama.cpp) and local image generation (via stable-diffusion.cpp) with automatic resource orchestration.
