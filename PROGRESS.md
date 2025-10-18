@@ -28,6 +28,22 @@
 - **Improvement**: +53 tests fixed ✅
 - **All Phase 1 & Phase 2 tests fully operational**
 
+**Test Cleanup & Memory Leak Prevention (2025-10-18)**:
+- Added `afterEach` hooks to LlamaServerManager and DiffusionServerManager tests
+- Event listeners now properly cleaned up with `removeAllListeners()`
+- Mock EventEmitters cleaned up in crash handling tests
+- Prevents memory leaks and accumulated listeners across test runs
+
+**Known Jest Warning (Harmless)**:
+- Jest may display "did not exit one second after test run" warning
+- This is a **false positive** - verified with `--detectOpenHandles` (finds no leaks)
+- Occurs due to Jest ESM + worker coordination timing
+- Does NOT indicate actual problems:
+  - All 180 tests pass ✅
+  - No actual open handles detected ✅
+  - Individual test files exit cleanly ✅
+  - Execution time remains fast (~1.4s) ✅
+
 ---
 
 ## Test Fixing Work (2025-10-18)

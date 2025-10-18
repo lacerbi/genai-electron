@@ -231,6 +231,11 @@ describe('LlamaServerManager', () => {
     mockProcessIsRunning.mockReturnValue(true);
   });
 
+  afterEach(() => {
+    // Clean up all event listeners to prevent memory leaks
+    llamaServer.removeAllListeners();
+  });
+
   describe('start()', () => {
     it('should start server with auto-configuration', async () => {
       const info = await llamaServer.start(mockConfig);
@@ -489,6 +494,11 @@ describe('LlamaServerManager', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
 
       expect(crashedHandler).toHaveBeenCalled();
+
+      // Clean up mock EventEmitters
+      mockProcess.removeAllListeners();
+      mockProcess.stdout.removeAllListeners();
+      mockProcess.stderr.removeAllListeners();
     });
 
     it('should update status to crashed', async () => {
@@ -518,6 +528,11 @@ describe('LlamaServerManager', () => {
 
       const status = llamaServer.getStatus();
       expect(status).toBe('crashed');
+
+      // Clean up mock EventEmitters
+      mockProcess.removeAllListeners();
+      mockProcess.stdout.removeAllListeners();
+      mockProcess.stderr.removeAllListeners();
     });
   });
 

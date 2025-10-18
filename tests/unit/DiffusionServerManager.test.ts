@@ -230,6 +230,11 @@ describe('DiffusionServerManager', () => {
     mockProcessSpawn.mockReturnValue(mockProcess);
   });
 
+  afterEach(() => {
+    // Clean up all event listeners to prevent memory leaks
+    diffusionServer.removeAllListeners();
+  });
+
   describe('start()', () => {
     it('should start HTTP wrapper server successfully', async () => {
       const info = await diffusionServer.start(mockConfig);
