@@ -5,23 +5,24 @@
 ## Current Build and Test Status
 
 - **Build Status:** ✅ Compiling successfully (0 TypeScript errors)
-- **Test Status:** ✅ 105/105 tests passing across 6 test suites
+- **Test Status:** ✅ 127/180 tests passing across 10 test suites (all suites loading!)
 - **Branch:** `fix/revert-broken-refactoring` (pushed to origin)
 - **Last Updated:** 2025-10-18
 
 **Test Suite Summary:**
-- ✅ **Passing (6 suites, 105 tests):**
+- ✅ **Fully Passing (6 suites, 105 tests):**
   - errors.test.ts: 14 tests
   - platform-utils.test.ts: 19 tests
   - file-utils.test.ts: 12 tests
   - Downloader.test.ts: 10 tests ← FIXED
   - DiffusionServerManager.test.ts: 33 tests (Phase 2)
   - ResourceOrchestrator.test.ts: 17 tests (Phase 2)
-- ❌ **Failing (4 suites, Phase 1 implementation issues):**
-  - SystemInfo.test.ts
-  - StorageManager.test.ts
-  - ModelManager.test.ts
-  - LlamaServerManager.test.ts
+- 🔄 **Partially Passing (4 suites, 22/75 tests passing):**
+  - SystemInfo.test.ts: 5/13 passing ← STRUCTURAL ISSUES FIXED
+  - StorageManager.test.ts: 8/17 passing ← STRUCTURAL ISSUES FIXED
+  - ModelManager.test.ts: 8/22 passing ← STRUCTURAL ISSUES FIXED
+  - LlamaServerManager.test.ts: 1/23 passing ← STRUCTURAL ISSUES FIXED
+  - **Note:** All 4 suites now load and run. Remaining 53 failures are assertion/logic errors, not mocking issues.
 
 ---
 
@@ -186,7 +187,10 @@ Commit c4ad0ed ("refactor: eliminate code duplication") introduced **17 TypeScri
   - ✅ platform-utils.test.ts: 19/19 passing (FIXED - was abandoned due to CommonJS mocking)
   - ✅ file-utils.test.ts: 12/12 passing (FIXED - was abandoned due to CommonJS mocking)
   - ✅ **Downloader.test.ts: 10/10 passing** (FIXED - was abandoned, see details below)
-  - ❌ SystemInfo, ModelManager, LlamaServerManager, StorageManager tests have correct ESM pattern but other implementation issues (4 suites still failing)
+  - 🔄 SystemInfo.test.ts: 5/13 passing (structural issues FIXED, assertion errors remain)
+  - 🔄 StorageManager.test.ts: 8/17 passing (structural issues FIXED, assertion errors remain)
+  - 🔄 ModelManager.test.ts: 8/22 passing (structural issues FIXED, assertion errors remain)
+  - 🔄 LlamaServerManager.test.ts: 1/23 passing (structural issues FIXED, assertion errors remain)
 - Documentation: README.md, docs/API.md, docs/SETUP.md
 - **NEW**: docs/dev/ESM-TESTING-GUIDE.md - Comprehensive guide on ESM testing patterns and solutions
 
@@ -204,6 +208,39 @@ Fixed all 10 Downloader tests that were failing due to incorrect mocking approac
   - Prevents badly-behaved callbacks from crashing downloads
   - Ensures download completes even if progress callback throws
 - **Result**: All 10 Downloader tests now passing ✅
+
+**Phase 1 Structural Test Fixes (2025-10-18)**:
+Fixed structural mocking issues in 4 Phase 1 test suites - all now load and run:
+
+**SystemInfo.test.ts (5/13 passing)**:
+- Fixed: Changed `'os'` → `'node:os'` with default export pattern
+- Fixed: Changed `'child_process'` → `'node:child_process'`
+- Status: Tests load and run (8 failures are exec timeouts and assertion errors)
+
+**StorageManager.test.ts (8/17 passing)**:
+- Fixed: Changed `getModelPath` → `getModelFilePath` (actual export name)
+- Status: Tests load and run (9 failures are assertion errors)
+
+**ModelManager.test.ts (8/22 passing)**:
+- Fixed: Added missing checksum exports (`calculateSHA256`, `formatChecksum`)
+- Fixed: Added missing file-utils export (`sanitizeFilename`)
+- Fixed: Added `storageManager` singleton export to StorageManager mock
+- Fixed: Changed `getModelPath` → `getModelFilePath`
+- Status: Tests load and run (14 failures are assertion errors)
+
+**LlamaServerManager.test.ts (1/23 passing)**:
+- Fixed: Added paths.js mock (which imports electron)
+- Fixed: Mocked all 10 file-utils exports to avoid missing export errors
+- Fixed: Added `execFile` to child_process mock
+- Fixed: Added `getInstance()` static methods to ModelManager and SystemInfo mocks
+- Status: Tests load and run (22 failures are assertion errors)
+
+**Impact**:
+- Before: 105 passing tests (6 suites), 4 suites completely broken
+- After: **127 passing tests (10 suites)**, all suites loading and running
+- Improvement: **+22 tests passing** ✅
+
+All structural "does not provide export" errors eliminated. Remaining 53 failures in these 4 suites are assertion/logic errors that require deeper investigation of test expectations.
 
 **Example Application: electron-control-panel (Phase 1)**
 - ✅ Full Electron app demonstrating genai-electron runtime management
