@@ -5,7 +5,7 @@
 ## Current Build and Test Status
 
 - **Build Status:** ✅ Compiling successfully (0 TypeScript errors)
-- **Test Status:** ✅ 158/180 tests passing across 10 test suites (87.8% coverage!)
+- **Test Status:** ✅ 168/180 tests passing across 10 test suites (93.3% coverage!)
 - **Branch:** `fix/revert-broken-refactoring` (pushed to origin)
 - **Last Updated:** 2025-10-18
 
@@ -20,14 +20,14 @@
   - **StorageManager.test.ts: 17 tests** ← FULLY FIXED (2025-10-18)
   - **ModelManager.test.ts: 22 tests** ← FULLY FIXED (2025-10-18)
   - **SystemInfo.test.ts: 13 tests** ← FULLY FIXED (2025-10-18)
-- 🔄 **Partially Passing (1 suite, 1/23 tests passing):**
-  - LlamaServerManager.test.ts: 1/23 passing (22 failures - complex async/process mocking issues)
-  - **Note:** All suites load and run. Remaining failures involve complex process spawning and async event handling.
+- 🔄 **Partially Passing (1 suite, 11/23 tests passing):**
+  - LlamaServerManager.test.ts: 11/23 passing (12 failures - complex async assertions remain)
+  - **Note:** All tests now run in <5 seconds (timeout issues completely resolved!)
 
 **Test Fix Progress (2025-10-18)**:
 - **Starting point**: 127/180 passing (70.6%)
-- **Ending point**: 158/180 passing (87.8%)
-- **Improvement**: +31 tests fixed ✅
+- **Ending point**: 168/180 passing (93.3%)
+- **Improvement**: +41 tests fixed ✅
 
 ---
 
@@ -77,26 +77,41 @@
 
 **Key Learning**: Always verify async methods use `await` and check actual return type property names
 
-### 🔄 LlamaServerManager.test.ts: 1/23 passing (22 failures remain)
+### 🔄 LlamaServerManager.test.ts: 11/23 PASSING (was 1/23)
+**Critical Issue Resolved - 100+ Second Timeout:**
+- **Root Cause**: `isServerResponding()` was dynamically imported but NOT mocked
+- This caused actual HTTP requests with 2000ms timeouts per call
+- Tests took 100+ seconds due to repeated network timeout failures
+
 **Fixed Issues**:
+- Added `isServerResponding` mock to health-check module ← KEY FIX
+- Added `BinaryManager` class mock (was trying to download real binaries!)
+- Added `LogManager.initialize()` mock (was missing)
 - Fixed ModelManager dependency: Pass mocked instances explicitly to constructor
-- Fixed `canRunModel` mock: Changed from `mockReturnValue` to `mockResolvedValue` (async method)
+- Fixed `canRunModel` mock: Changed from `mockReturnValue` to `mockResolvedValue`
 - Fixed `canRunModel` return: Changed `canRun` → `possible` property
 - Fixed `getOptimalConfig` mock: Changed from `mockReturnValue` to `mockResolvedValue`
+- Fixed all class-based mocks using proper patterns:
+  - MockProcessManager, MockLogManager, MockBinaryManager with externally accessible functions
+- Renamed mock variables to avoid conflicts (mockProcessSpawn vs mockSpawn)
+
+**Results**:
+- Before: 1/23 passing, 100+ second execution time
+- After: 11/23 passing, <5 second execution time ⚡
+- +10 tests fixed
 
 **Remaining Issues**:
-- 22 tests still failing with complex async/process spawning issues
-- Tests take 100+ seconds (likely timeouts in health checks or process management)
-- Requires deeper investigation of ProcessManager, health-check, and event-driven test patterns
-
-**Next Steps**: These failures require more complex async event mocking - deferred for now
+- 12 tests still failing with complex async assertions
+- Issues involve event handling, status checks, and log retrieval
+- Much more manageable now that timeout issues are resolved
 
 **Overall Impact**:
 - 3 test suites completely fixed (StorageManager: 17, ModelManager: 22, SystemInfo: 13 = 52 tests)
+- 1 test suite significantly improved (LlamaServerManager: 1→11 passing, +10 tests)
 - Build remains stable with 0 TypeScript errors
-- Test execution time under 15 seconds (excluding LlamaServerManager which has timeouts)
+- Test execution time under 15 seconds (timeout issues completely resolved!)
 - All ESM mocking patterns documented
-- Test coverage improved from 70.6% → 87.8% (+17.2 percentage points)
+- Test coverage improved from 70.6% → 93.3% (+22.7 percentage points)
 
 ---
 
@@ -207,12 +222,12 @@ Commit c4ad0ed ("refactor: eliminate code duplication") introduced **17 TypeScri
 
 **Test Results Summary**:
 - **Total Phase 2 Tests**: 50 passing (DiffusionServerManager: 33, ResourceOrchestrator: 17)
-- **Total Phase 1 Tests Passing**: 108/131 passing
+- **Total Phase 1 Tests Passing**: 118/131 passing
   - Fully passing: errors (14), platform-utils (19), file-utils (12), Downloader (10), StorageManager (17), ModelManager (22), SystemInfo (13)
-  - Partially passing: LlamaServerManager (1/23)
-- **Overall**: 158/180 tests passing (87.8%)
-- **Test Execution Time**: ~12-15 seconds (excluding LlamaServerManager which has timeouts)
-- **Coverage**: Comprehensive coverage of Phase 2, strong Phase 1 coverage except complex process management
+  - Partially passing: LlamaServerManager (11/23)
+- **Overall**: 168/180 tests passing (93.3%)
+- **Test Execution Time**: ~12-15 seconds (timeout issues completely resolved!)
+- **Coverage**: Comprehensive coverage of Phase 2, strong Phase 1 coverage with only 12 complex async tests remaining
 
 **Documentation Work (In Progress - 2025-10-18)**:
 
@@ -266,7 +281,7 @@ Commit c4ad0ed ("refactor: eliminate code duplication") introduced **17 TypeScri
   - ✅ **StorageManager.test.ts: 17/17 passing** ← FULLY FIXED
   - ✅ **ModelManager.test.ts: 22/22 passing** ← FULLY FIXED
   - ✅ **SystemInfo.test.ts: 13/13 passing** ← FULLY FIXED
-  - 🔄 LlamaServerManager.test.ts: 1/23 passing (22 complex async issues remain)
+  - 🔄 **LlamaServerManager.test.ts: 11/23 passing** ← MAJOR PROGRESS (timeout issues fixed!)
 - Documentation: README.md, docs/API.md, docs/SETUP.md
 - **NEW**: docs/dev/ESM-TESTING-GUIDE.md - Comprehensive guide on ESM testing patterns and solutions
 
@@ -315,10 +330,11 @@ Fixed structural mocking issues in 4 Phase 1 test suites - all now load and run:
 - Initial: 105 passing tests (6 suites), 4 suites completely broken
 - After structural fixes: 127 passing tests (10 suites), all suites loading
 - After assertion fixes (round 1): 150 passing tests (8 fully passing suites)
-- After assertion fixes (round 2): **158 passing tests (9 fully passing suites)** ✅
-- Total improvement: **+53 tests fixed** ✅
+- After assertion fixes (round 2): 158 passing tests (9 fully passing suites)
+- After timeout fixes: **168 passing tests (9 fully passing suites, 1 partially fixed)** ✅
+- Total improvement: **+63 tests fixed** ✅
 
-All structural "does not provide export" errors eliminated. StorageManager, ModelManager, and SystemInfo completely fixed. Remaining 22 failures in LlamaServerManager involve complex async process spawning and event-driven testing patterns.
+All structural "does not provide export" errors eliminated. StorageManager, ModelManager, and SystemInfo completely fixed. LlamaServerManager significantly improved (1→11 passing, timeout issues resolved). Remaining 12 failures involve complex async assertions and event handling.
 
 **Example Application: electron-control-panel (Phase 1)**
 - ✅ Full Electron app demonstrating genai-electron runtime management
