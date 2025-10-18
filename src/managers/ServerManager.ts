@@ -8,17 +8,8 @@
  */
 
 import { EventEmitter } from 'events';
-import path from 'node:path';
 import { ServerStatus, ServerInfo, ServerConfig, ServerEvent } from '../types/index.js';
-import {
-  ServerError,
-  PortInUseError,
-  ModelNotFoundError,
-  BinaryError,
-  InsufficientResourcesError,
-} from '../errors/index.js';
-import { LogManager } from '../process/log-manager.js';
-import { PATHS } from '../config/paths.js';
+import { ServerError } from '../errors/index.js';
 
 /**
  * Abstract ServerManager class
@@ -64,9 +55,6 @@ export abstract class ServerManager extends EventEmitter {
 
   /** Timestamp when server was started */
   protected _startedAt?: Date;
-
-  /** Log manager for server logs */
-  protected logManager?: LogManager;
 
   /**
    * Create a new ServerManager
@@ -246,107 +234,5 @@ export abstract class ServerManager extends EventEmitter {
    */
   protected emitEvent<T extends ServerEvent>(event: T, data?: unknown): void {
     this.emit(event, data);
-  }
-
-  /**
-   * Check if a port is already in use
-   *
-   * @param port - Port number to check
-   * @param timeout - Timeout in milliseconds (default: 2000)
-   * @throws {PortInUseError} If port is already in use
-   * @protected
-   */
-  protected async checkPortAvailability(port: number, timeout: number = 2000): Promise<void> {
-    const { isServerResponding } = await import('../process/health-check.js');
-    if (await isServerResponding(port, timeout)) {
-      throw new PortInUseError(port);
-    }
-  }
-
-  /**
-   * Initialize the log manager with a specific log file name
-   *
-   * @param logFileName - Name of the log file (e.g., 'llama-server.log')
-   * @param port - Port number to include in the startup message
-   * @protected
-   */
-  protected async initializeLogManager(logFileName: string, port: number): Promise<void> {
-    const logPath = path.join(PATHS.logs, logFileName);
-    this.logManager = new LogManager(logPath);
-    await this.logManager.initialize();
-    await this.logManager.write(`Starting server on port ${port}`, 'info');
-  }
-
-  /**
-   * Handle errors during server startup
-   *
-   * Logs the error, cleans up resources, and re-throws typed errors or wraps unknown errors.
-   *
-   * @param error - The error that occurred
-   * @param serverName - Name of the server for error messages (e.g., 'llama-server')
-   * @throws {ServerError} Always throws (either the original typed error or wrapped)
-   * @protected
-   */
-  protected async handleStartupError(error: unknown, serverName: string): Promise<never> {
-    // Log the error
-    if (this.logManager) {
-      await this.logManager.write(
-        `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
-        'error'
-      );
-    }
-
-    // Re-throw typed errors
-    if (
-      error instanceof ModelNotFoundError ||
-      error instanceof PortInUseError ||
-      error instanceof BinaryError ||
-      error instanceof InsufficientResourcesError ||
-      error instanceof ServerError
-    ) {
-      throw error;
-    }
-
-    // Wrap unknown errors
-    throw new ServerError(
-      `Failed to start ${serverName}: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      { error: error instanceof Error ? error.message : String(error) }
-    );
-  }
-
-  /**
-   * Get recent server logs
-   *
-   * @param lines - Number of lines to retrieve (default: 100)
-   * @returns Array of log lines
-   */
-  async getLogs(lines: number = 100): Promise<string[]> {
-    if (!this.logManager) {
-      return [];
-    }
-
-    try {
-      return await this.logManager.getRecent(lines);
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * Clear all server logs
-   *
-   * Removes all log entries by truncating the log file.
-   * This is useful for clearing old/corrupted logs and starting fresh.
-   */
-  async clearLogs(): Promise<void> {
-    if (!this.logManager) {
-      return;
-    }
-
-    try {
-      await this.logManager.clear();
-    } catch {
-      // Ignore errors
-    }
   }
 }

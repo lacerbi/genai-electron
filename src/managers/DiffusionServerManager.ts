@@ -75,6 +75,7 @@ export class DiffusionServerManager extends ServerManager {
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
+  private logManager?: LogManager;
   private binaryPath?: string;
   private httpServer?: http.Server;
   private currentGeneration?: {
@@ -153,10 +154,16 @@ export class DiffusionServerManager extends ServerManager {
 
       // 4. Check if port is in use
       const port = config.port || DEFAULT_PORTS.diffusion;
-      await this.checkPortAvailability(port);
+      const { isServerResponding } = await import('../process/health-check.js');
+      if (await isServerResponding(port, 2000)) {
+        throw new PortInUseError(port);
+      }
 
       // 5. Initialize log manager
-      await this.initializeLogManager('diffusion-server.log', port);
+      const logPath = path.join(PATHS.logs, 'diffusion-server.log');
+      this.logManager = new LogManager(logPath);
+      await this.logManager.initialize();
+      await this.logManager.write(`Starting diffusion server on port ${port}`, 'info');
 
       // 6. Create HTTP server
       await this.createHTTPServer(config);
@@ -176,8 +183,28 @@ export class DiffusionServerManager extends ServerManager {
         this.httpServer = undefined;
       }
 
-      // Handle error using base class helper
-      await this.handleStartupError(error, 'diffusion server');
+      if (this.logManager) {
+        await this.logManager.write(
+          `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        );
+      }
+
+      // Re-throw typed errors
+      if (
+        error instanceof ModelNotFoundError ||
+        error instanceof PortInUseError ||
+        error instanceof BinaryError ||
+        error instanceof InsufficientResourcesError ||
+        error instanceof ServerError
+      ) {
+        throw error;
+      }
+
+      throw new ServerError(
+        `Failed to start diffusion server: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        { error: error instanceof Error ? error.message : String(error) }
+      );
     }
   }
 
@@ -282,6 +309,36 @@ export class DiffusionServerManager extends ServerManager {
     } as DiffusionServerInfo;
   }
 
+  /**
+   * Get recent server logs
+   *
+   * @param lines - Number of lines to retrieve (default: 100)
+   * @returns Array of log lines
+   */
+  async getLogs(lines: number = 100): Promise<string[]> {
+    if (!this.logManager) {
+      return [];
+    }
+    try {
+      return await this.logManager.getRecent(lines);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Clear all server logs
+   */
+  async clearLogs(): Promise<void> {
+    if (!this.logManager) {
+      return;
+    }
+    try {
+      await this.logManager.clear();
+    } catch {
+      // Ignore errors
+    }
+  }
 
   /**
    * Ensure stable-diffusion.cpp binary is downloaded
