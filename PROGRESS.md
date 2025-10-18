@@ -101,6 +101,11 @@ shared functionality to ServerManager base class.
 
 **Test Results**: All 95 tests passing after refactoring (45 Phase 1 + 50 Phase 2)
 
+**Documentation**: See `docs/dev/REFACTORING-ANALYSIS.md` for complete analysis, including:
+- Detailed breakdown of original duplication found
+- Future refactoring opportunities (template method pattern for `start()`)
+- Recommendations on when to pursue remaining work (Phase 3+)
+
 **Bug Fixed During Testing**:
 - **File**: `src/managers/DiffusionServerManager.ts:459`
 - **Error**: `ReferenceError: Cannot access 'generationPromise' before initialization`
