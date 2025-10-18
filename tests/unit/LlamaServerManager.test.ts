@@ -47,34 +47,41 @@ jest.unstable_mockModule('../../src/system/SystemInfo.js', () => ({
 }));
 
 // Mock ProcessManager
-const mockProcessManager = {
-  spawn: jest.fn(),
-  kill: jest.fn(),
-  isRunning: jest.fn(),
-};
+const mockProcessSpawn = jest.fn();
+const mockProcessKill = jest.fn();
+const mockProcessIsRunning = jest.fn();
+
+class MockProcessManager {
+  spawn = mockProcessSpawn;
+  kill = mockProcessKill;
+  isRunning = mockProcessIsRunning;
+}
 
 jest.unstable_mockModule('../../src/process/ProcessManager.js', () => ({
-  ProcessManager: jest.fn(() => mockProcessManager),
+  ProcessManager: MockProcessManager,
 }));
 
 // Mock health-check
 const mockCheckHealth = jest.fn();
 const mockWaitForHealthy = jest.fn();
+const mockIsServerResponding = jest.fn();
 
 jest.unstable_mockModule('../../src/process/health-check.js', () => ({
   checkHealth: mockCheckHealth,
   waitForHealthy: mockWaitForHealthy,
+  isServerResponding: mockIsServerResponding,
 }));
 
 // Mock LogManager
-const mockLogManager = {
-  write: jest.fn(),
-  getRecent: jest.fn(),
-  clear: jest.fn(),
-};
+class MockLogManager {
+  initialize = jest.fn().mockResolvedValue(undefined);
+  write = jest.fn().mockResolvedValue(undefined);
+  getRecent = jest.fn().mockResolvedValue([]);
+  clear = jest.fn().mockResolvedValue(undefined);
+}
 
 jest.unstable_mockModule('../../src/process/log-manager.js', () => ({
-  LogManager: jest.fn(() => mockLogManager),
+  LogManager: MockLogManager,
 }));
 
 // Mock file-utils
@@ -91,6 +98,15 @@ jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
   formatBytes: jest.fn((bytes: number) => `${bytes} bytes`),
   isAbsolutePath: jest.fn().mockReturnValue(true),
   sanitizeFilename: jest.fn((filename: string) => filename),
+}));
+
+// Mock BinaryManager
+class MockBinaryManager {
+  ensureBinary = jest.fn().mockResolvedValue('/test/binaries/llama/llama-server');
+}
+
+jest.unstable_mockModule('../../src/managers/BinaryManager.js', () => ({
+  BinaryManager: MockBinaryManager,
 }));
 
 // Mock Downloader for binary downloads
@@ -172,6 +188,7 @@ describe('LlamaServerManager', () => {
     });
     mockFileExists.mockResolvedValue(true); // Binary exists
     mockWaitForHealthy.mockResolvedValue(undefined);
+    mockIsServerResponding.mockResolvedValue(false); // Port not in use by default
 
     // Mock process spawn
     const mockProcess = new EventEmitter() as any;
@@ -179,8 +196,8 @@ describe('LlamaServerManager', () => {
     mockProcess.stdout = new EventEmitter();
     mockProcess.stderr = new EventEmitter();
     mockProcess.kill = jest.fn();
-    mockProcessManager.spawn.mockReturnValue(mockProcess);
-    mockProcessManager.isRunning.mockReturnValue(true);
+    mockProcessSpawn.mockReturnValue(mockProcess);
+    mockProcessIsRunning.mockReturnValue(true);
   });
 
   describe('start()', () => {
@@ -200,7 +217,7 @@ describe('LlamaServerManager', () => {
       expect(mockSystemInfo.canRunModel).toHaveBeenCalledWith(mockModelInfo);
 
       // Verify process was spawned
-      expect(mockProcessManager.spawn).toHaveBeenCalled();
+      expect(mockProcessSpawn).toHaveBeenCalled();
 
       // Verify health check
       expect(mockWaitForHealthy).toHaveBeenCalledWith(8080, expect.any(Number));
@@ -218,7 +235,7 @@ describe('LlamaServerManager', () => {
 
       expect(info.status).toBe('running');
       // Custom config should override auto-detection
-      const spawnCall = mockProcessManager.spawn.mock.calls[0];
+      const spawnCall = mockProcessSpawn.mock.calls[0];
       const args = spawnCall[1] as string[];
       expect(args).toContain('--threads');
       expect(args).toContain('4');
@@ -273,27 +290,27 @@ describe('LlamaServerManager', () => {
     });
 
     it('should stop server gracefully', async () => {
-      mockProcessManager.isRunning.mockReturnValueOnce(true).mockReturnValueOnce(false);
+      mockProcessIsRunning.mockReturnValueOnce(true).mockReturnValueOnce(false);
 
       await llamaServer.stop();
 
-      expect(mockProcessManager.kill).toHaveBeenCalledWith(12345, 'SIGTERM');
+      expect(mockProcessKill).toHaveBeenCalledWith(12345, 'SIGTERM');
 
       const status = llamaServer.getStatus();
       expect(status.status).toBe('stopped');
     });
 
     it('should force kill after timeout', async () => {
-      mockProcessManager.isRunning.mockReturnValue(true); // Never stops gracefully
+      mockProcessIsRunning.mockReturnValue(true); // Never stops gracefully
 
       await llamaServer.stop();
 
-      expect(mockProcessManager.kill).toHaveBeenCalledWith(12345, 'SIGTERM');
-      expect(mockProcessManager.kill).toHaveBeenCalledWith(12345, 'SIGKILL');
+      expect(mockProcessKill).toHaveBeenCalledWith(12345, 'SIGTERM');
+      expect(mockProcessKill).toHaveBeenCalledWith(12345, 'SIGKILL');
     });
 
     it('should emit stopped event', async () => {
-      mockProcessManager.isRunning.mockReturnValueOnce(true).mockReturnValueOnce(false);
+      mockProcessIsRunning.mockReturnValueOnce(true).mockReturnValueOnce(false);
 
       const stoppedHandler = jest.fn();
       llamaServer.on('stopped', stoppedHandler);
@@ -317,12 +334,12 @@ describe('LlamaServerManager', () => {
     });
 
     it('should restart server', async () => {
-      mockProcessManager.isRunning.mockReturnValueOnce(true).mockReturnValueOnce(false);
+      mockProcessIsRunning.mockReturnValueOnce(true).mockReturnValueOnce(false);
 
       const info = await llamaServer.restart();
 
       expect(info.status).toBe('running');
-      expect(mockProcessManager.kill).toHaveBeenCalled();
+      expect(mockProcessKill).toHaveBeenCalled();
       expect(mockWaitForHealthy).toHaveBeenCalledTimes(2); // Once for start, once for restart
     });
   });
@@ -371,7 +388,7 @@ describe('LlamaServerManager', () => {
 
     it('should return false if server is not running', async () => {
       await llamaServer.stop();
-      mockProcessManager.isRunning.mockReturnValue(false);
+      mockProcessIsRunning.mockReturnValue(false);
 
       const healthy = await llamaServer.isHealthy();
 
@@ -411,7 +428,7 @@ describe('LlamaServerManager', () => {
       await llamaServer.start(mockConfig);
 
       // Simulate process crash
-      const mockProcess = mockProcessManager.spawn.mock.results[0].value;
+      const mockProcess = mockProcessSpawn.mock.results[0].value;
       mockProcess.emit('exit', 1, null);
 
       expect(crashedHandler).toHaveBeenCalled();
@@ -420,7 +437,7 @@ describe('LlamaServerManager', () => {
     it('should update status to crashed', async () => {
       await llamaServer.start(mockConfig);
 
-      const mockProcess = mockProcessManager.spawn.mock.results[0].value;
+      const mockProcess = mockProcessSpawn.mock.results[0].value;
       mockProcess.emit('exit', 1, null);
 
       const status = llamaServer.getStatus();
@@ -432,7 +449,7 @@ describe('LlamaServerManager', () => {
     it('should use GPU layers if GPU is available', async () => {
       await llamaServer.start(mockConfig);
 
-      const spawnCall = mockProcessManager.spawn.mock.calls[0];
+      const spawnCall = mockProcessSpawn.mock.calls[0];
       const args = spawnCall[1] as string[];
       expect(args).toContain('--gpu-layers');
     });
@@ -458,7 +475,7 @@ describe('LlamaServerManager', () => {
 
       await llamaServer.start(mockConfig);
 
-      const spawnCall = mockProcessManager.spawn.mock.calls[0];
+      const spawnCall = mockProcessSpawn.mock.calls[0];
       const args = spawnCall[1] as string[];
       const gpuLayersIndex = args.indexOf('--gpu-layers');
       if (gpuLayersIndex !== -1) {
