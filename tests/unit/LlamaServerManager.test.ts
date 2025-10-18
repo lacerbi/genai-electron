@@ -147,7 +147,7 @@ describe('LlamaServerManager', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    llamaServer = new LlamaServerManager();
+    llamaServer = new LlamaServerManager(mockModelManager as any, mockSystemInfo as any);
 
     // Setup default mocks
     mockModelManager.getModelInfo.mockResolvedValue(mockModelInfo);
@@ -163,8 +163,8 @@ describe('LlamaServerManager', () => {
         gpuLayers: 35,
       },
     });
-    mockSystemInfo.canRunModel.mockReturnValue({ canRun: true });
-    mockSystemInfo.getOptimalConfig.mockReturnValue({
+    mockSystemInfo.canRunModel.mockResolvedValue({ possible: true });
+    mockSystemInfo.getOptimalConfig.mockResolvedValue({
       threads: 7,
       contextSize: 4096,
       gpuLayers: 35,
