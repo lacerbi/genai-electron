@@ -89,7 +89,9 @@ describe('Downloader', () => {
       const chunkSize = 100;
 
       // Mock fetch response with streaming body
-      const chunks = Array(10).fill(0).map(() => new Uint8Array(chunkSize));
+      const chunks = Array(10)
+        .fill(0)
+        .map(() => new Uint8Array(chunkSize));
       const mockStream = createMockReadableStream(chunks);
 
       mockFetch.mockResolvedValue({
@@ -300,11 +302,7 @@ describe('Downloader', () => {
       const progressValues: number[] = [];
       const totalSize = 1000;
 
-      const chunks = [
-        new Uint8Array(100),
-        new Uint8Array(100),
-        new Uint8Array(100),
-      ];
+      const chunks = [new Uint8Array(100), new Uint8Array(100), new Uint8Array(100)];
       const mockStream = createMockReadableStream(chunks);
 
       mockFetch.mockResolvedValue({

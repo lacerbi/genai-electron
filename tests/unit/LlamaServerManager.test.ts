@@ -505,7 +505,7 @@ describe('LlamaServerManager', () => {
       mockProcess.emit('exit', 1, null);
 
       // Wait for async operations including logManager.write().catch()
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       expect(crashedHandler).toHaveBeenCalled();
 
@@ -538,7 +538,7 @@ describe('LlamaServerManager', () => {
       mockProcess.emit('exit', 1, null);
 
       // Wait for async operations including logManager.write().catch()
-      await new Promise(resolve => setTimeout(resolve, 10));
+      await new Promise((resolve) => setTimeout(resolve, 10));
 
       const status = llamaServer.getStatus();
       expect(status).toBe('crashed');

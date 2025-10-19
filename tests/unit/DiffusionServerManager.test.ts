@@ -5,7 +5,11 @@
 
 import { jest } from '@jest/globals';
 import { EventEmitter } from 'events';
-import type { DiffusionServerConfig, ModelInfo, ImageGenerationConfig } from '../../src/types/index.js';
+import type {
+  DiffusionServerConfig,
+  ModelInfo,
+  ImageGenerationConfig,
+} from '../../src/types/index.js';
 
 // Mock Electron app
 const mockApp = {
@@ -421,7 +425,7 @@ describe('DiffusionServerManager', () => {
       });
 
       // Wait for spawn to be called (after async log write)
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Simulate progress updates from stdout
       spawnedProcess.stdout.emit('data', 'step 5/30\n');
@@ -484,7 +488,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage(minimalConfig);
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       spawnedProcess.emit('exit', 0, null);
 
@@ -508,7 +512,7 @@ describe('DiffusionServerManager', () => {
       const firstGeneration = diffusionServer.generateImage(imageConfig);
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Try to start second generation while first is running
       await expect(diffusionServer.generateImage(imageConfig)).rejects.toThrow('busy');
@@ -522,7 +526,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage(imageConfig);
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       spawnedProcess.emit('exit', 1, null);
 
@@ -535,7 +539,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage(imageConfig);
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       spawnedProcess.emit('exit', 0, null);
 
@@ -557,7 +561,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage({ prompt: 'test' });
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       spawnedProcess.emit('exit', 0, null);
       await resultPromise;
@@ -576,7 +580,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage(imageConfig);
 
       // Wait for spawn to be called (currentGeneration is set after promise creation)
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Check busy during generation
       let info = diffusionServer.getInfo();
@@ -654,7 +658,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage({ prompt: 'test' });
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Stop server while generating
       await diffusionServer.stop();
@@ -779,9 +783,7 @@ describe('DiffusionServerManager', () => {
       requestHandler(req, res);
 
       expect(res.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
-      expect(res.end).toHaveBeenCalledWith(
-        expect.stringContaining('"status":"ok"')
-      );
+      expect(res.end).toHaveBeenCalledWith(expect.stringContaining('"status":"ok"'));
     });
 
     it('should handle CORS preflight', () => {

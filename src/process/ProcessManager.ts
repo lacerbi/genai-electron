@@ -79,10 +79,7 @@ export class ProcessManager {
       });
 
       if (!childProcess.pid) {
-        throw new ServerError(
-          `Failed to spawn process: ${command}`,
-          { command, args }
-        );
+        throw new ServerError(`Failed to spawn process: ${command}`, { command, args });
       }
 
       // Capture stdout
@@ -161,10 +158,10 @@ export class ProcessManager {
             resolve();
           } catch (error) {
             reject(
-              new ServerError(
-                `Failed to force kill process ${pid}`,
-                { pid, error: error instanceof Error ? error.message : String(error) }
-              )
+              new ServerError(`Failed to force kill process ${pid}`, {
+                pid,
+                error: error instanceof Error ? error.message : String(error),
+              })
             );
           }
         }
@@ -190,10 +187,10 @@ export class ProcessManager {
           resolve();
         } else {
           reject(
-            new ServerError(
-              `Failed to kill process ${pid}`,
-              { pid, error: error instanceof Error ? error.message : String(error) }
-            )
+            new ServerError(`Failed to kill process ${pid}`, {
+              pid,
+              error: error instanceof Error ? error.message : String(error),
+            })
           );
         }
       }

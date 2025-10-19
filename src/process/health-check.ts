@@ -37,10 +37,7 @@ export interface HealthCheckResponse {
  * }
  * ```
  */
-export async function checkHealth(
-  port: number,
-  timeout = 5000
-): Promise<HealthCheckResponse> {
+export async function checkHealth(port: number, timeout = 5000): Promise<HealthCheckResponse> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
@@ -48,7 +45,7 @@ export async function checkHealth(
     const response = await fetch(`http://localhost:${port}/health`, {
       signal: controller.signal,
       headers: {
-        'Accept': 'application/json',
+        Accept: 'application/json',
       },
     });
 
@@ -60,7 +57,7 @@ export async function checkHealth(
 
     // Try to parse JSON response
     try {
-      const data = await response.json() as HealthCheckResponse;
+      const data = (await response.json()) as HealthCheckResponse;
       // Validate status field
       if (
         data.status === 'ok' ||
@@ -163,10 +160,11 @@ export async function waitForHealthy(
   }
 
   // Should not reach here, but just in case
-  throw new ServerError(
-    `Server health check timeout after ${timeout}ms`,
-    { port, timeout, attempts: attempt }
-  );
+  throw new ServerError(`Server health check timeout after ${timeout}ms`, {
+    port,
+    timeout,
+    attempts: attempt,
+  });
 }
 
 /**

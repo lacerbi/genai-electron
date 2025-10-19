@@ -63,11 +63,7 @@ export async function ensureDirectories(): Promise<void> {
     PATHS.temp,
   ];
 
-  await Promise.all(
-    directories.map((dir) =>
-      mkdir(dir, { recursive: true })
-    )
-  );
+  await Promise.all(directories.map((dir) => mkdir(dir, { recursive: true })));
 }
 
 /**

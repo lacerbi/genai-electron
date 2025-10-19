@@ -354,10 +354,12 @@ export abstract class ServerManager extends EventEmitter {
 
     // Log the error
     if (this.logManager) {
-      await this.logManager.write(
-        `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
-        'error'
-      ).catch(() => void 0);
+      await this.logManager
+        .write(
+          `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+        .catch(() => void 0);
     }
 
     // Re-throw typed errors

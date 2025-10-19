@@ -55,9 +55,7 @@ async function detectMacGPU(): Promise<GPUInfo> {
 
   // Try to get GPU name from system_profiler
   try {
-    const { stdout } = await execAsync(
-      'system_profiler SPDisplaysDataType | grep "Chipset Model"'
-    );
+    const { stdout } = await execAsync('system_profiler SPDisplaysDataType | grep "Chipset Model"');
     const match = stdout.match(/Chipset Model:\s*(.+)/);
     if (match && match[1]) {
       gpuInfo.name = match[1].trim();
@@ -240,9 +238,7 @@ async function detectLinuxIntelGPU(): Promise<GPUInfo> {
     if (stdout.trim() === '0x8086') {
       // Try to get GPU name from device info
       try {
-        const { stdout: deviceInfo } = await execAsync(
-          'lspci | grep -i vga | grep -i intel'
-        );
+        const { stdout: deviceInfo } = await execAsync('lspci | grep -i vga | grep -i intel');
         const match = deviceInfo.match(/Intel.*?:\s*(.+)/);
         const name = match && match[1] ? match[1].trim() : 'Intel GPU';
 

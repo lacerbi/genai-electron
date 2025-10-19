@@ -257,9 +257,11 @@ export function isAbsolutePath(filePath: string): boolean {
  */
 export function sanitizeFilename(filename: string): string {
   // Remove invalid characters for all platforms
-  return filename
-    // eslint-disable-next-line no-control-regex
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '') // Invalid Windows chars (includes control chars)
-    .replace(/\s+/g, ' ') // Normalize whitespace
-    .trim();
+  return (
+    filename
+      // eslint-disable-next-line no-control-regex
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '') // Invalid Windows chars (includes control chars)
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .trim()
+  );
 }

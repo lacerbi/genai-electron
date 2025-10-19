@@ -18,11 +18,7 @@ import { promises as fs } from 'node:fs';
 import { getTempPath } from '../config/paths.js';
 import { BINARY_VERSIONS, DEFAULT_PORTS } from '../config/defaults.js';
 import { deleteFile } from '../utils/file-utils.js';
-import {
-  ServerError,
-  ModelNotFoundError,
-  InsufficientResourcesError,
-} from '../errors/index.js';
+import { ServerError, ModelNotFoundError, InsufficientResourcesError } from '../errors/index.js';
 import type {
   DiffusionServerConfig,
   DiffusionServerInfo,
@@ -277,7 +273,6 @@ export class DiffusionServerManager extends ServerManager {
     } as DiffusionServerInfo;
   }
 
-
   /**
    * Ensure stable-diffusion.cpp binary is downloaded
    *
@@ -286,11 +281,7 @@ export class DiffusionServerManager extends ServerManager {
    * @private
    */
   private async ensureBinary(): Promise<string> {
-    return this.ensureBinaryHelper(
-      'diffusion',
-      'stable-diffusion',
-      BINARY_VERSIONS.diffusionCpp
-    );
+    return this.ensureBinaryHelper('diffusion', 'stable-diffusion', BINARY_VERSIONS.diffusionCpp);
   }
 
   /**
@@ -418,10 +409,7 @@ export class DiffusionServerManager extends ServerManager {
     const outputPath = getTempPath(`sd-output-${Date.now()}.png`);
     args.push('-o', outputPath);
 
-    await this.logManager?.write(
-      `Generating image: ${this.binaryPath} ${args.join(' ')}`,
-      'info'
-    );
+    await this.logManager?.write(`Generating image: ${this.binaryPath} ${args.join(' ')}`, 'info');
 
     // Spawn stable-diffusion.cpp
     let cancelled = false;

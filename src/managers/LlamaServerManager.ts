@@ -20,10 +20,7 @@ import type {
   HealthStatus,
   ModelInfo,
 } from '../types/index.js';
-import {
-  ServerError,
-  InsufficientResourcesError,
-} from '../errors/index.js';
+import { ServerError, InsufficientResourcesError } from '../errors/index.js';
 import { BINARY_VERSIONS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
 import { fileExists } from '../utils/file-utils.js';
 
@@ -151,13 +148,10 @@ export class LlamaServerManager extends ServerManager {
       }
 
       if (!(await fileExists(this.binaryPath))) {
-        throw new ServerError(
-          `Binary file not found: ${this.binaryPath}`,
-          {
-            path: this.binaryPath,
-            suggestion: 'Try deleting the binaries directory and restarting the app',
-          }
-        );
+        throw new ServerError(`Binary file not found: ${this.binaryPath}`, {
+          path: this.binaryPath,
+          suggestion: 'Try deleting the binaries directory and restarting the app',
+        });
       }
 
       await this.logManager!.write(
@@ -166,16 +160,12 @@ export class LlamaServerManager extends ServerManager {
       );
 
       // 9. Spawn the process
-      const { pid } = this.processManager.spawn(
-        this.binaryPath,
-        args,
-        {
-          onStdout: (data) => this.handleStdout(data),
-          onStderr: (data) => this.handleStderr(data),
-          onExit: (code, signal) => this.handleExit(code, signal),
-          onError: (error) => this.handleSpawnError(error),
-        }
-      );
+      const { pid } = this.processManager.spawn(this.binaryPath, args, {
+        onStdout: (data) => this.handleStdout(data),
+        onStderr: (data) => this.handleStderr(data),
+        onExit: (code, signal) => this.handleExit(code, signal),
+        onError: (error) => this.handleSpawnError(error),
+      });
 
       this._pid = pid;
       this._port = finalConfig.port;
@@ -284,7 +274,6 @@ export class LlamaServerManager extends ServerManager {
     }
   }
 
-
   /**
    * Ensure llama-server binary is downloaded
    *
@@ -299,11 +288,7 @@ export class LlamaServerManager extends ServerManager {
    * @private
    */
   private async ensureBinary(): Promise<string> {
-    return this.ensureBinaryHelper(
-      'llama',
-      'llama-server',
-      BINARY_VERSIONS.llamaServer
-    );
+    return this.ensureBinaryHelper('llama', 'llama-server', BINARY_VERSIONS.llamaServer);
   }
 
   /**
@@ -447,9 +432,7 @@ export class LlamaServerManager extends ServerManager {
    */
   private handleSpawnError(error: Error): void {
     if (this.logManager) {
-      this.logManager
-        .write(`Spawn error: ${error.message}`, 'error')
-        .catch(() => void 0);
+      this.logManager.write(`Spawn error: ${error.message}`, 'error').catch(() => void 0);
     }
     // The error will be handled by the exit handler
     // which will emit a 'crashed' event

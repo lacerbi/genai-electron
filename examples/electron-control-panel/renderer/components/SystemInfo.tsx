@@ -93,9 +93,7 @@ const SystemInfo: React.FC = () => {
                   <p className="capability-subtitle">{capabilities.gpu.name}</p>
                   {capabilities.gpu.vram && (
                     <ProgressBar
-                      current={
-                        capabilities.gpu.vram - (capabilities.gpu.vramAvailable || 0)
-                      }
+                      current={capabilities.gpu.vram - (capabilities.gpu.vramAvailable || 0)}
                       total={capabilities.gpu.vram}
                       label={`VRAM: ${formatBytes(capabilities.gpu.vramAvailable || 0)} available`}
                       showPercentage={false}
@@ -121,12 +119,8 @@ const SystemInfo: React.FC = () => {
         <div className="recommendations">
           <div className="recommendation-item">
             <h4>Maximum Model Size</h4>
-            <p className="recommendation-value">
-              {capabilities.recommendations.maxModelSize}
-            </p>
-            <p className="recommendation-description">
-              Based on available system memory
-            </p>
+            <p className="recommendation-value">{capabilities.recommendations.maxModelSize}</p>
+            <p className="recommendation-description">Based on available system memory</p>
           </div>
 
           <div className="recommendation-item">
@@ -154,9 +148,7 @@ const SystemInfo: React.FC = () => {
                   <span className="model-name">
                     {model.name} ({model.size})
                   </span>
-                  <span className="model-status">
-                    {model.supported ? 'Supported' : 'Marginal'}
-                  </span>
+                  <span className="model-status">{model.supported ? 'Supported' : 'Marginal'}</span>
                 </li>
               ))}
             </ul>

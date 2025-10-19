@@ -65,11 +65,7 @@ export class SystemInfo {
   public async detect(forceRefresh = false): Promise<SystemCapabilities> {
     // Return cached result if still valid
     const now = Date.now();
-    if (
-      !forceRefresh &&
-      this.cachedCapabilities &&
-      now - this.cacheTimestamp < this.CACHE_TTL
-    ) {
+    if (!forceRefresh && this.cachedCapabilities && now - this.cacheTimestamp < this.CACHE_TTL) {
       return this.cachedCapabilities;
     }
 
@@ -189,11 +185,7 @@ export class SystemInfo {
       // Estimate total layers (rough approximation based on model size)
       // 7B models: ~32 layers, 13B: ~40 layers, 70B: ~80 layers
       const estimatedLayers = Math.round(modelInfo.size / (150 * 1024 ** 2));
-      config.gpuLayers = calculateGPULayers(
-        estimatedLayers,
-        capabilities.gpu.vram,
-        modelInfo.size
-      );
+      config.gpuLayers = calculateGPULayers(estimatedLayers, capabilities.gpu.vram, modelInfo.size);
     } else {
       config.gpuLayers = 0; // CPU-only
     }

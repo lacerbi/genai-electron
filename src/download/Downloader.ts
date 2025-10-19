@@ -86,10 +86,10 @@ export class Downloader {
       });
 
       if (!response.ok) {
-        throw new DownloadError(
-          `HTTP error: ${response.status} ${response.statusText}`,
-          { status: response.status, url }
-        );
+        throw new DownloadError(`HTTP error: ${response.status} ${response.statusText}`, {
+          status: response.status,
+          url,
+        });
       }
 
       if (!response.body) {
@@ -144,10 +144,7 @@ export class Downloader {
       const readPromise = readChunk();
 
       // Pipeline the streams
-      await Promise.all([
-        readPromise,
-        pipeline(trackingStream, fileStream),
-      ]);
+      await Promise.all([readPromise, pipeline(trackingStream, fileStream)]);
 
       // Final progress callback
       if (onProgress && totalSize > 0) {

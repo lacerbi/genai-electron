@@ -1,19 +1,19 @@
 name: ✨ Feature Request
 description: Suggest an idea for this project
-labels: ["enhancement"]
+labels: ['enhancement']
 body:
   - type: checkboxes
     attributes:
       label: Pre-submission Checks
       options:
-        - label: "I have searched the existing issues to make sure this feature has not been requested yet."
+        - label: 'I have searched the existing issues to make sure this feature has not been requested yet.'
           required: true
         - label: "This feature request is in scope with the project's goals (Electron-specific AI model server management)."
           required: true
 
   - type: textarea
     attributes:
-      label: "What problem is this feature trying to solve?"
+      label: 'What problem is this feature trying to solve?'
       description: "A clear and concise description of the problem. Ex. I'm always frustrated when [...]"
     validations:
       required: true
@@ -21,7 +21,7 @@ body:
   - type: textarea
     attributes:
       label: "Describe the solution you'd like"
-      description: "A clear and concise description of what you want to happen."
+      description: 'A clear and concise description of what you want to happen.'
     validations:
       required: true
 
@@ -32,5 +32,5 @@ body:
 
   - type: textarea
     attributes:
-      label: "Additional context"
-      description: "Add any other context or screenshots about the feature request here."
+      label: 'Additional context'
+      description: 'Add any other context or screenshots about the feature request here.'

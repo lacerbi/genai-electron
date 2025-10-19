@@ -167,14 +167,8 @@ const ModelDownloadForm: React.FC<ModelDownloadFormProps> = ({
       {/* Progress */}
       {downloading && progress && (
         <div className="download-progress">
-          <p className="download-status">
-            Downloading {progress.modelName}...
-          </p>
-          <ProgressBar
-            current={progress.downloaded}
-            total={progress.total}
-            showPercentage={true}
-          />
+          <p className="download-status">Downloading {progress.modelName}...</p>
+          <ProgressBar current={progress.downloaded} total={progress.total} showPercentage={true} />
           <p className="download-details">
             {formatBytes(progress.downloaded)} / {formatBytes(progress.total)}
           </p>

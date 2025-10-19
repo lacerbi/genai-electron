@@ -16,7 +16,9 @@ const mockStorageManager = {
   verifyModelIntegrity: jest.fn(),
   checkDiskSpace: jest.fn(),
   getStorageUsed: jest.fn(),
-  getModelPath: jest.fn().mockImplementation((type: string, filename: string) => `/test/models/${type}/${filename}`),
+  getModelPath: jest
+    .fn()
+    .mockImplementation((type: string, filename: string) => `/test/models/${type}/${filename}`),
 };
 
 jest.unstable_mockModule('../../src/managers/StorageManager.js', () => ({
@@ -107,7 +109,9 @@ describe('ModelManager', () => {
   describe('listModels()', () => {
     it('should list all models', async () => {
       // listModelFiles returns string[] (model IDs), not ModelInfo[]
-      mockStorageManager.listModelFiles.mockResolvedValueOnce(['test-model']).mockResolvedValueOnce([]);
+      mockStorageManager.listModelFiles
+        .mockResolvedValueOnce(['test-model'])
+        .mockResolvedValueOnce([]);
       mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
 
       const models = await modelManager.listModels();
@@ -174,7 +178,9 @@ describe('ModelManager', () => {
     });
 
     it('should download from HuggingFace', async () => {
-      mockGetHuggingFaceURL.mockReturnValue('https://huggingface.co/test/model/resolve/main/model.gguf');
+      mockGetHuggingFaceURL.mockReturnValue(
+        'https://huggingface.co/test/model/resolve/main/model.gguf'
+      );
 
       const hfConfig: DownloadConfig = {
         source: 'huggingface',
@@ -256,7 +262,9 @@ describe('ModelManager', () => {
   describe('deleteModel()', () => {
     it('should delete model by ID', async () => {
       // listModelFiles returns string IDs, loadModelMetadata returns ModelInfo
-      mockStorageManager.listModelFiles.mockResolvedValueOnce(['test-model']).mockResolvedValueOnce([]);
+      mockStorageManager.listModelFiles
+        .mockResolvedValueOnce(['test-model'])
+        .mockResolvedValueOnce([]);
       mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
       mockStorageManager.deleteModelFiles.mockResolvedValue(undefined);
 
@@ -272,7 +280,9 @@ describe('ModelManager', () => {
     });
 
     it('should handle deletion errors', async () => {
-      mockStorageManager.listModelFiles.mockResolvedValueOnce(['test-model']).mockResolvedValueOnce([]);
+      mockStorageManager.listModelFiles
+        .mockResolvedValueOnce(['test-model'])
+        .mockResolvedValueOnce([]);
       mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
       mockStorageManager.deleteModelFiles.mockRejectedValue(new Error('Delete failed'));
 
@@ -282,7 +292,9 @@ describe('ModelManager', () => {
 
   describe('getModelInfo()', () => {
     it('should return model info by ID', async () => {
-      mockStorageManager.listModelFiles.mockResolvedValueOnce(['test-model']).mockResolvedValueOnce([]);
+      mockStorageManager.listModelFiles
+        .mockResolvedValueOnce(['test-model'])
+        .mockResolvedValueOnce([]);
       mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
 
       const info = await modelManager.getModelInfo('test-model');
@@ -300,7 +312,9 @@ describe('ModelManager', () => {
   describe('verifyModel()', () => {
     beforeEach(() => {
       // listModelFiles returns string IDs
-      mockStorageManager.listModelFiles.mockResolvedValueOnce(['test-model']).mockResolvedValueOnce([]);
+      mockStorageManager.listModelFiles
+        .mockResolvedValueOnce(['test-model'])
+        .mockResolvedValueOnce([]);
       mockStorageManager.loadModelMetadata.mockResolvedValue({
         ...mockModelInfo,
         checksum: 'sha256:abc123',
@@ -328,7 +342,9 @@ describe('ModelManager', () => {
     });
 
     it('should handle models without checksum', async () => {
-      mockStorageManager.listModelFiles.mockResolvedValueOnce(['test-model']).mockResolvedValueOnce([]);
+      mockStorageManager.listModelFiles
+        .mockResolvedValueOnce(['test-model'])
+        .mockResolvedValueOnce([]);
       mockStorageManager.loadModelMetadata.mockResolvedValue({
         ...mockModelInfo,
         checksum: undefined,

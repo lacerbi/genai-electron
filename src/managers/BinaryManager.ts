@@ -68,13 +68,10 @@ export class BinaryManager {
     const { type, binaryName, variants, platformKey } = this.config;
 
     if (!variants || variants.length === 0) {
-      throw new BinaryError(
-        `No binary variants available for platform: ${platformKey}`,
-        {
-          platform: platformKey,
-          suggestion: 'Check platform support in DESIGN.md',
-        }
-      );
+      throw new BinaryError(`No binary variants available for platform: ${platformKey}`, {
+        platform: platformKey,
+        suggestion: 'Check platform support in DESIGN.md',
+      });
     }
 
     // Ensure binary directory exists
@@ -142,14 +139,11 @@ export class BinaryManager {
     }
 
     // All variants failed
-    throw new BinaryError(
-      `Failed to download binary. Tried all variants for ${platformKey}.`,
-      {
-        platform: platformKey,
-        errors: errors.join('; '),
-        suggestion: 'Check your GPU drivers are installed, or the system may not support any variant',
-      }
-    );
+    throw new BinaryError(`Failed to download binary. Tried all variants for ${platformKey}.`, {
+      platform: platformKey,
+      errors: errors.join('; '),
+      suggestion: 'Check your GPU drivers are installed, or the system may not support any variant',
+    });
   }
 
   /**

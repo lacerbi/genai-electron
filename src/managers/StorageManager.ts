@@ -12,11 +12,7 @@ import {
   getModelFilePath,
   PATHS,
 } from '../config/paths.js';
-import {
-  fileExists,
-  deleteFile,
-  calculateChecksum,
-} from '../utils/file-utils.js';
+import { fileExists, deleteFile, calculateChecksum } from '../utils/file-utils.js';
 
 /**
  * Storage manager for model files and metadata

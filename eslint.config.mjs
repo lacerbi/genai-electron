@@ -15,7 +15,17 @@ export default tseslint.config(
 
   // Global ignores
   {
-    ignores: ['dist/', 'coverage/', 'node_modules/', 'examples/', 'tests/', '**/*.js', '**/*.mjs', '!eslint.config.mjs', '!jest.config.js'],
+    ignores: [
+      'dist/',
+      'coverage/',
+      'node_modules/',
+      'examples/',
+      'tests/',
+      '**/*.js',
+      '**/*.mjs',
+      '!eslint.config.mjs',
+      '!jest.config.js',
+    ],
   },
 
   // Main configuration for TypeScript files

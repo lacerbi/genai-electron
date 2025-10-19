@@ -105,7 +105,9 @@ const ServerConfig: React.FC<ServerConfigProps> = ({
         <div className="config-group">
           <label htmlFor="gpuLayers">
             GPU Layers
-            <span className="config-hint">Number of model layers to offload to GPU (0 = CPU only)</span>
+            <span className="config-hint">
+              Number of model layers to offload to GPU (0 = CPU only)
+            </span>
           </label>
           <input
             type="number"

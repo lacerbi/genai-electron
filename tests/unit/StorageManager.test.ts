@@ -46,8 +46,7 @@ jest.unstable_mockModule('../../src/config/paths.js', () => ({
     config: '/test/config',
   },
   getModelFilePath: (type: string, filename: string) => `/test/models/${type}/${filename}`,
-  getModelMetadataPath: (type: string, modelId: string) =>
-    `/test/models/${type}/${modelId}.json`,
+  getModelMetadataPath: (type: string, modelId: string) => `/test/models/${type}/${modelId}.json`,
   ensureDirectories: jest.fn().mockResolvedValue(undefined),
 }));
 
@@ -205,9 +204,9 @@ describe('StorageManager', () => {
       mockReadFile.mockResolvedValue(JSON.stringify(mockModelInfo));
       mockCalculateChecksum.mockResolvedValue('different_checksum');
 
-      await expect(
-        storageManager.verifyModelIntegrity('llm', 'test-model')
-      ).rejects.toThrow('checksum mismatch');
+      await expect(storageManager.verifyModelIntegrity('llm', 'test-model')).rejects.toThrow(
+        'checksum mismatch'
+      );
     });
 
     it('should handle checksum calculation errors', async () => {
@@ -215,9 +214,7 @@ describe('StorageManager', () => {
       mockReadFile.mockResolvedValue(JSON.stringify(mockModelInfo));
       mockCalculateChecksum.mockRejectedValue(new Error('Checksum failed'));
 
-      await expect(
-        storageManager.verifyModelIntegrity('llm', 'test-model')
-      ).rejects.toThrow();
+      await expect(storageManager.verifyModelIntegrity('llm', 'test-model')).rejects.toThrow();
     });
   });
 
@@ -237,7 +234,12 @@ describe('StorageManager', () => {
           JSON.stringify({ ...mockModelInfo, id: 'model2', size: 2 * 1024 * 1024 * 1024 })
         )
         .mockResolvedValueOnce(
-          JSON.stringify({ ...mockModelInfo, id: 'diffusion1', type: 'diffusion', size: 3 * 1024 * 1024 * 1024 })
+          JSON.stringify({
+            ...mockModelInfo,
+            id: 'diffusion1',
+            type: 'diffusion',
+            size: 3 * 1024 * 1024 * 1024,
+          })
         );
 
       const total = await storageManager.getStorageUsed();

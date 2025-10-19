@@ -37,10 +37,7 @@ export async function calculateSHA256(filePath: string): Promise<string> {
  * }
  * ```
  */
-export async function verifyChecksum(
-  filePath: string,
-  expectedChecksum: string
-): Promise<boolean> {
+export async function verifyChecksum(filePath: string, expectedChecksum: string): Promise<boolean> {
   const actualChecksum = await calculateSHA256(filePath);
   const expected = expectedChecksum.replace(/^sha256:/, ''); // Remove prefix if present
 

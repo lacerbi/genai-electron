@@ -225,9 +225,7 @@ describe('BinaryManager', () => {
 
     it('should try cached variant first if cache exists', async () => {
       // Simulate cache pointing to 'cpu' variant
-      mockReadFile.mockResolvedValue(
-        JSON.stringify({ variant: 'cpu', platform: 'win32-x64' })
-      );
+      mockReadFile.mockResolvedValue(JSON.stringify({ variant: 'cpu', platform: 'win32-x64' }));
       // Ensure testBinary succeeds for all calls
       mockExecFileAsync.mockImplementation(async () => {
         return { stdout: 'version 1.0', stderr: '' };
