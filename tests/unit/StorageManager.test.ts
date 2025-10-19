@@ -45,9 +45,8 @@ jest.unstable_mockModule('../../src/config/paths.js', () => ({
     logs: '/test/logs',
     config: '/test/config',
   },
-  getModelPath: (type: string, filename: string) => `/test/models/${type}/${filename}`,
-  getModelMetadataPath: (type: string, modelId: string) =>
-    `/test/models/${type}/${modelId}.json`,
+  getModelFilePath: (type: string, filename: string) => `/test/models/${type}/${filename}`,
+  getModelMetadataPath: (type: string, modelId: string) => `/test/models/${type}/${modelId}.json`,
   ensureDirectories: jest.fn().mockResolvedValue(undefined),
 }));
 
@@ -93,7 +92,7 @@ describe('StorageManager', () => {
 
       expect(mockWriteFile).toHaveBeenCalledWith(
         expect.stringContaining('test-model.json'),
-        expect.stringContaining('"id":"test-model"'),
+        expect.stringContaining('"id": "test-model"'), // JSON is formatted with spaces
         'utf-8'
       );
     });
@@ -119,11 +118,11 @@ describe('StorageManager', () => {
       );
     });
 
-    it('should throw ModelNotFoundError if file does not exist', async () => {
+    it('should throw FileSystemError if file does not exist', async () => {
       mockFileExists.mockResolvedValue(false);
 
       await expect(storageManager.loadModelMetadata('llm', 'nonexistent')).rejects.toThrow(
-        'Model not found'
+        'Model metadata not found'
       );
     });
 
@@ -150,36 +149,22 @@ describe('StorageManager', () => {
       mockFileExists.mockResolvedValue(false);
 
       await expect(storageManager.deleteModelFiles('llm', 'nonexistent')).rejects.toThrow(
-        'Model not found'
+        'Model metadata not found'
       );
     });
   });
 
   describe('listModelFiles()', () => {
     it('should list all models of a given type', async () => {
-      mockReaddir.mockResolvedValue(['model1.gguf', 'model2.gguf', 'metadata.json']);
-      mockFileExists.mockResolvedValue(true);
-      mockReadFile
-        .mockResolvedValueOnce(
-          JSON.stringify({
-            ...mockModelInfo,
-            id: 'model1',
-            path: '/test/models/llm/model1.gguf',
-          })
-        )
-        .mockResolvedValueOnce(
-          JSON.stringify({
-            ...mockModelInfo,
-            id: 'model2',
-            path: '/test/models/llm/model2.gguf',
-          })
-        );
+      // listModelFiles returns model IDs (strings), not ModelInfo objects
+      // It looks for .json metadata files and returns their names without extension
+      mockReaddir.mockResolvedValue(['model1.json', 'model2.json', 'model1.gguf']);
 
       const models = await storageManager.listModelFiles('llm');
 
       expect(models).toHaveLength(2);
-      expect(models[0].id).toBe('model1');
-      expect(models[1].id).toBe('model2');
+      expect(models[0]).toBe('model1');
+      expect(models[1]).toBe('model2');
     });
 
     it('should handle empty directories', async () => {
@@ -191,60 +176,54 @@ describe('StorageManager', () => {
     });
 
     it('should skip files without metadata', async () => {
-      mockReaddir.mockResolvedValue(['model1.gguf', 'model2.gguf']);
-      mockFileExists.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
-      mockReadFile.mockResolvedValueOnce(
-        JSON.stringify({
-          ...mockModelInfo,
-          id: 'model1',
-        })
-      );
+      // Only .json files are considered, .gguf files without .json are ignored
+      mockReaddir.mockResolvedValue(['model1.json', 'model2.gguf']);
 
       const models = await storageManager.listModelFiles('llm');
 
       expect(models).toHaveLength(1);
-      expect(models[0].id).toBe('model1');
+      expect(models[0]).toBe('model1');
     });
   });
 
   describe('verifyModelIntegrity()', () => {
     it('should verify model checksum matches', async () => {
-      mockCalculateChecksum.mockResolvedValue('sha256:abc123');
+      // Method signature: verifyModelIntegrity(type: ModelType, modelId: string)
+      mockFileExists.mockResolvedValue(true);
+      mockReadFile.mockResolvedValue(JSON.stringify(mockModelInfo));
+      mockCalculateChecksum.mockResolvedValue('abc123'); // Without sha256: prefix
 
-      const result = await storageManager.verifyModelIntegrity(
-        '/test/model.gguf',
-        'sha256:abc123'
-      );
+      const result = await storageManager.verifyModelIntegrity('llm', 'test-model');
 
       expect(result).toBe(true);
-      expect(mockCalculateChecksum).toHaveBeenCalledWith('/test/model.gguf');
+      expect(mockCalculateChecksum).toHaveBeenCalledWith(mockModelInfo.path);
     });
 
-    it('should return false if checksum does not match', async () => {
-      mockCalculateChecksum.mockResolvedValue('sha256:different');
+    it('should throw ChecksumError if checksum does not match', async () => {
+      mockFileExists.mockResolvedValue(true);
+      mockReadFile.mockResolvedValue(JSON.stringify(mockModelInfo));
+      mockCalculateChecksum.mockResolvedValue('different_checksum');
 
-      const result = await storageManager.verifyModelIntegrity(
-        '/test/model.gguf',
-        'sha256:abc123'
+      await expect(storageManager.verifyModelIntegrity('llm', 'test-model')).rejects.toThrow(
+        'checksum mismatch'
       );
-
-      expect(result).toBe(false);
     });
 
     it('should handle checksum calculation errors', async () => {
+      mockFileExists.mockResolvedValue(true);
+      mockReadFile.mockResolvedValue(JSON.stringify(mockModelInfo));
       mockCalculateChecksum.mockRejectedValue(new Error('Checksum failed'));
 
-      await expect(
-        storageManager.verifyModelIntegrity('/test/model.gguf', 'sha256:abc123')
-      ).rejects.toThrow();
+      await expect(storageManager.verifyModelIntegrity('llm', 'test-model')).rejects.toThrow();
     });
   });
 
   describe('getStorageUsed()', () => {
     it('should calculate total storage used', async () => {
+      // getStorageUsed calls listModelFiles which returns IDs from .json files
       mockReaddir
-        .mockResolvedValueOnce(['model1.gguf', 'model2.gguf'])
-        .mockResolvedValueOnce(['diffusion1.gguf']);
+        .mockResolvedValueOnce(['model1.json', 'model2.json']) // llm models
+        .mockResolvedValueOnce(['diffusion1.json']); // diffusion models
 
       mockFileExists.mockResolvedValue(true);
       mockReadFile
@@ -255,7 +234,12 @@ describe('StorageManager', () => {
           JSON.stringify({ ...mockModelInfo, id: 'model2', size: 2 * 1024 * 1024 * 1024 })
         )
         .mockResolvedValueOnce(
-          JSON.stringify({ ...mockModelInfo, id: 'diffusion1', size: 3 * 1024 * 1024 * 1024 })
+          JSON.stringify({
+            ...mockModelInfo,
+            id: 'diffusion1',
+            type: 'diffusion',
+            size: 3 * 1024 * 1024 * 1024,
+          })
         );
 
       const total = await storageManager.getStorageUsed();
@@ -273,9 +257,9 @@ describe('StorageManager', () => {
   });
 
   describe('checkDiskSpace()', () => {
-    it('should be a placeholder that returns Infinity', async () => {
+    it('should be a placeholder that returns MAX_SAFE_INTEGER', async () => {
       const space = await storageManager.checkDiskSpace('/test/path');
-      expect(space).toBe(Infinity);
+      expect(space).toBe(Number.MAX_SAFE_INTEGER);
     });
   });
 });

@@ -33,12 +33,9 @@ jest.unstable_mockModule('node:crypto', () => ({
 }));
 
 // Import after mocking
-const {
-  ensureDirectory,
-  fileExists,
-  formatBytes,
-  sanitizeFilename,
-} = await import('../../src/utils/file-utils.js');
+const { ensureDirectory, fileExists, formatBytes, sanitizeFilename } = await import(
+  '../../src/utils/file-utils.js'
+);
 
 describe('file-utils', () => {
   beforeEach(() => {

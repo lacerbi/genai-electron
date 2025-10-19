@@ -5,7 +5,11 @@
 
 import { jest } from '@jest/globals';
 import { EventEmitter } from 'events';
-import type { DiffusionServerConfig, ModelInfo, ImageGenerationConfig } from '../../src/types/index.js';
+import type {
+  DiffusionServerConfig,
+  ModelInfo,
+  ImageGenerationConfig,
+} from '../../src/types/index.js';
 
 // Mock Electron app
 const mockApp = {
@@ -158,6 +162,7 @@ const { DiffusionServerManager } = await import('../../src/managers/DiffusionSer
 
 describe('DiffusionServerManager', () => {
   let diffusionServer: DiffusionServerManager;
+  let mockProcess: any; // Track for cleanup
 
   const mockModelInfo: ModelInfo = {
     id: 'sdxl-turbo',
@@ -221,13 +226,32 @@ describe('DiffusionServerManager', () => {
     });
     mockIsServerResponding.mockResolvedValue(false); // Port is available
 
-    // Mock process spawn
-    const mockProcess = new EventEmitter() as any;
+    // Mock process spawn (track at describe level for cleanup)
+    mockProcess = new EventEmitter() as any;
     mockProcess.pid = 54321;
     mockProcess.stdout = new EventEmitter();
     mockProcess.stderr = new EventEmitter();
     mockProcess.kill = jest.fn();
     mockProcessSpawn.mockReturnValue(mockProcess);
+  });
+
+  afterEach(() => {
+    // Clean up all event listeners to prevent memory leaks
+    diffusionServer.removeAllListeners();
+
+    // Clean up module-level mock HTTP server
+    mockHttpServer.removeAllListeners();
+
+    // Ensure the mock server is properly closed
+    // Reset the close implementation to ensure it cleans up properly
+    mockHttpServer.close.mockClear();
+
+    // Clean up beforeEach mockProcess and its streams
+    if (mockProcess) {
+      mockProcess.removeAllListeners?.();
+      mockProcess.stdout?.removeAllListeners?.();
+      mockProcess.stderr?.removeAllListeners?.();
+    }
   });
 
   describe('start()', () => {
@@ -315,7 +339,7 @@ describe('DiffusionServerManager', () => {
 
       expect(mockLogInitialize).toHaveBeenCalled();
       expect(mockLogWrite).toHaveBeenCalledWith(
-        expect.stringContaining('Starting server on port'),
+        expect.stringContaining('Starting diffusion server'),
         'info'
       );
     });
@@ -378,6 +402,15 @@ describe('DiffusionServerManager', () => {
       mockProcessKill.mockResolvedValue(undefined); // kill() must return a promise
     });
 
+    afterEach(() => {
+      // Clean up test-specific EventEmitters
+      if (spawnedProcess) {
+        spawnedProcess.removeAllListeners?.();
+        spawnedProcess.stdout?.removeAllListeners?.();
+        spawnedProcess.stderr?.removeAllListeners?.();
+      }
+    });
+
     it('should generate image successfully', async () => {
       const mockImageBuffer = Buffer.from('fake-image-data');
       mockReadFile.mockResolvedValue(mockImageBuffer);
@@ -392,7 +425,7 @@ describe('DiffusionServerManager', () => {
       });
 
       // Wait for spawn to be called (after async log write)
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Simulate progress updates from stdout
       spawnedProcess.stdout.emit('data', 'step 5/30\n');
@@ -455,7 +488,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage(minimalConfig);
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       spawnedProcess.emit('exit', 0, null);
 
@@ -479,7 +512,7 @@ describe('DiffusionServerManager', () => {
       const firstGeneration = diffusionServer.generateImage(imageConfig);
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Try to start second generation while first is running
       await expect(diffusionServer.generateImage(imageConfig)).rejects.toThrow('busy');
@@ -493,7 +526,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage(imageConfig);
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       spawnedProcess.emit('exit', 1, null);
 
@@ -506,7 +539,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage(imageConfig);
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       spawnedProcess.emit('exit', 0, null);
 
@@ -528,7 +561,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage({ prompt: 'test' });
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       spawnedProcess.emit('exit', 0, null);
       await resultPromise;
@@ -547,7 +580,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage(imageConfig);
 
       // Wait for spawn to be called (currentGeneration is set after promise creation)
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Check busy during generation
       let info = diffusionServer.getInfo();
@@ -599,6 +632,15 @@ describe('DiffusionServerManager', () => {
       mockProcessKill.mockResolvedValue(undefined);
     });
 
+    afterEach(() => {
+      // Clean up test-specific EventEmitters
+      if (spawnedProcess) {
+        spawnedProcess.removeAllListeners?.();
+        spawnedProcess.stdout?.removeAllListeners?.();
+        spawnedProcess.stderr?.removeAllListeners?.();
+      }
+    });
+
     it('should stop server gracefully', async () => {
       await diffusionServer.stop();
 
@@ -616,7 +658,7 @@ describe('DiffusionServerManager', () => {
       const resultPromise = diffusionServer.generateImage({ prompt: 'test' });
 
       // Wait for spawn to be called
-      await new Promise(resolve => setTimeout(resolve, 50));
+      await new Promise((resolve) => setTimeout(resolve, 50));
 
       // Stop server while generating
       await diffusionServer.stop();
@@ -741,9 +783,7 @@ describe('DiffusionServerManager', () => {
       requestHandler(req, res);
 
       expect(res.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
-      expect(res.end).toHaveBeenCalledWith(
-        expect.stringContaining('"status":"ok"')
-      );
+      expect(res.end).toHaveBeenCalledWith(expect.stringContaining('"status":"ok"'));
     });
 
     it('should handle CORS preflight', () => {

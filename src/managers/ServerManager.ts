@@ -9,7 +9,7 @@
 
 import { EventEmitter } from 'events';
 import path from 'node:path';
-import { ServerStatus, ServerInfo, ServerConfig, ServerEvent } from '../types/index.js';
+import type { ServerStatus, ServerInfo, ServerConfig, ServerEvent } from '../types/index.js';
 import {
   ServerError,
   PortInUseError,
@@ -18,7 +18,9 @@ import {
   InsufficientResourcesError,
 } from '../errors/index.js';
 import { LogManager } from '../process/log-manager.js';
+import { BinaryManager } from './BinaryManager.js';
 import { PATHS } from '../config/paths.js';
+import { getPlatformKey } from '../utils/platform-utils.js';
 
 /**
  * Abstract ServerManager class
@@ -57,7 +59,7 @@ export abstract class ServerManager extends EventEmitter {
   protected _pid?: number;
 
   /** Port the server is listening on (0 if not running) */
-  protected _port: number = 0;
+  protected _port = 0;
 
   /** Current server configuration */
   protected _config?: ServerConfig;
@@ -65,15 +67,8 @@ export abstract class ServerManager extends EventEmitter {
   /** Timestamp when server was started */
   protected _startedAt?: Date;
 
-  /** Log manager for server logs */
+  /** Log manager for capturing server logs */
   protected logManager?: LogManager;
-
-  /**
-   * Create a new ServerManager
-   */
-  constructor() {
-    super();
-  }
 
   /**
    * Start the server
@@ -249,78 +244,12 @@ export abstract class ServerManager extends EventEmitter {
   }
 
   /**
-   * Check if a port is already in use
-   *
-   * @param port - Port number to check
-   * @param timeout - Timeout in milliseconds (default: 2000)
-   * @throws {PortInUseError} If port is already in use
-   * @protected
-   */
-  protected async checkPortAvailability(port: number, timeout: number = 2000): Promise<void> {
-    const { isServerResponding } = await import('../process/health-check.js');
-    if (await isServerResponding(port, timeout)) {
-      throw new PortInUseError(port);
-    }
-  }
-
-  /**
-   * Initialize the log manager with a specific log file name
-   *
-   * @param logFileName - Name of the log file (e.g., 'llama-server.log')
-   * @param port - Port number to include in the startup message
-   * @protected
-   */
-  protected async initializeLogManager(logFileName: string, port: number): Promise<void> {
-    const logPath = path.join(PATHS.logs, logFileName);
-    this.logManager = new LogManager(logPath);
-    await this.logManager.initialize();
-    await this.logManager.write(`Starting server on port ${port}`, 'info');
-  }
-
-  /**
-   * Handle errors during server startup
-   *
-   * Logs the error, cleans up resources, and re-throws typed errors or wraps unknown errors.
-   *
-   * @param error - The error that occurred
-   * @param serverName - Name of the server for error messages (e.g., 'llama-server')
-   * @throws {ServerError} Always throws (either the original typed error or wrapped)
-   * @protected
-   */
-  protected async handleStartupError(error: unknown, serverName: string): Promise<never> {
-    // Log the error
-    if (this.logManager) {
-      await this.logManager.write(
-        `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
-        'error'
-      );
-    }
-
-    // Re-throw typed errors
-    if (
-      error instanceof ModelNotFoundError ||
-      error instanceof PortInUseError ||
-      error instanceof BinaryError ||
-      error instanceof InsufficientResourcesError ||
-      error instanceof ServerError
-    ) {
-      throw error;
-    }
-
-    // Wrap unknown errors
-    throw new ServerError(
-      `Failed to start ${serverName}: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      { error: error instanceof Error ? error.message : String(error) }
-    );
-  }
-
-  /**
    * Get recent server logs
    *
    * @param lines - Number of lines to retrieve (default: 100)
    * @returns Array of log lines
    */
-  async getLogs(lines: number = 100): Promise<string[]> {
+  async getLogs(lines = 100): Promise<string[]> {
     if (!this.logManager) {
       return [];
     }
@@ -346,7 +275,146 @@ export abstract class ServerManager extends EventEmitter {
     try {
       await this.logManager.clear();
     } catch {
-      // Ignore errors
+      // Ignore errors - log clearing is not critical
     }
+  }
+
+  /**
+   * Get log file path
+   *
+   * @returns Path to log file (undefined if log manager not initialized)
+   */
+  getLogPath(): string | undefined {
+    return this.logManager?.getLogPath();
+  }
+
+  /**
+   * Check if port is available
+   *
+   * Checks if a port is already in use by attempting to connect to it.
+   * Throws PortInUseError if the port is occupied.
+   *
+   * @param port - Port number to check
+   * @param timeout - Connection timeout in milliseconds (default: 2000)
+   * @throws {PortInUseError} If port is already in use
+   * @protected
+   */
+  protected async checkPortAvailability(port: number, timeout = 2000): Promise<void> {
+    const { isServerResponding } = await import('../process/health-check.js');
+    if (await isServerResponding(port, timeout)) {
+      throw new PortInUseError(port);
+    }
+  }
+
+  /**
+   * Initialize log manager
+   *
+   * Creates a log manager with the specified filename, initializes it,
+   * and writes an initial startup message.
+   *
+   * @param logFileName - Name of the log file (e.g., 'llama-server.log')
+   * @param startupMessage - Initial message to write to the log
+   * @protected
+   */
+  protected async initializeLogManager(logFileName: string, startupMessage: string): Promise<void> {
+    const logPath = path.join(PATHS.logs, logFileName);
+    this.logManager = new LogManager(logPath);
+    await this.logManager!.initialize();
+    await this.logManager!.write(startupMessage, 'info');
+  }
+
+  /**
+   * Handle startup errors
+   *
+   * Centralizes error handling during server startup. Sets status to stopped,
+   * runs custom cleanup if provided, logs the error, and re-throws or wraps the error.
+   *
+   * @param serverName - Name of the server for error messages (e.g., 'llama-server')
+   * @param error - The error that occurred
+   * @param cleanup - Optional cleanup function to run before rethrowing
+   * @throws The original error if it's a typed error, or wraps it in ServerError
+   * @protected
+   */
+  protected async handleStartupError(
+    serverName: string,
+    error: unknown,
+    cleanup?: () => Promise<void>
+  ): Promise<never> {
+    // Set status to stopped
+    this.setStatus('stopped');
+
+    // Run custom cleanup if provided
+    if (cleanup) {
+      try {
+        await cleanup();
+      } catch {
+        // Ignore cleanup errors - we're already handling a failure
+      }
+    }
+
+    // Log the error
+    if (this.logManager) {
+      await this.logManager
+        .write(
+          `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
+          'error'
+        )
+        .catch(() => void 0);
+    }
+
+    // Re-throw typed errors
+    if (
+      error instanceof ModelNotFoundError ||
+      error instanceof PortInUseError ||
+      error instanceof BinaryError ||
+      error instanceof InsufficientResourcesError ||
+      error instanceof ServerError
+    ) {
+      throw error;
+    }
+
+    // Wrap unknown errors
+    throw new ServerError(
+      `Failed to start ${serverName}: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      { error: error instanceof Error ? error.message : String(error) }
+    );
+  }
+
+  /**
+   * Ensure binary is downloaded
+   *
+   * Generic helper for downloading and verifying server binaries.
+   * Tries multiple variants in priority order and uses the first one that works.
+   *
+   * @param type - Binary type ('llama' or 'diffusion')
+   * @param binaryName - Name of the binary (e.g., 'llama-server')
+   * @param binaryConfig - Binary configuration from BINARY_VERSIONS
+   * @returns Path to the binary
+   * @throws {BinaryError} If download or verification fails for all variants
+   * @protected
+   */
+  protected async ensureBinaryHelper(
+    type: 'llama' | 'diffusion',
+    binaryName: string,
+    binaryConfig: any
+  ): Promise<string> {
+    const platformKey = getPlatformKey();
+    const variants = binaryConfig.variants[platformKey];
+
+    // Create BinaryManager with configuration
+    const binaryManager = new BinaryManager({
+      type,
+      binaryName,
+      platformKey,
+      variants: variants || [],
+      log: this.logManager
+        ? (message, level = 'info') => {
+            this.logManager?.write(message, level).catch(() => void 0);
+          }
+        : undefined,
+    });
+
+    // Download and install binary
+    return await binaryManager.ensureBinary();
   }
 }

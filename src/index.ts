@@ -186,11 +186,7 @@ export { Downloader } from './download/Downloader.js';
 // Utility Functions
 // ============================================================================
 
-export {
-  checkHealth,
-  waitForHealthy,
-  isServerResponding,
-} from './process/health-check.js';
+export { checkHealth, waitForHealthy, isServerResponding } from './process/health-check.js';
 export { getCPUInfo, getRecommendedThreads } from './system/cpu-detect.js';
 export { getMemoryInfo, estimateVRAM } from './system/memory-detect.js';
 export { detectGPU } from './system/gpu-detect.js';
@@ -215,10 +211,7 @@ export {
   formatBytes,
   sanitizeFilename,
 } from './utils/file-utils.js';
-export {
-  detectReasoningSupport,
-  REASONING_MODEL_PATTERNS,
-} from './config/reasoning-models.js';
+export { detectReasoningSupport, REASONING_MODEL_PATTERNS } from './config/reasoning-models.js';
 
 // ============================================================================
 // Configuration and Paths
@@ -266,19 +259,11 @@ export type {
   JSONValue,
 } from './types/index.js';
 
-export type {
-  SpawnOptions,
-  SpawnResult,
-} from './process/ProcessManager.js';
+export type { SpawnOptions, SpawnResult } from './process/ProcessManager.js';
 
-export type {
-  HealthCheckResponse,
-} from './process/health-check.js';
+export type { HealthCheckResponse } from './process/health-check.js';
 
-export type {
-  LogLevel,
-  LogEntry,
-} from './process/log-manager.js';
+export type { LogLevel, LogEntry } from './process/log-manager.js';
 
 // ============================================================================
 // Error Exports

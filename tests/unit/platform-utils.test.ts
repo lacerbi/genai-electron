@@ -10,15 +10,8 @@ const originalPlatform = process.platform;
 const originalArch = process.arch;
 
 // Import platform-utils
-const {
-  getPlatform,
-  getArchitecture,
-  getPlatformKey,
-  isMac,
-  isWindows,
-  isLinux,
-  isAppleSilicon,
-} = await import('../../src/utils/platform-utils.js');
+const { getPlatform, getArchitecture, getPlatformKey, isMac, isWindows, isLinux, isAppleSilicon } =
+  await import('../../src/utils/platform-utils.js');
 
 describe('platform-utils', () => {
   // Helper to mock process.platform

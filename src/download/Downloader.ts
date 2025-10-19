@@ -47,7 +47,7 @@ export interface DownloadOptions {
  */
 export class Downloader {
   private abortController: AbortController | null = null;
-  private isDownloading: boolean = false;
+  private isDownloading = false;
 
   /**
    * Download a file with progress tracking
@@ -86,10 +86,10 @@ export class Downloader {
       });
 
       if (!response.ok) {
-        throw new DownloadError(
-          `HTTP error: ${response.status} ${response.statusText}`,
-          { status: response.status, url }
-        );
+        throw new DownloadError(`HTTP error: ${response.status} ${response.statusText}`, {
+          status: response.status,
+          url,
+        });
       }
 
       if (!response.body) {
@@ -125,10 +125,14 @@ export class Downloader {
         trackingStream.push(value);
         downloadedSize += value.length;
 
-        // Call progress callback
+        // Call progress callback (wrap in try-catch to handle callback errors gracefully)
         const now = Date.now();
         if (onProgress && now - lastProgressUpdate >= progressInterval) {
-          onProgress(downloadedSize, totalSize);
+          try {
+            onProgress(downloadedSize, totalSize);
+          } catch {
+            // Ignore callback errors - don't let badly behaved callbacks crash the download
+          }
           lastProgressUpdate = now;
         }
 
@@ -140,14 +144,15 @@ export class Downloader {
       const readPromise = readChunk();
 
       // Pipeline the streams
-      await Promise.all([
-        readPromise,
-        pipeline(trackingStream, fileStream),
-      ]);
+      await Promise.all([readPromise, pipeline(trackingStream, fileStream)]);
 
       // Final progress callback
       if (onProgress && totalSize > 0) {
-        onProgress(totalSize, totalSize);
+        try {
+          onProgress(totalSize, totalSize);
+        } catch {
+          // Ignore callback errors
+        }
       }
 
       // Move partial file to final destination

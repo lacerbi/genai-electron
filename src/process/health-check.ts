@@ -7,7 +7,7 @@
  * @module process/health-check
  */
 
-import { HealthStatus } from '../types/index.js';
+import type { HealthStatus } from '../types/index.js';
 import { ServerError } from '../errors/index.js';
 
 /**
@@ -37,10 +37,7 @@ export interface HealthCheckResponse {
  * }
  * ```
  */
-export async function checkHealth(
-  port: number,
-  timeout: number = 5000
-): Promise<HealthCheckResponse> {
+export async function checkHealth(port: number, timeout = 5000): Promise<HealthCheckResponse> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
@@ -48,7 +45,7 @@ export async function checkHealth(
     const response = await fetch(`http://localhost:${port}/health`, {
       signal: controller.signal,
       headers: {
-        'Accept': 'application/json',
+        Accept: 'application/json',
       },
     });
 
@@ -60,7 +57,7 @@ export async function checkHealth(
 
     // Try to parse JSON response
     try {
-      const data = await response.json() as HealthCheckResponse;
+      const data = (await response.json()) as HealthCheckResponse;
       // Validate status field
       if (
         data.status === 'ok' ||
@@ -113,9 +110,9 @@ export async function checkHealth(
  */
 export async function waitForHealthy(
   port: number,
-  timeout: number = 60000,
-  initialDelay: number = 100,
-  maxDelay: number = 2000
+  timeout = 60000,
+  initialDelay = 100,
+  maxDelay = 2000
 ): Promise<void> {
   const startTime = Date.now();
   let delay = initialDelay;
@@ -138,7 +135,7 @@ export async function waitForHealthy(
         // Server reported error - might recover, keep trying
       }
       // 'unknown' means server didn't respond - keep trying
-    } catch (error) {
+    } catch {
       // Health check failed - server might not be up yet
     }
 
@@ -163,10 +160,11 @@ export async function waitForHealthy(
   }
 
   // Should not reach here, but just in case
-  throw new ServerError(
-    `Server health check timeout after ${timeout}ms`,
-    { port, timeout, attempts: attempt }
-  );
+  throw new ServerError(`Server health check timeout after ${timeout}ms`, {
+    port,
+    timeout,
+    attempts: attempt,
+  });
 }
 
 /**
@@ -185,7 +183,7 @@ export async function waitForHealthy(
  * }
  * ```
  */
-export async function isServerResponding(port: number, timeout: number = 2000): Promise<boolean> {
+export async function isServerResponding(port: number, timeout = 2000): Promise<boolean> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 

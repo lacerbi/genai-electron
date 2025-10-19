@@ -35,7 +35,5 @@ lerna-debug.log*
 .temp/
 temp/
 
-# Package manager
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
+# Example app (during active development)
+examples/**/package-lock.json

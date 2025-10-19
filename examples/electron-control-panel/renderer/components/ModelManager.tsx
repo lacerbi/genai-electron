@@ -53,15 +53,13 @@ const ModelManager: React.FC = () => {
           </div>
         ) : (
           <>
-            <ModelList
-              models={models}
-              onDelete={handleDelete}
-              onVerify={handleVerify}
-            />
+            <ModelList models={models} onDelete={handleDelete} onVerify={handleVerify} />
             <div className="disk-usage">
               <span className="disk-usage-label">Total disk usage:</span>
               <span className="disk-usage-value">{formatBytes(totalSize)}</span>
-              <span className="disk-usage-count">({models.length} model{models.length !== 1 ? 's' : ''})</span>
+              <span className="disk-usage-count">
+                ({models.length} model{models.length !== 1 ? 's' : ''})
+              </span>
             </div>
           </>
         )}

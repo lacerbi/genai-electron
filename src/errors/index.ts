@@ -43,14 +43,10 @@ export class GenaiElectronError extends Error {
  */
 export class ModelNotFoundError extends GenaiElectronError {
   constructor(modelId: string) {
-    super(
-      `Model not found: ${modelId}`,
-      'MODEL_NOT_FOUND',
-      {
-        modelId,
-        suggestion: 'Use modelManager.listModels() to see available models',
-      }
-    );
+    super(`Model not found: ${modelId}`, 'MODEL_NOT_FOUND', {
+      modelId,
+      suggestion: 'Use modelManager.listModels() to see available models',
+    });
     this.name = 'ModelNotFoundError';
   }
 }
@@ -65,11 +61,7 @@ export class ModelNotFoundError extends GenaiElectronError {
  */
 export class DownloadError extends GenaiElectronError {
   constructor(message: string, details?: unknown) {
-    super(
-      `Download failed: ${message}`,
-      'DOWNLOAD_FAILED',
-      details
-    );
+    super(`Download failed: ${message}`, 'DOWNLOAD_FAILED', details);
     this.name = 'DownloadError';
   }
 }
@@ -98,11 +90,7 @@ export class InsufficientResourcesError extends GenaiElectronError {
       suggestion?: string;
     }
   ) {
-    super(
-      message,
-      'INSUFFICIENT_RESOURCES',
-      details
-    );
+    super(message, 'INSUFFICIENT_RESOURCES', details);
     this.name = 'InsufficientResourcesError';
   }
 }
@@ -117,11 +105,7 @@ export class InsufficientResourcesError extends GenaiElectronError {
  */
 export class ServerError extends GenaiElectronError {
   constructor(message: string, details?: unknown) {
-    super(
-      `Server error: ${message}`,
-      'SERVER_ERROR',
-      details
-    );
+    super(`Server error: ${message}`, 'SERVER_ERROR', details);
     this.name = 'ServerError';
   }
 }
@@ -138,14 +122,10 @@ export class ServerError extends GenaiElectronError {
  */
 export class PortInUseError extends GenaiElectronError {
   constructor(port: number) {
-    super(
-      `Port ${port} is already in use`,
-      'PORT_IN_USE',
-      {
-        port,
-        suggestion: `Choose a different port or stop the process using port ${port}`,
-      }
-    );
+    super(`Port ${port} is already in use`, 'PORT_IN_USE', {
+      port,
+      suggestion: `Choose a different port or stop the process using port ${port}`,
+    });
     this.name = 'PortInUseError';
   }
 }
@@ -160,11 +140,7 @@ export class PortInUseError extends GenaiElectronError {
  */
 export class FileSystemError extends GenaiElectronError {
   constructor(message: string, details?: unknown) {
-    super(
-      `File system error: ${message}`,
-      'FILE_SYSTEM_ERROR',
-      details
-    );
+    super(`File system error: ${message}`, 'FILE_SYSTEM_ERROR', details);
     this.name = 'FileSystemError';
   }
 }
@@ -179,14 +155,10 @@ export class FileSystemError extends GenaiElectronError {
  */
 export class ChecksumError extends GenaiElectronError {
   constructor(message: string, details: { expected: string; actual: string }) {
-    super(
-      `Checksum verification failed: ${message}`,
-      'CHECKSUM_ERROR',
-      {
-        ...details,
-        suggestion: 'The downloaded file may be corrupted. Try downloading again.',
-      }
-    );
+    super(`Checksum verification failed: ${message}`, 'CHECKSUM_ERROR', {
+      ...details,
+      suggestion: 'The downloaded file may be corrupted. Try downloading again.',
+    });
     this.name = 'ChecksumError';
   }
 }
@@ -201,11 +173,7 @@ export class ChecksumError extends GenaiElectronError {
  */
 export class BinaryError extends GenaiElectronError {
   constructor(message: string, details?: unknown) {
-    super(
-      `Binary error: ${message}`,
-      'BINARY_ERROR',
-      details
-    );
+    super(`Binary error: ${message}`, 'BINARY_ERROR', details);
     this.name = 'BinaryError';
   }
 }

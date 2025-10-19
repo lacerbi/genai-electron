@@ -12,11 +12,7 @@ import {
   getModelFilePath,
   PATHS,
 } from '../config/paths.js';
-import {
-  fileExists,
-  deleteFile,
-  calculateChecksum,
-} from '../utils/file-utils.js';
+import { fileExists, deleteFile, calculateChecksum } from '../utils/file-utils.js';
 
 /**
  * Storage manager for model files and metadata
@@ -31,11 +27,12 @@ import {
  */
 export class StorageManager {
   private static instance: StorageManager;
-  private initialized: boolean = false;
+  private initialized = false;
 
   /**
    * Private constructor for singleton pattern
    */
+  // eslint-disable-next-line @typescript-eslint/no-empty-function
   private constructor() {}
 
   /**

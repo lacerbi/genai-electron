@@ -31,17 +31,10 @@ export default {
   },
 
   // Test match patterns
-  testMatch: [
-    '**/tests/**/*.test.ts',
-    '**/__tests__/**/*.test.ts',
-  ],
+  testMatch: ['**/tests/**/*.test.ts', '**/__tests__/**/*.test.ts'],
 
   // Coverage configuration
-  collectCoverageFrom: [
-    'src/**/*.ts',
-    '!src/**/*.d.ts',
-    '!src/types/**/*',
-  ],
+  collectCoverageFrom: ['src/**/*.ts', '!src/**/*.d.ts', '!src/types/**/*'],
 
   coverageDirectory: 'coverage',
 

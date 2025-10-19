@@ -68,13 +68,10 @@ export class BinaryManager {
     const { type, binaryName, variants, platformKey } = this.config;
 
     if (!variants || variants.length === 0) {
-      throw new BinaryError(
-        `No binary variants available for platform: ${platformKey}`,
-        {
-          platform: platformKey,
-          suggestion: 'Check platform support in DESIGN.md',
-        }
-      );
+      throw new BinaryError(`No binary variants available for platform: ${platformKey}`, {
+        platform: platformKey,
+        suggestion: 'Check platform support in DESIGN.md',
+      });
     }
 
     // Ensure binary directory exists
@@ -82,15 +79,6 @@ export class BinaryManager {
 
     const binaryPath = getBinaryPath(type, binaryName);
     const variantCachePath = path.join(PATHS.binaries[type], '.variant.json');
-
-    // WINDOWS FIX: Clean up old binary without .exe extension if it exists
-    if (process.platform === 'win32') {
-      const oldBinaryPath = path.join(PATHS.binaries[type], binaryName);
-      if (await fileExists(oldBinaryPath)) {
-        this.log('Removing old binary without .exe extension', 'info');
-        await deleteFile(oldBinaryPath).catch(() => {});
-      }
-    }
 
     // Check if binary already exists and works
     if (await fileExists(binaryPath)) {
@@ -100,7 +88,7 @@ export class BinaryManager {
         return binaryPath;
       } else {
         this.log('Existing binary not working, re-downloading...', 'warn');
-        await deleteFile(binaryPath).catch(() => {});
+        await deleteFile(binaryPath).catch(() => void 0);
       }
     }
 
@@ -151,14 +139,11 @@ export class BinaryManager {
     }
 
     // All variants failed
-    throw new BinaryError(
-      `Failed to download binary. Tried all variants for ${platformKey}.`,
-      {
-        platform: platformKey,
-        errors: errors.join('; '),
-        suggestion: 'Check your GPU drivers are installed, or the system may not support any variant',
-      }
-    );
+    throw new BinaryError(`Failed to download binary. Tried all variants for ${platformKey}.`, {
+      platform: platformKey,
+      errors: errors.join('; '),
+      suggestion: 'Check your GPU drivers are installed, or the system may not support any variant',
+    });
   }
 
   /**
@@ -216,21 +201,21 @@ export class BinaryManager {
         }
 
         // Cleanup
-        await deleteFile(zipPath).catch(() => {});
-        await cleanupExtraction(extractDir).catch(() => {});
+        await deleteFile(zipPath).catch(() => void 0);
+        await cleanupExtraction(extractDir).catch(() => void 0);
 
         return true;
       } else {
         // Binary doesn't work (missing drivers, etc.)
         // Cleanup and return false to try next variant
-        await deleteFile(zipPath).catch(() => {});
-        await cleanupExtraction(extractDir).catch(() => {});
+        await deleteFile(zipPath).catch(() => void 0);
+        await cleanupExtraction(extractDir).catch(() => void 0);
         return false;
       }
     } catch (error) {
       // Cleanup on error
-      await deleteFile(zipPath).catch(() => {});
-      await cleanupExtraction(extractDir).catch(() => {});
+      await deleteFile(zipPath).catch(() => void 0);
+      await cleanupExtraction(extractDir).catch(() => void 0);
       throw error;
     }
   }

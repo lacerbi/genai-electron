@@ -11,29 +11,18 @@ import { ServerManager } from './ServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
-import { LogManager } from '../process/log-manager.js';
 import { checkHealth, waitForHealthy } from '../process/health-check.js';
-import { BinaryManager } from './BinaryManager.js';
 import { parseLlamaCppLogLevel, stripLlamaCppFormatting } from '../process/llama-log-parser.js';
-import {
+import type {
   ServerConfig,
   ServerInfo,
   LlamaServerConfig,
   HealthStatus,
   ModelInfo,
 } from '../types/index.js';
-import {
-  ServerError,
-  ModelNotFoundError,
-  PortInUseError,
-  InsufficientResourcesError,
-  BinaryError,
-} from '../errors/index.js';
-import { PATHS } from '../config/paths.js';
+import { ServerError, InsufficientResourcesError } from '../errors/index.js';
 import { BINARY_VERSIONS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
-import { getPlatformKey } from '../utils/platform-utils.js';
 import { fileExists } from '../utils/file-utils.js';
-import path from 'path';
 
 /**
  * LlamaServerManager class
@@ -143,7 +132,10 @@ export class LlamaServerManager extends ServerManager {
       const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo);
 
       // 6. Initialize log manager
-      await this.initializeLogManager('llama-server.log', finalConfig.port);
+      await this.initializeLogManager(
+        'llama-server.log',
+        `Starting llama-server on port ${finalConfig.port}`
+      );
 
       // 7. Build command-line arguments
       const args = this.buildCommandLineArgs(finalConfig, modelInfo);
@@ -156,36 +148,29 @@ export class LlamaServerManager extends ServerManager {
       }
 
       if (!(await fileExists(this.binaryPath))) {
-        throw new ServerError(
-          `Binary file not found: ${this.binaryPath}`,
-          {
-            path: this.binaryPath,
-            suggestion: 'Try deleting the binaries directory and restarting the app',
-          }
-        );
+        throw new ServerError(`Binary file not found: ${this.binaryPath}`, {
+          path: this.binaryPath,
+          suggestion: 'Try deleting the binaries directory and restarting the app',
+        });
       }
 
-      await this.logManager.write(
+      await this.logManager!.write(
         `Spawning llama-server: ${this.binaryPath} with args: ${args.join(' ')}`,
         'info'
       );
 
       // 9. Spawn the process
-      const { pid } = this.processManager.spawn(
-        this.binaryPath,
-        args,
-        {
-          onStdout: (data) => this.handleStdout(data),
-          onStderr: (data) => this.handleStderr(data),
-          onExit: (code, signal) => this.handleExit(code, signal),
-          onError: (error) => this.handleSpawnError(error),
-        }
-      );
+      const { pid } = this.processManager.spawn(this.binaryPath, args, {
+        onStdout: (data) => this.handleStdout(data),
+        onStderr: (data) => this.handleStderr(data),
+        onExit: (code, signal) => this.handleExit(code, signal),
+        onError: (error) => this.handleSpawnError(error),
+      });
 
       this._pid = pid;
       this._port = finalConfig.port;
 
-      await this.logManager.write(
+      await this.logManager!.write(
         `Process spawned with PID ${pid}, waiting for health check...`,
         'info'
       );
@@ -196,21 +181,18 @@ export class LlamaServerManager extends ServerManager {
       this._startedAt = new Date();
       this.setStatus('running');
 
-      await this.logManager.write('Server is running and healthy', 'info');
+      await this.logManager!.write('Server is running and healthy', 'info');
 
       // Emit started event
       this.emitEvent('started', this.getInfo());
 
       return this.getInfo();
     } catch (error) {
-      // Cleanup on failure
-      this.setStatus('stopped');
-      if (this._pid && this.processManager.isRunning(this._pid)) {
-        await this.processManager.kill(this._pid, 5000);
-      }
-
-      // Handle error using base class helper
-      await this.handleStartupError(error, 'llama-server');
+      throw await this.handleStartupError('llama-server', error, async () => {
+        if (this._pid && this.processManager.isRunning(this._pid)) {
+          await this.processManager.kill(this._pid, 5000);
+        }
+      });
     }
   }
 
@@ -293,15 +275,6 @@ export class LlamaServerManager extends ServerManager {
   }
 
   /**
-   * Get log file path
-   *
-   * @returns Path to log file (undefined if log manager not initialized)
-   */
-  getLogPath(): string | undefined {
-    return this.logManager?.getLogPath();
-  }
-
-  /**
    * Ensure llama-server binary is downloaded
    *
    * Downloads binary from GitHub releases if not present. Tries multiple variants
@@ -315,27 +288,7 @@ export class LlamaServerManager extends ServerManager {
    * @private
    */
   private async ensureBinary(): Promise<string> {
-    const platformKey = getPlatformKey();
-    const binaryConfig = BINARY_VERSIONS.llamaServer;
-
-    // Get variants for this platform
-    const variants = binaryConfig.variants[platformKey];
-
-    // Create BinaryManager with llama configuration
-    const binaryManager = new BinaryManager({
-      type: 'llama',
-      binaryName: 'llama-server',
-      platformKey,
-      variants: variants || [],
-      log: this.logManager
-        ? (message, level = 'info') => {
-            this.logManager?.write(message, level).catch(() => {});
-          }
-        : undefined,
-    });
-
-    // Use BinaryManager to download and install binary
-    return await binaryManager.ensureBinary();
+    return this.ensureBinaryHelper('llama', 'llama-server', BINARY_VERSIONS.llamaServer);
   }
 
   /**
@@ -439,7 +392,7 @@ export class LlamaServerManager extends ServerManager {
         // so LogManager doesn't create duplicate timestamps
         const cleanMessage = stripLlamaCppFormatting(line);
 
-        this.logManager.write(cleanMessage, level).catch(() => {});
+        this.logManager.write(cleanMessage, level).catch(() => void 0);
       }
     }
   }
@@ -466,7 +419,7 @@ export class LlamaServerManager extends ServerManager {
         // so LogManager doesn't create duplicate timestamps
         const cleanMessage = stripLlamaCppFormatting(line);
 
-        this.logManager.write(cleanMessage, level).catch(() => {});
+        this.logManager.write(cleanMessage, level).catch(() => void 0);
       }
     }
   }
@@ -479,9 +432,7 @@ export class LlamaServerManager extends ServerManager {
    */
   private handleSpawnError(error: Error): void {
     if (this.logManager) {
-      this.logManager
-        .write(`Spawn error: ${error.message}`, 'error')
-        .catch(() => {});
+      this.logManager.write(`Spawn error: ${error.message}`, 'error').catch(() => void 0);
     }
     // The error will be handled by the exit handler
     // which will emit a 'crashed' event
@@ -500,7 +451,7 @@ export class LlamaServerManager extends ServerManager {
     if (this.logManager) {
       this.logManager
         .write(`Process exited with code ${code}, signal ${signal}`, 'warn')
-        .catch(() => {});
+        .catch(() => void 0);
     }
 
     // Update status

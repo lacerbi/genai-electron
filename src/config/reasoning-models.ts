@@ -23,9 +23,9 @@
  * All these models use <think>...</think> tags for reasoning output.
  */
 export const REASONING_MODEL_PATTERNS: readonly string[] = [
-  'qwen3',       // Qwen 3 series - all sizes
+  'qwen3', // Qwen 3 series - all sizes
   'deepseek-r1', // DeepSeek R1 reasoning models
-  'gpt-oss',     // OpenAI GPT-OSS
+  'gpt-oss', // OpenAI GPT-OSS
 ];
 
 /**
@@ -47,5 +47,5 @@ export const REASONING_MODEL_PATTERNS: readonly string[] = [
  */
 export function detectReasoningSupport(filename: string): boolean {
   const lowerFilename = filename.toLowerCase();
-  return REASONING_MODEL_PATTERNS.some(pattern => lowerFilename.includes(pattern));
+  return REASONING_MODEL_PATTERNS.some((pattern) => lowerFilename.includes(pattern));
 }

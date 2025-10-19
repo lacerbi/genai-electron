@@ -144,7 +144,7 @@
   font-style: italic;
 }
 
-.setting-group input[type="number"] {
+.setting-group input[type='number'] {
   padding: var(--spacing-sm) var(--spacing-md);
   background-color: var(--bg-secondary);
   border: 1px solid var(--border-color);
@@ -156,12 +156,12 @@
   transition: border-color var(--transition-fast);
 }
 
-.setting-group input[type="number"]:focus {
+.setting-group input[type='number']:focus {
   outline: none;
   border-color: var(--accent-blue);
 }
 
-.setting-group input[type="number"]:disabled {
+.setting-group input[type='number']:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

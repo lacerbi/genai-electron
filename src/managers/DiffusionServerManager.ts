@@ -13,22 +13,12 @@ import { ServerManager } from './ServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
-import { LogManager } from '../process/log-manager.js';
-import { BinaryManager } from './BinaryManager.js';
 import http from 'node:http';
-import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { PATHS, getTempPath } from '../config/paths.js';
+import { getTempPath } from '../config/paths.js';
 import { BINARY_VERSIONS, DEFAULT_PORTS } from '../config/defaults.js';
-import { getPlatformKey } from '../utils/platform-utils.js';
 import { deleteFile } from '../utils/file-utils.js';
-import {
-  ServerError,
-  ModelNotFoundError,
-  PortInUseError,
-  InsufficientResourcesError,
-  BinaryError,
-} from '../errors/index.js';
+import { ServerError, ModelNotFoundError, InsufficientResourcesError } from '../errors/index.js';
 import type {
   DiffusionServerConfig,
   DiffusionServerInfo,
@@ -156,7 +146,10 @@ export class DiffusionServerManager extends ServerManager {
       await this.checkPortAvailability(port);
 
       // 5. Initialize log manager
-      await this.initializeLogManager('diffusion-server.log', port);
+      await this.initializeLogManager(
+        'diffusion-server.log',
+        `Starting diffusion server on port ${port}`
+      );
 
       // 6. Create HTTP server
       await this.createHTTPServer(config);
@@ -165,19 +158,17 @@ export class DiffusionServerManager extends ServerManager {
       this._startedAt = new Date();
       this.setStatus('running');
 
-      await this.logManager.write('Diffusion server is running', 'info');
+      await this.logManager!.write('Diffusion server is running', 'info');
       this.emitEvent('started', this.getInfo());
 
       return this.getInfo() as DiffusionServerInfo;
     } catch (error) {
-      this.setStatus('stopped');
-      if (this.httpServer) {
-        this.httpServer.close();
-        this.httpServer = undefined;
-      }
-
-      // Handle error using base class helper
-      await this.handleStartupError(error, 'diffusion server');
+      throw await this.handleStartupError('diffusion-server', error, async () => {
+        if (this.httpServer) {
+          this.httpServer.close();
+          this.httpServer = undefined;
+        }
+      });
     }
   }
 
@@ -282,7 +273,6 @@ export class DiffusionServerManager extends ServerManager {
     } as DiffusionServerInfo;
   }
 
-
   /**
    * Ensure stable-diffusion.cpp binary is downloaded
    *
@@ -291,23 +281,7 @@ export class DiffusionServerManager extends ServerManager {
    * @private
    */
   private async ensureBinary(): Promise<string> {
-    const platformKey = getPlatformKey();
-    const binaryConfig = BINARY_VERSIONS.diffusionCpp;
-    const variants = binaryConfig.variants[platformKey];
-
-    const binaryManager = new BinaryManager({
-      type: 'diffusion',
-      binaryName: 'stable-diffusion',
-      platformKey,
-      variants: variants || [],
-      log: this.logManager
-        ? (message, level = 'info') => {
-            this.logManager?.write(message, level).catch(() => {});
-          }
-        : undefined,
-    });
-
-    return await binaryManager.ensureBinary();
+    return this.ensureBinaryHelper('diffusion', 'stable-diffusion', BINARY_VERSIONS.diffusionCpp);
   }
 
   /**
@@ -435,10 +409,7 @@ export class DiffusionServerManager extends ServerManager {
     const outputPath = getTempPath(`sd-output-${Date.now()}.png`);
     args.push('-o', outputPath);
 
-    await this.logManager?.write(
-      `Generating image: ${this.binaryPath} ${args.join(' ')}`,
-      'info'
-    );
+    await this.logManager?.write(`Generating image: ${this.binaryPath} ${args.join(' ')}`, 'info');
 
     // Spawn stable-diffusion.cpp
     let cancelled = false;
@@ -455,10 +426,10 @@ export class DiffusionServerManager extends ServerManager {
             const total = parseInt(match[2], 10);
             config.onProgress(current, total);
           }
-          this.logManager?.write(data, 'info').catch(() => {});
+          this.logManager?.write(data, 'info').catch(() => void 0);
         },
         onStderr: (data) => {
-          this.logManager?.write(data, 'warn').catch(() => {});
+          this.logManager?.write(data, 'warn').catch(() => void 0);
         },
         onExit: async (code) => {
           if (cancelled) {
@@ -474,7 +445,7 @@ export class DiffusionServerManager extends ServerManager {
           // Read generated image
           try {
             const imageBuffer = await fs.readFile(outputPath);
-            await deleteFile(outputPath).catch(() => {});
+            await deleteFile(outputPath).catch(() => void 0);
 
             resolve({
               image: imageBuffer,
@@ -509,7 +480,7 @@ export class DiffusionServerManager extends ServerManager {
       cancel: () => {
         cancelled = true;
         if (pid !== undefined) {
-          this.processManager.kill(pid, 5000).catch(() => {});
+          this.processManager.kill(pid, 5000).catch(() => void 0);
         }
       },
     };

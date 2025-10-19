@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **genai-electron** is an Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). It handles platform-specific operations like model downloads, binary management, server lifecycle, and resource orchestration. This library complements **genai-lite** (the API abstraction layer) by managing the runtime infrastructure.
 
-**Current Status**: Phase 1 MVP Complete (LLM support only). Phase 2 will add image generation via stable-diffusion.cpp.
+**Current Status**: Phase 2 Complete (LLM + Image Generation). Production-ready with 221/221 tests passing.
 
 ## Essential Commands
 
@@ -120,16 +120,22 @@ src/
 
 ## Testing Approach
 
-**Current Status** (Phase 1):
+**Current Status** (Phase 2 Complete):
 - Jest 30 + ts-jest with ESM experimental support
-- Error handling fully tested (14/14 passing, 100% coverage)
-- Test templates created for all modules but deferred due to ESM mocking complexity
-- Build system + TypeScript strict mode provides strong quality baseline
+- 221/221 tests passing (100% pass rate)
+- 12 test suites covering all Phase 1 & 2 functionality
+- Clean test exit (no memory leaks, no warnings)
+- Fast execution (~1.4 seconds for full suite)
+
+**Test Coverage**:
+- Phase 1: 130 tests (errors, utils, core managers)
+- Phase 2: 50 tests (DiffusionServerManager, ResourceOrchestrator)
+- Infrastructure: 41 tests (BinaryManager, health-check)
 
 **Test Structure**:
 ```
 tests/
-├── unit/              # Unit tests (errors.test.ts fully implemented)
+├── unit/              # Unit tests (all Phase 1 & 2 tests)
 ├── integration/       # Integration tests (future)
 └── e2e/              # End-to-end tests (future)
 ```
@@ -140,19 +146,22 @@ npm test -- errors.test.ts           # Run specific file
 npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 ```
 
+**Note**: See `docs/dev/ESM-TESTING-GUIDE.md` for ESM mocking patterns and best practices.
+
 ## Phase-Specific Context
 
-**Phase 1 (Complete)**: LLM support only
+**Phase 1 (Complete)**: LLM support
 - SystemInfo, ModelManager, LlamaServerManager operational
+- Binary management with variant testing (CUDA/Vulkan/CPU fallback)
 - Documentation complete (README, API.md, SETUP.md)
-- Example app deferred to Phase 2+
 
-**Phase 2 (Next)**: Image generation
+**Phase 2 (Complete)**: Image generation
 - DiffusionServerManager (HTTP wrapper for stable-diffusion.cpp)
-- Resource orchestration (automatic LLM offload/reload when VRAM constrained)
-- electron-control-panel example app (demonstrates both LLM and image gen)
+- ResourceOrchestrator (automatic LLM offload/reload when VRAM constrained)
+- Cross-platform CI/CD with automated testing
+- electron-control-panel example app available
 
-**Future Phases**: See DESIGN.md for complete roadmap
+**Future Phases**: See DESIGN.md for complete roadmap (Phase 3: Production Core, Phase 4: Production Polish)
 
 ## Important Files to Reference
 
@@ -160,7 +169,9 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 - **DESIGN-EXAMPLE-APP.md**: Detailed design for electron-control-panel example app
 - **PROGRESS.md**: Current status (concise summary)
 - **docs/dev/phase1/**: Archived Phase 1 detailed planning and logs
-- **docs/API.md**: Complete API reference with examples
+- **docs/dev/phase2/PHASE2-PROGRESS.md**: Complete Phase 2 development history
+- **docs/dev/ESM-TESTING-GUIDE.md**: ESM mocking patterns and testing best practices
+- **docs/API.md**: Complete API reference with examples (Phase 1 & 2)
 - **docs/SETUP.md**: Development environment setup for all platforms
 
 ## Critical: Electron + ES Modules Gotcha
@@ -191,6 +202,15 @@ The electron-control-panel example uses `"type": "module"` in package.json, whic
 This is documented in the electron-control-panel example for reference.
 
 ## Working with This Codebase
+
+**Before Committing (CI Requirements)**:
+1. **Run `npm run build`** - Must compile with 0 TypeScript errors
+2. **Run `npm run lint`** - Must pass with 0 errors (warnings OK if intentional)
+3. **Run `npm run format`** - Auto-format all files with Prettier
+4. **Run `npm test`** - All tests must pass (221/221)
+5. **Commit `package-lock.json`** - Never add lockfiles to .gitignore (needed for CI)
+
+**Note**: CI will fail if any of these checks fail. Run them locally before pushing.
 
 **When Adding New Features**:
 1. Check if it's planned in DESIGN.md (phases 2-5)

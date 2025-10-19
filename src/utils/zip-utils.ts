@@ -51,14 +51,11 @@ export async function extractLlamaServerBinary(
     const binaryPath = await findBinaryInDirectory(extractTo, binaryNames);
 
     if (!binaryPath) {
-      throw new FileSystemError(
-        `llama-server binary not found in extracted ZIP: ${zipPath}`,
-        {
-          path: zipPath,
-          extractedTo: extractTo,
-          suggestion: 'ZIP archive may have unexpected structure',
-        }
-      );
+      throw new FileSystemError(`llama-server binary not found in extracted ZIP: ${zipPath}`, {
+        path: zipPath,
+        extractedTo: extractTo,
+        suggestion: 'ZIP archive may have unexpected structure',
+      });
     }
 
     return binaryPath;
@@ -110,7 +107,7 @@ async function findBinaryInDirectory(
     }
 
     return undefined;
-  } catch (error) {
+  } catch {
     // If we can't read the directory, just return undefined
     return undefined;
   }

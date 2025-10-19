@@ -55,9 +55,7 @@ const LlamaServerControl: React.FC = () => {
 
     setStartLoading(true);
     try {
-      const startConfig = autoConfig
-        ? { modelId: config.modelId, port: config.port }
-        : config;
+      const startConfig = autoConfig ? { modelId: config.modelId, port: config.port } : config;
 
       await start(startConfig);
     } catch (err) {

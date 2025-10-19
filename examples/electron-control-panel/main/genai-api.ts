@@ -54,11 +54,7 @@ export async function cleanupServers(): Promise<void> {
 /**
  * Send download progress to renderer
  */
-export function sendDownloadProgress(
-  downloaded: number,
-  total: number,
-  modelName: string
-): void {
+export function sendDownloadProgress(downloaded: number, total: number, modelName: string): void {
   const mainWindow = BrowserWindow.getAllWindows()[0];
   if (mainWindow) {
     mainWindow.webContents.send('download:progress', {

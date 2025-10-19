@@ -9,14 +9,10 @@
  */
 
 import { SystemInfo } from '../system/SystemInfo.js';
-import { LlamaServerManager } from './LlamaServerManager.js';
-import { DiffusionServerManager } from './DiffusionServerManager.js';
+import type { LlamaServerManager } from './LlamaServerManager.js';
+import type { DiffusionServerManager } from './DiffusionServerManager.js';
 import { ModelManager } from './ModelManager.js';
-import type {
-  ServerConfig,
-  ImageGenerationConfig,
-  ImageGenerationResult,
-} from '../types/index.js';
+import type { ServerConfig, ImageGenerationConfig, ImageGenerationResult } from '../types/index.js';
 import { ServerError } from '../errors/index.js';
 
 /**
@@ -114,9 +110,7 @@ export class ResourceOrchestrator {
    * });
    * ```
    */
-  async orchestrateImageGeneration(
-    config: ImageGenerationConfig
-  ): Promise<ImageGenerationResult> {
+  async orchestrateImageGeneration(config: ImageGenerationConfig): Promise<ImageGenerationResult> {
     // Check if we need to offload LLM
     const needsOffload = await this.needsOffloadForImage();
 

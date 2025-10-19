@@ -4,16 +4,50 @@
  */
 
 import { jest } from '@jest/globals';
-import { Readable } from 'stream';
+import { Readable, Writable } from 'stream';
+import { EventEmitter } from 'events';
 
-// Mock fetch
+// Helper to create a mock ReadableStream (Web API, not Node.js)
+function createMockReadableStream(chunks: Uint8Array[]) {
+  let index = 0;
+  return {
+    getReader() {
+      return {
+        async read() {
+          if (index < chunks.length) {
+            return { done: false, value: chunks[index++] };
+          }
+          return { done: true, value: undefined };
+        },
+      };
+    },
+  };
+}
+
+// Mock fetch (save original for cleanup)
+const originalFetch = global.fetch;
 const mockFetch = jest.fn();
 global.fetch = mockFetch as any;
 
-// Mock fs/promises
-const mockWriteFile = jest.fn();
-jest.unstable_mockModule('fs/promises', () => ({
-  writeFile: mockWriteFile,
+// Create a mock WriteStream class
+class MockWriteStream extends Writable {
+  path: string;
+
+  constructor(path: string) {
+    super();
+    this.path = path;
+  }
+
+  _write(chunk: any, encoding: string, callback: Function) {
+    // Simulate successful write
+    callback();
+  }
+}
+
+// Mock node:fs
+const mockCreateWriteStream = jest.fn();
+jest.unstable_mockModule('node:fs', () => ({
+  createWriteStream: mockCreateWriteStream,
 }));
 
 // Mock file-utils
@@ -36,6 +70,16 @@ describe('Downloader', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     downloader = new Downloader();
+
+    // Setup createWriteStream to return a mock stream
+    mockCreateWriteStream.mockImplementation((path: string) => {
+      return new MockWriteStream(path);
+    });
+  });
+
+  afterAll(() => {
+    // Restore original global.fetch
+    global.fetch = originalFetch;
   });
 
   describe('download()', () => {
@@ -45,18 +89,10 @@ describe('Downloader', () => {
       const chunkSize = 100;
 
       // Mock fetch response with streaming body
-      const chunks = Array(10).fill(new Uint8Array(chunkSize));
-      let chunkIndex = 0;
-
-      const mockStream = new Readable({
-        read() {
-          if (chunkIndex < chunks.length) {
-            this.push(chunks[chunkIndex++]);
-          } else {
-            this.push(null);
-          }
-        },
-      });
+      const chunks = Array(10)
+        .fill(0)
+        .map(() => new Uint8Array(chunkSize));
+      const mockStream = createMockReadableStream(chunks);
 
       mockFetch.mockResolvedValue({
         ok: true,
@@ -69,7 +105,6 @@ describe('Downloader', () => {
         body: mockStream as any,
       });
 
-      mockWriteFile.mockResolvedValue(undefined);
       mockMoveFile.mockResolvedValue(undefined);
 
       await downloader.download({
@@ -85,7 +120,7 @@ describe('Downloader', () => {
       expect(progressCallback).toHaveBeenCalled();
 
       // Verify file operations
-      expect(mockWriteFile).toHaveBeenCalled();
+      expect(mockCreateWriteStream).toHaveBeenCalledWith(expect.stringContaining('.partial'));
       expect(mockMoveFile).toHaveBeenCalledWith(
         expect.stringContaining('.partial'),
         '/test/output.bin'
@@ -95,13 +130,14 @@ describe('Downloader', () => {
     it('should handle download errors and cleanup partial files', async () => {
       mockFetch.mockRejectedValue(new Error('Network error'));
       mockDeleteFile.mockResolvedValue(undefined);
+      mockFileExists.mockResolvedValue(true);
 
       await expect(
         downloader.download({
           url: 'https://example.com/file.bin',
           destination: '/test/output.bin',
         })
-      ).rejects.toThrow('Network error');
+      ).rejects.toThrow('Download failed');
 
       // Verify cleanup was attempted
       expect(mockDeleteFile).toHaveBeenCalled();
@@ -123,12 +159,7 @@ describe('Downloader', () => {
     });
 
     it('should create partial file during download', async () => {
-      const mockStream = new Readable({
-        read() {
-          this.push(new Uint8Array(100));
-          this.push(null);
-        },
-      });
+      const mockStream = createMockReadableStream([new Uint8Array(100)]);
 
       mockFetch.mockResolvedValue({
         ok: true,
@@ -138,7 +169,6 @@ describe('Downloader', () => {
         body: mockStream as any,
       });
 
-      mockWriteFile.mockResolvedValue(undefined);
       mockMoveFile.mockResolvedValue(undefined);
 
       await downloader.download({
@@ -147,17 +177,12 @@ describe('Downloader', () => {
       });
 
       // Verify .partial file was created
-      const writeFileCall = mockWriteFile.mock.calls[0];
-      expect(writeFileCall[0]).toContain('.partial');
+      const createStreamCall = mockCreateWriteStream.mock.calls[0];
+      expect(createStreamCall[0]).toContain('.partial');
     });
 
     it('should move file to final destination on completion', async () => {
-      const mockStream = new Readable({
-        read() {
-          this.push(new Uint8Array(100));
-          this.push(null);
-        },
-      });
+      const mockStream = createMockReadableStream([new Uint8Array(100)]);
 
       mockFetch.mockResolvedValue({
         ok: true,
@@ -167,7 +192,6 @@ describe('Downloader', () => {
         body: mockStream as any,
       });
 
-      mockWriteFile.mockResolvedValue(undefined);
       mockMoveFile.mockResolvedValue(undefined);
 
       await downloader.download({
@@ -182,12 +206,7 @@ describe('Downloader', () => {
     });
 
     it('should handle missing content-length header', async () => {
-      const mockStream = new Readable({
-        read() {
-          this.push(new Uint8Array(100));
-          this.push(null);
-        },
-      });
+      const mockStream = createMockReadableStream([new Uint8Array(100)]);
 
       mockFetch.mockResolvedValue({
         ok: true,
@@ -197,7 +216,6 @@ describe('Downloader', () => {
         body: mockStream as any,
       });
 
-      mockWriteFile.mockResolvedValue(undefined);
       mockMoveFile.mockResolvedValue(undefined);
 
       await downloader.download({
@@ -206,19 +224,42 @@ describe('Downloader', () => {
       });
 
       // Should still work, just without total size
-      expect(mockWriteFile).toHaveBeenCalled();
+      expect(mockCreateWriteStream).toHaveBeenCalled();
       expect(mockMoveFile).toHaveBeenCalled();
     });
   });
 
   describe('cancel()', () => {
+    beforeEach(() => {
+      // Use fake timers to prevent lingering setTimeout calls
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      // Clear any pending timers and restore real timers
+      jest.runOnlyPendingTimers();
+      jest.useRealTimers();
+    });
+
     it('should cancel ongoing download', async () => {
-      const mockStream = new Readable({
-        read() {
-          // Never push data, simulating a slow download
-          setTimeout(() => this.push(new Uint8Array(100)), 10000);
+      // Create a stream that will be interrupted
+      let rejectRead: (reason: any) => void;
+      const mockStream = {
+        getReader() {
+          return {
+            read() {
+              // Return a promise that can be rejected externally
+              return new Promise((resolve, reject) => {
+                rejectRead = reject;
+                // Simulate slow download
+                setTimeout(() => {
+                  resolve({ done: false, value: new Uint8Array(100) });
+                }, 10000);
+              });
+            },
+          };
         },
-      });
+      };
 
       mockFetch.mockResolvedValue({
         ok: true,
@@ -228,16 +269,21 @@ describe('Downloader', () => {
         body: mockStream as any,
       });
 
-      mockWriteFile.mockResolvedValue(undefined);
       mockDeleteFile.mockResolvedValue(undefined);
+      mockFileExists.mockResolvedValue(true);
 
       const downloadPromise = downloader.download({
         url: 'https://example.com/large-file.bin',
         destination: '/test/output.bin',
       });
 
-      // Cancel immediately
+      // Cancel after a tiny delay (advance fake timers)
+      jest.advanceTimersByTime(10);
+      await Promise.resolve(); // Allow microtasks to process
       downloader.cancel();
+
+      // Trigger abort by rejecting the read
+      rejectRead!(new Error('AbortError'));
 
       // Download should reject
       await expect(downloadPromise).rejects.toThrow();
@@ -256,14 +302,8 @@ describe('Downloader', () => {
       const progressValues: number[] = [];
       const totalSize = 1000;
 
-      const mockStream = new Readable({
-        read() {
-          this.push(new Uint8Array(100));
-          this.push(new Uint8Array(100));
-          this.push(new Uint8Array(100));
-          this.push(null);
-        },
-      });
+      const chunks = [new Uint8Array(100), new Uint8Array(100), new Uint8Array(100)];
+      const mockStream = createMockReadableStream(chunks);
 
       mockFetch.mockResolvedValue({
         ok: true,
@@ -273,7 +313,6 @@ describe('Downloader', () => {
         body: mockStream as any,
       });
 
-      mockWriteFile.mockResolvedValue(undefined);
       mockMoveFile.mockResolvedValue(undefined);
 
       await downloader.download({
@@ -299,12 +338,7 @@ describe('Downloader', () => {
         throw new Error('Callback error');
       });
 
-      const mockStream = new Readable({
-        read() {
-          this.push(new Uint8Array(100));
-          this.push(null);
-        },
-      });
+      const mockStream = createMockReadableStream([new Uint8Array(100)]);
 
       mockFetch.mockResolvedValue({
         ok: true,
@@ -314,7 +348,6 @@ describe('Downloader', () => {
         body: mockStream as any,
       });
 
-      mockWriteFile.mockResolvedValue(undefined);
       mockMoveFile.mockResolvedValue(undefined);
 
       // Should not throw even if callback fails

@@ -122,7 +122,7 @@ export async function estimateVRAM(gpu: GPUInfo): Promise<number | null> {
  */
 export async function hasSufficientMemory(
   requiredBytes: number,
-  useVRAM: boolean = false,
+  useVRAM = false,
   gpu?: GPUInfo
 ): Promise<boolean> {
   if (useVRAM) {

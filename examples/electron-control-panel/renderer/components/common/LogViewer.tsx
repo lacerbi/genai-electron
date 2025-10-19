@@ -63,7 +63,8 @@ const LogViewer: React.FC<LogViewerProps> = ({
     <div className="log-viewer">
       <div className="log-viewer-header">
         <span className="log-viewer-title">
-          Logs ({visibleLogs.length}{showDebug ? '' : ` of ${logs.length}`})
+          Logs ({visibleLogs.length}
+          {showDebug ? '' : ` of ${logs.length}`})
         </span>
         <div className="log-viewer-controls">
           <label className="debug-toggle">

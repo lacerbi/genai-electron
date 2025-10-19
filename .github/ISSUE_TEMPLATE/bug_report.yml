@@ -1,0 +1,94 @@
+name: 🐞 Bug Report
+description: Create a report to help us improve
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to file a bug report. To address this issue, we need as much information as possible.
+
+  - type: checkboxes
+    id: pre-submission-checks
+    attributes:
+      label: Pre-submission Checks
+      description: 'Please confirm the following before submitting the issue.'
+      options:
+        - label: I have searched the existing issues to make sure this bug has not been reported yet.
+          required: true
+        - label: I have read the `README.md` documentation.
+          required: true
+        - label: I am using a supported version of Node.js (>=22.0.0).
+          required: true
+        - label: I am using a supported version of Electron (>=25.0.0).
+          required: true
+
+  - type: textarea
+    id: bug-description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: 'Please provide detailed steps to reproduce the behavior.'
+      placeholder: |
+        1. In this file...
+        2. Call this function with these arguments...
+        3. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+
+  - type: input
+    id: node-version
+    attributes:
+      label: Node.js Version
+      placeholder: 'e.g., 22.11.0'
+    validations:
+      required: true
+
+  - type: input
+    id: electron-version
+    attributes:
+      label: Electron Version
+      placeholder: 'e.g., 32.0.0'
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating System
+      description: Which operating system are you using?
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other (please specify in Additional Context)
+    validations:
+      required: true
+
+  - type: input
+    id: package-version
+    attributes:
+      label: genai-electron Version
+      placeholder: 'e.g., 0.1.0'
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: 'Add any other context about the problem here (e.g., error logs, code samples, GPU info).'

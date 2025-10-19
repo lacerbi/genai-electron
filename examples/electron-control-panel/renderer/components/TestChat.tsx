@@ -120,9 +120,7 @@ const TestChat: React.FC<TestChatProps> = ({ serverRunning, port = 8080 }) => {
       </div>
 
       {!serverRunning && (
-        <div className="test-chat-notice">
-          Server must be running to test chat functionality.
-        </div>
+        <div className="test-chat-notice">Server must be running to test chat functionality.</div>
       )}
 
       <div className="test-chat-settings">
@@ -220,9 +218,7 @@ const TestChat: React.FC<TestChatProps> = ({ serverRunning, port = 8080 }) => {
               {showReasoning ? '▼' : '▶'} Thinking / Reasoning
             </button>
           </div>
-          {showReasoning && (
-            <div className="reasoning-content">{reasoning}</div>
-          )}
+          {showReasoning && <div className="reasoning-content">{reasoning}</div>}
         </div>
       )}
 

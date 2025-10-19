@@ -8,7 +8,7 @@
  * @module process/llama-log-parser
  */
 
-import { LogLevel } from './log-manager.js';
+import type { LogLevel } from './log-manager.js';
 
 /**
  * Parse llama.cpp log line and determine actual log level
