@@ -212,6 +212,36 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 - **Fix:** Modified `testBinary()` to use type-specific flags: llama uses `--version`, diffusion uses `--help`
 - **Result:** Diffusion binaries now pass variant testing, first working variant is selected and installed
 
+**Issue 5: Missing CUDA/Vulkan Runtime Dependencies**
+- **Problem:** Binary downloads only fetch main sd.exe, missing required runtime DLLs
+- **Impact:** After Issues 3 & 4 fixes, binary test passes but image generation hangs indefinitely
+- **Root Cause:** CUDA variants need `cudart-sd-bin-win-cu12-x64.zip` (runtime DLLs), Vulkan may need similar
+- **Current Architecture Limitation:** `BINARY_VERSIONS` only supports one URL per variant, can't download dependencies
+- **Discovery:** Manual testing revealed sd.exe runs but hangs during generation without DLLs
+- **Workaround:** User manually copied DLLs from separate download → image generation works perfectly
+- **Status:** ⚠️ PARTIAL - Core functionality proven working, automatic dependency download not yet implemented
+- **Next Steps:** Need to extend BinaryVariantConfig to support multiple URLs or dependency field
+
+### Manual Testing Results (2025-10-19)
+
+**Diffusion Server Testing:**
+- ✅ Binary download works (CUDA/Vulkan/AVX2 variants)
+- ✅ Binary extraction works (finds sd.exe correctly)
+- ✅ Binary testing works (--help flag test passes)
+- ✅ **Image generation confirmed working** (with manual DLL setup)
+- ⚠️ Automatic dependency download missing (cudart DLLs for CUDA, similar for Vulkan)
+
+**Known External Issues:**
+- Windows Defender may flag sd.exe as suspicious (false positive, common with ML binaries)
+- Virus scans confirm files are clean
+- User may need to add exception for genai-electron binaries folder
+
+**Architecture Discovery:**
+Windows variants (CUDA/Vulkan) require additional runtime DLLs not included in main binary ZIP:
+- CUDA: Needs `cudart-sd-bin-win-cu12-x64.zip` from same release
+- Vulkan: May need similar runtime package (TBD)
+- AVX2/CPU: No additional dependencies needed
+
 ### Build & Quality Status
 
 - ✅ **TypeScript:** 0 errors (strict mode)
@@ -316,7 +346,9 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 - ✅ Phase 2 example app implementation complete
 - ✅ Fixed critical diffusion binary extraction bug (Issue 3)
 - ✅ Fixed diffusion binary test flag incompatibility (Issue 4)
-- 🔄 Manual testing of diffusion server functionality
+- ✅ Verified core diffusion functionality works (with manual DLL workaround)
+- 🔄 Implement automatic runtime dependency downloading (Issue 5)
+- 🔄 Add architecture support for multi-file binary variants
 - 🔄 Testing resource orchestration with real workloads
 - 🔄 Verification of model management across both types
 - 🔄 Cross-platform testing (Windows, macOS, Linux)
