@@ -212,15 +212,21 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 - **Fix:** Modified `testBinary()` to use type-specific flags: llama uses `--version`, diffusion uses `--help`
 - **Result:** Diffusion binaries now pass variant testing, first working variant is selected and installed
 
-**Issue 5: Missing CUDA/Vulkan Runtime Dependencies**
-- **Problem:** Binary downloads only fetch main sd.exe, missing required runtime DLLs
-- **Impact:** After Issues 3 & 4 fixes, binary test passes but image generation hangs indefinitely
-- **Root Cause:** CUDA variants need `cudart-sd-bin-win-cu12-x64.zip` (runtime DLLs), Vulkan may need similar
+**Issue 5: Missing CUDA Runtime Dependencies**
+- **Problem:** Binary downloads only fetch main executables (llama-server.exe, sd.exe), missing required CUDA runtime DLLs
+- **Impact:** After Issues 3 & 4 fixes, binary test passes but CUDA variants hang indefinitely during execution
+- **Root Cause:** BOTH binary types require CUDA runtime DLLs for CUDA variants:
+  - llama.cpp CUDA: Needs `cudart-llama-bin-win-cuda-12.4-x64.zip`
+  - stable-diffusion.cpp CUDA: Needs `cudart-sd-bin-win-cu12-x64.zip`
+  - Note: Vulkan variants do NOT require CUDA DLLs (work without additional dependencies)
 - **Current Architecture Limitation:** `BINARY_VERSIONS` only supports one URL per variant, can't download dependencies
-- **Discovery:** Manual testing revealed sd.exe runs but hangs during generation without DLLs
-- **Workaround:** User manually copied DLLs from separate download → image generation works perfectly
-- **Status:** ⚠️ PARTIAL - Core functionality proven working, automatic dependency download not yet implemented
-- **Next Steps:** Need to extend BinaryVariantConfig to support multiple URLs or dependency field
+- **Discovery:** Manual testing revealed executables run but hang during inference/generation without CUDA runtime DLLs
+- **Workaround:** User manually copied DLLs from separate download → both LLM and image generation work perfectly
+- **Status:** ⚠️ PARTIAL - Core functionality proven working for both binaries, automatic dependency download not yet implemented
+- **Next Steps:**
+  - Extend BinaryVariantConfig to support dependency downloads
+  - Download CUDA runtime DLLs BEFORE running variant tests (to avoid testing non-functional binaries)
+  - Only attempt CUDA downloads if CUDA-compatible GPU is detected (avoid unnecessary ~100MB+ downloads per binary type)
 
 ### Manual Testing Results (2025-10-19)
 
@@ -228,8 +234,8 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 - ✅ Binary download works (CUDA/Vulkan/AVX2 variants)
 - ✅ Binary extraction works (finds sd.exe correctly)
 - ✅ Binary testing works (--help flag test passes)
-- ✅ **Image generation confirmed working** (with manual DLL setup)
-- ⚠️ Automatic dependency download missing (cudart DLLs for CUDA, similar for Vulkan)
+- ✅ **Image generation confirmed working** (with manual CUDA runtime DLL setup)
+- ⚠️ Automatic CUDA runtime dependency download missing (needed for CUDA variants only, not Vulkan/AVX2)
 
 **Known External Issues:**
 - Windows Defender may flag sd.exe as suspicious (false positive, common with ML binaries)
@@ -237,10 +243,11 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 - User may need to add exception for genai-electron binaries folder
 
 **Architecture Discovery:**
-Windows variants (CUDA/Vulkan) require additional runtime DLLs not included in main binary ZIP:
-- CUDA: Needs `cudart-sd-bin-win-cu12-x64.zip` from same release
-- Vulkan: May need similar runtime package (TBD)
-- AVX2/CPU: No additional dependencies needed
+Windows CUDA variants require additional runtime DLLs not included in main binary ZIP:
+- **llama.cpp CUDA:** Needs `cudart-llama-bin-win-cuda-12.4-x64.zip` from same release
+- **stable-diffusion.cpp CUDA:** Needs `cudart-sd-bin-win-cu12-x64.zip` from same release
+- **Vulkan variants:** No additional dependencies needed (work out of the box)
+- **AVX2/CPU variants:** No additional dependencies needed
 
 ### Build & Quality Status
 
@@ -346,9 +353,10 @@ Windows variants (CUDA/Vulkan) require additional runtime DLLs not included in m
 - ✅ Phase 2 example app implementation complete
 - ✅ Fixed critical diffusion binary extraction bug (Issue 3)
 - ✅ Fixed diffusion binary test flag incompatibility (Issue 4)
-- ✅ Verified core diffusion functionality works (with manual DLL workaround)
-- 🔄 Implement automatic runtime dependency downloading (Issue 5)
-- 🔄 Add architecture support for multi-file binary variants
+- ✅ Verified core functionality works for both binaries (with manual CUDA runtime DLL workaround)
+- 🔄 Implement automatic CUDA runtime dependency downloading for both llama.cpp and stable-diffusion.cpp (Issue 5)
+- 🔄 Add architecture support for multi-file binary variants (main executable + runtime dependencies)
+- 🔄 Add CUDA GPU detection before attempting CUDA variant downloads
 - 🔄 Testing resource orchestration with real workloads
 - 🔄 Verification of model management across both types
 - 🔄 Cross-platform testing (Windows, macOS, Linux)
