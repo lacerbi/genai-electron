@@ -5,13 +5,13 @@
 ## Current Build and Test Status
 
 - **Build Status:** ✅ Compiling successfully (0 TypeScript errors)
-- **Test Status:** ✅ **180/180 tests passing across 10 test suites (100% pass rate!)** 🎉
+- **Test Status:** ✅ **221/221 tests passing across 12 test suites (100% pass rate!)** 🎉
 - **Jest Status:** ✅ **Clean exit with no warnings** (worker exit issue resolved!)
 - **Branch:** `fix/revert-broken-refactoring` (pushed to origin)
 - **Last Updated:** 2025-10-19
 
 **Test Suite Summary:**
-- ✅ **ALL SUITES PASSING (10 suites, 180 tests):**
+- ✅ **ALL SUITES PASSING (12 suites, 221 tests):**
   - errors.test.ts: 14 tests
   - platform-utils.test.ts: 19 tests
   - file-utils.test.ts: 12 tests
@@ -21,7 +21,27 @@
   - StorageManager.test.ts: 17 tests
   - ModelManager.test.ts: 22 tests
   - SystemInfo.test.ts: 13 tests
-  - **LlamaServerManager.test.ts: 23 tests** ← FULLY FIXED! (2025-10-18)
+  - LlamaServerManager.test.ts: 23 tests
+  - **BinaryManager.test.ts: 19 tests** ← NEW! (2025-10-19)
+  - **health-check.test.ts: 22 tests** ← NEW! (2025-10-19)
+
+**New Test Coverage Added (2025-10-19)** ✅:
+- **BinaryManager.test.ts**: 19 comprehensive tests covering:
+  - Variant fallback logic (CUDA → CPU → Vulkan)
+  - Checksum verification for all variants
+  - Binary caching and variant preference
+  - Platform-specific cleanup (Windows .exe handling, Unix chmod)
+  - Download progress tracking
+  - Error handling (download, extraction, checksum failures)
+  - Binary testing with --version flag
+- **health-check.test.ts**: 22 comprehensive tests covering:
+  - `checkHealth()` function (9 tests): Status parsing, timeouts, errors, JSON handling
+  - `waitForHealthy()` function (8 tests): Exponential backoff, retry logic, timeout enforcement
+  - `isServerResponding()` function (5 tests): Simple ping checks with timeout
+  - AbortController timeout handling
+  - Attempt counting in error details
+- **Total improvement**: +41 tests, covering critical infrastructure gaps identified in TESTS.md
+- **Execution time**: ~3.1 seconds for full suite (221 tests)
 
 **Final Test Fix Progress (2025-10-18)**:
 - **Starting point**: 127/180 passing (70.6%)
