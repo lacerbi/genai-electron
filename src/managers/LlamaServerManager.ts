@@ -11,9 +11,7 @@ import { ServerManager } from './ServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
-import { LogManager } from '../process/log-manager.js';
 import { checkHealth, waitForHealthy } from '../process/health-check.js';
-import { BinaryManager } from './BinaryManager.js';
 import { parseLlamaCppLogLevel, stripLlamaCppFormatting } from '../process/llama-log-parser.js';
 import {
   ServerConfig,
@@ -24,16 +22,10 @@ import {
 } from '../types/index.js';
 import {
   ServerError,
-  ModelNotFoundError,
-  PortInUseError,
   InsufficientResourcesError,
-  BinaryError,
 } from '../errors/index.js';
-import { PATHS } from '../config/paths.js';
 import { BINARY_VERSIONS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
-import { getPlatformKey } from '../utils/platform-utils.js';
 import { fileExists } from '../utils/file-utils.js';
-import path from 'path';
 
 /**
  * LlamaServerManager class
@@ -71,7 +63,6 @@ export class LlamaServerManager extends ServerManager {
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
-  private logManager?: LogManager;
   private binaryPath?: string;
 
   /**
@@ -138,19 +129,16 @@ export class LlamaServerManager extends ServerManager {
       this.binaryPath = await this.ensureBinary();
 
       // 4. Check if port is in use
-      const { isServerResponding } = await import('../process/health-check.js');
-      if (await isServerResponding(config.port, 2000)) {
-        throw new PortInUseError(config.port);
-      }
+      await this.checkPortAvailability(config.port);
 
       // 5. Auto-configure if needed
       const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo);
 
       // 6. Initialize log manager
-      const logPath = path.join(PATHS.logs, 'llama-server.log');
-      this.logManager = new LogManager(logPath);
-      await this.logManager.initialize();
-      await this.logManager.write(`Starting llama-server on port ${finalConfig.port}`, 'info');
+      await this.initializeLogManager(
+        'llama-server.log',
+        `Starting llama-server on port ${finalConfig.port}`
+      );
 
       // 7. Build command-line arguments
       const args = this.buildCommandLineArgs(finalConfig, modelInfo);
@@ -172,7 +160,7 @@ export class LlamaServerManager extends ServerManager {
         );
       }
 
-      await this.logManager.write(
+      await this.logManager!.write(
         `Spawning llama-server: ${this.binaryPath} with args: ${args.join(' ')}`,
         'info'
       );
@@ -192,7 +180,7 @@ export class LlamaServerManager extends ServerManager {
       this._pid = pid;
       this._port = finalConfig.port;
 
-      await this.logManager.write(
+      await this.logManager!.write(
         `Process spawned with PID ${pid}, waiting for health check...`,
         'info'
       );
@@ -203,42 +191,18 @@ export class LlamaServerManager extends ServerManager {
       this._startedAt = new Date();
       this.setStatus('running');
 
-      await this.logManager.write('Server is running and healthy', 'info');
+      await this.logManager!.write('Server is running and healthy', 'info');
 
       // Emit started event
       this.emitEvent('started', this.getInfo());
 
       return this.getInfo();
     } catch (error) {
-      // Cleanup on failure
-      this.setStatus('stopped');
-      if (this._pid && this.processManager.isRunning(this._pid)) {
-        await this.processManager.kill(this._pid, 5000);
-      }
-
-      if (this.logManager) {
-        await this.logManager.write(
-          `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
-          'error'
-        );
-      }
-
-      // Re-throw typed errors
-      if (
-        error instanceof ModelNotFoundError ||
-        error instanceof PortInUseError ||
-        error instanceof BinaryError ||
-        error instanceof InsufficientResourcesError ||
-        error instanceof ServerError
-      ) {
-        throw error;
-      }
-
-      // Wrap unknown errors
-      throw new ServerError(
-        `Failed to start llama-server: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        { error: error instanceof Error ? error.message : String(error) }
-      );
+      throw await this.handleStartupError('llama-server', error, async () => {
+        if (this._pid && this.processManager.isRunning(this._pid)) {
+          await this.processManager.kill(this._pid, 5000);
+        }
+      });
     }
   }
 
@@ -320,50 +284,6 @@ export class LlamaServerManager extends ServerManager {
     }
   }
 
-  /**
-   * Get recent server logs
-   *
-   * @param lines - Number of lines to retrieve (default: 100)
-   * @returns Array of log lines
-   */
-  async getLogs(lines: number = 100): Promise<string[]> {
-    if (!this.logManager) {
-      return [];
-    }
-
-    try {
-      return await this.logManager.getRecent(lines);
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * Clear all server logs
-   *
-   * Removes all log entries by truncating the log file.
-   * This is useful for clearing old/corrupted logs and starting fresh.
-   */
-  async clearLogs(): Promise<void> {
-    if (!this.logManager) {
-      return;
-    }
-
-    try {
-      await this.logManager.clear();
-    } catch {
-      // Ignore errors - log clearing is not critical
-    }
-  }
-
-  /**
-   * Get log file path
-   *
-   * @returns Path to log file (undefined if log manager not initialized)
-   */
-  getLogPath(): string | undefined {
-    return this.logManager?.getLogPath();
-  }
 
   /**
    * Ensure llama-server binary is downloaded
@@ -379,27 +299,11 @@ export class LlamaServerManager extends ServerManager {
    * @private
    */
   private async ensureBinary(): Promise<string> {
-    const platformKey = getPlatformKey();
-    const binaryConfig = BINARY_VERSIONS.llamaServer;
-
-    // Get variants for this platform
-    const variants = binaryConfig.variants[platformKey];
-
-    // Create BinaryManager with llama configuration
-    const binaryManager = new BinaryManager({
-      type: 'llama',
-      binaryName: 'llama-server',
-      platformKey,
-      variants: variants || [],
-      log: this.logManager
-        ? (message, level = 'info') => {
-            this.logManager?.write(message, level).catch(() => {});
-          }
-        : undefined,
-    });
-
-    // Use BinaryManager to download and install binary
-    return await binaryManager.ensureBinary();
+    return this.ensureBinaryHelper(
+      'llama',
+      'llama-server',
+      BINARY_VERSIONS.llamaServer
+    );
   }
 
   /**

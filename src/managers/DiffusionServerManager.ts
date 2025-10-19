@@ -13,21 +13,15 @@ import { ServerManager } from './ServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
-import { LogManager } from '../process/log-manager.js';
-import { BinaryManager } from './BinaryManager.js';
 import http from 'node:http';
-import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { PATHS, getTempPath } from '../config/paths.js';
+import { getTempPath } from '../config/paths.js';
 import { BINARY_VERSIONS, DEFAULT_PORTS } from '../config/defaults.js';
-import { getPlatformKey } from '../utils/platform-utils.js';
 import { deleteFile } from '../utils/file-utils.js';
 import {
   ServerError,
   ModelNotFoundError,
-  PortInUseError,
   InsufficientResourcesError,
-  BinaryError,
 } from '../errors/index.js';
 import type {
   DiffusionServerConfig,
@@ -75,7 +69,6 @@ export class DiffusionServerManager extends ServerManager {
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
-  private logManager?: LogManager;
   private binaryPath?: string;
   private httpServer?: http.Server;
   private currentGeneration?: {
@@ -154,16 +147,13 @@ export class DiffusionServerManager extends ServerManager {
 
       // 4. Check if port is in use
       const port = config.port || DEFAULT_PORTS.diffusion;
-      const { isServerResponding } = await import('../process/health-check.js');
-      if (await isServerResponding(port, 2000)) {
-        throw new PortInUseError(port);
-      }
+      await this.checkPortAvailability(port);
 
       // 5. Initialize log manager
-      const logPath = path.join(PATHS.logs, 'diffusion-server.log');
-      this.logManager = new LogManager(logPath);
-      await this.logManager.initialize();
-      await this.logManager.write(`Starting diffusion server on port ${port}`, 'info');
+      await this.initializeLogManager(
+        'diffusion-server.log',
+        `Starting diffusion server on port ${port}`
+      );
 
       // 6. Create HTTP server
       await this.createHTTPServer(config);
@@ -172,39 +162,17 @@ export class DiffusionServerManager extends ServerManager {
       this._startedAt = new Date();
       this.setStatus('running');
 
-      await this.logManager.write('Diffusion server is running', 'info');
+      await this.logManager!.write('Diffusion server is running', 'info');
       this.emitEvent('started', this.getInfo());
 
       return this.getInfo() as DiffusionServerInfo;
     } catch (error) {
-      this.setStatus('stopped');
-      if (this.httpServer) {
-        this.httpServer.close();
-        this.httpServer = undefined;
-      }
-
-      if (this.logManager) {
-        await this.logManager.write(
-          `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
-          'error'
-        );
-      }
-
-      // Re-throw typed errors
-      if (
-        error instanceof ModelNotFoundError ||
-        error instanceof PortInUseError ||
-        error instanceof BinaryError ||
-        error instanceof InsufficientResourcesError ||
-        error instanceof ServerError
-      ) {
-        throw error;
-      }
-
-      throw new ServerError(
-        `Failed to start diffusion server: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        { error: error instanceof Error ? error.message : String(error) }
-      );
+      throw await this.handleStartupError('diffusion-server', error, async () => {
+        if (this.httpServer) {
+          this.httpServer.close();
+          this.httpServer = undefined;
+        }
+      });
     }
   }
 
@@ -309,36 +277,6 @@ export class DiffusionServerManager extends ServerManager {
     } as DiffusionServerInfo;
   }
 
-  /**
-   * Get recent server logs
-   *
-   * @param lines - Number of lines to retrieve (default: 100)
-   * @returns Array of log lines
-   */
-  async getLogs(lines: number = 100): Promise<string[]> {
-    if (!this.logManager) {
-      return [];
-    }
-    try {
-      return await this.logManager.getRecent(lines);
-    } catch {
-      return [];
-    }
-  }
-
-  /**
-   * Clear all server logs
-   */
-  async clearLogs(): Promise<void> {
-    if (!this.logManager) {
-      return;
-    }
-    try {
-      await this.logManager.clear();
-    } catch {
-      // Ignore errors
-    }
-  }
 
   /**
    * Ensure stable-diffusion.cpp binary is downloaded
@@ -348,23 +286,11 @@ export class DiffusionServerManager extends ServerManager {
    * @private
    */
   private async ensureBinary(): Promise<string> {
-    const platformKey = getPlatformKey();
-    const binaryConfig = BINARY_VERSIONS.diffusionCpp;
-    const variants = binaryConfig.variants[platformKey];
-
-    const binaryManager = new BinaryManager({
-      type: 'diffusion',
-      binaryName: 'stable-diffusion',
-      platformKey,
-      variants: variants || [],
-      log: this.logManager
-        ? (message, level = 'info') => {
-            this.logManager?.write(message, level).catch(() => {});
-          }
-        : undefined,
-    });
-
-    return await binaryManager.ensureBinary();
+    return this.ensureBinaryHelper(
+      'diffusion',
+      'stable-diffusion',
+      BINARY_VERSIONS.diffusionCpp
+    );
   }
 
   /**
