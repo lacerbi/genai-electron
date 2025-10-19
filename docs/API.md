@@ -35,7 +35,7 @@ The `SystemInfo` class provides system capability detection and intelligent conf
 import { systemInfo } from 'genai-electron';
 // Or for advanced usage:
 import { SystemInfo } from 'genai-electron';
-const customSystemInfo = new SystemInfo();
+const customSystemInfo = SystemInfo.getInstance();
 ```
 
 ### Methods
@@ -96,25 +96,28 @@ console.log('Memory usage:', usagePercent.toFixed(1), '%');
 
 ---
 
-#### `canRunModel(modelInfo: ModelInfo): Promise<{ canRun: boolean; reason?: string }>`
+#### `canRunModel(modelInfo: ModelInfo): Promise<{ possible: boolean; reason?: string; suggestion?: string }>`
 
 Checks if a specific model can run on the current system based on available resources.
 
 **Parameters**:
 - `modelInfo: ModelInfo` - Model information to check
 
-**Returns**: `Promise<{ canRun: boolean; reason?: string }>` - Whether model can run and reason if not
+**Returns**: `Promise<{ possible: boolean; reason?: string; suggestion?: string }>` - Whether model can run, reason if not, and optional suggestion
 
 **Example**:
 ```typescript
 const modelInfo = await modelManager.getModelInfo('llama-2-7b');
 const check = await systemInfo.canRunModel(modelInfo);
 
-if (check.canRun) {
+if (check.possible) {
   console.log('✅ Model can run on this system');
   await llamaServer.start({ modelId: modelInfo.id, port: 8080 });
 } else {
   console.log('❌ Cannot run model:', check.reason);
+  if (check.suggestion) {
+    console.log('💡 Suggestion:', check.suggestion);
+  }
   // Example reasons:
   // - "Insufficient RAM: Model requires 8GB but only 4GB available"
   // - "Model file not found or corrupt"
@@ -123,14 +126,14 @@ if (check.canRun) {
 
 ---
 
-#### `getOptimalConfig(modelInfo: ModelInfo): Promise<ServerConfig>`
+#### `getOptimalConfig(modelInfo: ModelInfo): Promise<Partial<ServerConfig>>`
 
 Generates optimal server configuration for a specific model based on system capabilities.
 
 **Parameters**:
 - `modelInfo: ModelInfo` - Model to generate config for
 
-**Returns**: `Promise<ServerConfig>` - Optimized server configuration
+**Returns**: `Promise<Partial<ServerConfig>>` - Partial server configuration (threads, gpuLayers, contextSize, etc.) meant to be spread into full `start()` call. Does not include `modelId` or `port`.
 
 **Example**:
 ```typescript
@@ -164,7 +167,7 @@ The `ModelManager` class handles model downloading, storage, and management.
 import { modelManager } from 'genai-electron';
 // Or for advanced usage:
 import { ModelManager } from 'genai-electron';
-const customModelManager = new ModelManager();
+const customModelManager = ModelManager.getInstance();
 ```
 
 ### Methods
@@ -367,7 +370,7 @@ if (isValid) {
 }
 ```
 
-**Note**: Only works if checksum was provided during download. Returns `true` if no checksum stored.
+**Note**: Only works if checksum was provided during download. Returns `false` if no checksum stored (cannot verify integrity without checksum).
 
 **Throws**: `ModelNotFoundError` if model doesn't exist
 
@@ -514,17 +517,18 @@ console.log('Status:', status.status); // 'stopped'
 
 ---
 
-#### `restart(): Promise<void>`
+#### `restart(): Promise<ServerInfo>`
 
 Restarts the server with the same configuration.
 
-**Returns**: `Promise<void>`
+**Returns**: `Promise<ServerInfo>` - Server information after restart
 
 **Example**:
 ```typescript
 console.log('Restarting server...');
-await llamaServer.restart();
-console.log('Server restarted');
+const info = await llamaServer.restart();
+console.log('Server restarted on port', info.port);
+console.log('PID:', info.pid);
 ```
 
 **Equivalent to**:
@@ -535,31 +539,52 @@ await llamaServer.start(previousConfig);
 
 ---
 
-#### `getStatus(): ServerInfo`
+#### `getStatus(): ServerStatus`
 
-Gets current server status (synchronous).
+Gets current server status as a simple string (synchronous).
 
-**Returns**: `ServerInfo` - Current server state
+**Returns**: `ServerStatus` - Current server state: `'stopped'`, `'starting'`, `'running'`, `'stopping'`, or `'crashed'`
 
 **Example**:
 ```typescript
 const status = llamaServer.getStatus();
-
-console.log('Server Status:', status.status);
+console.log('Server Status:', status);
 // Possible values: 'stopped', 'starting', 'running', 'stopping', 'crashed'
 
-console.log('Health:', status.health);
+if (status === 'running') {
+  console.log('✅ Server is running');
+} else if (status === 'crashed') {
+  console.error('❌ Server has crashed');
+}
+```
+
+---
+
+#### `getInfo(): ServerInfo`
+
+Gets detailed server information including status, health, PID, and more (synchronous).
+
+**Returns**: `ServerInfo` - Complete server state
+
+**Example**:
+```typescript
+const info = llamaServer.getInfo();
+
+console.log('Server Status:', info.status);
+// Possible values: 'stopped', 'starting', 'running', 'stopping', 'crashed'
+
+console.log('Health:', info.health);
 // Possible values: 'ok', 'loading', 'error', 'unknown'
 
-if (status.pid) {
-  console.log('Process ID:', status.pid);
+if (info.pid) {
+  console.log('Process ID:', info.pid);
 }
 
-console.log('Port:', status.port);
-console.log('Model ID:', status.modelId);
+console.log('Port:', info.port);
+console.log('Model ID:', info.modelId);
 
-if (status.startedAt) {
-  const uptime = Date.now() - new Date(status.startedAt).getTime();
+if (info.startedAt) {
+  const uptime = Date.now() - new Date(info.startedAt).getTime();
   console.log('Uptime:', Math.floor(uptime / 1000), 'seconds');
 }
 ```
@@ -580,9 +605,9 @@ if (healthy) {
   console.log('✅ Server is healthy and ready to accept requests');
 } else {
   console.log('❌ Server is not responding');
-  const status = llamaServer.getStatus();
-  console.log('Status:', status.status);
-  console.log('Health:', status.health);
+  const info = llamaServer.getInfo();
+  console.log('Status:', info.status);
+  console.log('Health:', info.health);
 }
 ```
 
@@ -608,28 +633,29 @@ if (await llamaServer.isHealthy()) {
 
 ---
 
-#### `getLogs(lines?: number): Promise<string>`
+#### `getLogs(lines?: number): Promise<string[]>`
 
 Gets recent server logs.
 
 **Parameters**:
 - `lines?: number` - Optional - Number of lines to retrieve (default: 100)
 
-**Returns**: `Promise<string>` - Recent log entries
+**Returns**: `Promise<string[]>` - Array of recent log entries
 
 **Example**:
 ```typescript
 // Get last 100 lines (default)
 const logs = await llamaServer.getLogs();
-console.log('Recent logs:\n', logs);
+console.log('Recent logs:');
+logs.forEach(line => console.log(line));
 
 // Get last 50 lines
 const recentLogs = await llamaServer.getLogs(50);
-console.log('Last 50 lines:\n', recentLogs);
+console.log(`Last ${recentLogs.length} lines`);
 
 // Get all logs
 const allLogs = await llamaServer.getLogs(Infinity);
-console.log('All logs:\n', allLogs);
+console.log(`Total log entries: ${allLogs.length}`);
 ```
 
 **Log Format**:
@@ -738,7 +764,7 @@ Starts the diffusion HTTP wrapper server. Downloads binary automatically on firs
 - `port?: number` - Optional - Port to listen on (default: 8081)
 - `threads?: number` - Optional - CPU threads (auto-detected if not specified)
 - `gpuLayers?: number` - Optional - Layers to offload to GPU (auto-detected if not specified, 0 = CPU-only)
-- `vramBudget?: number` - Optional - VRAM budget in MB
+- `vramBudget?: number` - Optional - VRAM budget in MB ⚠️ **Phase 3**: This option is planned but not yet implemented. Currently ignored.
 
 **Returns**: `Promise<DiffusionServerInfo>` - Server information
 
@@ -861,41 +887,61 @@ await fs.writeFile('cyberpunk-city.png', result.image);
 ```
 
 **Throws**:
-- `ServerError` - Server not running or generation failed
-- `ModelNotFoundError` - Model not found
+- `ServerError` - Server not running, already generating an image, or generation failed
 
-**Note**: Only one image can be generated at a time. If called while busy, throws `ServerError`.
+**Note**: Only one image can be generated at a time. If called while busy, throws `ServerError`. Model validation occurs during `start()`.
 
 ---
 
-#### `getStatus(): DiffusionServerInfo`
+#### `getStatus(): ServerStatus`
 
-Gets current server status (synchronous).
+Gets current server status as a simple string (synchronous).
 
-**Returns**: `DiffusionServerInfo` - Current server state
+**Returns**: `ServerStatus` - Current server state: `'stopped'`, `'starting'`, `'running'`, `'stopping'`, or `'crashed'`
 
 **Example**:
 ```typescript
 const status = diffusionServer.getStatus();
-
-console.log('Server Status:', status.status);
+console.log('Server Status:', status);
 // Possible values: 'stopped', 'starting', 'running', 'stopping', 'crashed'
 
-console.log('Health:', status.health);
+if (status === 'running') {
+  console.log('✅ Diffusion server is running');
+} else if (status === 'crashed') {
+  console.error('❌ Diffusion server has crashed');
+}
+```
+
+---
+
+#### `getInfo(): DiffusionServerInfo`
+
+Gets detailed server information including status, health, busy state, PID, and more (synchronous).
+
+**Returns**: `DiffusionServerInfo` - Complete server state
+
+**Example**:
+```typescript
+const info = diffusionServer.getInfo();
+
+console.log('Server Status:', info.status);
+// Possible values: 'stopped', 'starting', 'running', 'stopping', 'crashed'
+
+console.log('Health:', info.health);
 // Possible values: 'ok', 'loading', 'error', 'unknown'
 
-console.log('Busy:', status.busy);
+console.log('Busy:', info.busy);
 // true if currently generating an image
 
-if (status.pid) {
-  console.log('HTTP wrapper PID:', status.pid);
+if (info.pid) {
+  console.log('HTTP wrapper PID:', info.pid);
 }
 
-console.log('Port:', status.port);
-console.log('Model ID:', status.modelId);
+console.log('Port:', info.port);
+console.log('Model ID:', info.modelId);
 
-if (status.startedAt) {
-  const uptime = Date.now() - new Date(status.startedAt).getTime();
+if (info.startedAt) {
+  const uptime = Date.now() - new Date(info.startedAt).getTime();
   console.log('Uptime:', Math.floor(uptime / 1000), 'seconds');
 }
 ```
@@ -1052,13 +1098,17 @@ const orchestrator = new ResourceOrchestrator(
 ```typescript
 new ResourceOrchestrator(
   systemInfo?: SystemInfo,
-  llamaServer?: LlamaServerManager,
-  diffusionServer?: DiffusionServerManager,
+  llamaServer: LlamaServerManager,
+  diffusionServer: DiffusionServerManager,
   modelManager?: ModelManager
 )
 ```
 
-**Parameters**: All optional, defaults to singleton instances if not provided.
+**Parameters**:
+- `systemInfo?: SystemInfo` - Optional - System information instance (defaults to singleton)
+- `llamaServer: LlamaServerManager` - **Required** - LLM server manager instance
+- `diffusionServer: DiffusionServerManager` - **Required** - Diffusion server manager instance
+- `modelManager?: ModelManager` - Optional - Model manager instance (defaults to singleton)
 
 ---
 
@@ -1467,7 +1517,7 @@ interface DiffusionServerConfig {
   port?: number;          // Port to listen on (default: 8081)
   threads?: number;       // CPU threads (auto-detected if not specified)
   gpuLayers?: number;     // GPU layers to offload (auto-detected if not specified)
-  vramBudget?: number;    // VRAM budget in MB (optional)
+  vramBudget?: number;    // VRAM budget in MB (Phase 3 - not yet implemented, currently ignored)
 }
 ```
 
