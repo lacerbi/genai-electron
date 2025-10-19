@@ -32,7 +32,7 @@ const execFileAsync = promisify(execFile);
 export interface BinaryManagerConfig {
   /** Binary type (llama or diffusion) */
   type: 'llama' | 'diffusion';
-  /** Binary name (e.g., 'llama-server', 'stable-diffusion') */
+  /** Binary name (e.g., 'llama-server', 'sd') */
   binaryName: string;
   /** Platform key (e.g., 'win32-x64') */
   platformKey: string;

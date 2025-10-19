@@ -281,7 +281,7 @@ export class DiffusionServerManager extends ServerManager {
    * @private
    */
   private async ensureBinary(): Promise<string> {
-    return this.ensureBinaryHelper('diffusion', 'stable-diffusion', BINARY_VERSIONS.diffusionCpp);
+    return this.ensureBinaryHelper('diffusion', 'sd', BINARY_VERSIONS.diffusionCpp);
   }
 
   /**

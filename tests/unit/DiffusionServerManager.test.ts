@@ -190,7 +190,7 @@ describe('DiffusionServerManager', () => {
     mockLogWrite.mockResolvedValue(undefined);
     mockLogGetRecent.mockResolvedValue([]);
     mockLogClear.mockResolvedValue(undefined);
-    mockEnsureBinary.mockResolvedValue('/test/binaries/stable-diffusion');
+    mockEnsureBinary.mockResolvedValue('/test/binaries/sd');
     mockCreateServer.mockReturnValue(mockHttpServer);
     mockHttpServer.listen.mockImplementation((port: number, callback: () => void) => {
       callback();
