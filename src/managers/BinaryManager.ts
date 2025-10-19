@@ -9,7 +9,7 @@
 
 import { Downloader } from '../download/Downloader.js';
 import { PATHS, getBinaryPath } from '../config/paths.js';
-import { type BinaryVariantConfig } from '../config/defaults.js';
+import { type BinaryVariantConfig, type BinaryDependency } from '../config/defaults.js';
 import { BinaryError } from '../errors/index.js';
 import {
   fileExists,
@@ -19,6 +19,8 @@ import {
   copyDirectory,
 } from '../utils/file-utils.js';
 import { extractBinary, cleanupExtraction } from '../utils/zip-utils.js';
+import { detectGPU } from '../system/gpu-detect.js';
+import AdmZip from 'adm-zip';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { execFile } from 'child_process';
@@ -56,6 +58,48 @@ export class BinaryManager {
   }
 
   /**
+   * Filter variants based on CUDA GPU availability
+   *
+   * Removes CUDA variants if no CUDA-capable GPU is detected.
+   * This prevents unnecessary downloads (~100-200MB) of CUDA runtime dependencies
+   * on systems without NVIDIA GPUs.
+   *
+   * @param variants - Original list of variants
+   * @returns Filtered list of variants
+   * @private
+   */
+  private async filterVariantsByCudaAvailability(
+    variants: readonly BinaryVariantConfig[]
+  ): Promise<readonly BinaryVariantConfig[]> {
+    // Check if any CUDA variants exist
+    const hasCudaVariants = variants.some((v) => v.type === 'cuda');
+    if (!hasCudaVariants) {
+      return variants;
+    }
+
+    // Detect GPU capabilities
+    const gpu = await detectGPU();
+
+    // If CUDA is available, return all variants
+    if (gpu.available && gpu.cuda === true) {
+      this.log('CUDA GPU detected, CUDA variants will be tried', 'info');
+      return variants;
+    }
+
+    // Filter out CUDA variants
+    const filtered = variants.filter((v) => v.type !== 'cuda');
+
+    if (filtered.length < variants.length) {
+      const reason = gpu.available
+        ? `GPU detected (${gpu.type}) but CUDA not supported`
+        : 'No GPU detected';
+      this.log(`Skipping CUDA variants: ${reason}`, 'info');
+    }
+
+    return filtered;
+  }
+
+  /**
    * Ensure binary is available, downloading if necessary
    *
    * Tries each variant in priority order until one works.
@@ -65,12 +109,23 @@ export class BinaryManager {
    * @throws {BinaryError} If all variants fail
    */
   async ensureBinary(): Promise<string> {
-    const { type, binaryName, variants, platformKey } = this.config;
+    const { type, binaryName, platformKey } = this.config;
+    let { variants } = this.config;
 
     if (!variants || variants.length === 0) {
       throw new BinaryError(`No binary variants available for platform: ${platformKey}`, {
         platform: platformKey,
         suggestion: 'Check platform support in DESIGN.md',
+      });
+    }
+
+    // Filter variants based on CUDA availability
+    variants = await this.filterVariantsByCudaAvailability(variants);
+
+    if (variants.length === 0) {
+      throw new BinaryError(`No compatible binary variants available for platform: ${platformKey}`, {
+        platform: platformKey,
+        suggestion: 'All variants were filtered out (e.g., CUDA variants on non-NVIDIA system)',
       });
     }
 
@@ -147,6 +202,74 @@ export class BinaryManager {
   }
 
   /**
+   * Download and extract binary dependencies (e.g., CUDA runtime DLLs)
+   *
+   * Dependencies are downloaded and extracted BEFORE the main binary is tested.
+   * This ensures all required files are present during binary testing.
+   *
+   * @param dependencies - List of dependencies to download
+   * @param extractDir - Directory to extract dependencies into
+   * @throws {BinaryError} If any dependency fails to download or verify
+   * @private
+   */
+  private async downloadDependencies(
+    dependencies: readonly BinaryDependency[],
+    extractDir: string
+  ): Promise<void> {
+    const { type } = this.config;
+
+    for (let i = 0; i < dependencies.length; i++) {
+      const dep = dependencies[i];
+      if (!dep) continue;
+
+      const depName = dep.description || `Dependency ${i + 1}`;
+      this.log(`Downloading ${depName}...`, 'info');
+
+      const downloader = new Downloader();
+      const depZipPath = path.join(PATHS.binaries[type], `.dep${i}.zip`);
+
+      try {
+        // Download dependency
+        await downloader.download({
+          url: dep.url,
+          destination: depZipPath,
+          onProgress: (downloaded, total) => {
+            const percent = ((downloaded / total) * 100).toFixed(1);
+            this.log(`Downloading ${depName}: ${percent}%`, 'info');
+          },
+        });
+
+        // Verify checksum
+        const actualChecksum = await calculateChecksum(depZipPath);
+        if (actualChecksum !== dep.checksum) {
+          throw new BinaryError('Dependency checksum verification failed', {
+            dependency: dep.url,
+            expected: dep.checksum,
+            actual: actualChecksum,
+            suggestion: 'The downloaded dependency may be corrupted. Try again.',
+          });
+        }
+
+        // Extract dependency to same directory as main binary
+        // This ensures DLLs are in the same directory as the executable
+        // Use AdmZip directly to extract all files (not searching for specific binary)
+        await fs.mkdir(extractDir, { recursive: true });
+        const zip = new AdmZip(depZipPath);
+        zip.extractAllTo(extractDir, true);
+
+        // Cleanup dependency ZIP
+        await deleteFile(depZipPath).catch(() => void 0);
+
+        this.log(`${depName} extracted successfully`, 'info');
+      } catch (error) {
+        // Cleanup on error
+        await deleteFile(depZipPath).catch(() => void 0);
+        throw error;
+      }
+    }
+  }
+
+  /**
    * Download and test a binary variant
    *
    * @param variant - Binary variant configuration
@@ -164,7 +287,13 @@ export class BinaryManager {
     const extractDir = `${finalBinaryPath}.${variant.type}.extract`;
 
     try {
-      // Download ZIP
+      // Download and extract dependencies FIRST (e.g., CUDA runtime DLLs)
+      // This ensures all required files are present when testing the binary
+      if (variant.dependencies && variant.dependencies.length > 0) {
+        await this.downloadDependencies(variant.dependencies, extractDir);
+      }
+
+      // Download main binary ZIP
       await downloader.download({
         url: variant.url,
         destination: zipPath,
@@ -190,7 +319,7 @@ export class BinaryManager {
           ? ['llama-server.exe', 'llama-server', 'llama-cli.exe', 'llama-cli']
           : ['sd.exe', 'sd'];
 
-      // Extract ZIP
+      // Extract main binary ZIP to same directory as dependencies
       const extractedBinaryPath = await extractBinary(zipPath, extractDir, binaryNamesToSearch);
 
       // Test if binary works (has required drivers, etc.)
@@ -198,7 +327,7 @@ export class BinaryManager {
 
       if (works) {
         // Copy ALL extracted files to binaries directory
-        // This includes the .exe AND all required DLLs
+        // This includes the .exe AND all required DLLs (from dependencies)
         await copyDirectory(extractDir, PATHS.binaries[type]);
 
         // Make executable (Unix-like systems)
@@ -213,13 +342,13 @@ export class BinaryManager {
         return true;
       } else {
         // Binary doesn't work (missing drivers, etc.)
-        // Cleanup and return false to try next variant
+        // Cleanup everything including dependencies and return false to try next variant
         await deleteFile(zipPath).catch(() => void 0);
         await cleanupExtraction(extractDir).catch(() => void 0);
         return false;
       }
     } catch (error) {
-      // Cleanup on error
+      // Cleanup everything on error (including dependencies)
       await deleteFile(zipPath).catch(() => void 0);
       await cleanupExtraction(extractDir).catch(() => void 0);
       throw error;

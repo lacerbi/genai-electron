@@ -63,12 +63,14 @@ jest.unstable_mockModule('../../src/config/paths.js', () => ({
 const mockReadFile = jest.fn();
 const mockWriteFile = jest.fn();
 const mockChmod = jest.fn();
+const mockMkdir = jest.fn();
 
 jest.unstable_mockModule('fs', () => ({
   promises: {
     readFile: mockReadFile,
     writeFile: mockWriteFile,
     chmod: mockChmod,
+    mkdir: mockMkdir,
   },
 }));
 
@@ -82,6 +84,21 @@ jest.unstable_mockModule('child_process', () => ({
 // Mock util.promisify to return our async mock
 jest.unstable_mockModule('util', () => ({
   promisify: (fn: any) => mockExecFileAsync,
+}));
+
+// Mock gpu-detect
+const mockDetectGPU = jest.fn();
+jest.unstable_mockModule('../../src/system/gpu-detect.js', () => ({
+  detectGPU: mockDetectGPU,
+}));
+
+// Mock adm-zip
+const mockExtractAllTo = jest.fn();
+class MockAdmZip {
+  extractAllTo = mockExtractAllTo;
+}
+jest.unstable_mockModule('adm-zip', () => ({
+  default: MockAdmZip,
 }));
 
 // Import after mocking
@@ -132,8 +149,17 @@ describe('BinaryManager', () => {
     mockReadFile.mockRejectedValue(new Error('No cache'));
     mockWriteFile.mockResolvedValue(undefined);
     mockChmod.mockResolvedValue(undefined);
+    mockMkdir.mockResolvedValue(undefined);
     mockDownload.mockResolvedValue(undefined);
+    mockExtractAllTo.mockReturnValue(undefined);
     // mockExecFileAsync setup moved to individual tests for better control
+
+    // Default: Mock CUDA GPU detected (to not filter CUDA variants in most tests)
+    mockDetectGPU.mockResolvedValue({
+      available: true,
+      type: 'nvidia',
+      cuda: true,
+    });
 
     binaryManager = new BinaryManager({
       type: 'llama',
@@ -423,6 +449,202 @@ describe('BinaryManager', () => {
         expect.stringContaining('Successfully installed cpu variant'),
         'info'
       );
+    });
+  });
+
+  describe('CUDA GPU detection filtering', () => {
+    it('should skip CUDA variants when no CUDA GPU is detected', async () => {
+      // Mock detectGPU to return no CUDA support
+      mockDetectGPU.mockResolvedValue({
+        available: false,
+      });
+
+      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+
+      const result = await binaryManager.ensureBinary();
+
+      // Should only try CPU variant (CUDA filtered out)
+      expect(mockDownload).toHaveBeenCalledTimes(1);
+      expect(mockDownload).toHaveBeenCalledWith({
+        url: cpuVariant.url,
+        destination: expect.stringContaining('.cpu.zip'),
+        onProgress: expect.any(Function),
+      });
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping CUDA variants'),
+        'info'
+      );
+      expect(result).toBe('/mock/binaries/llama/llama-server.exe');
+    });
+
+    it('should try CUDA variants when CUDA GPU is detected', async () => {
+      // Mock detectGPU to return CUDA support
+      mockDetectGPU.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        cuda: true,
+        name: 'NVIDIA RTX 4090',
+      });
+
+      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+
+      const result = await binaryManager.ensureBinary();
+
+      // Should try CUDA variant (not filtered)
+      expect(mockDownload).toHaveBeenCalledWith({
+        url: cudaVariant.url,
+        destination: expect.stringContaining('.cuda.zip'),
+        onProgress: expect.any(Function),
+      });
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('CUDA GPU detected'),
+        'info'
+      );
+      expect(result).toBe('/mock/binaries/llama/llama-server.exe');
+    });
+
+    it('should skip CUDA variants when non-CUDA GPU is detected', async () => {
+      // Mock detectGPU to return AMD GPU (no CUDA)
+      mockDetectGPU.mockResolvedValue({
+        available: true,
+        type: 'amd',
+        rocm: true,
+        name: 'AMD Radeon RX 7900',
+      });
+
+      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+
+      await binaryManager.ensureBinary();
+
+      // Should skip CUDA, try CPU
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping CUDA variants'),
+        'info'
+      );
+      expect(mockDownload).toHaveBeenCalledWith({
+        url: cpuVariant.url,
+        destination: expect.stringContaining('.cpu.zip'),
+        onProgress: expect.any(Function),
+      });
+    });
+  });
+
+  describe('dependency downloads', () => {
+    const cudaVariantWithDeps: BinaryVariantConfig = {
+      type: 'cuda',
+      url: 'https://example.com/llama-cuda.zip',
+      checksum: 'abc123cuda',
+      dependencies: [
+        {
+          url: 'https://example.com/cudart.zip',
+          checksum: 'def456cudart',
+          description: 'CUDA runtime libraries',
+        },
+      ],
+    };
+
+    beforeEach(() => {
+      // Don't clear all mocks - just reset specific ones needed for this suite
+      // Clearing all mocks would break mockExecFileAsync setup
+
+      // Mock CUDA GPU detected (default is already set in main beforeEach, but we make it explicit here)
+      mockDetectGPU.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        cuda: true,
+      });
+
+      mockFileExists.mockResolvedValue(false);
+      mockEnsureDirectory.mockResolvedValue(undefined);
+      mockCalculateChecksum.mockImplementation(async (path: string) => {
+        if (path.includes('.dep0.zip')) return 'def456cudart';
+        if (path.includes('.cuda.zip')) return 'abc123cuda';
+        if (path.includes('.cpu.zip')) return 'abc123cpu';
+        return 'abc123';
+      });
+      mockDeleteFile.mockResolvedValue(undefined);
+      mockCopyDirectory.mockResolvedValue(undefined);
+      mockExtractBinary.mockResolvedValue('/mock/extract/llama-server.exe');
+      mockCleanupExtraction.mockResolvedValue(undefined);
+      mockGetBinaryPath.mockReturnValue('/mock/binaries/llama/llama-server.exe');
+      mockReadFile.mockRejectedValue(new Error('No cache'));
+      mockWriteFile.mockResolvedValue(undefined);
+      mockChmod.mockResolvedValue(undefined);
+      mockMkdir.mockResolvedValue(undefined);
+      mockDownload.mockResolvedValue(undefined);
+      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+      mockExtractAllTo.mockReturnValue(undefined);
+    });
+
+    it('should download dependencies before main binary', async () => {
+      const managerWithDeps = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps],
+        log: mockLogger,
+      });
+
+      await managerWithDeps.ensureBinary();
+
+      // Should download dependency first, then main binary
+      expect(mockDownload).toHaveBeenCalledTimes(2);
+      expect(mockDownload).toHaveBeenNthCalledWith(1, {
+        url: 'https://example.com/cudart.zip',
+        destination: expect.stringContaining('.dep0.zip'),
+        onProgress: expect.any(Function),
+      });
+      expect(mockDownload).toHaveBeenNthCalledWith(2, {
+        url: 'https://example.com/llama-cuda.zip',
+        destination: expect.stringContaining('.cuda.zip'),
+        onProgress: expect.any(Function),
+      });
+    });
+
+    it('should fail variant if dependency checksum is wrong', async () => {
+      // Make dependency checksum fail
+      mockCalculateChecksum.mockImplementation(async (path: string) => {
+        if (path.includes('.dep0.zip')) return 'wrongchecksum';
+        if (path.includes('.cuda.zip')) return 'abc123cuda';
+        if (path.includes('.cpu.zip')) return 'abc123cpu';
+        return 'abc123';
+      });
+
+      const managerWithDeps = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps, cpuVariant],
+        log: mockLogger,
+      });
+
+      // Should fall back to CPU variant
+      await managerWithDeps.ensureBinary();
+
+      // Should cleanup and try next variant
+      expect(mockDeleteFile).toHaveBeenCalledWith(expect.stringContaining('.dep0.zip'));
+      expect(mockCleanupExtraction).toHaveBeenCalled();
+    });
+
+    it('should cleanup dependencies if binary test fails', async () => {
+      // Make binary test fail
+      mockExecFileAsync.mockRejectedValueOnce(new Error('Missing drivers'));
+
+      const managerWithDeps = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps, cpuVariant],
+        log: mockLogger,
+      });
+
+      // Mock second call (CPU variant) to succeed
+      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+
+      await managerWithDeps.ensureBinary();
+
+      // Should cleanup extraction dir (which contains both binary and dependencies)
+      expect(mockCleanupExtraction).toHaveBeenCalled();
     });
   });
 });

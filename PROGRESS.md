@@ -7,15 +7,15 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors (library + example app)
-- **Tests:** ✅ 221/221 passing (100% pass rate - library only)
+- **Tests:** ✅ 226/226 passing (100% pass rate - library only)
 - **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `feat/phase2-app` (Phase 2 example app implementation)
-- **Last Updated:** 2025-10-19 (Phase 2 example app completed)
+- **Branch:** `feat/phase2-app` (Phase 2 example app implementation + CUDA runtime dependencies)
+- **Last Updated:** 2025-10-19 (Issue 5 resolved - CUDA runtime dependencies)
 
 **Test Suite Breakdown:**
 - Phase 1 Tests: 130 tests (errors, utils, core managers)
 - Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator)
-- Infrastructure: 41 tests (BinaryManager, health-check)
+- Infrastructure: 46 tests (BinaryManager + CUDA dependency support, health-check)
 
 ---
 
@@ -212,21 +212,26 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 - **Fix:** Modified `testBinary()` to use type-specific flags: llama uses `--version`, diffusion uses `--help`
 - **Result:** Diffusion binaries now pass variant testing, first working variant is selected and installed
 
-**Issue 5: Missing CUDA Runtime Dependencies**
-- **Problem:** Binary downloads only fetch main executables (llama-server.exe, sd.exe), missing required CUDA runtime DLLs
-- **Impact:** After Issues 3 & 4 fixes, binary test passes but CUDA variants hang indefinitely during execution
-- **Root Cause:** BOTH binary types require CUDA runtime DLLs for CUDA variants:
-  - llama.cpp CUDA: Needs `cudart-llama-bin-win-cuda-12.4-x64.zip`
-  - stable-diffusion.cpp CUDA: Needs `cudart-sd-bin-win-cu12-x64.zip`
+**Issue 5: Missing CUDA Runtime Dependencies** ✅ **RESOLVED**
+- **Problem:** Binary downloads only fetched main executables (llama-server.exe, sd.exe), missing required CUDA runtime DLLs
+- **Impact:** After Issues 3 & 4 fixes, binary test passed but CUDA variants hung indefinitely during execution
+- **Root Cause:** BOTH binary types required CUDA runtime DLLs for CUDA variants:
+  - llama.cpp CUDA: Needs `cudart-llama-bin-win-cuda-12.4-x64.zip` (SHA256: `8c79a9b2...`)
+  - stable-diffusion.cpp CUDA: Needs `cudart-sd-bin-win-cu12-x64.zip` (SHA256: `cacc1f7e...`)
   - Note: Vulkan variants do NOT require CUDA DLLs (work without additional dependencies)
-- **Current Architecture Limitation:** `BINARY_VERSIONS` only supports one URL per variant, can't download dependencies
-- **Discovery:** Manual testing revealed executables run but hang during inference/generation without CUDA runtime DLLs
-- **Workaround:** User manually copied DLLs from separate download → both LLM and image generation work perfectly
-- **Status:** ⚠️ PARTIAL - Core functionality proven working for both binaries, automatic dependency download not yet implemented
-- **Next Steps:**
-  - Extend BinaryVariantConfig to support dependency downloads
-  - Download CUDA runtime DLLs BEFORE running variant tests (to avoid testing non-functional binaries)
-  - Only attempt CUDA downloads if CUDA-compatible GPU is detected (avoid unnecessary ~100MB+ downloads per binary type)
+- **Solution Implemented (2025-10-19):**
+  - ✅ Extended `BinaryVariantConfig` with optional `dependencies` array
+  - ✅ Added `BinaryDependency` interface with URL, checksum, and description
+  - ✅ Implemented automatic dependency download BEFORE binary testing
+  - ✅ Added CUDA GPU detection filter to skip CUDA variants on non-NVIDIA systems
+  - ✅ Dependencies extracted to same directory as main binary (DLLs alongside executables)
+  - ✅ Automatic cleanup of dependencies if variant test fails
+  - ✅ Added 5 new tests for dependency download and CUDA filtering (226/226 passing)
+- **Architecture Benefits:**
+  - Prevents ~100-200MB of unnecessary CUDA downloads on AMD/Intel/CPU-only systems
+  - Dependencies verified with SHA256 checksums before extraction
+  - Clean fallback chain: CUDA (with deps) → Vulkan → CPU
+  - Future-proof for other dependencies (ROCm, Vulkan layers, etc.)
 
 ### Manual Testing Results (2025-10-19)
 
@@ -353,10 +358,9 @@ Windows CUDA variants require additional runtime DLLs not included in main binar
 - ✅ Phase 2 example app implementation complete
 - ✅ Fixed critical diffusion binary extraction bug (Issue 3)
 - ✅ Fixed diffusion binary test flag incompatibility (Issue 4)
-- ✅ Verified core functionality works for both binaries (with manual CUDA runtime DLL workaround)
-- 🔄 Implement automatic CUDA runtime dependency downloading for both llama.cpp and stable-diffusion.cpp (Issue 5)
-- 🔄 Add architecture support for multi-file binary variants (main executable + runtime dependencies)
-- 🔄 Add CUDA GPU detection before attempting CUDA variant downloads
+- ✅ Implemented automatic CUDA runtime dependency downloading for both llama.cpp and stable-diffusion.cpp (Issue 5)
+- ✅ Added architecture support for multi-file binary variants (main executable + runtime dependencies)
+- ✅ Added CUDA GPU detection before attempting CUDA variant downloads
 - 🔄 Testing resource orchestration with real workloads
 - 🔄 Verification of model management across both types
 - 🔄 Cross-platform testing (Windows, macOS, Linux)

@@ -47,6 +47,19 @@ export const DEFAULT_SERVER_CONFIG: Partial<ServerConfig> = {
 export type BinaryVariant = 'cuda' | 'vulkan' | 'metal' | 'cpu';
 
 /**
+ * Binary dependency configuration
+ * Used for additional files required by certain binary variants (e.g., CUDA runtime DLLs)
+ */
+export interface BinaryDependency {
+  /** Download URL for this dependency */
+  url: string;
+  /** SHA256 checksum for verification */
+  checksum: string;
+  /** Human-readable description of this dependency */
+  description?: string;
+}
+
+/**
  * Binary variant configuration
  */
 export interface BinaryVariantConfig {
@@ -56,6 +69,8 @@ export interface BinaryVariantConfig {
   url: string;
   /** SHA256 checksum for verification */
   checksum: string;
+  /** Optional dependencies required by this variant (e.g., CUDA runtime DLLs for Windows CUDA variants) */
+  dependencies?: readonly BinaryDependency[];
 }
 
 /**
@@ -93,6 +108,13 @@ export const BINARY_VERSIONS = {
           type: 'cuda' as BinaryVariant,
           url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/llama-b6784-bin-win-cuda-12.4-x64.zip',
           checksum: 'a7a8981f742cdc0e1c93c02caa955fb2ad2716407fb3556cbc71e7e4e44f7d72',
+          dependencies: [
+            {
+              url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/cudart-llama-bin-win-cuda-12.4-x64.zip',
+              checksum: '8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6',
+              description: 'CUDA 12.4 runtime libraries required for NVIDIA GPU acceleration',
+            },
+          ],
         },
         {
           type: 'vulkan' as BinaryVariant,
@@ -141,6 +163,13 @@ export const BINARY_VERSIONS = {
           type: 'cuda' as BinaryVariant,
           url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master-db6f479-bin-win-cuda12-x64.zip',
           checksum: '5f15a0f08e2b34eaf8aa8b1bb50dd0b6a194bf21176ab9512ecacf0ccc8f1532',
+          dependencies: [
+            {
+              url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/cudart-sd-bin-win-cu12-x64.zip',
+              checksum: 'cacc1f7e1e7b53ba310a6769893b8184de2afd5690aa2233d1416e84d3efccd6',
+              description: 'CUDA 12 runtime libraries required for NVIDIA GPU acceleration',
+            },
+          ],
         },
         {
           type: 'vulkan' as BinaryVariant,
