@@ -75,6 +75,19 @@
 
 **Detailed Progress:** See `docs/dev/phase2/PHASE2-PROGRESS.md` for complete development history
 
+**Example Application (Phase 2):**
+- ✅ **electron-control-panel Phase 2 Features**:
+  - Diffusion Server tab: Start/stop diffusion server, generate images with full parameter control
+  - Resource Monitor tab: Real-time memory/VRAM usage, server status grid, offload detection
+  - Event log: Timeline of server lifecycle events (start/stop/crash)
+  - GPU/VRAM monitoring: Conditional display when GPU available
+  - Model type selector: Support for downloading both LLM and Diffusion models
+  - 8 sampler options: euler_a, euler, heun, dpm2, dpm++2s_a, dpm++2m, dpm++2mv2, lcm
+  - Image generation form: Prompt, negative prompt, dimensions, steps, CFG scale, seed
+  - Generated image display: Shows result with metadata (dimensions, time, seed)
+  - Orchestration status: Displays saved LLM state and offload warnings
+  - 5 tabs total: System Info, Models, LLM Server, Diffusion Server, Resource Monitor
+
 ---
 
 ## Key Achievements

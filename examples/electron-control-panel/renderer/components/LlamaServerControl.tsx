@@ -58,8 +58,6 @@ const LlamaServerControl: React.FC = () => {
       const startConfig = autoConfig ? { modelId: config.modelId, port: config.port } : config;
 
       await start(startConfig);
-    } catch (err) {
-      // Error is handled by useServerStatus
     } finally {
       setStartLoading(false);
     }
@@ -69,8 +67,6 @@ const LlamaServerControl: React.FC = () => {
     setStopLoading(true);
     try {
       await stop();
-    } catch (err) {
-      // Error is handled by useServerStatus
     } finally {
       setStopLoading(false);
     }
@@ -80,8 +76,6 @@ const LlamaServerControl: React.FC = () => {
     setRestartLoading(true);
     try {
       await restart();
-    } catch (err) {
-      // Error is handled by useServerStatus
     } finally {
       setRestartLoading(false);
     }

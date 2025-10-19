@@ -3,6 +3,8 @@ import {
   systemInfo,
   modelManager,
   llamaServer,
+  diffusionServer,
+  getOrchestrator,
   setupServerEventForwarding,
   sendDownloadProgress,
   sendDownloadComplete,
@@ -200,7 +202,7 @@ export function registerIpcHandlers(): void {
     }
   });
 
-  ipcMain.handle('server:testMessage', async (_event, message: string, settings?: any) => {
+  ipcMain.handle('server:testMessage', async (_event, message: string, settings?: unknown) => {
     try {
       // Create LLMService instance (llama.cpp doesn't need real API keys)
       const llmService = new LLMService(async () => 'not-needed');
@@ -228,6 +230,206 @@ export function registerIpcHandlers(): void {
       return response;
     } catch (error) {
       throw new Error(`Failed to send test message: ${(error as Error).message}`);
+    }
+  });
+
+  // ========================================
+  // Diffusion Server Handlers (Phase 2)
+  // ========================================
+
+  ipcMain.handle('diffusion:start', async (_event, config) => {
+    try {
+      await diffusionServer.start(config);
+    } catch (error) {
+      throw new Error(`Failed to start diffusion server: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('diffusion:stop', async () => {
+    try {
+      await diffusionServer.stop();
+    } catch (error) {
+      throw new Error(`Failed to stop diffusion server: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('diffusion:status', () => {
+    try {
+      return diffusionServer.getInfo();
+    } catch (error) {
+      throw new Error(`Failed to get diffusion server status: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('diffusion:health', async () => {
+    try {
+      return await diffusionServer.isHealthy();
+    } catch (error) {
+      throw new Error(`Failed to check diffusion server health: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('diffusion:logs', async (_event, limit: number) => {
+    try {
+      const logStrings = await diffusionServer.getLogs(limit);
+
+      // Parse log strings into LogEntry objects
+      return logStrings.map((logLine) => {
+        const parsed = LogManager.parseEntry(logLine);
+
+        if (!parsed) {
+          return {
+            timestamp: new Date().toISOString(),
+            level: 'info',
+            message: logLine,
+          };
+        }
+
+        return parsed;
+      });
+    } catch (error) {
+      throw new Error(`Failed to get diffusion server logs: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('diffusion:clearLogs', async () => {
+    try {
+      await diffusionServer.clearLogs();
+    } catch (error) {
+      throw new Error(`Failed to clear diffusion logs: ${(error as Error).message}`);
+    }
+  });
+
+  // Generate image via HTTP (demonstrates HTTP API pattern)
+  ipcMain.handle('diffusion:generate', async (_event, config, port: number = 8081) => {
+    try {
+      // Make HTTP request to diffusion server wrapper
+      const response = await fetch(`http://localhost:${port}/v1/images/generations`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: config.prompt,
+          negativePrompt: config.negativePrompt,
+          width: config.width || 512,
+          height: config.height || 512,
+          steps: config.steps || 20,
+          cfgScale: config.cfgScale || 7.5,
+          seed: config.seed || -1,
+          sampler: config.sampler || 'euler_a',
+        }),
+      });
+
+      if (!response.ok) {
+        const error = (await response.json()) as { error?: string };
+        throw new Error(error.error || 'Image generation failed');
+      }
+
+      const result = (await response.json()) as {
+        image: string;
+        timeTaken: number;
+        seed: number;
+        width: number;
+        height: number;
+      };
+
+      // Convert base64 image to data URL for renderer
+      return {
+        imageDataUrl: `data:image/png;base64,${result.image}`,
+        timeTaken: result.timeTaken,
+        seed: result.seed,
+        width: result.width,
+        height: result.height,
+      };
+    } catch (error) {
+      throw new Error(`Failed to generate image: ${(error as Error).message}`);
+    }
+  });
+
+  // ========================================
+  // Resource Orchestrator Handlers (Phase 2)
+  // ========================================
+
+  ipcMain.handle('resources:orchestrateGeneration', async (_event, config) => {
+    try {
+      const orchestrator = getOrchestrator();
+      const result = await orchestrator.orchestrateImageGeneration(config);
+
+      // Convert Buffer to base64 data URL
+      return {
+        imageDataUrl: `data:image/png;base64,${result.image.toString('base64')}`,
+        timeTaken: result.timeTaken,
+        seed: result.seed,
+        width: result.width,
+        height: result.height,
+      };
+    } catch (error) {
+      throw new Error(`Failed to orchestrate image generation: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('resources:wouldNeedOffload', async () => {
+    try {
+      const orchestrator = getOrchestrator();
+      return await orchestrator.wouldNeedOffload();
+    } catch (error) {
+      throw new Error(`Failed to check offload requirement: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('resources:getSavedState', () => {
+    try {
+      const orchestrator = getOrchestrator();
+      const state = orchestrator.getSavedState();
+
+      // Serialize Date to ISO string for IPC transport
+      if (state) {
+        return {
+          ...state,
+          savedAt: state.savedAt.toISOString(),
+        };
+      }
+      return null;
+    } catch (error) {
+      throw new Error(`Failed to get saved state: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('resources:clearSavedState', () => {
+    try {
+      const orchestrator = getOrchestrator();
+      orchestrator.clearSavedState();
+    } catch (error) {
+      throw new Error(`Failed to clear saved state: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('resources:getUsage', async () => {
+    try {
+      const memoryInfo = systemInfo.getMemoryInfo();
+      const llamaInfo = llamaServer.getInfo();
+      const diffusionInfo = diffusionServer.getInfo();
+
+      return {
+        memory: memoryInfo,
+        llamaServer: llamaInfo,
+        diffusionServer: diffusionInfo,
+      };
+    } catch (error) {
+      throw new Error(`Failed to get resource usage: ${(error as Error).message}`);
+    }
+  });
+
+  // ========================================
+  // System Capabilities Handler (Phase 2)
+  // ========================================
+
+  ipcMain.handle('system:getCapabilities', async () => {
+    try {
+      return await systemInfo.detect();
+    } catch (error) {
+      throw new Error(`Failed to get system capabilities: ${(error as Error).message}`);
     }
   });
 }

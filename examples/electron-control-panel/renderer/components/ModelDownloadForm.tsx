@@ -32,6 +32,7 @@ const ModelDownloadForm: React.FC<ModelDownloadFormProps> = ({
   progress,
 }) => {
   const [source, setSource] = useState<'url' | 'huggingface'>('huggingface');
+  const [modelType, setModelType] = useState<'llm' | 'diffusion'>('llm');
   const [url, setUrl] = useState('');
   const [repo, setRepo] = useState('');
   const [file, setFile] = useState('');
@@ -44,7 +45,7 @@ const ModelDownloadForm: React.FC<ModelDownloadFormProps> = ({
     const config: DownloadConfig = {
       source,
       name,
-      type: 'llm',
+      type: modelType,
       checksum: checksum || undefined,
     };
 
@@ -87,6 +88,20 @@ const ModelDownloadForm: React.FC<ModelDownloadFormProps> = ({
         >
           <option value="huggingface">HuggingFace</option>
           <option value="url">Direct URL</option>
+        </select>
+      </div>
+
+      {/* Model Type Selection */}
+      <div className="form-group">
+        <label htmlFor="modelType">Model Type</label>
+        <select
+          id="modelType"
+          value={modelType}
+          onChange={(e) => setModelType(e.target.value as 'llm' | 'diffusion')}
+          disabled={downloading}
+        >
+          <option value="llm">LLM (Text Generation)</option>
+          <option value="diffusion">Diffusion (Image Generation)</option>
         </select>
       </div>
 

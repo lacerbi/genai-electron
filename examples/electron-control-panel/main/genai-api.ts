@@ -1,13 +1,17 @@
-import { systemInfo, modelManager, llamaServer } from 'genai-electron';
+import {
+  systemInfo,
+  modelManager,
+  llamaServer,
+  diffusionServer,
+  ResourceOrchestrator,
+} from 'genai-electron';
 import { BrowserWindow } from 'electron';
 
 /**
  * Forward download progress events to renderer
+ * @deprecated This function is a placeholder for future download progress tracking
  */
-export function setupDownloadProgressForwarding(_downloadId: string): void {
-  const mainWindow = BrowserWindow.getAllWindows()[0];
-  if (!mainWindow) return;
-
+export function setupDownloadProgressForwarding(): void {
   // Note: In the actual implementation, genai-electron would need to support
   // progress callbacks. For now, this is a placeholder structure.
   // The actual progress forwarding will be implemented when the download API
@@ -21,6 +25,7 @@ export function setupServerEventForwarding(): void {
   const mainWindow = BrowserWindow.getAllWindows()[0];
   if (!mainWindow) return;
 
+  // LLM server events
   llamaServer.on('started', () => {
     mainWindow.webContents.send('server:started');
   });
@@ -35,6 +40,22 @@ export function setupServerEventForwarding(): void {
       stack: error.stack,
     });
   });
+
+  // Diffusion server events
+  diffusionServer.on('started', () => {
+    mainWindow.webContents.send('diffusion:started');
+  });
+
+  diffusionServer.on('stopped', () => {
+    mainWindow.webContents.send('diffusion:stopped');
+  });
+
+  diffusionServer.on('crashed', (error: Error) => {
+    mainWindow.webContents.send('diffusion:crashed', {
+      message: error.message,
+      stack: error.stack,
+    });
+  });
 }
 
 /**
@@ -42,12 +63,19 @@ export function setupServerEventForwarding(): void {
  */
 export async function cleanupServers(): Promise<void> {
   try {
-    const status = llamaServer.getStatus();
-    if (status === 'running') {
+    // Stop LLM server if running
+    const llamaStatus = llamaServer.getStatus();
+    if (llamaStatus === 'running') {
       await llamaServer.stop();
     }
+
+    // Stop diffusion server if running
+    const diffusionStatus = diffusionServer.getStatus();
+    if (diffusionStatus === 'running') {
+      await diffusionServer.stop();
+    }
   } catch (error) {
-    console.error('Error stopping server during cleanup:', error);
+    console.error('Error stopping servers during cleanup:', error);
   }
 }
 
@@ -89,5 +117,17 @@ export function sendDownloadError(error: Error, modelName: string): void {
   }
 }
 
+/**
+ * Create ResourceOrchestrator singleton instance
+ */
+let orchestrator: ResourceOrchestrator | null = null;
+
+export function getOrchestrator(): ResourceOrchestrator {
+  if (!orchestrator) {
+    orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, diffusionServer, modelManager);
+  }
+  return orchestrator;
+}
+
 // Export genai-electron instances for direct access
-export { systemInfo, modelManager, llamaServer };
+export { systemInfo, modelManager, llamaServer, diffusionServer };

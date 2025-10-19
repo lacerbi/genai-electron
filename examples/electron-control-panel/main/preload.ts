@@ -38,6 +38,28 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.invoke('server:testMessage', message, settings),
   },
 
+  // Diffusion Server APIs (Phase 2)
+  diffusion: {
+    start: (config: unknown) => ipcRenderer.invoke('diffusion:start', config),
+    stop: () => ipcRenderer.invoke('diffusion:stop'),
+    status: () => ipcRenderer.invoke('diffusion:status'),
+    health: () => ipcRenderer.invoke('diffusion:health'),
+    logs: (limit: number) => ipcRenderer.invoke('diffusion:logs', limit),
+    clearLogs: () => ipcRenderer.invoke('diffusion:clearLogs'),
+    generateImage: (config: unknown, port?: number) =>
+      ipcRenderer.invoke('diffusion:generate', config, port),
+  },
+
+  // Resource Orchestrator APIs (Phase 2)
+  resources: {
+    orchestrateGeneration: (config: unknown) =>
+      ipcRenderer.invoke('resources:orchestrateGeneration', config),
+    wouldNeedOffload: () => ipcRenderer.invoke('resources:wouldNeedOffload'),
+    getSavedState: () => ipcRenderer.invoke('resources:getSavedState'),
+    clearSavedState: () => ipcRenderer.invoke('resources:clearSavedState'),
+    getUsage: () => ipcRenderer.invoke('resources:getUsage'),
+  },
+
   // Event listeners
   on: (channel: string, callback: (...args: unknown[]) => void) => {
     const validChannels = [
@@ -47,6 +69,9 @@ contextBridge.exposeInMainWorld('api', {
       'server:started',
       'server:stopped',
       'server:crashed',
+      'diffusion:started',
+      'diffusion:stopped',
+      'diffusion:crashed',
     ];
 
     if (validChannels.includes(channel)) {
@@ -92,6 +117,22 @@ export type WindowAPI = {
     logs: (limit: number) => Promise<unknown[]>;
     clearLogs: () => Promise<void>;
     testMessage: (message: string, settings?: unknown) => Promise<unknown>;
+  };
+  diffusion: {
+    start: (config: unknown) => Promise<void>;
+    stop: () => Promise<void>;
+    status: () => Promise<unknown>;
+    health: () => Promise<boolean>;
+    logs: (limit: number) => Promise<unknown[]>;
+    clearLogs: () => Promise<void>;
+    generateImage: (config: unknown, port?: number) => Promise<unknown>;
+  };
+  resources: {
+    orchestrateGeneration: (config: unknown) => Promise<unknown>;
+    wouldNeedOffload: () => Promise<boolean>;
+    getSavedState: () => Promise<unknown>;
+    clearSavedState: () => Promise<void>;
+    getUsage: () => Promise<unknown>;
   };
   on: (channel: string, callback: (...args: unknown[]) => void) => void;
   off: (channel: string) => void;

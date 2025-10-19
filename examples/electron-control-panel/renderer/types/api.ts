@@ -21,6 +21,29 @@ export interface WindowAPI {
     status: () => Promise<ServerStatus>;
     health: () => Promise<boolean>;
     logs: (limit: number) => Promise<LogEntry[]>;
+    clearLogs: () => Promise<void>;
+    testMessage: (message: string, settings?: unknown) => Promise<unknown>;
+  };
+  diffusion: {
+    start: (config: {
+      modelId: string;
+      port?: number;
+      threads?: number;
+      gpuLayers?: number;
+    }) => Promise<void>;
+    stop: () => Promise<void>;
+    status: () => Promise<DiffusionServerInfo>;
+    health: () => Promise<boolean>;
+    logs: (limit: number) => Promise<LogEntry[]>;
+    clearLogs: () => Promise<void>;
+    generateImage: (config: ImageGenerationConfig, port?: number) => Promise<ImageGenerationResult>;
+  };
+  resources: {
+    orchestrateGeneration: (config: ImageGenerationConfig) => Promise<ImageGenerationResult>;
+    wouldNeedOffload: () => Promise<boolean>;
+    getSavedState: () => Promise<SavedLLMState | null>;
+    clearSavedState: () => Promise<void>;
+    getUsage: () => Promise<ResourceUsage>;
   };
   on: (channel: string, callback: (...args: unknown[]) => void) => void;
   off: (channel: string) => void;
@@ -118,6 +141,75 @@ export interface LogEntry {
   level: string;
   message: string;
   timestamp: string;
+}
+
+// ========================================
+// Phase 2: Image Generation Types
+// ========================================
+
+export type ImageSampler =
+  | 'euler_a'
+  | 'euler'
+  | 'heun'
+  | 'dpm2'
+  | 'dpm++2s_a'
+  | 'dpm++2m'
+  | 'dpm++2mv2'
+  | 'lcm';
+
+export interface ImageGenerationConfig {
+  prompt: string;
+  negativePrompt?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  cfgScale?: number;
+  seed?: number;
+  sampler?: ImageSampler;
+}
+
+export interface ImageGenerationResult {
+  imageDataUrl: string; // data:image/png;base64,...
+  timeTaken: number;
+  seed: number;
+  width: number;
+  height: number;
+}
+
+export interface DiffusionServerInfo {
+  status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
+  health: 'unknown' | 'healthy' | 'unhealthy';
+  modelId: string;
+  port: number;
+  pid?: number;
+  startedAt?: string;
+  error?: string;
+  busy?: boolean;
+}
+
+export interface SavedLLMState {
+  config: ServerConfig;
+  wasRunning: boolean;
+  savedAt: string; // ISO timestamp (Date serialized from main process)
+}
+
+export interface ResourceUsage {
+  memory: {
+    total: number;
+    available: number;
+    used: number;
+  };
+  llamaServer: {
+    status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
+    pid?: number;
+    port: number;
+  };
+  diffusionServer: {
+    status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
+    pid?: number;
+    port: number;
+    busy?: boolean;
+  };
 }
 
 // Global window extension

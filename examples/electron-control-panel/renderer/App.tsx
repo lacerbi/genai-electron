@@ -2,8 +2,10 @@ import React, { useState } from 'react';
 import SystemInfo from './components/SystemInfo';
 import ModelManager from './components/ModelManager';
 import LlamaServerControl from './components/LlamaServerControl';
+import DiffusionServerControl from './components/DiffusionServerControl';
+import ResourceMonitor from './components/ResourceMonitor';
 
-type TabName = 'system' | 'models' | 'server';
+type TabName = 'system' | 'models' | 'server' | 'diffusion' | 'resources';
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabName>('system');
@@ -36,6 +38,18 @@ const App: React.FC = () => {
         >
           LLM Server
         </button>
+        <button
+          className={`tab-button ${activeTab === 'diffusion' ? 'active' : ''}`}
+          onClick={() => setActiveTab('diffusion')}
+        >
+          Diffusion Server
+        </button>
+        <button
+          className={`tab-button ${activeTab === 'resources' ? 'active' : ''}`}
+          onClick={() => setActiveTab('resources')}
+        >
+          Resource Monitor
+        </button>
       </nav>
 
       {/* Tab Content */}
@@ -43,6 +57,8 @@ const App: React.FC = () => {
         {activeTab === 'system' && <SystemInfo />}
         {activeTab === 'models' && <ModelManager />}
         {activeTab === 'server' && <LlamaServerControl />}
+        {activeTab === 'diffusion' && <DiffusionServerControl />}
+        {activeTab === 'resources' && <ResourceMonitor />}
       </main>
     </div>
   );
