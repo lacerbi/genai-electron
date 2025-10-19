@@ -47,6 +47,19 @@
 - **Verification**: Tested with `--detectOpenHandles` - no open handles detected ✅
 - **Performance**: Execution time remains fast (~1.4s) ✅
 
+**Cross-Platform npm Scripts - FIXED (2025-10-19)** ✅:
+- **Issue**: npm scripts failed on Windows with "NODE_OPTIONS is not recognized" error
+- **Root Causes**: Unix-specific syntax in package.json scripts
+  - `NODE_OPTIONS=...` syntax doesn't work on Windows CMD/PowerShell
+  - `rm -rf` command doesn't exist on Windows
+- **Fixes Applied**:
+  - Installed `cross-env` package for cross-platform environment variables
+  - Installed `rimraf` package for cross-platform directory removal
+  - Updated test scripts: `cross-env NODE_OPTIONS=--experimental-vm-modules jest`
+  - Updated clean script: `rimraf dist coverage`
+- **Result**: All npm scripts now work on Windows, Linux, and macOS ✅
+- **Verification**: Tested on Linux/WSL - all scripts working ✅
+
 ---
 
 ## Test Fixing Work (2025-10-18)
