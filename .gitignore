@@ -34,3 +34,6 @@ lerna-debug.log*
 *.tmp
 .temp/
 temp/
+
+# Example app (during active development)
+examples/**/package-lock.json
