@@ -295,39 +295,6 @@ describe('BinaryManager', () => {
       );
     });
 
-    it('should cleanup old binary without .exe on Windows', async () => {
-      // Simulate Windows platform
-      const originalPlatform = process.platform;
-      Object.defineProperty(process, 'platform', {
-        value: 'win32',
-        configurable: true,
-      });
-
-      // Sequence: Windows check (old binary exists), then final binary check (doesn't exist)
-      mockFileExists
-        .mockResolvedValueOnce(true) // Old binary without .exe exists (Windows check)
-        .mockResolvedValueOnce(false); // New binary doesn't exist yet
-
-      // Ensure download and testBinary succeed
-      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
-
-      await binaryManager.ensureBinary();
-
-      expect(mockDeleteFile).toHaveBeenCalledWith(
-        expect.stringContaining('llama-server')
-      );
-      expect(mockLogger).toHaveBeenCalledWith(
-        'Removing old binary without .exe extension',
-        'info'
-      );
-
-      // Restore platform
-      Object.defineProperty(process, 'platform', {
-        value: originalPlatform,
-        configurable: true,
-      });
-    });
-
     it('should call chmod on Unix-like systems', async () => {
       // Simulate Linux platform
       const originalPlatform = process.platform;

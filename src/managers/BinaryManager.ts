@@ -83,15 +83,6 @@ export class BinaryManager {
     const binaryPath = getBinaryPath(type, binaryName);
     const variantCachePath = path.join(PATHS.binaries[type], '.variant.json');
 
-    // WINDOWS FIX: Clean up old binary without .exe extension if it exists
-    if (process.platform === 'win32') {
-      const oldBinaryPath = path.join(PATHS.binaries[type], binaryName);
-      if (await fileExists(oldBinaryPath)) {
-        this.log('Removing old binary without .exe extension', 'info');
-        await deleteFile(oldBinaryPath).catch(() => {});
-      }
-    }
-
     // Check if binary already exists and works
     if (await fileExists(binaryPath)) {
       const works = await this.testBinary(binaryPath);
