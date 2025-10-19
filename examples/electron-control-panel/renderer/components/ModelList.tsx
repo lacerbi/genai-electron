@@ -5,6 +5,7 @@ import './ModelList.css';
 interface ModelInfo {
   id: string;
   name: string;
+  type: 'llm' | 'diffusion';
   size: number;
   downloadedAt: string;
 }
@@ -52,6 +53,7 @@ const ModelList: React.FC<ModelListProps> = ({ models, onDelete, onVerify }) => 
         <thead>
           <tr>
             <th>Name</th>
+            <th>Type</th>
             <th>Size</th>
             <th>Downloaded</th>
             <th>Actions</th>
@@ -61,6 +63,13 @@ const ModelList: React.FC<ModelListProps> = ({ models, onDelete, onVerify }) => 
           {models.map((model) => (
             <tr key={model.id}>
               <td className="model-name">{model.name}</td>
+              <td>
+                <span
+                  className={`model-type-badge model-type-${model.type}`}
+                >
+                  {model.type === 'llm' ? 'LLM' : 'Diffusion'}
+                </span>
+              </td>
               <td>{formatBytes(model.size)}</td>
               <td className="model-date">{formatDate(model.downloadedAt)}</td>
               <td className="model-actions">
