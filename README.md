@@ -3,7 +3,7 @@
 > **Version**: 0.2.0 (Phase 2 - Image Generation Complete)
 > **Status**: Production Ready - LLM & Image Generation
 
-An Electron-specific library for managing local AI model servers and resources. Complements [genai-lite](https://github.com/yourusername/genai-lite) by handling platform-specific operations required to run AI models locally on desktop systems.
+An Electron-specific library for managing local AI model servers and resources. Complements [genai-lite](https://github.com/lacerbi/genai-lite) by handling platform-specific operations required to run AI models locally on desktop systems.
 
 ## Overview
 
@@ -577,40 +577,6 @@ Complete example applications demonstrating genai-electron usage:
 
 - **[electron-control-panel](examples/electron-control-panel/)** - Full-featured Electron app showcasing all library features (coming in Phase 2+)
 
-## Contributing
-
-Contributions are welcome! This project has completed Phase 1 MVP and is ready for community contributions. See [DESIGN.md](DESIGN.md) for the complete implementation roadmap across all phases.
-
-### Development
-
-```bash
-# Install dependencies
-npm install
-
-# Build the project
-npm run build
-
-# Run tests
-npm test
-
-# Run tests with coverage
-npm run test:coverage
-
-# Lint code
-npm run lint
-
-# Format code
-npm run format
-```
-
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-Originally developed as part of the Athanor project, genai-electron has been extracted and made standalone to benefit the wider developer community.
-
----
-
-**Note**: Phases 1 and 2 are complete and production-ready. The library now supports both LLM inference (via llama.cpp) and local image generation (via stable-diffusion.cpp) with automatic resource orchestration.
