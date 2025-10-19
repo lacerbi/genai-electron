@@ -176,8 +176,7 @@ await diffusionServer.start({
   modelId: string,      // Required: Model ID from modelManager.listModels('diffusion')
   port?: number,        // Optional: Default 8081
   threads?: number,     // Optional: CPU threads (auto-detected if omitted)
-  gpuLayers?: number,   // Optional: GPU layers to offload (auto-detected if omitted)
-  vramBudget?: number   // Optional: VRAM budget in MB
+  gpuLayers?: number    // Optional: GPU layers to offload (auto-detected if omitted)
 });
 
 // Stop server
@@ -337,10 +336,11 @@ interface DiffusionServerInfo {
 }
 
 // Resource orchestrator saved state
+// Note: The library returns Date, but IPC serializes it to ISO string
 interface SavedLLMState {
   config: ServerConfig;
   wasRunning: boolean;
-  savedAt: Date;
+  savedAt: Date;  // Library returns Date; serialize to string for IPC transport
 }
 
 // Available samplers
@@ -528,7 +528,16 @@ ipcMain.handle('resources:wouldNeedOffload', async () => {
 ipcMain.handle('resources:getSavedState', () => {
   try {
     const orch = getOrchestrator();
-    return orch.getSavedState();
+    const state = orch.getSavedState();
+
+    // Serialize Date to ISO string for IPC transport
+    if (state) {
+      return {
+        ...state,
+        savedAt: state.savedAt.toISOString()
+      };
+    }
+    return null;
   } catch (error) {
     throw new Error(`Failed to get saved state: ${(error as Error).message}`);
   }
@@ -615,8 +624,14 @@ diffusion: {
   clearLogs: () => ipcRenderer.invoke('diffusion:clearLogs'),
   generateImage: (config: any, port?: number) =>
     ipcRenderer.invoke('diffusion:generate', config, port),
-  onEvent: (callback: (event: any) => void) =>
-    ipcRenderer.on('diffusion:event', (_event, data) => callback(data)),
+
+  // Event listener with cleanup support
+  onEvent: (callback: (event: any) => void) => {
+    const handler = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('diffusion:event', handler);
+    // Return cleanup function for useEffect teardown
+    return () => ipcRenderer.removeListener('diffusion:event', handler);
+  },
 },
 
 resources: {
@@ -628,6 +643,38 @@ resources: {
   getUsage: () => ipcRenderer.invoke('resources:getUsage'),
 },
 ```
+
+**Important: Event Listener Cleanup Pattern**
+
+The `onEvent` methods above now return cleanup functions. Update the components to use them:
+
+```typescript
+// In DiffusionServerControl.tsx:
+useEffect(() => {
+  // ... other setup ...
+  const cleanupDiffusionEvents = window.api.diffusion.onEvent(eventHandler);
+
+  return () => {
+    clearInterval(interval);
+    cleanupDiffusionEvents(); // Cleanup listener on unmount
+  };
+}, []);
+
+// In ResourceMonitor.tsx:
+useEffect(() => {
+  // ... other setup ...
+  const cleanupLlamaEvents = window.api.server.onEvent(llamaEventHandler);
+  const cleanupDiffusionEvents = window.api.diffusion.onEvent(diffusionEventHandler);
+
+  return () => {
+    clearInterval(interval);
+    cleanupLlamaEvents();      // Cleanup listeners on unmount
+    cleanupDiffusionEvents();
+  };
+}, []);
+```
+
+This pattern prevents memory leaks by properly removing event listeners when components unmount.
 
 ### Step 2: Add TypeScript Types (Renderer)
 
@@ -685,7 +732,7 @@ export interface DiffusionServerInfo {
 export interface SavedLLMState {
   config: any;  // ServerConfig
   wasRunning: boolean;
-  savedAt: string;  // ISO timestamp
+  savedAt: string;  // ISO timestamp (Date serialized from main process)
 }
 
 export interface ResourceUsage {
@@ -779,16 +826,24 @@ const DiffusionServerControl: React.FC = () => {
     loadModels();
     refreshStatus();
 
-    // Set up event listener
-    window.api.diffusion.onEvent((event) => {
+    // Set up event listener with proper cleanup
+    // The onEvent method returns a cleanup function for useEffect teardown
+    const eventHandler = (event: { type: string; error?: string }) => {
       if (event.type === 'started' || event.type === 'stopped' || event.type === 'crashed') {
         refreshStatus();
       }
-    });
+    };
+
+    const cleanupDiffusionEvents = window.api.diffusion.onEvent(eventHandler);
 
     // Poll status every 3 seconds
     const interval = setInterval(refreshStatus, 3000);
-    return () => clearInterval(interval);
+
+    // Cleanup function - prevents memory leaks
+    return () => {
+      clearInterval(interval);
+      cleanupDiffusionEvents(); // Remove event listener on unmount
+    };
   }, []);
 
   const loadModels = async () => {
@@ -869,7 +924,16 @@ const DiffusionServerControl: React.FC = () => {
     };
 
     try {
-      // Use direct HTTP call (genai-lite doesn't have image API yet)
+      // NOTE: Using HTTP fetch means we only get the result after completion.
+      // Progress updates (step-by-step) are not shown in this approach.
+      // The UI will show a busy spinner with static "Generating... (0/20)" text.
+      //
+      // For real-time step updates, you would need to:
+      // 1. Call diffusionServer.generateImage() from main process with onProgress callback
+      // 2. Stream progress updates via IPC events to renderer
+      // 3. Update progress state in response to events
+      //
+      // Current approach: Simple but no incremental progress feedback
       const result = await window.api.diffusion.generateImage(config, serverInfo?.port);
       setGeneratedImage(result);
       setProgress({ current: steps, total: steps });
@@ -1123,6 +1187,18 @@ const DiffusionServerControl: React.FC = () => {
 export default DiffusionServerControl;
 ```
 
+**Important Note: Downloading Diffusion Models**
+
+The component above calls `window.api.models.list('diffusion')` to load diffusion models, but the existing ModelDownloadForm (in the Models tab) is currently hardcoded to download only LLM models (`type: 'llm'`).
+
+**Required Update: ModelDownloadForm Enhancement**
+
+Update the ModelDownloadForm component to support both model types:
+- Add a model type selector (radio buttons or dropdown: "LLM" vs "Diffusion")
+- Pass the selected type to the download API call
+- Update form validation to handle diffusion model URLs
+- This provides centralized model management in a single tab
+
 ### Step 4: Create Resource Monitor Tab
 
 **File**: `examples/electron-control-panel/renderer/components/ResourceMonitor.tsx`
@@ -1152,7 +1228,46 @@ const ResourceMonitor: React.FC = () => {
       checkSavedState();
     }, 2000);
 
-    return () => clearInterval(interval);
+    // Wire up event listeners for LLM and diffusion servers
+    // This populates the event log with server lifecycle events
+    const llamaEventHandler = (event: { type: string; error?: string }) => {
+      switch (event.type) {
+        case 'started':
+          addEvent('LLM Server started');
+          break;
+        case 'stopped':
+          addEvent('LLM Server stopped');
+          break;
+        case 'crashed':
+          addEvent(`LLM Server crashed: ${event.error || 'Unknown error'}`);
+          break;
+      }
+    };
+
+    const diffusionEventHandler = (event: { type: string; error?: string }) => {
+      switch (event.type) {
+        case 'started':
+          addEvent('Diffusion Server started');
+          break;
+        case 'stopped':
+          addEvent('Diffusion Server stopped');
+          break;
+        case 'crashed':
+          addEvent(`Diffusion Server crashed: ${event.error || 'Unknown error'}`);
+          break;
+      }
+    };
+
+    // Subscribe to events - returns cleanup functions
+    const cleanupLlamaEvents = window.api.server.onEvent(llamaEventHandler);
+    const cleanupDiffusionEvents = window.api.diffusion.onEvent(diffusionEventHandler);
+
+    // Cleanup function - prevents memory leaks
+    return () => {
+      clearInterval(interval);
+      cleanupLlamaEvents();      // Remove LLM server listener
+      cleanupDiffusionEvents();  // Remove diffusion server listener
+    };
   }, []);
 
   const refreshUsage = async () => {
@@ -1330,6 +1445,70 @@ const ResourceMonitor: React.FC = () => {
 
 export default ResourceMonitor;
 ```
+
+**Enhancements Needed for Full DESIGN-EXAMPLE-APP.md Compliance:**
+
+The basic ResourceMonitor component above provides core functionality, but DESIGN-EXAMPLE-APP.md specifies additional features:
+
+**1. GPU/VRAM Monitoring:**
+- Add GPU detection state from `systemInfo.detect()`
+- Display VRAM usage bar (similar to RAM bar)
+- Show VRAM allocation per server (LLM vs Diffusion)
+- Add IPC handler: `system:getCapabilities` that calls `systemInfo.detect()`
+
+**2. Resource Timeline Visualization:**
+- Add state for historical resource data points
+- Store snapshots every 2 seconds (last 5 minutes)
+- Render ASCII-art or canvas-based timeline chart
+- Show memory/VRAM usage over time
+- Visualize server start/stop events on timeline
+
+**3. Manual Test Controls:**
+- Add "Test Automatic Offload" button
+- Triggers image generation while LLM is running
+- Demonstrates automatic offload/reload behavior
+- Shows real-time resource transitions
+
+**4. Event Logging Integration:**
+- Wire up `addEvent()` to actual server events (see Fix #3 below)
+- Subscribe to LLM and diffusion server events
+- Log resource orchestration events (offload triggered, reload complete)
+- Clean up event listeners in useEffect teardown
+
+**Example Enhancement Snippet (GPU/VRAM Display):**
+
+```typescript
+// Add to ResourceMonitor component
+
+const [gpuInfo, setGpuInfo] = useState<any>(null);
+
+useEffect(() => {
+  // Fetch GPU capabilities once on mount
+  window.api.system.getCapabilities().then(caps => {
+    setGpuInfo(caps.gpu);
+  });
+}, []);
+
+// In render:
+{gpuInfo && gpuInfo.available && (
+  <Card title="GPU Memory Usage (VRAM)">
+    <div className="memory-usage">
+      <div className="memory-bar">
+        <div className="memory-bar-fill" style={{ width: `${vramUsedPercent}%` }}>
+          {vramUsedPercent}%
+        </div>
+      </div>
+      <div className="memory-stats">
+        <div><strong>Total:</strong> {formatBytes(gpuInfo.vram)}</div>
+        <div><strong>Used:</strong> {formatBytes(vramUsed)}</div>
+        <div><strong>Available:</strong> {formatBytes(gpuInfo.vram - vramUsed)}</div>
+      </div>
+    </div>
+  </Card>
+)}
+```
+
+These enhancements are **optional for Phase 2 MVP** but recommended for a complete demonstration of genai-electron's resource management capabilities.
 
 ### Step 5: Update App.tsx
 
