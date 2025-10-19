@@ -21,6 +21,7 @@ An Electron-specific library for managing local AI model servers and resources. 
 - ✅ **Model storage** - Organized model management in Electron userData directory
 - ✅ **Model downloads** - Download GGUF models from direct URLs with progress tracking
 - ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
+- ✅ **Reasoning model support** - Automatic detection and configuration for reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS)
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when generating images
 - ✅ **Health monitoring** - Real-time server health checks and status tracking
@@ -93,7 +94,7 @@ async function setupLocalAI() {
   const llmService = new LLMService(async () => 'not-needed');
   const response = await llmService.sendMessage({
     providerId: 'llamacpp',
-    modelId: 'llama-2-7b',
+    modelId: firstModel.id,
     messages: [
       { role: 'system', content: 'You are a helpful assistant.' },
       { role: 'user', content: 'Explain quantum computing in simple terms.' }
@@ -114,6 +115,8 @@ app.on('before-quit', async () => {
 // Run setup when app is ready
 app.whenReady().then(setupLocalAI).catch(console.error);
 ```
+
+> **Note**: For image generation examples using `diffusionServer` and `ResourceOrchestrator`, see the [Complete Example](#complete-example-llm--image-generation) section below.
 
 ## API Overview
 
@@ -194,6 +197,12 @@ const modelInfo = await modelManager.getModelInfo('my-model');
 console.log('Model size:', modelInfo.size, 'bytes');
 console.log('Downloaded:', modelInfo.downloadedAt);
 
+// Check if model supports reasoning
+if (modelInfo.supportsReasoning) {
+  console.log('✅ Model supports reasoning (automatic flag injection enabled)');
+  console.log('llama-server will use: --jinja --reasoning-format deepseek');
+}
+
 // Verify model integrity
 const isValid = await modelManager.verifyModel('my-model');
 console.log('Model is valid:', isValid);
@@ -260,6 +269,35 @@ llamaServer.on('crashed', (error) => {
   console.error('Server crashed:', error);
 });
 ```
+
+### Reasoning Models
+
+genai-electron automatically detects and configures reasoning-capable models that use `<think>...</think>` tags for chain-of-thought reasoning:
+
+```typescript
+import { detectReasoningSupport, REASONING_MODEL_PATTERNS } from 'genai-electron';
+
+// Check if a model supports reasoning based on filename
+const supportsReasoning = detectReasoningSupport('Qwen3-8B-Instruct-Q4_K_M.gguf');
+console.log('Supports reasoning:', supportsReasoning); // true
+
+// View known patterns
+console.log('Known patterns:', REASONING_MODEL_PATTERNS);
+// ['qwen3', 'deepseek-r1', 'gpt-oss']
+```
+
+**Supported model families**:
+- **Qwen3**: All sizes (0.6B, 1.7B, 4B, 8B, 14B, 30B)
+- **DeepSeek-R1**: All variants including distilled models
+- **GPT-OSS**: OpenAI's open-source reasoning model
+
+**How it works**:
+1. ModelManager detects reasoning support from GGUF filename during download
+2. Stores `supportsReasoning: true` in model metadata
+3. LlamaServerManager automatically adds `--jinja --reasoning-format deepseek` flags when starting the server
+4. Use with genai-lite to access reasoning traces via the `reasoning` field in responses
+
+For complete API details, see [docs/API.md](docs/API.md#reasoning-model-detection).
 
 ### DiffusionServerManager (Phase 2)
 
@@ -421,27 +459,44 @@ app.whenReady().then(setupAI).catch(console.error);
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────┐
-│           Electron Application                 │
-│                                                │
-│  ┌────────────────┐      ┌──────────────────┐  │
-│  │  genai-lite    │      │ genai-electron   │  │
-│  │  (API layer)   │◄─────│ (Server manager) │  │
-│  │                │      │                  │  │
-│  │ • sendMessage  │      │ • downloadModel  │  │
-│  │ • providers    │      │ • startServer    │  │
-│  │ • templates    │      │ • stopServer     │  │
-│  └────────┬───────┘      └────────┬─────────┘  │
-│           │                       │            │
-└───────────┼───────────────────────┼────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│                    Electron Application                        │
+│                                                                │
+│  ┌────────────────┐      ┌──────────────────────────────────┐  │
+│  │  genai-lite    │      │      genai-electron              │  │
+│  │  (API layer)   │◄─────│      (Runtime manager)           │  │
+│  │                │      │                                  │  │
+│  │ • sendMessage  │      │ • SystemInfo                     │  │
+│  │ • generateImg  │      │ • ModelManager                   │  │
+│  │ • providers    │      │ • LlamaServerManager             │  │
+│  │ • templates    │      │ • DiffusionServerManager         │  │
+│  │                │      │ • ResourceOrchestrator           │  │
+│  └────────┬───────┘      └────────┬─────────────────────────┘  │
+│           │                       │                            │
+└───────────┼───────────────────────┼────────────────────────────┘
             │                       │
             │ HTTP requests         │ spawns/manages
             │                       ▼
             │              ┌─────────────────────┐
-            └─────────────►│  llama-server       │
-                           │  (port 8080)        │
+            ├─────────────►│  llama-server       │
+            │              │  (port 8080)        │
+            │              │  [LLM inference]    │
+            │              └─────────────────────┘
+            │              ┌─────────────────────┐
+            └─────────────►│  HTTP wrapper       │
+                           │  (port 8081)        │
+                           │  [Image generation] │
+                           │    ↓ spawns         │
+                           │  stable-diffusion   │
+                           │  .cpp executable    │
                            └─────────────────────┘
 ```
+
+**Key features**:
+- **LLM inference**: Native llama-server (HTTP server from llama.cpp)
+- **Image generation**: HTTP wrapper created by genai-electron that spawns stable-diffusion.cpp
+- **Resource management**: ResourceOrchestrator automatically offloads LLM when resources are constrained
+- **Automatic reasoning**: Reasoning-capable models get `--jinja --reasoning-format deepseek` flags automatically
 
 ## Platform Support
 
