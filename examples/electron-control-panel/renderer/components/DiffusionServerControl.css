@@ -162,6 +162,35 @@
   cursor: not-allowed;
 }
 
+/* Custom input fields (shown when "Custom" is selected) */
+.custom-input {
+  width: 100%;
+  padding: 10px 12px;
+  background: #2c2c2e;
+  border: 1px solid #3a3a3c;
+  border-radius: 6px;
+  color: #fff;
+  font-size: 14px;
+  margin-top: 8px;
+}
+
+.custom-input:focus {
+  outline: none;
+  border-color: #0a84ff;
+}
+
+.custom-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Preset selector styling improvements */
+.form-group select.model-select option {
+  background: #2c2c2e;
+  color: #fff;
+  padding: 8px;
+}
+
 /* Generated image display */
 .generated-image-container {
   display: flex;
