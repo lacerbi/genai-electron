@@ -227,7 +227,11 @@ export class BinaryManager {
   }
 
   /**
-   * Test if a binary works by running it with --version
+   * Test if a binary works by running it with appropriate test flag
+   *
+   * Different binaries support different flags:
+   * - llama-server: supports --version
+   * - sd (diffusion): does NOT support --version, use --help instead
    *
    * @param binaryPath - Path to binary to test
    * @returns True if binary executes successfully
@@ -235,9 +239,13 @@ export class BinaryManager {
    */
   private async testBinary(binaryPath: string): Promise<boolean> {
     try {
-      // Try to execute binary with --version flag
+      // Use different test flags based on binary type
+      // llama-server supports --version, sd supports --help
+      const testArgs = this.config.type === 'llama' ? ['--version'] : ['--help'];
+
+      // Try to execute binary with test flag
       // If it exits successfully, the binary works (drivers are present)
-      await execFileAsync(binaryPath, ['--version'], { timeout: 5000 });
+      await execFileAsync(binaryPath, testArgs, { timeout: 5000 });
       return true;
     } catch {
       // Binary failed to execute (missing drivers, wrong architecture, etc.)

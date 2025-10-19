@@ -204,6 +204,14 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 - **Result:** Diffusion binaries now extract successfully, server can start on all platforms
 - **Testing Gap:** Unit tests mocked extraction layer, missing integration test for real ZIP extraction
 
+**Issue 4: Diffusion Binary Test Flag Incompatibility**
+- **Problem:** `testBinary()` used `--version` flag for all binaries, but `sd.exe` doesn't support it
+- **Impact:** After Issue 3 fix, extraction succeeded but ALL variants failed binary test phase
+- **Root Cause:** `sd.exe --version` returns error "unknown argument", only supports `--help`
+- **Discovery:** Manual testing revealed silent test failures (no error logs, just cycles through variants)
+- **Fix:** Modified `testBinary()` to use type-specific flags: llama uses `--version`, diffusion uses `--help`
+- **Result:** Diffusion binaries now pass variant testing, first working variant is selected and installed
+
 ### Build & Quality Status
 
 - ✅ **TypeScript:** 0 errors (strict mode)
@@ -306,7 +314,8 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 
 **Immediate: Testing & Debugging (In Progress)**
 - ✅ Phase 2 example app implementation complete
-- ✅ Fixed critical diffusion binary extraction bug
+- ✅ Fixed critical diffusion binary extraction bug (Issue 3)
+- ✅ Fixed diffusion binary test flag incompatibility (Issue 4)
 - 🔄 Manual testing of diffusion server functionality
 - 🔄 Testing resource orchestration with real workloads
 - 🔄 Verification of model management across both types
