@@ -9,8 +9,8 @@
  */
 
 import { SystemInfo } from '../system/SystemInfo.js';
-import { LlamaServerManager } from './LlamaServerManager.js';
-import { DiffusionServerManager } from './DiffusionServerManager.js';
+import type { LlamaServerManager } from './LlamaServerManager.js';
+import type { DiffusionServerManager } from './DiffusionServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import type {
   ServerConfig,

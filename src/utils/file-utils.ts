@@ -209,7 +209,7 @@ export async function calculateChecksum(filePath: string): Promise<string> {
  * console.log(size); // "1.54 GB"
  * ```
  */
-export function formatBytes(bytes: number, decimals: number = 2): string {
+export function formatBytes(bytes: number, decimals = 2): string {
   if (bytes === 0) return '0 Bytes';
 
   const k = 1024;
@@ -258,7 +258,8 @@ export function isAbsolutePath(filePath: string): boolean {
 export function sanitizeFilename(filename: string): string {
   // Remove invalid characters for all platforms
   return filename
-    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '') // Invalid Windows chars
+    // eslint-disable-next-line no-control-regex
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '') // Invalid Windows chars (includes control chars)
     .replace(/\s+/g, ' ') // Normalize whitespace
     .trim();
 }

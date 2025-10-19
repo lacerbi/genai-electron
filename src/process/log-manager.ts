@@ -93,7 +93,7 @@ export class LogManager {
   async write(message: string, level: LogLevel = 'info'): Promise<void> {
     try {
       const entry = this.formatEntry({ timestamp: new Date().toISOString(), level, message });
-      await fs.appendFile(this.logPath, entry + '\n', 'utf8');
+      await fs.appendFile(this.logPath, `${entry  }\n`, 'utf8');
     } catch (error) {
       throw new FileSystemError(
         `Failed to write to log file: ${error instanceof Error ? error.message : 'Unknown error'}`,
@@ -111,7 +111,7 @@ export class LogManager {
    * @returns Array of log entry strings
    * @throws {FileSystemError} If read fails
    */
-  async getRecent(lines: number = 100): Promise<string[]> {
+  async getRecent(lines = 100): Promise<string[]> {
     try {
       // Check if log file exists
       if (!(await fileExists(this.logPath))) {

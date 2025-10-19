@@ -7,7 +7,8 @@
  * @module process/ProcessManager
  */
 
-import { spawn, ChildProcess } from 'child_process';
+import type { ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 import { ServerError } from '../errors/index.js';
 
 /**
@@ -143,7 +144,7 @@ export class ProcessManager {
    * @param timeout - Timeout in milliseconds before force kill (default: 10000)
    * @returns Promise that resolves when process is killed
    */
-  async kill(pid: number, timeout: number = 10000): Promise<void> {
+  async kill(pid: number, timeout = 10000): Promise<void> {
     // Check if process exists
     if (!this.isRunning(pid)) {
       return; // Already dead
@@ -210,7 +211,7 @@ export class ProcessManager {
       // Sending signal 0 doesn't kill the process, just checks if it exists
       process.kill(pid, 0);
       return true;
-    } catch (error) {
+    } catch {
       // ESRCH means process doesn't exist
       return false;
     }

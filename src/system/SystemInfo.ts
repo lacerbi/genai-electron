@@ -29,12 +29,13 @@ import { RECOMMENDED_QUANTIZATIONS } from '../config/defaults.js';
 export class SystemInfo {
   private static instance: SystemInfo;
   private cachedCapabilities: SystemCapabilities | null = null;
-  private cacheTimestamp: number = 0;
+  private cacheTimestamp = 0;
   private readonly CACHE_TTL = 60000; // 60 seconds
 
   /**
    * Private constructor for singleton pattern
    */
+  // eslint-disable-next-line @typescript-eslint/no-empty-function
   private constructor() {}
 
   /**
@@ -61,7 +62,7 @@ export class SystemInfo {
    * console.log(`RAM: ${capabilities.memory.total / (1024 ** 3)} GB`);
    * ```
    */
-  public async detect(forceRefresh: boolean = false): Promise<SystemCapabilities> {
+  public async detect(forceRefresh = false): Promise<SystemCapabilities> {
     // Return cached result if still valid
     const now = Date.now();
     if (

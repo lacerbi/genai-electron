@@ -110,7 +110,7 @@ async function findBinaryInDirectory(
     }
 
     return undefined;
-  } catch (error) {
+  } catch {
     // If we can't read the directory, just return undefined
     return undefined;
   }

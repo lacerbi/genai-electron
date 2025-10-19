@@ -13,7 +13,7 @@ import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
 import { checkHealth, waitForHealthy } from '../process/health-check.js';
 import { parseLlamaCppLogLevel, stripLlamaCppFormatting } from '../process/llama-log-parser.js';
-import {
+import type {
   ServerConfig,
   ServerInfo,
   LlamaServerConfig,
@@ -407,7 +407,7 @@ export class LlamaServerManager extends ServerManager {
         // so LogManager doesn't create duplicate timestamps
         const cleanMessage = stripLlamaCppFormatting(line);
 
-        this.logManager.write(cleanMessage, level).catch(() => {});
+        this.logManager.write(cleanMessage, level).catch(() => void 0);
       }
     }
   }
@@ -434,7 +434,7 @@ export class LlamaServerManager extends ServerManager {
         // so LogManager doesn't create duplicate timestamps
         const cleanMessage = stripLlamaCppFormatting(line);
 
-        this.logManager.write(cleanMessage, level).catch(() => {});
+        this.logManager.write(cleanMessage, level).catch(() => void 0);
       }
     }
   }
@@ -449,7 +449,7 @@ export class LlamaServerManager extends ServerManager {
     if (this.logManager) {
       this.logManager
         .write(`Spawn error: ${error.message}`, 'error')
-        .catch(() => {});
+        .catch(() => void 0);
     }
     // The error will be handled by the exit handler
     // which will emit a 'crashed' event
@@ -468,7 +468,7 @@ export class LlamaServerManager extends ServerManager {
     if (this.logManager) {
       this.logManager
         .write(`Process exited with code ${code}, signal ${signal}`, 'warn')
-        .catch(() => {});
+        .catch(() => void 0);
     }
 
     // Update status

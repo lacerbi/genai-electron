@@ -438,10 +438,10 @@ export class DiffusionServerManager extends ServerManager {
             const total = parseInt(match[2], 10);
             config.onProgress(current, total);
           }
-          this.logManager?.write(data, 'info').catch(() => {});
+          this.logManager?.write(data, 'info').catch(() => void 0);
         },
         onStderr: (data) => {
-          this.logManager?.write(data, 'warn').catch(() => {});
+          this.logManager?.write(data, 'warn').catch(() => void 0);
         },
         onExit: async (code) => {
           if (cancelled) {
@@ -457,7 +457,7 @@ export class DiffusionServerManager extends ServerManager {
           // Read generated image
           try {
             const imageBuffer = await fs.readFile(outputPath);
-            await deleteFile(outputPath).catch(() => {});
+            await deleteFile(outputPath).catch(() => void 0);
 
             resolve({
               image: imageBuffer,
@@ -492,7 +492,7 @@ export class DiffusionServerManager extends ServerManager {
       cancel: () => {
         cancelled = true;
         if (pid !== undefined) {
-          this.processManager.kill(pid, 5000).catch(() => {});
+          this.processManager.kill(pid, 5000).catch(() => void 0);
         }
       },
     };

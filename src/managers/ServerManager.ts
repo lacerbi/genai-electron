@@ -9,7 +9,7 @@
 
 import { EventEmitter } from 'events';
 import path from 'node:path';
-import { ServerStatus, ServerInfo, ServerConfig, ServerEvent } from '../types/index.js';
+import type { ServerStatus, ServerInfo, ServerConfig, ServerEvent } from '../types/index.js';
 import {
   ServerError,
   PortInUseError,
@@ -59,7 +59,7 @@ export abstract class ServerManager extends EventEmitter {
   protected _pid?: number;
 
   /** Port the server is listening on (0 if not running) */
-  protected _port: number = 0;
+  protected _port = 0;
 
   /** Current server configuration */
   protected _config?: ServerConfig;
@@ -69,13 +69,6 @@ export abstract class ServerManager extends EventEmitter {
 
   /** Log manager for capturing server logs */
   protected logManager?: LogManager;
-
-  /**
-   * Create a new ServerManager
-   */
-  constructor() {
-    super();
-  }
 
   /**
    * Start the server
@@ -256,7 +249,7 @@ export abstract class ServerManager extends EventEmitter {
    * @param lines - Number of lines to retrieve (default: 100)
    * @returns Array of log lines
    */
-  async getLogs(lines: number = 100): Promise<string[]> {
+  async getLogs(lines = 100): Promise<string[]> {
     if (!this.logManager) {
       return [];
     }
@@ -306,7 +299,7 @@ export abstract class ServerManager extends EventEmitter {
    * @throws {PortInUseError} If port is already in use
    * @protected
    */
-  protected async checkPortAvailability(port: number, timeout: number = 2000): Promise<void> {
+  protected async checkPortAvailability(port: number, timeout = 2000): Promise<void> {
     const { isServerResponding } = await import('../process/health-check.js');
     if (await isServerResponding(port, timeout)) {
       throw new PortInUseError(port);
@@ -364,7 +357,7 @@ export abstract class ServerManager extends EventEmitter {
       await this.logManager.write(
         `Failed to start: ${error instanceof Error ? error.message : String(error)}`,
         'error'
-      ).catch(() => {});
+      ).catch(() => void 0);
     }
 
     // Re-throw typed errors
@@ -414,7 +407,7 @@ export abstract class ServerManager extends EventEmitter {
       variants: variants || [],
       log: this.logManager
         ? (message, level = 'info') => {
-            this.logManager?.write(message, level).catch(() => {});
+            this.logManager?.write(message, level).catch(() => void 0);
           }
         : undefined,
     });
