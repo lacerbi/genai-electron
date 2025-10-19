@@ -91,7 +91,7 @@ export class BinaryManager {
         return binaryPath;
       } else {
         this.log('Existing binary not working, re-downloading...', 'warn');
-        await deleteFile(binaryPath).catch(() => {});
+        await deleteFile(binaryPath).catch(() => void 0);
       }
     }
 
@@ -207,21 +207,21 @@ export class BinaryManager {
         }
 
         // Cleanup
-        await deleteFile(zipPath).catch(() => {});
-        await cleanupExtraction(extractDir).catch(() => {});
+        await deleteFile(zipPath).catch(() => void 0);
+        await cleanupExtraction(extractDir).catch(() => void 0);
 
         return true;
       } else {
         // Binary doesn't work (missing drivers, etc.)
         // Cleanup and return false to try next variant
-        await deleteFile(zipPath).catch(() => {});
-        await cleanupExtraction(extractDir).catch(() => {});
+        await deleteFile(zipPath).catch(() => void 0);
+        await cleanupExtraction(extractDir).catch(() => void 0);
         return false;
       }
     } catch (error) {
       // Cleanup on error
-      await deleteFile(zipPath).catch(() => {});
-      await cleanupExtraction(extractDir).catch(() => {});
+      await deleteFile(zipPath).catch(() => void 0);
+      await cleanupExtraction(extractDir).catch(() => void 0);
       throw error;
     }
   }

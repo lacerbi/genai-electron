@@ -47,7 +47,7 @@ export interface DownloadOptions {
  */
 export class Downloader {
   private abortController: AbortController | null = null;
-  private isDownloading: boolean = false;
+  private isDownloading = false;
 
   /**
    * Download a file with progress tracking
