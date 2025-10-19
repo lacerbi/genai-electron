@@ -34,8 +34,3 @@ lerna-debug.log*
 *.tmp
 .temp/
 temp/
-
-# Package manager
-package-lock.json
-yarn.lock
-pnpm-lock.yaml
