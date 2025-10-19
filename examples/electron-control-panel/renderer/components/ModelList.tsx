@@ -64,9 +64,7 @@ const ModelList: React.FC<ModelListProps> = ({ models, onDelete, onVerify }) => 
             <tr key={model.id}>
               <td className="model-name">{model.name}</td>
               <td>
-                <span
-                  className={`model-type-badge model-type-${model.type}`}
-                >
+                <span className={`model-type-badge model-type-${model.type}`}>
                   {model.type === 'llm' ? 'LLM' : 'Diffusion'}
                 </span>
               </td>

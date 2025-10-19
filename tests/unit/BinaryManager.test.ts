@@ -36,11 +36,11 @@ jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
 }));
 
 // Mock zip-utils
-const mockExtractLlamaServerBinary = jest.fn();
+const mockExtractBinary = jest.fn();
 const mockCleanupExtraction = jest.fn();
 
 jest.unstable_mockModule('../../src/utils/zip-utils.js', () => ({
-  extractLlamaServerBinary: mockExtractLlamaServerBinary,
+  extractBinary: mockExtractBinary,
   cleanupExtraction: mockCleanupExtraction,
 }));
 
@@ -126,7 +126,7 @@ describe('BinaryManager', () => {
     });
     mockDeleteFile.mockResolvedValue(undefined);
     mockCopyDirectory.mockResolvedValue(undefined);
-    mockExtractLlamaServerBinary.mockResolvedValue('/mock/extract/llama-server.exe');
+    mockExtractBinary.mockResolvedValue('/mock/extract/llama-server.exe');
     mockCleanupExtraction.mockResolvedValue(undefined);
     mockGetBinaryPath.mockReturnValue('/mock/binaries/llama/llama-server.exe');
     mockReadFile.mockRejectedValue(new Error('No cache'));
@@ -354,7 +354,7 @@ describe('BinaryManager', () => {
 
     it('should cleanup on extraction failure', async () => {
       // Make extraction fail for ALL variants
-      mockExtractLlamaServerBinary.mockRejectedValue(new Error('Extraction failed'));
+      mockExtractBinary.mockRejectedValue(new Error('Extraction failed'));
 
       await expect(binaryManager.ensureBinary()).rejects.toThrow(BinaryError);
       await expect(binaryManager.ensureBinary()).rejects.toThrow(

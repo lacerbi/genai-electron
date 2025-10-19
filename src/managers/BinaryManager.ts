@@ -18,7 +18,7 @@ import {
   deleteFile,
   copyDirectory,
 } from '../utils/file-utils.js';
-import { extractLlamaServerBinary, cleanupExtraction } from '../utils/zip-utils.js';
+import { extractBinary, cleanupExtraction } from '../utils/zip-utils.js';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { execFile } from 'child_process';
@@ -184,8 +184,14 @@ export class BinaryManager {
         });
       }
 
+      // Determine which binary names to search for based on type
+      const binaryNamesToSearch =
+        this.config.type === 'llama'
+          ? ['llama-server.exe', 'llama-server', 'llama-cli.exe', 'llama-cli']
+          : ['sd.exe', 'sd'];
+
       // Extract ZIP
-      const extractedBinaryPath = await extractLlamaServerBinary(zipPath, extractDir);
+      const extractedBinaryPath = await extractBinary(zipPath, extractDir, binaryNamesToSearch);
 
       // Test if binary works (has required drivers, etc.)
       const works = await this.testBinary(extractedBinaryPath);

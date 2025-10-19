@@ -196,6 +196,14 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 - **Fix:** Fetch both types, merge arrays, add type badges (commit `457327d`)
 - **Result:** All models visible in Models tab with clear type identification
 
+**Issue 3: Diffusion Binary Extraction Failure**
+- **Problem:** `extractLlamaServerBinary()` hardcoded to search only for llama-server binary names
+- **Impact:** Diffusion binary downloads succeeded but extraction failed, server wouldn't start
+- **Root Cause:** Function searched for `llama-server.exe` instead of `sd.exe` when extracting diffusion binaries
+- **Fix:** Renamed to `extractBinary()`, added `binaryNames` parameter, pass correct names based on type
+- **Result:** Diffusion binaries now extract successfully, server can start on all platforms
+- **Testing Gap:** Unit tests mocked extraction layer, missing integration test for real ZIP extraction
+
 ### Build & Quality Status
 
 - ✅ **TypeScript:** 0 errors (strict mode)
@@ -298,6 +306,7 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
 
 **Immediate: Testing & Debugging (In Progress)**
 - ✅ Phase 2 example app implementation complete
+- ✅ Fixed critical diffusion binary extraction bug
 - 🔄 Manual testing of diffusion server functionality
 - 🔄 Testing resource orchestration with real workloads
 - 🔄 Verification of model management across both types

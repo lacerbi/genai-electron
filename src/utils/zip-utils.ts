@@ -10,25 +10,33 @@ import { fileExists } from './file-utils.js';
 import { FileSystemError } from '../errors/index.js';
 
 /**
- * Extract a ZIP archive and find the llama-server binary
+ * Extract a ZIP archive and find a binary executable
+ *
+ * Searches for binary executables within the extracted ZIP archive.
+ * Supports both llama-server and diffusion (sd) binaries with unpredictable
+ * directory structures in GitHub releases.
  *
  * @param zipPath - Path to the ZIP file
  * @param extractTo - Directory to extract to (will be created if it doesn't exist)
- * @returns Path to the extracted llama-server binary
+ * @param binaryNames - List of binary names to search for (e.g., ['sd.exe', 'sd'] or ['llama-server.exe', 'llama-server'])
+ * @returns Path to the extracted binary
  * @throws {FileSystemError} If extraction fails or binary not found
  *
  * @example
  * ```typescript
- * const binaryPath = await extractLlamaServerBinary(
- *   '/path/to/llama-b6783-bin-win-cuda-x64.zip',
- *   '/path/to/temp/extract'
+ * // Extract diffusion binary
+ * const binaryPath = await extractBinary(
+ *   '/path/to/sd-cuda.zip',
+ *   '/path/to/temp/extract',
+ *   ['sd.exe', 'sd']
  * );
  * console.log('Binary extracted to:', binaryPath);
  * ```
  */
-export async function extractLlamaServerBinary(
+export async function extractBinary(
   zipPath: string,
-  extractTo: string
+  extractTo: string,
+  binaryNames: string[]
 ): Promise<string> {
   try {
     // Verify ZIP file exists
@@ -45,16 +53,16 @@ export async function extractLlamaServerBinary(
     const zip = new AdmZip(zipPath);
     zip.extractAllTo(extractTo, true);
 
-    // Find llama-server binary in extracted files
-    // Binary names: llama-server (Unix) or llama-server.exe (Windows)
-    const binaryNames = ['llama-server.exe', 'llama-server', 'llama-cli.exe', 'llama-cli'];
+    // Find binary in extracted files
+    // Searches recursively through all subdirectories
     const binaryPath = await findBinaryInDirectory(extractTo, binaryNames);
 
     if (!binaryPath) {
-      throw new FileSystemError(`llama-server binary not found in extracted ZIP: ${zipPath}`, {
+      throw new FileSystemError(`Binary not found in extracted ZIP: ${zipPath}`, {
         path: zipPath,
         extractedTo: extractTo,
-        suggestion: 'ZIP archive may have unexpected structure',
+        expectedNames: binaryNames,
+        suggestion: 'ZIP archive may have unexpected structure or binary names may be incorrect',
       });
     }
 
