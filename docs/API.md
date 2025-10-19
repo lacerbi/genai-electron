@@ -1,20 +1,27 @@
 # genai-electron API Reference
 
-> **Version**: 0.1.0 (Phase 1 MVP)
-> **Status**: Complete
+> **Version**: 0.2.0 (Phase 2 Complete)
+> **Status**: Production Ready
 
-Complete API reference for genai-electron Phase 1.
+Complete API reference for genai-electron Phase 1 (LLM Support) and Phase 2 (Image Generation).
 
 ---
 
 ## Table of Contents
 
+### Phase 1: LLM Support
 1. [SystemInfo](#systeminfo)
 2. [ModelManager](#modelmanager)
 3. [LlamaServerManager](#llamaservermanager)
-4. [Types and Interfaces](#types-and-interfaces)
-5. [Error Classes](#error-classes)
-6. [Utilities](#utilities)
+
+### Phase 2: Image Generation
+4. [DiffusionServerManager](#diffusionservermanager)
+5. [ResourceOrchestrator](#resourceorchestrator)
+
+### Reference
+6. [Types and Interfaces](#types-and-interfaces)
+7. [Error Classes](#error-classes)
+8. [Utilities](#utilities)
 
 ---
 
@@ -702,6 +709,558 @@ await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
 
 ---
 
+## DiffusionServerManager
+
+The `DiffusionServerManager` class manages the diffusion HTTP wrapper server for local image generation using stable-diffusion.cpp.
+
+**Architecture Note**: Unlike llama-server (which is a native HTTP server), stable-diffusion.cpp is a one-shot executable. DiffusionServerManager creates an HTTP wrapper server that spawns stable-diffusion.cpp on-demand for each image generation request.
+
+### Import
+
+```typescript
+import { diffusionServer } from 'genai-electron';
+// Or for advanced usage:
+import { DiffusionServerManager } from 'genai-electron';
+const customServer = new DiffusionServerManager();
+```
+
+### Methods
+
+#### `start(config: DiffusionServerConfig): Promise<DiffusionServerInfo>`
+
+Starts the diffusion HTTP wrapper server. Downloads binary automatically on first run.
+
+**Parameters**:
+- `config: DiffusionServerConfig` - Server configuration
+
+**DiffusionServerConfig Options**:
+- `modelId: string` - **Required** - Diffusion model ID to load
+- `port?: number` - Optional - Port to listen on (default: 8081)
+- `threads?: number` - Optional - CPU threads (auto-detected if not specified)
+- `gpuLayers?: number` - Optional - Layers to offload to GPU (auto-detected if not specified, 0 = CPU-only)
+- `vramBudget?: number` - Optional - VRAM budget in MB
+
+**Returns**: `Promise<DiffusionServerInfo>` - Server information
+
+**Example (Auto-configuration)**:
+```typescript
+await diffusionServer.start({
+  modelId: 'sdxl-turbo',
+  port: 8081
+  // threads, gpuLayers auto-detected
+});
+
+console.log('Diffusion server started with optimal settings');
+```
+
+**Example (Custom configuration)**:
+```typescript
+await diffusionServer.start({
+  modelId: 'sdxl-turbo',
+  port: 8081,
+  threads: 8,        // Use 8 CPU threads
+  gpuLayers: 35,     // Offload 35 layers to GPU
+  vramBudget: 6144   // Limit VRAM usage to 6GB
+});
+
+console.log('Diffusion server started with custom settings');
+```
+
+**Throws**:
+- `ModelNotFoundError` - Model doesn't exist or is not a diffusion model
+- `ServerError` - Server failed to start
+- `PortInUseError` - Port already in use
+- `InsufficientResourcesError` - Not enough RAM/VRAM
+- `BinaryError` - Binary download or execution failed
+
+**Note**: First run will download stable-diffusion.cpp binary (~50-100MB) for your platform.
+
+---
+
+#### `stop(): Promise<void>`
+
+Stops the diffusion HTTP wrapper server gracefully.
+
+**Returns**: `Promise<void>`
+
+**Example**:
+```typescript
+console.log('Stopping diffusion server...');
+await diffusionServer.stop();
+console.log('Diffusion server stopped');
+
+// Verify status
+const status = diffusionServer.getStatus();
+console.log('Status:', status.status); // 'stopped'
+```
+
+**Behavior**:
+1. Cancels any ongoing image generation
+2. Closes HTTP server
+3. Cleans up resources
+
+---
+
+#### `generateImage(config: ImageGenerationConfig): Promise<ImageGenerationResult>`
+
+Generates an image by spawning stable-diffusion.cpp executable.
+
+**Parameters**:
+- `config: ImageGenerationConfig` - Image generation configuration
+
+**ImageGenerationConfig Options**:
+- `prompt: string` - **Required** - Text prompt describing the image
+- `negativePrompt?: string` - Optional - What to avoid in the image
+- `width?: number` - Optional - Image width in pixels (default: 512)
+- `height?: number` - Optional - Image height in pixels (default: 512)
+- `steps?: number` - Optional - Number of inference steps (default: 20, more = better quality but slower)
+- `cfgScale?: number` - Optional - Guidance scale (default: 7.5, higher = closer to prompt)
+- `seed?: number` - Optional - Random seed for reproducibility (-1 = random)
+- `sampler?: ImageSampler` - Optional - Sampler algorithm (default: 'euler_a')
+- `onProgress?: (currentStep: number, totalSteps: number) => void` - Optional - Progress callback
+
+**Returns**: `Promise<ImageGenerationResult>` - Generated image data
+
+**Example (Basic)**:
+```typescript
+const result = await diffusionServer.generateImage({
+  prompt: 'A serene mountain landscape at sunset, 4k, detailed',
+  width: 1024,
+  height: 1024,
+  steps: 30
+});
+
+console.log('Image generated in', result.timeTaken, 'ms');
+console.log('Image size:', result.width, 'x', result.height);
+
+// Save image
+import { promises as fs } from 'fs';
+await fs.writeFile('output.png', result.image);
+```
+
+**Example (Advanced with progress tracking)**:
+```typescript
+const result = await diffusionServer.generateImage({
+  prompt: 'A futuristic city with flying cars, cyberpunk style',
+  negativePrompt: 'blurry, low quality, distorted, ugly',
+  width: 1024,
+  height: 1024,
+  steps: 50,
+  cfgScale: 8.0,
+  seed: 42,  // For reproducibility
+  sampler: 'dpm++2m',
+  onProgress: (currentStep, totalSteps) => {
+    const percent = ((currentStep / totalSteps) * 100).toFixed(1);
+    console.log(`Generating: ${currentStep}/${totalSteps} (${percent}%)`);
+  }
+});
+
+console.log('Generated with seed:', result.seed);
+console.log('Format:', result.format); // 'png'
+await fs.writeFile('cyberpunk-city.png', result.image);
+```
+
+**Throws**:
+- `ServerError` - Server not running or generation failed
+- `ModelNotFoundError` - Model not found
+
+**Note**: Only one image can be generated at a time. If called while busy, throws `ServerError`.
+
+---
+
+#### `getStatus(): DiffusionServerInfo`
+
+Gets current server status (synchronous).
+
+**Returns**: `DiffusionServerInfo` - Current server state
+
+**Example**:
+```typescript
+const status = diffusionServer.getStatus();
+
+console.log('Server Status:', status.status);
+// Possible values: 'stopped', 'starting', 'running', 'stopping', 'crashed'
+
+console.log('Health:', status.health);
+// Possible values: 'ok', 'loading', 'error', 'unknown'
+
+console.log('Busy:', status.busy);
+// true if currently generating an image
+
+if (status.pid) {
+  console.log('HTTP wrapper PID:', status.pid);
+}
+
+console.log('Port:', status.port);
+console.log('Model ID:', status.modelId);
+
+if (status.startedAt) {
+  const uptime = Date.now() - new Date(status.startedAt).getTime();
+  console.log('Uptime:', Math.floor(uptime / 1000), 'seconds');
+}
+```
+
+---
+
+#### `isHealthy(): Promise<boolean>`
+
+Checks if the HTTP wrapper server is responding (asynchronous).
+
+**Returns**: `Promise<boolean>` - `true` if server is healthy, `false` otherwise
+
+**Example**:
+```typescript
+const healthy = await diffusionServer.isHealthy();
+
+if (healthy) {
+  console.log('✅ Diffusion server is healthy and ready');
+} else {
+  console.log('❌ Diffusion server is not responding');
+}
+```
+
+---
+
+#### `getLogs(lines?: number): Promise<string[]>`
+
+Gets recent server logs.
+
+**Parameters**:
+- `lines?: number` - Optional - Number of lines to retrieve (default: 100)
+
+**Returns**: `Promise<string[]>` - Array of recent log entries
+
+**Example**:
+```typescript
+// Get last 100 lines (default)
+const logs = await diffusionServer.getLogs();
+console.log('Recent logs:');
+logs.forEach(line => console.log(line));
+
+// Get last 50 lines
+const recentLogs = await diffusionServer.getLogs(50);
+
+// Get all logs
+const allLogs = await diffusionServer.getLogs(Infinity);
+```
+
+---
+
+#### `clearLogs(): Promise<void>`
+
+Clears all server logs.
+
+**Returns**: `Promise<void>`
+
+**Example**:
+```typescript
+await diffusionServer.clearLogs();
+console.log('Logs cleared');
+```
+
+---
+
+### Events
+
+The `DiffusionServerManager` extends `EventEmitter` and emits lifecycle events.
+
+#### `'started'`
+
+Emitted when HTTP wrapper server starts successfully.
+
+```typescript
+diffusionServer.on('started', (info: DiffusionServerInfo) => {
+  console.log('Diffusion server started on port', info.port);
+});
+```
+
+#### `'stopped'`
+
+Emitted when server stops.
+
+```typescript
+diffusionServer.on('stopped', () => {
+  console.log('Diffusion server stopped');
+});
+```
+
+#### `'crashed'`
+
+Emitted when server crashes unexpectedly.
+
+```typescript
+diffusionServer.on('crashed', (error: Error) => {
+  console.error('Diffusion server crashed:', error.message);
+});
+```
+
+**Example (Complete Event Handling)**:
+```typescript
+diffusionServer.on('started', (info) => {
+  console.log('✅ Diffusion server started on port', info.port);
+});
+
+diffusionServer.on('stopped', () => {
+  console.log('🛑 Diffusion server stopped');
+});
+
+diffusionServer.on('crashed', (error) => {
+  console.error('💥 Diffusion server crashed:', error.message);
+
+  // Implement custom restart logic
+  console.log('Attempting restart in 5 seconds...');
+  setTimeout(async () => {
+    try {
+      await diffusionServer.start({
+        modelId: 'sdxl-turbo',
+        port: 8081
+      });
+      console.log('✅ Server restarted successfully');
+    } catch (restartError) {
+      console.error('❌ Failed to restart:', restartError);
+    }
+  }, 5000);
+});
+
+// Start server
+await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081 });
+```
+
+---
+
+## ResourceOrchestrator
+
+The `ResourceOrchestrator` class provides automatic resource management between LLM and image generation servers. When system resources are constrained (limited RAM or VRAM), it automatically offloads the LLM server before generating images, then reloads it afterward.
+
+### Import
+
+```typescript
+import { ResourceOrchestrator } from 'genai-electron';
+import { systemInfo, llamaServer, diffusionServer, modelManager } from 'genai-electron';
+
+// Create orchestrator instance
+const orchestrator = new ResourceOrchestrator(
+  systemInfo,
+  llamaServer,
+  diffusionServer,
+  modelManager
+);
+```
+
+### Constructor
+
+```typescript
+new ResourceOrchestrator(
+  systemInfo?: SystemInfo,
+  llamaServer?: LlamaServerManager,
+  diffusionServer?: DiffusionServerManager,
+  modelManager?: ModelManager
+)
+```
+
+**Parameters**: All optional, defaults to singleton instances if not provided.
+
+---
+
+### Methods
+
+#### `orchestrateImageGeneration(config: ImageGenerationConfig): Promise<ImageGenerationResult>`
+
+Generates an image with automatic resource management. If system resources are constrained, automatically offloads the LLM server before generation and reloads it afterward.
+
+**Parameters**:
+- `config: ImageGenerationConfig` - Image generation configuration (same as `DiffusionServerManager.generateImage()`)
+
+**Returns**: `Promise<ImageGenerationResult>` - Generated image data
+
+**Example (Basic Usage)**:
+```typescript
+import { ResourceOrchestrator } from 'genai-electron';
+import { systemInfo, llamaServer, diffusionServer, modelManager } from 'genai-electron';
+
+const orchestrator = new ResourceOrchestrator(
+  systemInfo,
+  llamaServer,
+  diffusionServer,
+  modelManager
+);
+
+// LLM server is running and using 6GB VRAM
+await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
+
+// Start diffusion server
+await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081 });
+
+// Generate image - automatically manages resources
+// If not enough VRAM:
+//   1. Saves LLM state
+//   2. Stops LLM server (frees 6GB VRAM)
+//   3. Generates image
+//   4. Restarts LLM server with saved config
+const result = await orchestrator.orchestrateImageGeneration({
+  prompt: 'A beautiful sunset over mountains',
+  width: 1024,
+  height: 1024,
+  steps: 30
+});
+
+console.log('Image generated successfully');
+// LLM server is running again with original configuration
+```
+
+**Example (With Progress Tracking)**:
+```typescript
+const result = await orchestrator.orchestrateImageGeneration({
+  prompt: 'A futuristic city at night',
+  negativePrompt: 'blurry, low quality',
+  width: 1024,
+  height: 1024,
+  steps: 50,
+  onProgress: (currentStep, totalSteps) => {
+    console.log(`Progress: ${currentStep}/${totalSteps}`);
+  }
+});
+
+await fs.promises.writeFile('city.png', result.image);
+```
+
+**Behavior**:
+- **Ample resources**: Generates directly without offloading LLM
+- **Constrained resources**: Automatically offloads LLM, generates image, reloads LLM
+- **Resource detection**: Determines bottleneck (RAM vs VRAM) automatically
+- **Threshold**: Uses 75% of available resource as threshold for offload decision
+
+**Throws**: Same exceptions as `DiffusionServerManager.generateImage()`
+
+---
+
+#### `wouldNeedOffload(): Promise<boolean>`
+
+Checks if generating an image would require offloading the LLM server.
+
+**Returns**: `Promise<boolean>` - `true` if offload would be needed, `false` otherwise
+
+**Example**:
+```typescript
+const needsOffload = await orchestrator.wouldNeedOffload();
+
+if (needsOffload) {
+  console.log('⚠️  Image generation will temporarily stop the LLM server');
+  console.log('The LLM will be automatically reloaded after generation');
+} else {
+  console.log('✅ Enough resources - both servers can run simultaneously');
+}
+
+// Proceed with generation
+const result = await orchestrator.orchestrateImageGeneration({
+  prompt: 'A landscape painting',
+  steps: 30
+});
+```
+
+**Use Cases**:
+- Warn users about temporary LLM unavailability
+- Decide whether to defer image generation
+- Display resource status in UI
+
+---
+
+#### `getSavedState(): SavedLLMState | undefined`
+
+Gets the saved LLM state if the server was offloaded.
+
+**Returns**: `SavedLLMState | undefined` - Saved state or undefined if no state saved
+
+**SavedLLMState Interface**:
+```typescript
+interface SavedLLMState {
+  config: ServerConfig;   // Original LLM configuration
+  wasRunning: boolean;    // Whether LLM was running before offload
+  savedAt: Date;          // When state was saved
+}
+```
+
+**Example**:
+```typescript
+// Check if LLM was offloaded
+const savedState = orchestrator.getSavedState();
+
+if (savedState) {
+  console.log('LLM was offloaded at:', savedState.savedAt);
+  console.log('Original model:', savedState.config.modelId);
+  console.log('Original port:', savedState.config.port);
+  console.log('GPU layers:', savedState.config.gpuLayers);
+  console.log('Was running:', savedState.wasRunning);
+} else {
+  console.log('No LLM state saved (not offloaded)');
+}
+```
+
+---
+
+#### `clearSavedState(): void`
+
+Clears any saved LLM state. Use this if you don't want the LLM to be automatically reloaded.
+
+**Returns**: `void`
+
+**Example**:
+```typescript
+// Generate image with offload
+await orchestrator.orchestrateImageGeneration({
+  prompt: 'A mountain landscape',
+  steps: 30
+});
+
+// Prevent automatic LLM reload for next generation
+orchestrator.clearSavedState();
+
+// Next generation won't reload LLM
+await orchestrator.orchestrateImageGeneration({
+  prompt: 'A city skyline',
+  steps: 30
+});
+```
+
+---
+
+### Resource Estimation
+
+The `ResourceOrchestrator` automatically estimates resource usage and determines the bottleneck:
+
+**Bottleneck Detection**:
+- **GPU Systems**: Uses VRAM as bottleneck if GPU is available
+- **CPU-Only Systems**: Uses RAM as bottleneck
+
+**Estimation Formulas**:
+- **LLM Usage**:
+  - GPU mode: `VRAM = model_size * (gpu_layers / total_layers) * 1.2`
+  - CPU mode: `RAM = model_size * 1.2`
+- **Diffusion Usage**: `RAM/VRAM = model_size * 1.2`
+
+**Offload Decision**:
+- Combined usage > 75% of available resource → Offload needed
+- Combined usage ≤ 75% of available resource → No offload needed
+
+**Example Scenarios**:
+
+1. **GPU System with 8GB VRAM**:
+   - LLM using 6GB VRAM (75%)
+   - Diffusion needs 5GB VRAM
+   - Combined: 11GB > 8GB * 0.75 (6GB) → **Offload needed** ✅
+
+2. **GPU System with 24GB VRAM**:
+   - LLM using 6GB VRAM (25%)
+   - Diffusion needs 5GB VRAM
+   - Combined: 11GB < 24GB * 0.75 (18GB) → **No offload** ✅
+
+3. **CPU-Only System with 16GB RAM**:
+   - LLM using 8GB RAM (50%)
+   - Diffusion needs 6GB RAM
+   - Combined: 14GB > 16GB * 0.75 (12GB) → **Offload needed** ✅
+
+---
+
 ## Types and Interfaces
 
 ### SystemCapabilities
@@ -844,6 +1403,88 @@ interface ServerConfig {
   gpuLayers?: number;         // GPU layers to offload
   parallelRequests?: number;  // Concurrent request slots
   flashAttention?: boolean;   // Enable flash attention
+}
+```
+
+### Phase 2: Image Generation Types
+
+#### ImageGenerationConfig
+
+Configuration for image generation requests.
+
+```typescript
+interface ImageGenerationConfig {
+  prompt: string;                    // Text prompt describing the image
+  negativePrompt?: string;           // What to avoid in the image
+  width?: number;                    // Image width in pixels (default: 512)
+  height?: number;                   // Image height in pixels (default: 512)
+  steps?: number;                    // Inference steps (default: 20)
+  cfgScale?: number;                 // Guidance scale (default: 7.5)
+  seed?: number;                     // Random seed (-1 = random)
+  sampler?: ImageSampler;            // Sampler algorithm (default: 'euler_a')
+  onProgress?: (currentStep: number, totalSteps: number) => void; // Progress callback
+}
+```
+
+#### ImageGenerationResult
+
+Result of image generation.
+
+```typescript
+interface ImageGenerationResult {
+  image: Buffer;         // Generated image data (PNG format)
+  format: 'png';         // Image format (always 'png')
+  timeTaken: number;     // Generation time in milliseconds
+  seed: number;          // Seed used (for reproducibility)
+  width: number;         // Image width
+  height: number;        // Image height
+}
+```
+
+#### ImageSampler
+
+Available sampler algorithms for image generation.
+
+```typescript
+type ImageSampler =
+  | 'euler_a'      // Euler Ancestral (default, good quality/speed balance)
+  | 'euler'        // Euler
+  | 'heun'         // Heun (better quality, slower)
+  | 'dpm2'         // DPM 2
+  | 'dpm++2s_a'    // DPM++ 2S Ancestral
+  | 'dpm++2m'      // DPM++ 2M (good quality)
+  | 'dpm++2mv2'    // DPM++ 2M v2
+  | 'lcm';         // LCM (very fast, fewer steps)
+```
+
+#### DiffusionServerConfig
+
+Configuration for starting the diffusion server.
+
+```typescript
+interface DiffusionServerConfig {
+  modelId: string;        // Diffusion model ID to load
+  port?: number;          // Port to listen on (default: 8081)
+  threads?: number;       // CPU threads (auto-detected if not specified)
+  gpuLayers?: number;     // GPU layers to offload (auto-detected if not specified)
+  vramBudget?: number;    // VRAM budget in MB (optional)
+}
+```
+
+#### DiffusionServerInfo
+
+Diffusion server status information.
+
+```typescript
+interface DiffusionServerInfo {
+  status: ServerStatus;      // Current server state
+  health: HealthStatus;      // Health check result
+  pid?: number;              // HTTP wrapper process ID (if running)
+  port: number;              // Server port
+  modelId: string;           // Loaded model ID
+  startedAt?: string;        // ISO 8601 timestamp (if running)
+  error?: string;            // Last error message (if crashed)
+  busy?: boolean;            // Whether currently generating an image
 }
 ```
 
@@ -1106,27 +1747,42 @@ if (response.object === 'chat.completion') {
 
 ---
 
-## Complete Example
+## Complete Example: LLM + Image Generation
+
+This example demonstrates both LLM inference and local image generation with automatic resource management.
 
 ```typescript
 import { app } from 'electron';
 import { LLMService } from 'genai-lite';
-import { systemInfo, modelManager, llamaServer } from 'genai-electron';
+import {
+  systemInfo,
+  modelManager,
+  llamaServer,
+  diffusionServer,
+  ResourceOrchestrator
+} from 'genai-electron';
+import { promises as fs } from 'fs';
 
 async function main() {
-  // 1. Detect system
+  // 1. Detect system capabilities
   console.log('Detecting system capabilities...');
   const capabilities = await systemInfo.detect();
-  console.log('CPU:', capabilities.cpu.cores, 'cores');
-  console.log('RAM:', formatBytes(capabilities.memory.total));
-  console.log('GPU:', capabilities.gpu.available ? capabilities.gpu.name : 'none');
-  console.log('Max model size:', capabilities.recommendations.maxModelSize);
+  console.log('System Information:');
+  console.log('  CPU:', capabilities.cpu.cores, 'cores');
+  console.log('  RAM:', (capabilities.memory.total / 1024 ** 3).toFixed(1), 'GB');
+  console.log('  GPU:', capabilities.gpu.available ? capabilities.gpu.name : 'none');
+  if (capabilities.gpu.available) {
+    console.log('  VRAM:', (capabilities.gpu.vram / 1024 ** 3).toFixed(1), 'GB');
+  }
+  console.log('  Recommended max model:', capabilities.recommendations.maxModelSize);
 
-  // 2. List or download models
-  let models = await modelManager.listModels('llm');
+  // 2. Download models if needed
+  let llmModels = await modelManager.listModels('llm');
+  let diffusionModels = await modelManager.listModels('diffusion');
 
-  if (models.length === 0) {
-    console.log('No models found. Downloading Llama 2 7B...');
+  // Download LLM model if none exist
+  if (llmModels.length === 0) {
+    console.log('\nDownloading LLM model (Llama 2 7B)...');
     await modelManager.downloadModel({
       source: 'huggingface',
       repo: 'TheBloke/Llama-2-7B-GGUF',
@@ -1135,59 +1791,130 @@ async function main() {
       type: 'llm',
       onProgress: (downloaded, total) => {
         const percent = ((downloaded / total) * 100).toFixed(1);
-        process.stdout.write(`\rProgress: ${percent}%`);
+        process.stdout.write(`\rLLM Progress: ${percent}%`);
       }
     });
-    console.log('\nDownload complete!');
-    models = await modelManager.listModels('llm');
+    console.log('\n✅ LLM model downloaded');
+    llmModels = await modelManager.listModels('llm');
   }
 
-  const model = models[0];
-  console.log('Using model:', model.name);
-
-  // 3. Check if model can run
-  const check = await systemInfo.canRunModel(model);
-  if (!check.canRun) {
-    console.error('Cannot run model:', check.reason);
-    return;
+  // Download diffusion model if none exist
+  if (diffusionModels.length === 0) {
+    console.log('\nDownloading diffusion model (SDXL Turbo)...');
+    await modelManager.downloadModel({
+      source: 'url',
+      url: 'https://huggingface.co/stabilityai/sdxl-turbo/resolve/main/sdxl-turbo-q4.gguf',
+      name: 'SDXL Turbo',
+      type: 'diffusion',
+      onProgress: (downloaded, total) => {
+        const percent = ((downloaded / total) * 100).toFixed(1);
+        process.stdout.write(`\rDiffusion Progress: ${percent}%`);
+      }
+    });
+    console.log('\n✅ Diffusion model downloaded');
+    diffusionModels = await modelManager.listModels('diffusion');
   }
 
-  // 4. Get optimal config
-  const config = await systemInfo.getOptimalConfig(model);
-  console.log('Optimal config:', config);
+  const llmModel = llmModels[0];
+  const diffusionModel = diffusionModels[0];
 
-  // 5. Start server
-  console.log('Starting llama-server...');
+  // 3. Start LLM server
+  console.log('\nStarting LLM server...');
+  const llmConfig = await systemInfo.getOptimalConfig(llmModel);
   await llamaServer.start({
-    modelId: model.id,
+    modelId: llmModel.id,
     port: 8080,
-    ...config
+    ...llmConfig
   });
-  console.log('Server started!');
+  console.log('✅ LLM server running on port 8080');
 
-  // 6. Use with genai-lite
+  // 4. Start diffusion server
+  console.log('Starting diffusion server...');
+  await diffusionServer.start({
+    modelId: diffusionModel.id,
+    port: 8081
+  });
+  console.log('✅ Diffusion server running on port 8081');
+
+  // 5. Use LLM via genai-lite
+  console.log('\nTesting LLM...');
   const llmService = new LLMService(async () => 'not-needed');
-  const response = await llmService.sendMessage({
+  const llmResponse = await llmService.sendMessage({
     providerId: 'llamacpp',
-    modelId: 'llama-2-7b',
+    modelId: llmModel.id,
     messages: [
-      { role: 'user', content: 'Explain AI in one sentence.' }
+      { role: 'user', content: 'Describe a beautiful landscape in 2 sentences.' }
     ]
   });
 
-  if (response.object === 'chat.completion') {
-    console.log('AI:', response.choices[0].message.content);
+  if (llmResponse.object === 'chat.completion') {
+    const description = llmResponse.choices[0].message.content;
+    console.log('LLM Response:', description);
+
+    // 6. Generate image based on LLM description
+    console.log('\nGenerating image based on description...');
+
+    // Create resource orchestrator for automatic management
+    const orchestrator = new ResourceOrchestrator(
+      systemInfo,
+      llamaServer,
+      diffusionServer,
+      modelManager
+    );
+
+    // Check if offload will be needed
+    const needsOffload = await orchestrator.wouldNeedOffload();
+    if (needsOffload) {
+      console.log('⚠️  Limited resources - LLM will be temporarily offloaded');
+    }
+
+    // Generate image with automatic resource management
+    const imageResult = await orchestrator.orchestrateImageGeneration({
+      prompt: description,
+      negativePrompt: 'blurry, low quality, distorted',
+      width: 1024,
+      height: 1024,
+      steps: 30,
+      onProgress: (currentStep, totalSteps) => {
+        const percent = ((currentStep / totalSteps) * 100).toFixed(1);
+        process.stdout.write(`\rImage Generation: ${percent}% (${currentStep}/${totalSteps})`);
+      }
+    });
+
+    console.log(`\n✅ Image generated in ${(imageResult.timeTaken / 1000).toFixed(1)}s`);
+
+    // Save image
+    await fs.writeFile('generated-landscape.png', imageResult.image);
+    console.log('💾 Image saved to generated-landscape.png');
+
+    // Check if LLM is running again
+    const llamaStatus = llamaServer.getStatus();
+    if (llamaStatus.status === 'running') {
+      console.log('✅ LLM server automatically reloaded and ready');
+    }
   }
 
-  // 7. Cleanup
+  // 7. Cleanup on app quit
   app.on('before-quit', async () => {
-    console.log('Stopping server...');
+    console.log('\nShutting down servers...');
     await llamaServer.stop();
+    await diffusionServer.stop();
+    console.log('✅ All servers stopped');
   });
 }
 
 app.whenReady().then(main).catch(console.error);
 ```
+
+**This example demonstrates:**
+- System capability detection
+- Downloading both LLM and diffusion models
+- Starting both servers
+- Using LLM via genai-lite to generate a description
+- Using ResourceOrchestrator for automatic resource management
+- Generating an image based on the LLM description
+- Automatic LLM offload/reload when resources are constrained
+- Proper cleanup on application quit
 
 ---
 
