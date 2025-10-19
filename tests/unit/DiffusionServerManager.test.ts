@@ -158,6 +158,7 @@ const { DiffusionServerManager } = await import('../../src/managers/DiffusionSer
 
 describe('DiffusionServerManager', () => {
   let diffusionServer: DiffusionServerManager;
+  let mockProcess: any; // Track for cleanup
 
   const mockModelInfo: ModelInfo = {
     id: 'sdxl-turbo',
@@ -221,8 +222,8 @@ describe('DiffusionServerManager', () => {
     });
     mockIsServerResponding.mockResolvedValue(false); // Port is available
 
-    // Mock process spawn
-    const mockProcess = new EventEmitter() as any;
+    // Mock process spawn (track at describe level for cleanup)
+    mockProcess = new EventEmitter() as any;
     mockProcess.pid = 54321;
     mockProcess.stdout = new EventEmitter();
     mockProcess.stderr = new EventEmitter();
@@ -233,6 +234,20 @@ describe('DiffusionServerManager', () => {
   afterEach(() => {
     // Clean up all event listeners to prevent memory leaks
     diffusionServer.removeAllListeners();
+
+    // Clean up module-level mock HTTP server
+    mockHttpServer.removeAllListeners();
+
+    // Ensure the mock server is properly closed
+    // Reset the close implementation to ensure it cleans up properly
+    mockHttpServer.close.mockClear();
+
+    // Clean up beforeEach mockProcess and its streams
+    if (mockProcess) {
+      mockProcess.removeAllListeners?.();
+      mockProcess.stdout?.removeAllListeners?.();
+      mockProcess.stderr?.removeAllListeners?.();
+    }
   });
 
   describe('start()', () => {
@@ -381,6 +396,15 @@ describe('DiffusionServerManager', () => {
       });
 
       mockProcessKill.mockResolvedValue(undefined); // kill() must return a promise
+    });
+
+    afterEach(() => {
+      // Clean up test-specific EventEmitters
+      if (spawnedProcess) {
+        spawnedProcess.removeAllListeners?.();
+        spawnedProcess.stdout?.removeAllListeners?.();
+        spawnedProcess.stderr?.removeAllListeners?.();
+      }
     });
 
     it('should generate image successfully', async () => {
@@ -602,6 +626,15 @@ describe('DiffusionServerManager', () => {
       });
 
       mockProcessKill.mockResolvedValue(undefined);
+    });
+
+    afterEach(() => {
+      // Clean up test-specific EventEmitters
+      if (spawnedProcess) {
+        spawnedProcess.removeAllListeners?.();
+        spawnedProcess.stdout?.removeAllListeners?.();
+        spawnedProcess.stderr?.removeAllListeners?.();
+      }
     });
 
     it('should stop server gracefully', async () => {

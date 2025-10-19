@@ -24,7 +24,8 @@ function createMockReadableStream(chunks: Uint8Array[]) {
   };
 }
 
-// Mock fetch
+// Mock fetch (save original for cleanup)
+const originalFetch = global.fetch;
 const mockFetch = jest.fn();
 global.fetch = mockFetch as any;
 
@@ -74,6 +75,11 @@ describe('Downloader', () => {
     mockCreateWriteStream.mockImplementation((path: string) => {
       return new MockWriteStream(path);
     });
+  });
+
+  afterAll(() => {
+    // Restore original global.fetch
+    global.fetch = originalFetch;
   });
 
   describe('download()', () => {
@@ -222,6 +228,17 @@ describe('Downloader', () => {
   });
 
   describe('cancel()', () => {
+    beforeEach(() => {
+      // Use fake timers to prevent lingering setTimeout calls
+      jest.useFakeTimers();
+    });
+
+    afterEach(() => {
+      // Clear any pending timers and restore real timers
+      jest.runOnlyPendingTimers();
+      jest.useRealTimers();
+    });
+
     it('should cancel ongoing download', async () => {
       // Create a stream that will be interrupted
       let rejectRead: (reason: any) => void;
@@ -258,8 +275,9 @@ describe('Downloader', () => {
         destination: '/test/output.bin',
       });
 
-      // Cancel after a tiny delay
-      await new Promise(resolve => setTimeout(resolve, 10));
+      // Cancel after a tiny delay (advance fake timers)
+      jest.advanceTimersByTime(10);
+      await Promise.resolve(); // Allow microtasks to process
       downloader.cancel();
 
       // Trigger abort by rejecting the read

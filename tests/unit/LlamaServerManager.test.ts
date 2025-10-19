@@ -15,7 +15,8 @@ jest.unstable_mockModule('child_process', () => ({
   execFile: mockExecFile,
 }));
 
-// Mock fetch for health checks
+// Mock fetch for health checks (save original for cleanup)
+const originalFetch = global.fetch;
 const mockFetch = jest.fn();
 global.fetch = mockFetch as any;
 
@@ -150,6 +151,7 @@ const { LlamaServerManager } = await import('../../src/managers/LlamaServerManag
 
 describe('LlamaServerManager', () => {
   let llamaServer: LlamaServerManager;
+  let mockProcess: any; // Track for cleanup
 
   const mockModelInfo: ModelInfo = {
     id: 'test-model',
@@ -205,8 +207,8 @@ describe('LlamaServerManager', () => {
     mockWaitForHealthy.mockResolvedValue(undefined);
     mockIsServerResponding.mockResolvedValue(false); // Port not in use by default
 
-    // Mock process spawn - need to capture callbacks to trigger events
-    const mockProcess = new EventEmitter() as any;
+    // Mock process spawn - need to capture callbacks to trigger events (track at describe level for cleanup)
+    mockProcess = new EventEmitter() as any;
     mockProcess.pid = 12345;
     mockProcess.stdout = new EventEmitter();
     mockProcess.stderr = new EventEmitter();
@@ -234,6 +236,18 @@ describe('LlamaServerManager', () => {
   afterEach(() => {
     // Clean up all event listeners to prevent memory leaks
     llamaServer.removeAllListeners();
+
+    // Clean up beforeEach mockProcess and its streams
+    if (mockProcess) {
+      mockProcess.removeAllListeners?.();
+      mockProcess.stdout?.removeAllListeners?.();
+      mockProcess.stderr?.removeAllListeners?.();
+    }
+  });
+
+  afterAll(() => {
+    // Restore original global.fetch
+    global.fetch = originalFetch;
   });
 
   describe('start()', () => {
