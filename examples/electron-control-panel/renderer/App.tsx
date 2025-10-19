@@ -54,11 +54,21 @@ const App: React.FC = () => {
 
       {/* Tab Content */}
       <main className="tab-content">
-        {activeTab === 'system' && <SystemInfo />}
-        {activeTab === 'models' && <ModelManager />}
-        {activeTab === 'server' && <LlamaServerControl />}
-        {activeTab === 'diffusion' && <DiffusionServerControl />}
-        {activeTab === 'resources' && <ResourceMonitor />}
+        <div className={`tab-panel ${activeTab !== 'system' ? 'tab-panel--hidden' : ''}`}>
+          <SystemInfo />
+        </div>
+        <div className={`tab-panel ${activeTab !== 'models' ? 'tab-panel--hidden' : ''}`}>
+          <ModelManager />
+        </div>
+        <div className={`tab-panel ${activeTab !== 'server' ? 'tab-panel--hidden' : ''}`}>
+          <LlamaServerControl />
+        </div>
+        <div className={`tab-panel ${activeTab !== 'diffusion' ? 'tab-panel--hidden' : ''}`}>
+          <DiffusionServerControl />
+        </div>
+        <div className={`tab-panel ${activeTab !== 'resources' ? 'tab-panel--hidden' : ''}`}>
+          <ResourceMonitor />
+        </div>
       </main>
     </div>
   );

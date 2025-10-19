@@ -213,6 +213,16 @@ code {
   padding: var(--spacing-xl);
 }
 
+/* Tab Panel - Individual tab content containers */
+.tab-panel {
+  width: 100%;
+  height: 100%;
+}
+
+.tab-panel--hidden {
+  display: none;
+}
+
 /* ========================================
    Scrollbar Styling (Webkit)
    ======================================== */
