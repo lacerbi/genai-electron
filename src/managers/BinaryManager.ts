@@ -362,12 +362,44 @@ export class BinaryManager {
   }
 
   /**
-   * Run real functionality test to verify GPU/CUDA actually works
+   * Run Phase 1: Basic validation test
    *
-   * Tests actual inference capability, not just binary execution.
-   * Catches cases where CUDA binary loads but fails during GPU operations.
+   * Tests that the primary server binary executes correctly.
+   * - For llama: llama-server --version
+   * - For diffusion: sd --help
    *
-   * @param binaryPath - Path to binary to test
+   * @param binaryPath - Path to primary binary to test
+   * @returns True if basic validation succeeds
+   * @private
+   */
+  private async runBasicValidationTest(binaryPath: string): Promise<boolean> {
+    const { type } = this.config;
+
+    try {
+      this.log('Phase 1: Testing binary basic validation...', 'info');
+
+      // Use different test flags based on binary type
+      const testArgs = type === 'llama' ? ['--version'] : ['--help'];
+
+      await execFileAsync(binaryPath, testArgs, { timeout: 5000 });
+
+      this.log(`Phase 1: ✓ Binary validation passed (${testArgs[0]})`, 'info');
+      return true;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.log(`Phase 1: ✗ Basic validation failed: ${errorMsg}`, 'error');
+      return false;
+    }
+  }
+
+  /**
+   * Run Phase 2: Real functionality test to verify GPU/CUDA actually works
+   *
+   * Tests actual inference capability to catch GPU/CUDA errors.
+   * - For llama: Uses llama-run for one-shot inference
+   * - For diffusion: Uses sd for tiny image generation
+   *
+   * @param binaryPath - Path to primary binary (llama-server or sd)
    * @param modelPath - Path to test model
    * @returns True if real inference test succeeds
    * @private
@@ -379,26 +411,40 @@ export class BinaryManager {
     const { type } = this.config;
 
     try {
+      this.log('Phase 2: Testing GPU functionality with real inference...', 'info');
+
+      let testBinaryPath: string;
       let testArgs: string[];
       let timeout: number;
 
       if (type === 'llama') {
-        // Test llama with minimal 1-token generation
+        // For llama, we need to use llama-run (not llama-server)
+        // llama-run is designed for one-shot inference and supports -p flag
+        const binaryDir = path.dirname(binaryPath);
+        const llamaRunName = process.platform === 'win32' ? 'llama-run.exe' : 'llama-run';
+        testBinaryPath = path.join(binaryDir, llamaRunName);
+
+        // Check if llama-run exists
+        if (!(await fileExists(testBinaryPath))) {
+          this.log('Phase 2: ✗ llama-run not found in binary directory', 'error');
+          return false;
+        }
+
+        // Test llama-run with minimal 1-token generation
         // -ngl 1 forces at least 1 GPU layer (tests CUDA/GPU)
         testArgs = [
-          '-m',
-          modelPath,
-          '-p',
-          'Hi',
-          '-n',
-          '1', // Only generate 1 token
-          '--ctx-size',
-          '512', // Small context
           '-ngl',
           '1', // Force GPU usage
+          '-n',
+          '1', // Only generate 1 token
+          modelPath,
+          'Hi', // Prompt
         ];
         timeout = 30000; // 30 seconds should be enough for 1 token
       } else {
+        // For diffusion, use sd directly (it's already one-shot)
+        testBinaryPath = binaryPath;
+
         // Test diffusion with tiny 64x64 image, 1 step
         const tempOutput = path.join(PATHS.binaries[type], '.test-output.png');
         testArgs = [
@@ -419,9 +465,8 @@ export class BinaryManager {
       }
 
       // Run the test
-      const { stdout, stderr } = await execFileAsync(binaryPath, testArgs, {
+      const { stdout, stderr } = await execFileAsync(testBinaryPath, testArgs, {
         timeout,
-        // Capture stderr to check for CUDA errors
         encoding: 'utf-8',
       });
 
@@ -437,75 +482,63 @@ export class BinaryManager {
         'out of memory',
         'llama_model_load: error',
         'failed to load model',
+        'error: invalid argument',
       ];
 
       for (const pattern of errorPatterns) {
         if (output.includes(pattern)) {
-          this.log(
-            `Real functionality test detected GPU error: ${pattern}`,
-            'warn'
-          );
+          this.log(`Phase 2: ✗ GPU error detected: ${pattern}`, 'warn');
           return false;
         }
       }
 
       // Test passed - GPU inference worked
-      this.log('Real functionality test passed (GPU inference successful)', 'info');
+      const testBinaryName = type === 'llama' ? 'llama-run' : 'sd';
+      this.log(`Phase 2: ✓ GPU functionality test passed (${testBinaryName})`, 'info');
       return true;
     } catch (error) {
       // Test failed - could be timeout, crash, or other issue
       const errorMsg = error instanceof Error ? error.message : String(error);
-      this.log(`Real functionality test failed: ${errorMsg}`, 'warn');
+      this.log(`Phase 2: ✗ Real functionality test failed: ${errorMsg}`, 'warn');
       return false;
     }
   }
 
   /**
-   * Test if a binary works by running it with appropriate test flag
+   * Test if a binary works using two-phase approach
    *
-   * If testModelPath is provided in config, runs real functionality test.
-   * Otherwise, falls back to basic --version/--help test.
+   * Phase 1 (always runs): Basic validation (--version / --help)
+   * Phase 2 (if model available): Real functionality test (GPU inference)
    *
-   * Different binaries support different flags:
-   * - llama-server: supports --version (basic) or real inference (with model)
-   * - sd (diffusion): supports --help (basic) or real generation (with model)
+   * Both phases must pass for binary to be considered working.
    *
    * @param binaryPath - Path to binary to test
-   * @returns True if binary executes successfully
+   * @returns True if all required tests pass
    * @private
    */
   private async testBinary(binaryPath: string): Promise<boolean> {
     const { testModelPath } = this.config;
 
-    // If test model provided, run real functionality test
-    if (testModelPath) {
-      this.log('Running real functionality test with model...', 'info');
-      const realTestPassed = await this.runRealFunctionalityTest(binaryPath, testModelPath);
-
-      if (!realTestPassed) {
-        this.log(
-          'Real functionality test failed (GPU inference error), variant will be skipped',
-          'warn'
-        );
-      }
-
-      return realTestPassed;
-    }
-
-    // Fall back to basic test
-    try {
-      // Use different test flags based on binary type
-      // llama-server supports --version, sd supports --help
-      const testArgs = this.config.type === 'llama' ? ['--version'] : ['--help'];
-
-      // Try to execute binary with test flag
-      // If it exits successfully, the binary works (drivers are present)
-      await execFileAsync(binaryPath, testArgs, { timeout: 5000 });
-      return true;
-    } catch {
-      // Binary failed to execute (missing drivers, wrong architecture, etc.)
+    // Phase 1: Basic validation (always required)
+    const phase1Passed = await this.runBasicValidationTest(binaryPath);
+    if (!phase1Passed) {
+      this.log('Binary validation failed, variant will be skipped', 'warn');
       return false;
     }
+
+    // Phase 2: Real functionality test (if model available)
+    if (testModelPath && (await fileExists(testModelPath))) {
+      const phase2Passed = await this.runRealFunctionalityTest(binaryPath, testModelPath);
+      if (!phase2Passed) {
+        this.log('GPU functionality test failed, variant will be skipped', 'warn');
+        return false;
+      }
+    } else {
+      this.log('No test model provided, skipping Phase 2 (GPU functionality test)', 'info');
+    }
+
+    // All required tests passed
+    return true;
   }
 
   /**

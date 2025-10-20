@@ -648,11 +648,14 @@ describe('BinaryManager', () => {
     });
   });
 
-  describe('real functionality testing', () => {
-    it('should run real functionality test when testModelPath is provided', async () => {
+  describe('two-phase binary testing', () => {
+    it('should run Phase 1 (basic validation) and Phase 2 (real functionality) when testModelPath is provided', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock exec to succeed for real test
+      // Mock fileExists to return true for both binary and llama-run
+      mockFileExists.mockResolvedValue(true);
+
+      // Mock exec to succeed for both phases
       mockExecFileAsync.mockResolvedValue({ stdout: 'test output', stderr: '' });
 
       const managerWithModel = new BinaryManager({
@@ -666,35 +669,66 @@ describe('BinaryManager', () => {
 
       await managerWithModel.ensureBinary();
 
-      // Should call execFileAsync with model path and GPU testing args
+      // Phase 1: Should test llama-server --version
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: Testing binary basic validation...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: ✓ Binary validation passed (--version)',
+        'info'
+      );
+
+      // Phase 2: Should test llama-run with GPU
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: Testing GPU functionality with real inference...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✓ GPU functionality test passed (llama-run)',
+        'info'
+      );
+
+      // Should call execFileAsync for llama-run with GPU testing args
       expect(mockExecFileAsync).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.arrayContaining(['-m', testModelPath, '-ngl', '1']),
+        expect.stringContaining('llama-run'),
+        expect.arrayContaining(['-ngl', '1', '-n', '1', testModelPath, 'Hi']),
         expect.objectContaining({ timeout: 30000 })
-      );
-      expect(mockLogger).toHaveBeenCalledWith(
-        'Running real functionality test with model...',
-        'info'
-      );
-      expect(mockLogger).toHaveBeenCalledWith(
-        'Real functionality test passed (GPU inference successful)',
-        'info'
       );
     });
 
-    it('should detect CUDA errors in real functionality test', async () => {
+    it('should fail variant if Phase 1 (basic validation) fails', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock exec to return CUDA error for first variant, success for second
-      mockExecFileAsync
-        .mockResolvedValueOnce({
-          stdout: '',
-          stderr: 'CUDA error: out of memory',
-        })
-        .mockResolvedValue({
-          stdout: 'success',
-          stderr: '',
-        });
+      // First variant: Phase 1 fails (llama-server --version fails)
+      // Second variant: Phase 1 succeeds
+      let phase1CallCount = 0;
+      mockExecFileAsync.mockImplementation(async (binary, args) => {
+        if (Array.isArray(args) && args.includes('--version')) {
+          phase1CallCount++;
+          if (phase1CallCount === 1) {
+            throw new Error('Binary not working');
+          }
+        }
+        return { stdout: 'success', stderr: '' };
+      });
+
+      // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
+      mockFileExists.mockImplementation(async (path) => {
+        // Binary doesn't exist initially (trigger download)
+        if (path.includes('llama-server.exe')) {
+          return false;
+        }
+        // llama-run exists (for Phase 2 test)
+        if (path.includes('llama-run')) {
+          return true;
+        }
+        // Test model exists
+        if (path === testModelPath) {
+          return true;
+        }
+        return false;
+      });
 
       const managerWithModel = new BinaryManager({
         type: 'llama',
@@ -707,20 +741,113 @@ describe('BinaryManager', () => {
 
       await managerWithModel.ensureBinary();
 
-      // Should detect CUDA error and try next variant
+      // Should log Phase 1 failure
       expect(mockLogger).toHaveBeenCalledWith(
-        expect.stringContaining('Real functionality test detected GPU error'),
+        expect.stringContaining('Phase 1: ✗ Basic validation failed'),
+        'error'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Binary validation failed, variant will be skipped',
+        'warn'
+      );
+
+      // Should have tried both variants
+      expect(mockDownload).toHaveBeenCalledTimes(2);
+    });
+
+    it('should fail variant if Phase 2 (real functionality) fails due to GPU errors', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
+      mockFileExists.mockImplementation(async (path) => {
+        if (path.includes('llama-server.exe')) {
+          return false;
+        }
+        if (path.includes('llama-run')) {
+          return true;
+        }
+        if (path === testModelPath) {
+          return true;
+        }
+        return false;
+      });
+
+      // Phase 1 succeeds for both, Phase 2 fails for CUDA (GPU error), succeeds for CPU
+      let phase2CallCount = 0;
+      mockExecFileAsync.mockImplementation(async (binary, args) => {
+        // Phase 1: --version test
+        if (Array.isArray(args) && args.includes('--version')) {
+          return { stdout: 'version 1.0', stderr: '' };
+        }
+        // Phase 2: llama-run test
+        phase2CallCount++;
+        if (phase2CallCount === 1) {
+          // First variant (CUDA) fails with GPU error
+          return { stdout: '', stderr: 'CUDA error: out of memory' };
+        }
+        // Second variant (CPU) succeeds
+        return { stdout: 'success', stderr: '' };
+      });
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant, cpuVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await managerWithModel.ensureBinary();
+
+      // Should detect GPU error in Phase 2
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Phase 2: ✗ GPU error detected'),
         'warn'
       );
       expect(mockLogger).toHaveBeenCalledWith(
-        'Real functionality test failed (GPU inference error), variant will be skipped',
+        'GPU functionality test failed, variant will be skipped',
         'warn'
       );
+
       // Should have tried CPU variant as fallback
       expect(mockDownload).toHaveBeenCalledTimes(2);
     });
 
-    it('should fall back to basic test when no testModelPath provided', async () => {
+    it('should fail variant if llama-run is not found', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // Mock fileExists: binary exists, but llama-run doesn't
+      mockFileExists.mockImplementation(async (path) => {
+        return !path.includes('llama-run');
+      });
+
+      // Phase 1 succeeds
+      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await expect(managerWithModel.ensureBinary()).rejects.toThrow(BinaryError);
+
+      // Should log that llama-run was not found
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✗ llama-run not found in binary directory',
+        'error'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'GPU functionality test failed, variant will be skipped',
+        'warn'
+      );
+    });
+
+    it('should skip Phase 2 when no testModelPath provided', async () => {
       // No testModelPath provided
       mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
 
@@ -734,22 +861,30 @@ describe('BinaryManager', () => {
 
       await managerWithoutModel.ensureBinary();
 
-      // Should use basic --version test (not real functionality test)
-      expect(mockExecFileAsync).toHaveBeenCalledWith(
-        expect.anything(),
-        ['--version'],
-        expect.objectContaining({ timeout: 5000 })
+      // Should only run Phase 1 (basic validation)
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: Testing binary basic validation...',
+        'info'
       );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'No test model provided, skipping Phase 2 (GPU functionality test)',
+        'info'
+      );
+
+      // Should NOT run Phase 2
       expect(mockLogger).not.toHaveBeenCalledWith(
-        'Running real functionality test with model...',
+        'Phase 2: Testing GPU functionality with real inference...',
         'info'
       );
     });
 
-    it('should run diffusion test with correct args when testModelPath provided', async () => {
+    it('should run diffusion test with two phases when testModelPath provided', async () => {
       const testModelPath = '/mock/models/test-diffusion.safetensors';
 
-      // Mock exec to succeed
+      // Mock fileExists to return true
+      mockFileExists.mockResolvedValue(true);
+
+      // Mock exec to succeed for both phases
       mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
 
       const diffusionManager = new BinaryManager({
@@ -762,6 +897,26 @@ describe('BinaryManager', () => {
       });
 
       await diffusionManager.ensureBinary();
+
+      // Phase 1: Should test sd --help
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: Testing binary basic validation...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: ✓ Binary validation passed (--help)',
+        'info'
+      );
+
+      // Phase 2: Should test sd with tiny image generation
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: Testing GPU functionality with real inference...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✓ GPU functionality test passed (sd)',
+        'info'
+      );
 
       // Should call sd with tiny image generation args
       expect(mockExecFileAsync).toHaveBeenCalledWith(
@@ -782,13 +937,37 @@ describe('BinaryManager', () => {
       );
     });
 
-    it('should treat timeout as test failure', async () => {
+    it('should treat timeout in Phase 2 as test failure', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock exec to timeout for first variant, succeed for second
-      mockExecFileAsync
-        .mockRejectedValueOnce(new Error('Timeout'))
-        .mockResolvedValue({ stdout: 'success', stderr: '' });
+      // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
+      mockFileExists.mockImplementation(async (path) => {
+        if (path.includes('llama-server.exe')) {
+          return false;
+        }
+        if (path.includes('llama-run')) {
+          return true;
+        }
+        if (path === testModelPath) {
+          return true;
+        }
+        return false;
+      });
+
+      // Phase 1 succeeds for both, Phase 2 times out for first variant, succeeds for second
+      let phase2CallCount = 0;
+      mockExecFileAsync.mockImplementation(async (binary, args) => {
+        // Phase 1: --version test
+        if (Array.isArray(args) && args.includes('--version')) {
+          return { stdout: 'version 1.0', stderr: '' };
+        }
+        // Phase 2: llama-run test
+        phase2CallCount++;
+        if (phase2CallCount === 1) {
+          throw new Error('Timeout');
+        }
+        return { stdout: 'success', stderr: '' };
+      });
 
       const managerWithModel = new BinaryManager({
         type: 'llama',
@@ -801,11 +980,16 @@ describe('BinaryManager', () => {
 
       await managerWithModel.ensureBinary();
 
-      // Should log timeout as failure and try next variant
+      // Should log timeout as Phase 2 failure
       expect(mockLogger).toHaveBeenCalledWith(
-        expect.stringContaining('Real functionality test failed'),
+        expect.stringContaining('Phase 2: ✗ Real functionality test failed'),
         'warn'
       );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'GPU functionality test failed, variant will be skipped',
+        'warn'
+      );
+
       // Should have tried CPU variant
       expect(mockDownload).toHaveBeenCalledTimes(2);
     });
