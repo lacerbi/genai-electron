@@ -825,6 +825,35 @@ window.api.diffusion.generateImage(...)
 
 ---
 
+## Debug Tools
+
+**Status:** Implemented (2025-10-20)
+
+Added debug panel to example app for diagnosing orchestration and configuration issues.
+
+### Debug Panel Features
+
+Located in Resource Monitor tab with 4 diagnostic buttons:
+- **Print LLM Config** - Shows current server config (gpuLayers, threads, etc.)
+- **Print System Capabilities** - Shows detected hardware (GPU, VRAM, RAM)
+- **Print Optimal Config** - Calculates recommended settings for current model
+- **Print Resource Estimates** - Shows orchestrator calculations and offload decision
+
+**Output:** Formatted text to terminal console where `npm run dev` was executed
+
+**Files Added:**
+- `examples/.../renderer/components/DebugPanel.tsx`
+- `examples/.../renderer/components/DebugPanel.css`
+
+**Files Modified:**
+- `examples/.../main/ipc-handlers.ts` - Added 4 debug IPC handlers
+- `examples/.../main/preload.ts` - Exposed debug API
+- `examples/.../renderer/components/ResourceMonitor.tsx` - Added debug panel
+
+**Use Case:** Helps diagnose issues like incorrect GPU layer configuration or resource estimation problems
+
+---
+
 ## Key Achievements
 
 ### Test Infrastructure

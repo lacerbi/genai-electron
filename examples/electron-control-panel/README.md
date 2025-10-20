@@ -58,6 +58,9 @@ This Electron application showcases genai-electron's Phase 1 & 2 capabilities: s
     - Tracks server start/stop/crash events
     - Color-coded by type (info/warning/error)
     - Clear events button
+  - Debug tools (diagnostic buttons)
+    - Print LLM config, system capabilities, optimal config, resource estimates
+    - Output appears in terminal console
 
 ## Prerequisites
 
