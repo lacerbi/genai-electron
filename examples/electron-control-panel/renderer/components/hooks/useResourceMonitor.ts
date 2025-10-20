@@ -109,6 +109,24 @@ export function useResourceMonitor() {
     return () => clearInterval(interval);
   }, [fetchUsage, checkOffloadStatus, checkSavedState]);
 
+  // Poll GPU capabilities every 5 seconds for VRAM updates
+  useEffect(() => {
+    const fetchCapabilities = async () => {
+      try {
+        const caps = await window.api.system.detect();
+        setCapabilities(caps);
+      } catch (err) {
+        console.error('Failed to get system capabilities:', err);
+      }
+    };
+
+    const interval = setInterval(() => {
+      fetchCapabilities();
+    }, 5000);
+
+    return () => clearInterval(interval);
+  }, []);
+
   // Listen to server events for timeline
   useEffect(() => {
     if (!window.api || !window.api.on) {
