@@ -693,7 +693,10 @@ describe('BinaryManager', () => {
       expect(mockExecFileAsync).toHaveBeenCalledWith(
         expect.stringContaining('llama-run'),
         expect.arrayContaining(['-ngl', '1', testModelPath, 'What is 2+2? Just answer with the number.']),
-        expect.objectContaining({ timeout: 15000 })
+        expect.objectContaining({
+          timeout: 15000,
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
       );
     });
 
@@ -933,7 +936,10 @@ describe('BinaryManager', () => {
           '--steps',
           '1',
         ]),
-        expect.objectContaining({ timeout: 15000 })
+        expect.objectContaining({
+          timeout: 15000,
+          stdio: ['ignore', 'pipe', 'pipe']
+        })
       );
     });
 

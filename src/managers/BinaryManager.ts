@@ -467,7 +467,13 @@ export class BinaryManager {
       const { stdout, stderr } = await execFileAsync(testBinaryPath, testArgs, {
         timeout,
         encoding: 'utf-8',
-      });
+        maxBuffer: 10 * 1024 * 1024, // 10MB buffer to capture all output
+        // CRITICAL: Explicitly configure stdio to prevent hanging
+        // 'ignore' = close stdin immediately (process doesn't wait for input)
+        // 'pipe' = capture stdout/stderr for error detection
+        // Type cast needed because stdio is valid for execFile but not in promisified type definition
+        stdio: ['ignore', 'pipe', 'pipe'],
+      } as any);
 
       // Check for GPU/CUDA error messages in output
       const output = `${stdout} ${stderr}`.toLowerCase();
