@@ -119,16 +119,16 @@ export class ResourceOrchestrator {
       await this.offloadLLM();
 
       try {
-        // Generate image
-        const result = await this.diffusionServer.generateImage(config);
+        // Generate image directly (bypassing orchestrator to avoid recursion)
+        const result = await this.diffusionServer.executeImageGeneration(config);
         return result;
       } finally {
         // Always reload LLM if it was running before
         await this.reloadLLM();
       }
     } else {
-      // Enough resources, generate directly
-      return await this.diffusionServer.generateImage(config);
+      // Enough resources, generate directly (bypassing orchestrator to avoid recursion)
+      return await this.diffusionServer.executeImageGeneration(config);
     }
   }
 

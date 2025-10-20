@@ -913,6 +913,13 @@ console.log('Status:', status.status); // 'stopped'
 
 Generates an image by spawning stable-diffusion.cpp executable.
 
+**Automatic Resource Management**: When using the singleton `diffusionServer`, this method automatically manages system resources. If RAM or VRAM is constrained while both the LLM and diffusion servers are running:
+1. Temporarily stops the LLM server (saves configuration)
+2. Generates the image
+3. Automatically restarts the LLM server with the same configuration
+
+This happens transparently without any additional code. The orchestration uses a 75% resource availability threshold to determine if offloading is needed.
+
 **Parameters**:
 - `config: ImageGenerationConfig` - Image generation configuration
 
@@ -1169,6 +1176,8 @@ await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081 });
 ## ResourceOrchestrator
 
 The `ResourceOrchestrator` class provides automatic resource management between LLM and image generation servers. When system resources are constrained (limited RAM or VRAM), it automatically offloads the LLM server before generating images, then reloads it afterward.
+
+**Note**: When using the singleton `diffusionServer`, resource orchestration happens automatically inside `generateImage()`. The ResourceOrchestrator is used internally and you typically don't need to interact with it directly. This class is primarily for advanced use cases where you need custom orchestrator instances or want to check resource status programmatically.
 
 ### Import
 

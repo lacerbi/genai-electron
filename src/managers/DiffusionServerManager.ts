@@ -13,6 +13,7 @@ import { ServerManager } from './ServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
+import { ResourceOrchestrator } from './ResourceOrchestrator.js';
 import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import { getTempPath } from '../config/paths.js';
@@ -27,6 +28,7 @@ import type {
   ModelInfo,
   ServerInfo,
 } from '../types/index.js';
+import type { LlamaServerManager } from './LlamaServerManager.js';
 
 /**
  * DiffusionServerManager class
@@ -65,6 +67,7 @@ export class DiffusionServerManager extends ServerManager {
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
+  private orchestrator?: ResourceOrchestrator;
   private binaryPath?: string;
   private httpServer?: http.Server;
   private currentGeneration?: {
@@ -78,15 +81,22 @@ export class DiffusionServerManager extends ServerManager {
    *
    * @param modelManager - Model manager instance (default: singleton)
    * @param systemInfo - System info instance (default: singleton)
+   * @param llamaServer - Optional LLM server manager for automatic resource orchestration
    */
   constructor(
     modelManager: ModelManager = ModelManager.getInstance(),
-    systemInfo: SystemInfo = SystemInfo.getInstance()
+    systemInfo: SystemInfo = SystemInfo.getInstance(),
+    llamaServer?: LlamaServerManager
   ) {
     super();
     this.processManager = new ProcessManager();
     this.modelManager = modelManager;
     this.systemInfo = systemInfo;
+
+    // Create orchestrator if llamaServer is provided (enables automatic resource management)
+    if (llamaServer) {
+      this.orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, this, modelManager);
+    }
   }
 
   /**
@@ -253,8 +263,13 @@ export class DiffusionServerManager extends ServerManager {
       });
     }
 
-    // Implementation in private method
-    return this.executeImageGeneration(config);
+    // Use orchestrator if available (automatic resource management)
+    // Otherwise use direct execution (legacy behavior)
+    if (this.orchestrator) {
+      return this.orchestrator.orchestrateImageGeneration(config);
+    } else {
+      return this.executeImageGeneration(config);
+    }
   }
 
   /**
@@ -395,11 +410,14 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Execute image generation by spawning stable-diffusion.cpp
    *
+   * This is the direct execution method used internally and by ResourceOrchestrator.
+   * External callers should use generateImage() which includes automatic resource management.
+   *
    * @param config - Image generation configuration
    * @returns Generated image result
-   * @private
+   * @internal
    */
-  private async executeImageGeneration(
+  public async executeImageGeneration(
     config: ImageGenerationConfig
   ): Promise<ImageGenerationResult> {
     const startTime = Date.now();

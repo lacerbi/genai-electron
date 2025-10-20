@@ -566,6 +566,115 @@ await llamaServer.start({
 
 ---
 
+## Issue 9: Resource Orchestration Architecture ✅
+
+**Status:** Resolved (2025-10-20)
+
+### Problem Identified
+
+**User Report:** "I started the llama server with a large LLM, then started the diffusion server and generated an image. The computer struggled and crashed (switched off)."
+
+**Root Cause Analysis:**
+
+The example app UI component (`DiffusionServerControl.tsx`) called `window.api.diffusion.generateImage()` directly, which bypassed the ResourceOrchestrator entirely. When both the LLM and diffusion models were loaded in memory simultaneously, they competed for RAM/VRAM until the system ran out of memory and crashed.
+
+**Architecture Issue:**
+- ResourceOrchestrator existed and worked correctly ✅
+- But users had to choose between two APIs: `generateImage()` vs `orchestrateImageGeneration()` ❌
+- Direct `generateImage()` caused crashes (unsafe default) ❌
+- For genai-lite integration, requiring orchestration knowledge would break abstraction ❌
+
+### Solution Implemented
+
+**Wrapper Pattern**: Keep ResourceOrchestrator as a clean, separate class (good separation of concerns), but make `DiffusionServerManager.generateImage()` use it internally as automatic behavior.
+
+**Implementation Details:**
+
+1. **Updated DiffusionServerManager constructor** (`src/managers/DiffusionServerManager.ts`):
+   - Added optional `llamaServer` parameter
+   - Creates internal ResourceOrchestrator instance if llamaServer provided
+   - Enables automatic orchestration for singleton usage
+
+2. **Updated generateImage() method** (`src/managers/DiffusionServerManager.ts`):
+   - Checks if orchestrator exists
+   - If yes: Delegates to `orchestrator.orchestrateImageGeneration()`
+   - If no: Uses direct execution (backward compatible for custom instances)
+
+3. **Made executeImageGeneration() public** (`src/managers/DiffusionServerManager.ts`):
+   - Changed from `private` to `public`
+   - Allows ResourceOrchestrator to call it directly
+   - Prevents infinite recursion (generateImage → orchestrator → executeImageGeneration)
+
+4. **Updated ResourceOrchestrator** (`src/managers/ResourceOrchestrator.ts`):
+   - Changed calls from `generateImage()` to `executeImageGeneration()`
+   - Avoids recursion back through orchestrator
+
+5. **Updated singleton instantiation** (`src/index.ts`):
+   - Pass `llamaServer` to `diffusionServer` constructor
+   - Enables automatic orchestration for all singleton usage
+
+**Files Modified (Library - 3):**
+- `src/managers/DiffusionServerManager.ts` (~20 lines)
+- `src/managers/ResourceOrchestrator.ts` (~2 lines)
+- `src/index.ts` (~4 lines)
+
+**Files Modified (Tests & Documentation - 4):**
+- `tests/unit/ResourceOrchestrator.test.ts` (~3 lines)
+- `docs/API.md` (documentation updates)
+- `README.md` (simplified examples)
+- `PROGRESS.md` (this section)
+
+**Test Status:**
+- ✅ All 238 tests passing (100% pass rate)
+- ✅ TypeScript compiles with 0 errors
+- ✅ No breaking changes to existing API
+
+### Result
+
+**Before Fix:**
+```typescript
+const result = await diffusionServer.generateImage({ prompt: '...' });
+// ❌ Both models in memory → RAM/VRAM exhausted → System crash
+```
+
+**After Fix:**
+```typescript
+const result = await diffusionServer.generateImage({ prompt: '...' });
+// ✅ Automatically:
+// 1. Detects resource constraint (75% threshold)
+// 2. Stops LLM server (saves config)
+// 3. Generates image
+// 4. Restarts LLM server (restores config)
+// 5. Returns result
+```
+
+### Architecture Benefits
+
+**For genai-lite Integration:**
+- ✅ Clean API: Just call `diffusionServer.generateImage()`
+- ✅ No orchestration knowledge needed: Happens automatically
+- ✅ Safe by default: Won't crash from OOM
+
+**For UI Developers:**
+- ✅ Single API: Use `generateImage()` for everything
+- ✅ No decisions: Orchestration handled automatically
+- ✅ Optional control: Can check `wouldNeedOffload()` for warnings
+
+**For Architecture:**
+- ✅ Right abstraction: Orchestration is implementation detail
+- ✅ Encapsulation: Resource management contained in DiffusionServerManager
+- ✅ Backward compatible: Custom instances work without orchestrator
+- ✅ Clean separation: ResourceOrchestrator remains testable, reusable class
+
+### Impact
+
+- **Prevents system crashes** from Out-of-Memory conditions
+- **Zero API changes** for users - orchestration is now transparent
+- **Automatic behavior** - users don't need to manage resources manually
+- **Production ready** - safe default behavior for all use cases
+
+---
+
 ## Key Achievements
 
 ### Test Infrastructure

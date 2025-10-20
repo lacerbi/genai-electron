@@ -137,7 +137,12 @@ export const llamaServer = new LlamaServerManager();
  * Diffusion server manager singleton (Phase 2)
  *
  * Manages diffusion HTTP wrapper server for stable-diffusion.cpp,
- * including image generation, binary downloads, and resource management.
+ * including image generation, binary downloads, and automatic resource orchestration.
+ *
+ * When generateImage() is called, the server automatically manages resources:
+ * - If resources are constrained, temporarily offloads the LLM server
+ * - Generates the image
+ * - Restores the LLM server to its previous state
  *
  * @example
  * ```typescript
@@ -149,7 +154,7 @@ export const llamaServer = new LlamaServerManager();
  *   port: 8081
  * });
  *
- * // Generate image
+ * // Generate image (automatic resource management)
  * const result = await diffusionServer.generateImage({
  *   prompt: 'A serene mountain landscape at sunset',
  *   width: 1024,
@@ -165,7 +170,11 @@ export const llamaServer = new LlamaServerManager();
  * await diffusionServer.stop();
  * ```
  */
-export const diffusionServer = new DiffusionServerManager();
+export const diffusionServer = new DiffusionServerManager(
+  undefined, // modelManager (uses default singleton)
+  undefined, // systemInfo (uses default singleton)
+  llamaServer // llamaServer (enables automatic resource orchestration)
+);
 
 // ============================================================================
 // Classes (For advanced usage or custom instances)

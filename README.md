@@ -116,7 +116,7 @@ app.on('before-quit', async () => {
 app.whenReady().then(setupLocalAI).catch(console.error);
 ```
 
-> **Note**: For image generation examples using `diffusionServer` and `ResourceOrchestrator`, see the [Complete Example](#complete-example-llm--image-generation) section below.
+> **Note**: For image generation examples using `diffusionServer` with automatic resource management, see the [Complete Example](#complete-example-llm--image-generation) section below.
 
 ## API Overview
 
@@ -337,40 +337,25 @@ fs.writeFileSync('output.png', result.image);  // Save image buffer
 await diffusionServer.stop();
 ```
 
-### ResourceOrchestrator (Phase 2)
+### Automatic Resource Management (Phase 2)
 
-Automatically manage resources between LLM and image generation:
+Image generation automatically manages system resources. When you call `diffusionServer.generateImage()`, the library automatically:
+- Detects if RAM or VRAM is constrained
+- Temporarily offloads the LLM server if needed
+- Generates the image
+- Restores the LLM server to its previous state
+
+No additional code needed - it just works!
 
 ```typescript
-import { ResourceOrchestrator } from 'genai-electron';
-import { systemInfo, llamaServer, diffusionServer, modelManager } from 'genai-electron';
+import { diffusionServer, llamaServer } from 'genai-electron';
 
-// Create orchestrator
-const orchestrator = new ResourceOrchestrator(
-  systemInfo,
-  llamaServer,
-  diffusionServer,
-  modelManager
-);
+// Start servers
+await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
+await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081 });
 
-// Start LLM server
-await llamaServer.start({
-  modelId: 'llama-2-7b',
-  port: 8080,
-  gpuLayers: 35,
-});
-
-// Start diffusion server
-await diffusionServer.start({
-  modelId: 'sdxl-turbo',
-  port: 8081,
-});
-
-// Generate image with automatic resource management
-// If resources are constrained, the LLM will be automatically:
-// 1. Stopped before generation
-// 2. Reloaded after generation completes
-const result = await orchestrator.orchestrateImageGeneration({
+// Generate image - automatic resource management included
+const result = await diffusionServer.generateImage({
   prompt: 'A beautiful sunset over mountains',
   width: 1024,
   height: 1024,
@@ -380,15 +365,21 @@ const result = await orchestrator.orchestrateImageGeneration({
   },
 });
 
-// Check if offload would be needed
-const wouldOffload = await orchestrator.wouldNeedOffload();
-console.log('Would need to offload LLM:', wouldOffload);
+console.log('Image generated in', result.timeTaken, 'ms');
+// LLM server is still running (or automatically restarted if it was offloaded)
+```
 
-// Get saved LLM state (if offloaded)
-const savedState = orchestrator.getSavedState();
-if (savedState) {
-  console.log('LLM was offloaded at:', savedState.savedAt);
-  console.log('Original config:', savedState.config);
+**Advanced**: For programmatic resource checking, you can still access the internal orchestrator:
+
+```typescript
+// Check if resources would require offload (optional)
+import { ResourceOrchestrator } from 'genai-electron';
+import { systemInfo, llamaServer, diffusionServer, modelManager } from 'genai-electron';
+
+const orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, diffusionServer, modelManager);
+const wouldOffload = await orchestrator.wouldNeedOffload();
+if (wouldOffload) {
+  console.log('Note: LLM will be temporarily stopped during image generation');
 }
 ```
 
@@ -396,7 +387,7 @@ if (savedState) {
 
 ```typescript
 import { app } from 'electron';
-import { systemInfo, modelManager, llamaServer, diffusionServer, ResourceOrchestrator } from 'genai-electron';
+import { systemInfo, modelManager, llamaServer, diffusionServer } from 'genai-electron';
 
 async function setupAI() {
   // 1. Detect system capabilities
@@ -421,17 +412,9 @@ async function setupAI() {
   });
   console.log('Diffusion server running');
 
-  // 4. Create orchestrator for automatic resource management
-  const orchestrator = new ResourceOrchestrator(
-    systemInfo,
-    llamaServer,
-    diffusionServer,
-    modelManager
-  );
-
-  // 5. Generate image (LLM will auto-offload if needed)
+  // 4. Generate image (automatic resource management - LLM offloaded if needed)
   console.log('Generating image...');
-  const imageResult = await orchestrator.orchestrateImageGeneration({
+  const imageResult = await diffusionServer.generateImage({
     prompt: 'A peaceful zen garden with cherry blossoms',
     width: 1024,
     height: 1024,
@@ -443,7 +426,7 @@ async function setupAI() {
 
   console.log('Image generated in', imageResult.timeTaken, 'ms');
 
-  // 6. Chat with LLM (automatically reloaded if it was offloaded)
+  // 5. Chat with LLM (automatically reloaded if it was offloaded)
   // Use genai-lite here for LLM interactions...
 }
 
