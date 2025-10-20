@@ -3,7 +3,7 @@ import Card from './common/Card';
 import StatusIndicator from './common/StatusIndicator';
 import ActionButton from './common/ActionButton';
 import LogViewer from './common/LogViewer';
-import ServerConfig from './ServerConfig';
+import LlamaServerConfig from './LlamaServerConfig';
 import TestChat from './TestChat';
 import { useServerStatus } from './hooks/useServerStatus';
 import { useServerLogs } from './hooks/useServerLogs';
@@ -11,7 +11,7 @@ import { useModels } from './hooks/useModels';
 import type { BinaryLogEvent } from '../types/api';
 import './LlamaServerControl.css';
 
-interface ServerConfigForm {
+interface LlamaServerConfigForm {
   modelId: string;
   port: number;
   contextSize: number;
@@ -27,7 +27,7 @@ const LlamaServerControl: React.FC = () => {
   const { models } = useModels();
 
   const [autoConfig, setAutoConfig] = useState(true);
-  const [config, setConfig] = useState<ServerConfigForm>({
+  const [config, setConfig] = useState<LlamaServerConfigForm>({
     modelId: '',
     port: 8080,
     contextSize: 4096,
@@ -165,7 +165,7 @@ const LlamaServerControl: React.FC = () => {
 
       {/* Configuration */}
       <Card title="Configuration">
-        <ServerConfig
+        <LlamaServerConfig
           models={models}
           config={config}
           onChange={setConfig}

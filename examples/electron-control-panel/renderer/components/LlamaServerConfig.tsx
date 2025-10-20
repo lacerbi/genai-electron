@@ -1,12 +1,12 @@
 import React from 'react';
-import './ServerConfig.css';
+import './LlamaServerConfig.css';
 
 interface ModelInfo {
   id: string;
   name: string;
 }
 
-interface ServerConfigForm {
+interface LlamaServerConfigForm {
   modelId: string;
   port: number;
   contextSize: number;
@@ -16,22 +16,22 @@ interface ServerConfigForm {
   flashAttention: boolean;
 }
 
-interface ServerConfigProps {
+interface LlamaServerConfigProps {
   models: ModelInfo[];
-  config: ServerConfigForm;
-  onChange: (config: ServerConfigForm) => void;
+  config: LlamaServerConfigForm;
+  onChange: (config: LlamaServerConfigForm) => void;
   autoConfig: boolean;
   onAutoConfigChange: (auto: boolean) => void;
 }
 
-const ServerConfig: React.FC<ServerConfigProps> = ({
+const LlamaServerConfig: React.FC<LlamaServerConfigProps> = ({
   models,
   config,
   onChange,
   autoConfig,
   onAutoConfigChange,
 }) => {
-  const handleChange = (field: keyof ServerConfigForm, value: string | number | boolean) => {
+  const handleChange = (field: keyof LlamaServerConfigForm, value: string | number | boolean) => {
     onChange({ ...config, [field]: value });
   };
 
@@ -170,4 +170,4 @@ const ServerConfig: React.FC<ServerConfigProps> = ({
   );
 };
 
-export default ServerConfig;
+export default LlamaServerConfig;

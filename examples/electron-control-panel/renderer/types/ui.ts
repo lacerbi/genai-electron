@@ -2,7 +2,7 @@
 
 export type TabName = 'system' | 'models' | 'server' | 'diffusion' | 'resources';
 
-export interface ServerConfigForm {
+export interface LlamaServerConfigForm {
   modelId: string;
   port: number;
   contextSize: number;

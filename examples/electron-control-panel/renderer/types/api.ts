@@ -4,7 +4,7 @@ export interface WindowAPI {
     detect: () => Promise<SystemCapabilities>;
     getMemory: () => Promise<MemoryInfo>;
     canRunModel: (modelInfo: ModelInfo) => Promise<{ canRun: boolean; reason?: string }>;
-    getOptimalConfig: (modelInfo: ModelInfo) => Promise<ServerConfig>;
+    getOptimalConfig: (modelInfo: ModelInfo) => Promise<LlamaServerConfig>;
   };
   models: {
     list: (type: 'llm' | 'diffusion') => Promise<ModelInfo[]>;
@@ -15,7 +15,7 @@ export interface WindowAPI {
     getStorageInfo: () => Promise<StorageInfo>;
   };
   server: {
-    start: (config: ServerConfig) => Promise<void>;
+    start: (config: LlamaServerConfig) => Promise<void>;
     stop: () => Promise<void>;
     restart: () => Promise<void>;
     status: () => Promise<ServerStatus>;
@@ -116,7 +116,7 @@ export interface StorageInfo {
 }
 
 // Server Types
-export interface ServerConfig {
+export interface LlamaServerConfig {
   modelId: string;
   port?: number;
   contextSize?: number;
@@ -194,7 +194,7 @@ export interface DiffusionServerInfo {
 }
 
 export interface SavedLLMState {
-  config: ServerConfig;
+  config: LlamaServerConfig;
   wasRunning: boolean;
   savedAt: string; // ISO timestamp (Date serialized from main process)
 }

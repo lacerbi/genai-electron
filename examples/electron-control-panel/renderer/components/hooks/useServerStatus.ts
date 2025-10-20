@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
+import type { LlamaServerConfig } from '../../types/api';
 
 interface ServerInfo {
   status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
@@ -8,16 +9,6 @@ interface ServerInfo {
   pid?: number;
   startedAt?: string;
   error?: string;
-}
-
-interface ServerConfig {
-  modelId: string;
-  port?: number;
-  contextSize?: number;
-  gpuLayers?: number;
-  threads?: number;
-  parallelRequests?: number;
-  flashAttention?: boolean;
 }
 
 export function useServerStatus() {
@@ -89,7 +80,7 @@ export function useServerStatus() {
     };
   }, [fetchStatus]);
 
-  const start = async (config: ServerConfig) => {
+  const start = async (config: LlamaServerConfig) => {
     setError(null);
     try {
       await window.api.server.start(config);
