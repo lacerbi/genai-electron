@@ -10,7 +10,7 @@
 - **Tests:** ✅ 238/238 passing (100% pass rate - all tests passing!)
 - **Jest:** ✅ Clean exit with no warnings
 - **Branch:** `feat/phase2-app` (Phase 2 example app + orchestration fixes)
-- **Last Updated:** 2025-10-20 (Fixed IPC handler bypassing orchestration - Issue 10)
+- **Last Updated:** 2025-10-20 (Fixed auto-config not saving to this._config - Issue 11 - ORCHESTRATION NOW WORKS!)
 
 **Test Suite Breakdown:**
 - Phase 1 Tests: 130 tests (errors, utils, core managers) - ✅ All passing
@@ -18,9 +18,10 @@
 - Infrastructure: 58 tests (BinaryManager + health-check + validation cache) - ✅ All passing
 
 **Recent Critical Fixes:**
+- **Issue 11:** Fixed auto-config not saving to this._config (orchestration now works!) ⚡
 - Issue 10: Fixed IPC handler bypassing orchestration (prevents system crashes)
-- Issue 8: Memory cache staleness fix (eliminates false "Insufficient RAM" errors)
 - Issue 9: Automatic orchestration architecture (transparent resource management)
+- Issue 8: Memory cache staleness fix (eliminates false "Insufficient RAM" errors)
 - Performance: Binary validation caching (4-20x faster server startup)
 
 ---
@@ -825,6 +826,144 @@ window.api.diffusion.generateImage(...)
 
 ---
 
+## Issue 11: Auto-Config Not Saving to this._config ✅
+
+**Status:** Resolved (2025-10-20)
+
+### Problem Identified
+
+**User Report:** "Orchestration still doesn't fucking work. When image generation is started, the LLM server should be fucking stopped."
+
+**Root Cause Analysis:**
+
+After fixing Issues 9 and 10, orchestration code path was correct but **resource estimation was still wrong**. Debug logging revealed:
+
+```
+[Orchestrator] LLM GPU Layers: 0 / 32
+[Orchestrator] LLM VRAM usage: 0 GB  ← WRONG! Should be 7.7 GB
+[Orchestrator] Diffusion VRAM usage: 3.1 GB
+[Orchestrator] Total VRAM needed: 3.1 GB
+[Orchestrator] Offload needed: false  ← WRONG! Should be true
+```
+
+But "Print Optimal Config" button showed:
+```
+Recommended GPU Layers: 41  ← Auto-config WAS working!
+```
+
+**The Bug:**
+
+In `LlamaServerManager.start()`:
+```typescript
+this.setStatus('starting');
+this._config = config;  // ❌ Saved ORIGINAL config (gpuLayers: undefined)
+
+// ... later ...
+const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo); // gpuLayers: 41
+// Server runs with finalConfig ✓
+// But this._config still has old values! ✗
+```
+
+Flow:
+1. Auto-configure correctly calculated `gpuLayers: 41` ✓
+2. Server spawned with correct args (`-ngl 41`) ✓
+3. **BUT** `this._config` stored original config before auto-configuration ✗
+4. `getConfig()` returned `gpuLayers: undefined` (becomes 0) ✗
+5. Orchestrator called `getConfig()` and calculated VRAM = 0 GB ✗
+6. `needsOffloadForImage()` returned false ✗
+7. **LLM never offloaded** ✗
+
+### The Fix
+
+**File:** `src/managers/LlamaServerManager.ts`
+
+```typescript
+// BEFORE:
+this.setStatus('starting');
+this._config = config;  // ❌ Too early!
+
+try {
+  const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo);
+  // ...
+}
+
+// AFTER:
+this.setStatus('starting');
+// Removed: this._config = config;  ← Deleted
+
+try {
+  const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo);
+  this._config = finalConfig;  // ✓ Save AFTER auto-configuration
+  // ...
+}
+```
+
+### Debug Process
+
+Used comprehensive logging and UI debug panel to trace the issue:
+
+1. Added `[LlamaServer]` logging to `autoConfigureIfNeeded()`
+2. Added `[Orchestrator]` logging to resource estimation
+3. Created debug UI panel with buttons to print diagnostics
+4. User clicked "Print Optimal Config" → showed 41 ✓
+5. User clicked "Print LLM Config" → showed 0 ✗
+6. Traced through code and found `this._config` assignment timing bug
+
+### Verification
+
+**After Fix - Debug Output:**
+```
+[LlamaServer] Input config: { modelId, port }
+[LlamaServer] Optimal config: { gpuLayers: 41, ... }
+[LlamaServer] Final config: { gpuLayers: 41, ... }
+
+[Orchestrator] LLM GPU Layers: 41 / 32  ✓
+[Orchestrator] LLM VRAM usage: 7.70 GB  ✓
+[Orchestrator] Diffusion VRAM usage: 3.10 GB  ✓
+[Orchestrator] Total VRAM needed: 10.80 GB  ✓
+[Orchestrator] Total VRAM available: 8.00 GB
+[Orchestrator] Threshold (75%): 6.00 GB
+[Orchestrator] Offload needed: true  ✓✓✓
+```
+
+**Tests:** All 238/238 tests passing (updated 1 test for new log format)
+
+### Impact
+
+**Before:**
+- ✅ Auto-configuration worked (calculated correct GPU layers)
+- ✅ Server ran with correct GPU layers
+- ❌ `getConfig()` returned wrong values
+- ❌ Orchestrator saw VRAM = 0 GB
+- ❌ **Orchestration never triggered**
+
+**After:**
+- ✅ Auto-configuration works
+- ✅ Server runs with correct GPU layers
+- ✅ `getConfig()` returns actual running configuration
+- ✅ Orchestrator sees correct VRAM usage (7.7 GB)
+- ✅ **ORCHESTRATION WORKS!**
+
+**User Experience:**
+1. Start LLM server with auto-configure
+2. LLM uses 41 GPU layers (7.7 GB VRAM)
+3. Start diffusion server (3.1 GB VRAM needed)
+4. Click "Generate Image"
+5. **Terminal shows:**
+   ```
+   [Orchestrator] ⚠️  Resources constrained - offloading LLM before generation
+   [Orchestrator] Stopping LLM server...
+   [Orchestrator] ✅ LLM server stopped successfully
+   [Orchestrator] Generating image with LLM offloaded...
+   [Orchestrator] Reloading LLM after generation...
+   [Orchestrator] ✅ LLM server restarted successfully
+   ```
+6. **Image generated successfully** ✓
+7. **LLM back online** ✓
+8. **No crash, no hang** ✓
+
+---
+
 ## Debug Tools
 
 **Status:** Implemented (2025-10-20)
@@ -839,7 +978,7 @@ Located in Resource Monitor tab with 4 diagnostic buttons:
 - **Print Optimal Config** - Calculates recommended settings for current model
 - **Print Resource Estimates** - Shows orchestrator calculations and offload decision
 
-**Output:** Formatted text to terminal console where `npm run dev` was executed
+**Output:** Formatted text displayed in UI (with scrollable output box) + terminal console for detailed logging
 
 **Files Added:**
 - `examples/.../renderer/components/DebugPanel.tsx`
@@ -899,6 +1038,8 @@ Located in Resource Monitor tab with 4 diagnostic buttons:
 - ✅ Fixed memory cache staleness bug (Issue 8 - eliminates false "Insufficient RAM" errors)
 - ✅ **Fixed automatic orchestration architecture** (Issue 9 - transparent resource management)
 - ✅ **Fixed IPC handler bypassing orchestration** (Issue 10 - prevents system crashes)
+- ✅ **Fixed auto-config not saving final values** (Issue 11 - orchestration now works!)
+- ✅ Added comprehensive debug tools (UI panel + logging for diagnostics)
 - 🔄 User testing with real workloads (LLM + image generation)
 - 🔄 Cross-platform validation (Windows, macOS, Linux)
 - 📋 Create pull request after validation completes
