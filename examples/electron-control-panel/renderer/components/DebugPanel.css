@@ -70,3 +70,54 @@
   font-family: 'Courier New', monospace;
   font-size: 12px;
 }
+
+.debug-output {
+  margin-top: 15px;
+  background-color: var(--background-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.debug-output-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 15px;
+  background-color: var(--background-tertiary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.debug-output-header h4 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.debug-output-header .clear-button {
+  padding: 4px 12px;
+  background-color: var(--button-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.debug-output-header .clear-button:hover {
+  background-color: var(--button-hover);
+}
+
+.debug-output-content {
+  margin: 0;
+  padding: 15px;
+  font-family: 'Courier New', 'Monaco', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 400px;
+  overflow-y: auto;
+}
