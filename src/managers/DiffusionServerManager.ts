@@ -139,7 +139,7 @@ export class DiffusionServerManager extends ServerManager {
       }
 
       // 3. Ensure binary is downloaded (pass model path for real functionality testing)
-      this.binaryPath = await this.ensureBinary(modelInfo.path);
+      this.binaryPath = await this.ensureBinary(modelInfo.path, config.forceValidation);
 
       // 4. Check if port is in use
       const port = config.port || DEFAULT_PORTS.diffusion;
@@ -277,12 +277,13 @@ export class DiffusionServerManager extends ServerManager {
    * Ensure stable-diffusion.cpp binary is downloaded
    *
    * @param modelPath - Optional model path for real functionality testing
+   * @param forceValidation - If true, re-run validation tests even if cached validation exists
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails
    * @private
    */
-  private async ensureBinary(modelPath?: string): Promise<string> {
-    return this.ensureBinaryHelper('diffusion', 'sd', BINARY_VERSIONS.diffusionCpp, modelPath);
+  private async ensureBinary(modelPath?: string, forceValidation = false): Promise<string> {
+    return this.ensureBinaryHelper('diffusion', 'sd', BINARY_VERSIONS.diffusionCpp, modelPath, forceValidation);
   }
 
   /**

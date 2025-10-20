@@ -440,6 +440,7 @@ Starts the llama-server process with the specified configuration. Downloads bina
 - `gpuLayers?: number` - Optional - Layers to offload to GPU (auto-detected if not specified)
 - `parallelRequests?: number` - Optional - Concurrent request slots (default: 4)
 - `flashAttention?: boolean` - Optional - Enable flash attention (default: false)
+- `forceValidation?: boolean` - Optional - Force re-validation of binary even if cached (default: false, see [Binary Validation Caching](#binary-validation-caching))
 
 **Returns**: `Promise<ServerInfo>` - Server information
 
@@ -500,9 +501,28 @@ On first call to `start()`, the library automatically:
 4. **Falls back automatically** if test fails:
    - Example: Broken CUDA → tries Vulkan → CPU
    - Logs warnings but continues with working variant
-5. **Caches working variant** for fast subsequent starts
+5. **Caches working variant and validation results** for fast subsequent starts
 
 **Note**: Real functionality testing only runs if model is downloaded. If model doesn't exist yet, falls back to basic `--version` test. This means optimal variant selection happens automatically when you call `start()` with a valid model.
+
+**Binary Validation Caching**:
+
+After the first successful validation, subsequent calls to `start()` skip the expensive validation tests (Phase 1 & Phase 2) and only verify binary integrity via checksum (~0.5s instead of 2-10s):
+
+- ✅ **First start**: Downloads binary → Runs Phase 1 & 2 tests → Saves validation cache
+- ✅ **Subsequent starts**: Verifies checksum → Uses cached validation (fast startup)
+- ✅ **Modified binary**: Checksum mismatch → Re-runs full validation
+- ✅ **Force validation**: Use `forceValidation: true` to re-run tests (e.g., after driver updates)
+
+**Example (Force Validation)**:
+```typescript
+// After updating GPU drivers
+await llamaServer.start({
+  modelId: 'llama-2-7b',
+  port: 8080,
+  forceValidation: true  // Re-run Phase 1 & 2 tests
+});
+```
 
 ---
 
@@ -789,6 +809,7 @@ Starts the diffusion HTTP wrapper server. Downloads binary automatically on firs
 - `threads?: number` - Optional - CPU threads (auto-detected if not specified)
 - `gpuLayers?: number` - Optional - Layers to offload to GPU (auto-detected if not specified, 0 = CPU-only)
 - `vramBudget?: number` - Optional - VRAM budget in MB ⚠️ **Phase 3**: This option is planned but not yet implemented. Currently ignored.
+- `forceValidation?: boolean` - Optional - Force re-validation of binary even if cached (default: false)
 
 **Returns**: `Promise<DiffusionServerInfo>` - Server information
 

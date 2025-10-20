@@ -391,6 +391,7 @@ export abstract class ServerManager extends EventEmitter {
    * @param binaryName - Name of the binary (e.g., 'llama-server')
    * @param binaryConfig - Binary configuration from BINARY_VERSIONS
    * @param testModelPath - Optional path to model for real functionality testing
+   * @param forceValidation - If true, re-run validation tests even if cached validation exists
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails for all variants
    * @protected
@@ -399,7 +400,8 @@ export abstract class ServerManager extends EventEmitter {
     type: 'llama' | 'diffusion',
     binaryName: string,
     binaryConfig: any,
-    testModelPath?: string
+    testModelPath?: string,
+    forceValidation = false
   ): Promise<string> {
     const platformKey = getPlatformKey();
     const variants = binaryConfig.variants[platformKey];
@@ -419,7 +421,7 @@ export abstract class ServerManager extends EventEmitter {
       },
     });
 
-    // Download and install binary
-    return await binaryManager.ensureBinary();
+    // Download and install binary (passing forceValidation flag)
+    return await binaryManager.ensureBinary(forceValidation);
   }
 }

@@ -89,6 +89,13 @@ export interface DiffusionServerConfig {
 
   /** VRAM budget in MB (optional, stable-diffusion.cpp will try to fit within this) */
   vramBudget?: number;
+
+  /**
+   * Force binary validation even if cached validation exists
+   * Default: false (use cached validation if available)
+   * Set to true to re-run Phase 1 & Phase 2 tests (e.g., after driver updates)
+   */
+  forceValidation?: boolean;
 }
 
 /**

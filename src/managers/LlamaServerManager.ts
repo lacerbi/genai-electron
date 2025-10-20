@@ -123,7 +123,7 @@ export class LlamaServerManager extends ServerManager {
       }
 
       // 3. Ensure binary is downloaded (pass model path for real functionality testing)
-      this.binaryPath = await this.ensureBinary(modelInfo.path);
+      this.binaryPath = await this.ensureBinary(modelInfo.path, config.forceValidation);
 
       // 4. Check if port is in use
       await this.checkPortAvailability(config.port);
@@ -279,17 +279,24 @@ export class LlamaServerManager extends ServerManager {
    *
    * Downloads binary from GitHub releases if not present. Tries multiple variants
    * in priority order (CUDA → Vulkan → CPU) and uses the first one that works.
-   * Caches which variant worked for faster startup next time.
+   * Caches validation results for faster startup next time.
    *
    * For updating to new llama.cpp releases, see docs/dev/UPDATING-BINARIES.md
    *
    * @param modelPath - Optional model path for real functionality testing
+   * @param forceValidation - If true, re-run validation tests even if cached validation exists
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails for all variants
    * @private
    */
-  private async ensureBinary(modelPath?: string): Promise<string> {
-    return this.ensureBinaryHelper('llama', 'llama-server', BINARY_VERSIONS.llamaServer, modelPath);
+  private async ensureBinary(modelPath?: string, forceValidation = false): Promise<string> {
+    return this.ensureBinaryHelper(
+      'llama',
+      'llama-server',
+      BINARY_VERSIONS.llamaServer,
+      modelPath,
+      forceValidation
+    );
   }
 
   /**

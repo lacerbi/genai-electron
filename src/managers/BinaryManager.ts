@@ -26,6 +26,23 @@ import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
 
 /**
+ * Validation cache structure
+ * Stores results of binary validation to avoid redundant testing
+ */
+interface ValidationCache {
+  /** Which variant is installed (cuda/vulkan/cpu) */
+  variant: string;
+  /** SHA256 checksum of the binary file */
+  checksum: string;
+  /** ISO timestamp when validation was performed */
+  validatedAt: string;
+  /** Whether Phase 1 (basic validation) passed */
+  phase1Passed: boolean;
+  /** Whether Phase 2 (real functionality test) passed (if model was available) */
+  phase2Passed?: boolean;
+}
+
+/**
  * Configuration for binary download and management
  */
 export interface BinaryManagerConfig {
@@ -58,6 +75,48 @@ export class BinaryManager {
 
   constructor(config: BinaryManagerConfig) {
     this.config = config;
+  }
+
+  /**
+   * Load validation cache from disk
+   * @returns ValidationCache if exists and valid, undefined otherwise
+   * @private
+   */
+  private async loadValidationCache(): Promise<ValidationCache | undefined> {
+    const { type } = this.config;
+    const validationCachePath = path.join(PATHS.binaries[type], '.validation.json');
+
+    try {
+      const cacheContent = await fs.readFile(validationCachePath, 'utf-8');
+      const cache = JSON.parse(cacheContent) as ValidationCache;
+
+      // Validate cache structure
+      if (cache.variant && cache.checksum && cache.validatedAt && typeof cache.phase1Passed === 'boolean') {
+        return cache;
+      }
+
+      return undefined;
+    } catch {
+      // No cache or invalid cache
+      return undefined;
+    }
+  }
+
+  /**
+   * Save validation cache to disk
+   * @param cache - Validation cache to save
+   * @private
+   */
+  private async saveValidationCache(cache: ValidationCache): Promise<void> {
+    const { type } = this.config;
+    const validationCachePath = path.join(PATHS.binaries[type], '.validation.json');
+
+    try {
+      await fs.writeFile(validationCachePath, JSON.stringify(cache, null, 2), 'utf-8');
+    } catch (error) {
+      // Non-fatal - just log warning
+      this.log(`Failed to save validation cache: ${error}`, 'warn');
+    }
   }
 
   /**
@@ -106,12 +165,13 @@ export class BinaryManager {
    * Ensure binary is available, downloading if necessary
    *
    * Tries each variant in priority order until one works.
-   * Caches which variant worked for faster startup next time.
+   * Caches validation results for faster startup next time.
    *
+   * @param forceValidation - If true, re-run validation tests even if cached validation exists
    * @returns Path to the working binary
    * @throws {BinaryError} If all variants fail
    */
-  async ensureBinary(): Promise<string> {
+  async ensureBinary(forceValidation = false): Promise<string> {
     const { type, binaryName, platformKey } = this.config;
     let { variants } = this.config;
 
@@ -138,11 +198,47 @@ export class BinaryManager {
     const binaryPath = getBinaryPath(type, binaryName);
     const variantCachePath = path.join(PATHS.binaries[type], '.variant.json');
 
-    // Check if binary already exists and works
+    // Check if binary already exists
     if (await fileExists(binaryPath)) {
+      // Load validation cache
+      const validationCache = await this.loadValidationCache();
+
+      if (validationCache && !forceValidation) {
+        // Calculate current checksum to verify binary hasn't been modified
+        this.log('Verifying binary integrity...', 'info');
+        const currentChecksum = await calculateChecksum(binaryPath);
+
+        if (currentChecksum === validationCache.checksum) {
+          // Cache is valid - skip validation tests
+          this.log('Using cached validation result (binary verified)', 'info');
+          this.log(
+            `Last validated: ${new Date(validationCache.validatedAt).toLocaleString()}`,
+            'info'
+          );
+          return binaryPath;
+        } else {
+          // Checksum mismatch - binary was modified
+          this.log('Binary checksum mismatch, re-validating...', 'warn');
+        }
+      } else if (forceValidation) {
+        this.log('Force validation requested, re-running tests...', 'info');
+      }
+
+      // Run validation tests (cache invalid, missing, or forced)
       const works = await this.testBinary(binaryPath);
       if (works) {
-        this.log('Using existing binary', 'info');
+        // Save validation cache
+        const checksum = await calculateChecksum(binaryPath);
+        const variantType = validationCache?.variant || 'unknown';
+        await this.saveValidationCache({
+          variant: variantType,
+          checksum,
+          validatedAt: new Date().toISOString(),
+          phase1Passed: true,
+          phase2Passed: this.config.testModelPath ? true : undefined,
+        });
+
+        this.log('Binary validated successfully', 'info');
         return binaryPath;
       } else {
         this.log('Existing binary not working, re-downloading...', 'warn');
@@ -179,12 +275,22 @@ export class BinaryManager {
       try {
         const success = await this.downloadAndTestVariant(variant, binaryPath);
         if (success) {
-          // Cache this variant for next time
+          // Cache this variant for next time (legacy variant cache)
           await fs.writeFile(
             variantCachePath,
             JSON.stringify({ variant: variant.type, platform: platformKey }),
             'utf-8'
           );
+
+          // Save validation cache
+          const checksum = await calculateChecksum(binaryPath);
+          await this.saveValidationCache({
+            variant: variant.type,
+            checksum,
+            validatedAt: new Date().toISOString(),
+            phase1Passed: true,
+            phase2Passed: this.config.testModelPath ? true : undefined,
+          });
 
           this.log(`Successfully installed ${variant.type} variant`, 'info');
           return binaryPath;

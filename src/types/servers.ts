@@ -37,6 +37,13 @@ export interface ServerConfig {
 
   /** Enable flash attention (if supported) */
   flashAttention?: boolean;
+
+  /**
+   * Force binary validation even if cached validation exists
+   * Default: false (use cached validation if available)
+   * Set to true to re-run Phase 1 & Phase 2 tests (e.g., after driver updates)
+   */
+  forceValidation?: boolean;
 }
 
 /**

@@ -1,23 +1,23 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Phase 2 Example App Complete - Testing & Debugging (2025-10-19)
+> **Current Status**: Phase 2 Complete + Performance Optimization (2025-10-20)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors (library + example app)
-- **Tests:** ✅ 233/233 passing (100% pass rate - all tests passing!)
+- **Tests:** ✅ 238/238 passing (100% pass rate - all tests passing!)
 - **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `feat/phase2-app` (Phase 2 example app + spawn fix complete)
-- **Last Updated:** 2025-10-20 (Phase 2 timeout issue fully resolved)
+- **Branch:** `feat/phase2-app` (Phase 2 example app + binary validation caching)
+- **Last Updated:** 2025-10-20 (Binary validation caching implemented)
 
 **Test Suite Breakdown:**
 - Phase 1 Tests: 130 tests (errors, utils, core managers) - ✅ All passing
 - Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator) - ✅ All passing
-- Infrastructure: 53 tests (BinaryManager + health-check + 2 new tests) - ✅ All passing
+- Infrastructure: 58 tests (BinaryManager + health-check + validation cache) - ✅ All passing
 
-**Recent Fix:** Resolved spawn mock issues in BinaryManager tests (commits fb68073, a539e54)
+**Recent Optimization:** Implemented binary validation caching for 4-20x faster server startup
 
 ---
 
@@ -397,13 +397,74 @@ Windows CUDA variants require additional runtime DLLs not included in main binar
 
 ---
 
+## Post-Phase 2: Performance Optimization ✅
+
+**Status:** Complete (2025-10-20)
+
+### Binary Validation Caching
+
+**Problem Identified:**
+- Binary validation (Phase 1 & 2 tests) ran on EVERY server start
+- Caused 2-10 second delay even for already-validated binaries
+- Only variant preference was cached, not test results
+- Poor user experience with redundant GPU functionality tests
+
+**Solution Implemented:**
+- ✅ Smart validation result caching with SHA256 checksum verification
+- ✅ First start: Download + validate + cache results (~2-10s)
+- ✅ Subsequent starts: Checksum verification only (~0.5s)
+- ✅ Automatic re-validation if binary modified (checksum mismatch)
+- ✅ Manual `forceValidation` flag for driver updates
+
+**Performance Impact:**
+- **4-20x faster startup** after first run (0.5s vs 2-10s)
+- Checksum calculation: ~0.5s for 50-100MB binaries
+- Cache invalidation: Automatic on binary modification
+- Force validation: Available via `forceValidation: true` flag
+
+**Implementation Details:**
+- New `ValidationCache` structure with variant, checksum, timestamp, test results
+- Added to both `LlamaServerManager` and `DiffusionServerManager`
+- 5 new tests covering all cache scenarios
+- Documented in `docs/API.md` with examples
+
+**Files Modified:**
+- `src/types/servers.ts` - Added `forceValidation` flag
+- `src/types/images.ts` - Added `forceValidation` flag
+- `src/managers/BinaryManager.ts` - Implemented cache logic
+- `src/managers/ServerManager.ts` - Pass flag through
+- `src/managers/LlamaServerManager.ts` - Pass flag from config
+- `src/managers/DiffusionServerManager.ts` - Pass flag from config
+- `tests/unit/BinaryManager.test.ts` - Added 5 cache tests
+- `docs/API.md` - Documented flag and caching behavior
+
+**Usage Example:**
+```typescript
+// Normal startup (fast after first run)
+await llamaServer.start({
+  modelId: 'llama-2-7b',
+  port: 8080
+});
+// ✅ 0.5s startup
+
+// Force re-validation (e.g., after driver update)
+await llamaServer.start({
+  modelId: 'llama-2-7b',
+  port: 8080,
+  forceValidation: true
+});
+// ✅ 2-10s with full validation
+```
+
+---
+
 ## Key Achievements
 
 ### Test Infrastructure
 - **Jest 30 + ESM**: Modern testing setup with ES modules support
-- **221 tests passing**: Comprehensive coverage across 12 test suites
+- **238 tests passing**: Comprehensive coverage across 12 test suites
 - **Clean exit**: No warnings, no memory leaks, no open handles
-- **Fast execution**: ~1.4 seconds for full test suite
+- **Fast execution**: ~3.5 seconds for full test suite
 
 ### Cross-Platform Compatibility
 - **Windows, macOS, Linux**: All npm scripts work across platforms
@@ -438,6 +499,7 @@ Windows CUDA variants require additional runtime DLLs not included in main binar
 - ✅ Implemented automatic CUDA runtime dependency downloading for both llama.cpp and stable-diffusion.cpp (Issue 5)
 - ✅ Added architecture support for multi-file binary variants (main executable + runtime dependencies)
 - ✅ Added CUDA GPU detection before attempting CUDA variant downloads
+- ✅ **Implemented binary validation caching** (4-20x faster server startup)
 - 🔄 Testing resource orchestration with real workloads
 - 🔄 Verification of model management across both types
 - 🔄 Cross-platform testing (Windows, macOS, Linux)

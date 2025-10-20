@@ -283,13 +283,17 @@ describe('BinaryManager', () => {
 
     it('should return existing binary path if binary works', async () => {
       mockFileExists.mockResolvedValue(true);
+      // Mock no validation cache, so it runs tests
+      mockReadFile.mockRejectedValue(new Error('No validation cache'));
+      mockCalculateChecksum.mockResolvedValue('abc123');
       // Default spawnBehavior set in beforeEach works for this test
 
       const result = await binaryManager.ensureBinary();
 
       expect(result).toBe('/mock/binaries/llama/llama-server.exe');
       expect(mockDownload).not.toHaveBeenCalled();
-      expect(mockLogger).toHaveBeenCalledWith('Using existing binary', 'info');
+      // With the validation cache implementation, it validates and saves cache
+      expect(mockLogger).toHaveBeenCalledWith('Binary validated successfully', 'info');
     });
 
     it('should re-download if existing binary does not work', async () => {
@@ -478,13 +482,17 @@ describe('BinaryManager', () => {
 
   describe('testBinary()', () => {
     it('should return true when binary executes successfully', async () => {
+      // Mock existing binary with no validation cache (will run tests)
       mockFileExists.mockResolvedValue(true);
+      mockReadFile.mockRejectedValue(new Error('No validation cache'));
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
       // Default spawn behavior (set in beforeEach) works for this test
 
       const result = await binaryManager.ensureBinary();
 
       expect(result).toBe('/mock/binaries/llama/llama-server.exe');
-      expect(mockLogger).toHaveBeenCalledWith('Using existing binary', 'info');
+      expect(mockLogger).toHaveBeenCalledWith('Binary validated successfully', 'info');
     });
 
     it('should return false when binary execution fails', async () => {
@@ -1057,6 +1065,232 @@ describe('BinaryManager', () => {
 
       // Should have tried CPU variant
       expect(mockDownload).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('Validation Cache', () => {
+    it('should skip validation tests if cache exists and checksum matches', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+        phase2Passed: true,
+      };
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile to return validation cache
+      mockReadFile.mockResolvedValue(JSON.stringify(validationCache));
+
+      // Mock checksum to match cache
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should use cached validation
+      expect(result).toBe(binaryPath);
+      expect(mockLogger).toHaveBeenCalledWith('Verifying binary integrity...', 'info');
+      expect(mockLogger).toHaveBeenCalledWith('Using cached validation result (binary verified)', 'info');
+      expect(mockLogger).toHaveBeenCalledWith(expect.stringContaining('Last validated:'), 'info');
+
+      // Should NOT run tests (spawn not called)
+      expect(mockSpawn).not.toHaveBeenCalled();
+      // Should NOT download again
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it('should re-run validation if checksum does not match cache', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+      };
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile to return validation cache
+      mockReadFile.mockResolvedValue(JSON.stringify(validationCache));
+
+      // Mock checksum to NOT match cache (binary was modified)
+      mockCalculateChecksum.mockResolvedValue('different-checksum');
+
+      // Phase 1 test succeeds
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should detect checksum mismatch
+      expect(mockLogger).toHaveBeenCalledWith('Binary checksum mismatch, re-validating...', 'warn');
+
+      // Should run validation tests
+      expect(mockSpawn).toHaveBeenCalled();
+
+      // Should save new validation cache
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('.validation.json'),
+        expect.stringContaining('different-checksum'),
+        'utf-8'
+      );
+    });
+
+    it('should re-run validation if forceValidation=true', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+      };
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile to return validation cache
+      mockReadFile.mockResolvedValue(JSON.stringify(validationCache));
+
+      // Mock checksum to match cache (binary unchanged)
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      // Phase 1 test succeeds
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(true); // forceValidation=true
+
+      // Should log force validation
+      expect(mockLogger).toHaveBeenCalledWith('Force validation requested, re-running tests...', 'info');
+
+      // Should run validation tests even though cache is valid
+      expect(mockSpawn).toHaveBeenCalled();
+
+      // Should save new validation cache
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('.validation.json'),
+        expect.any(String),
+        'utf-8'
+      );
+    });
+
+    it('should run validation on first run (no cache)', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+
+      // Binary does NOT exist (first run), but extracted binary exists for testing
+      mockFileExists.mockImplementation(async (path) => {
+        // Binary doesn't exist at final location yet
+        if (path === binaryPath) return false;
+        // Extracted binary exists after download (for testing)
+        if (path.includes('.extract') && path.includes('llama-server.exe')) return true;
+        // For other paths, return true (variant cache file, etc.)
+        return false;
+      });
+
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // No validation cache
+      mockReadFile.mockRejectedValue(new Error('ENOENT'));
+
+      // Mock successful download and extraction
+      const extractedPath = '/mock/extract/llama-server.exe';
+      mockDownload.mockResolvedValue(undefined);
+      mockExtractBinary.mockResolvedValue(extractedPath);
+      mockCalculateChecksum.mockImplementation(async (path) => {
+        if (path.includes('.cuda.zip')) return 'abc123cuda';
+        return 'new-checksum';
+      });
+      mockCopyDirectory.mockResolvedValue(undefined);
+      mockCleanupExtraction.mockResolvedValue(undefined);
+
+      // Phase 1 test succeeds
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should download and test binary
+      expect(mockDownload).toHaveBeenCalled();
+      expect(mockSpawn).toHaveBeenCalled();
+
+      // Should save validation cache after successful validation
+      const validationCacheCalls = (mockWriteFile as jest.Mock).mock.calls.filter(
+        call => call[0].includes('.validation.json')
+      );
+      expect(validationCacheCalls.length).toBeGreaterThan(0);
+      expect(validationCacheCalls[0][1]).toContain('new-checksum');
+    });
+
+    it('should fall back to validation if cache is corrupted', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile to return corrupted cache (invalid JSON)
+      mockReadFile.mockResolvedValue('{ invalid json');
+
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      // Phase 1 test succeeds
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should run validation tests (cache corrupted, treated as no cache)
+      expect(mockSpawn).toHaveBeenCalled();
+
+      // Should save new validation cache
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('.validation.json'),
+        expect.any(String),
+        'utf-8'
+      );
     });
   });
 });
