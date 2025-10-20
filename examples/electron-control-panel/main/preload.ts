@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld('api', {
       'diffusion:stopped',
       'diffusion:crashed',
       'diffusion:binary-log',
+      'diffusion:progress',
     ];
 
     if (validChannels.includes(channel)) {

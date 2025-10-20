@@ -144,19 +144,16 @@ const DiffusionServerControl: React.FC = () => {
     setGeneratedImage(null);
 
     try {
-      const result = await window.api.diffusion.generateImage(
-        {
-          prompt,
-          negativePrompt: negativePrompt || undefined,
-          width,
-          height,
-          steps,
-          cfgScale,
-          seed,
-          sampler,
-        },
-        serverInfo.port
-      );
+      const result = await window.api.diffusion.generateImage({
+        prompt,
+        negativePrompt: negativePrompt || undefined,
+        width,
+        height,
+        steps,
+        cfgScale,
+        seed,
+        sampler,
+      });
       setGeneratedImage(result);
     } catch (err) {
       setGenerateError((err as Error).message);

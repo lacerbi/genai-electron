@@ -150,6 +150,20 @@ export function sendDownloadError(error: Error, modelName: string): void {
 }
 
 /**
+ * Send image generation progress to renderer
+ */
+export function sendImageProgress(currentStep: number, totalSteps: number): void {
+  const mainWindow = BrowserWindow.getAllWindows()[0];
+  if (mainWindow) {
+    mainWindow.webContents.send('diffusion:progress', {
+      currentStep,
+      totalSteps,
+      percentage: totalSteps > 0 ? (currentStep / totalSteps) * 100 : 0,
+    });
+  }
+}
+
+/**
  * Create ResourceOrchestrator singleton instance
  */
 let orchestrator: ResourceOrchestrator | null = null;

@@ -170,39 +170,34 @@ const ResourceMonitor: React.FC = () => {
       <Card title="Resource Orchestration">
         <div className="orchestration-status">
           <div className="status-item">
-            <label>Offload Required:</label>
-            {wouldOffload ? (
-              <span className="warning-badge">⚠️ Yes - VRAM constrained</span>
-            ) : (
-              <span className="success-badge">✓ No - Sufficient VRAM</span>
-            )}
+            <label>Status:</label>
+            <span className="info-badge">✓ Automatic</span>
           </div>
+
+          <p className="info-message">
+            Resource management is handled automatically. If RAM or VRAM is constrained during image
+            generation, the LLM server will be temporarily offloaded and then restored.
+          </p>
 
           {savedState && (
             <div className="saved-state-info">
-              <h4>Saved LLM State</h4>
-              <p>
-                <strong>Model ID:</strong> {savedState.config.modelId}
+              <h4>⚠️ LLM Server Offloaded</h4>
+              <p className="warning-message">
+                The LLM server was temporarily stopped to free resources for image generation.
+                It will be automatically restarted when generation completes.
               </p>
-              <p>
-                <strong>Was Running:</strong> {savedState.wasRunning ? 'Yes' : 'No'}
-              </p>
-              <p>
-                <strong>Saved At:</strong> {new Date(savedState.savedAt).toLocaleString()}
-              </p>
+              <div className="saved-state-details">
+                <p>
+                  <strong>Model ID:</strong> {savedState.config.modelId}
+                </p>
+                <p>
+                  <strong>Was Running:</strong> {savedState.wasRunning ? 'Yes' : 'No'}
+                </p>
+                <p>
+                  <strong>Offloaded At:</strong> {new Date(savedState.savedAt).toLocaleString()}
+                </p>
+              </div>
             </div>
-          )}
-
-          {!savedState && !wouldOffload && (
-            <p className="info-message">
-              No offload required. Both servers can run simultaneously with available VRAM.
-            </p>
-          )}
-
-          {!savedState && wouldOffload && (
-            <p className="warning-message">
-              VRAM constrained. LLM server will be automatically offloaded when generating images.
-            </p>
           )}
         </div>
       </Card>

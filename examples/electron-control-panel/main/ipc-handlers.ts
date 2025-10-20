@@ -9,6 +9,7 @@ import {
   sendDownloadProgress,
   sendDownloadComplete,
   sendDownloadError,
+  sendImageProgress,
 } from './genai-api.js';
 import { LogManager } from 'genai-electron';
 import { LLMService } from 'genai-lite';
@@ -300,43 +301,29 @@ export function registerIpcHandlers(): void {
     }
   });
 
-  // Generate image via HTTP (demonstrates HTTP API pattern)
-  ipcMain.handle('diffusion:generate', async (_event, config, port: number = 8081) => {
+  // Generate image using diffusionServer.generateImage() (with automatic orchestration)
+  ipcMain.handle('diffusion:generate', async (_event, config) => {
     try {
-      // Make HTTP request to diffusion server wrapper
-      const response = await fetch(`http://localhost:${port}/v1/images/generations`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
+      // Call diffusionServer.generateImage() which automatically uses ResourceOrchestrator
+      // when configured with llamaServer (as done in src/index.ts)
+      const result = await diffusionServer.generateImage({
+        prompt: config.prompt,
+        negativePrompt: config.negativePrompt,
+        width: config.width || 512,
+        height: config.height || 512,
+        steps: config.steps || 20,
+        cfgScale: config.cfgScale || 7.5,
+        seed: config.seed || -1,
+        sampler: config.sampler || 'euler_a',
+        // Progress callback to send updates to renderer
+        onProgress: (currentStep: number, totalSteps: number) => {
+          sendImageProgress(currentStep, totalSteps);
         },
-        body: JSON.stringify({
-          prompt: config.prompt,
-          negativePrompt: config.negativePrompt,
-          width: config.width || 512,
-          height: config.height || 512,
-          steps: config.steps || 20,
-          cfgScale: config.cfgScale || 7.5,
-          seed: config.seed || -1,
-          sampler: config.sampler || 'euler_a',
-        }),
       });
 
-      if (!response.ok) {
-        const error = (await response.json()) as { error?: string };
-        throw new Error(error.error || 'Image generation failed');
-      }
-
-      const result = (await response.json()) as {
-        image: string;
-        timeTaken: number;
-        seed: number;
-        width: number;
-        height: number;
-      };
-
-      // Convert base64 image to data URL for renderer
+      // Convert Buffer to base64 data URL for renderer
       return {
-        imageDataUrl: `data:image/png;base64,${result.image}`,
+        imageDataUrl: `data:image/png;base64,${result.image.toString('base64')}`,
         timeTaken: result.timeTaken,
         seed: result.seed,
         width: result.width,
