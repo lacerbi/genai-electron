@@ -123,16 +123,15 @@ export class DiffusionServerManager extends ServerManager {
       }
       this.currentModelInfo = modelInfo;
 
-      // 2. Check if system can run this model
-      const canRun = await this.systemInfo.canRunModel(modelInfo);
+      // 2. Check if system can run this model (check total memory since model loads on-demand)
+      const canRun = await this.systemInfo.canRunModel(modelInfo, { checkTotalMemory: true });
       if (!canRun.possible) {
+        const memoryInfo = this.systemInfo.getMemoryInfo();
         throw new InsufficientResourcesError(
           `System cannot run model: ${canRun.reason || 'Insufficient resources'}`,
           {
             required: `Model size: ${Math.round(modelInfo.size / 1024 / 1024 / 1024)}GB`,
-            available: `Available RAM: ${Math.round(
-              (await this.systemInfo.getMemoryInfo()).available / 1024 / 1024 / 1024
-            )}GB`,
+            available: `Total RAM: ${Math.round(memoryInfo.total / 1024 / 1024 / 1024)}GB`,
             suggestion: canRun.suggestion || canRun.reason || 'Try a smaller model',
           }
         );

@@ -100,16 +100,22 @@ console.log('Memory usage:', usagePercent.toFixed(1), '%');
 
 ---
 
-#### `canRunModel(modelInfo: ModelInfo): Promise<{ possible: boolean; reason?: string; suggestion?: string }>`
+#### `canRunModel(modelInfo: ModelInfo, options?: { checkTotalMemory?: boolean }): Promise<{ possible: boolean; reason?: string; suggestion?: string }>`
 
-Checks if a specific model can run on the current system based on available resources.
+Checks if a specific model can run on the current system based on available or total memory.
 
 **Parameters**:
 - `modelInfo: ModelInfo` - Model information to check
+- `options?: { checkTotalMemory?: boolean }` - Optional configuration
+  - `checkTotalMemory` - If `true`, checks against total system memory instead of currently available memory. Use this for servers that load models on-demand (e.g., diffusion server). Default: `false` (checks available memory)
 
 **Returns**: `Promise<{ possible: boolean; reason?: string; suggestion?: string }>` - Whether model can run, reason if not, and optional suggestion
 
-**Example**:
+**When to Use Each Mode**:
+- **Default (available memory)**: For servers that load the model at startup (e.g., LLM server). Ensures there's enough RAM right now.
+- **Total memory mode**: For servers that load models on-demand (e.g., diffusion server). Validates the model will eventually fit, allowing ResourceOrchestrator to free up memory when needed.
+
+**Example (Default - Check Available Memory)**:
 ```typescript
 const modelInfo = await modelManager.getModelInfo('llama-2-7b');
 const check = await systemInfo.canRunModel(modelInfo);
@@ -122,9 +128,22 @@ if (check.possible) {
   if (check.suggestion) {
     console.log('💡 Suggestion:', check.suggestion);
   }
-  // Example reasons:
-  // - "Insufficient RAM: Model requires 8GB but only 4GB available"
-  // - "Model file not found or corrupt"
+  // Example: "Insufficient RAM: Model requires 8GB but only 4GB available"
+}
+```
+
+**Example (Total Memory - For On-Demand Loading)**:
+```typescript
+const modelInfo = await modelManager.getModelInfo('sdxl-turbo');
+const check = await systemInfo.canRunModel(modelInfo, { checkTotalMemory: true });
+
+if (check.possible) {
+  console.log('✅ Model will fit in system memory');
+  // Server can start - ResourceOrchestrator will free memory when needed
+  await diffusionServer.start({ modelId: modelInfo.id, port: 8081 });
+} else {
+  console.log('❌ Model too large for system:', check.reason);
+  // Example: "Insufficient RAM: Model requires 8GB but only 4GB total"
 }
 ```
 

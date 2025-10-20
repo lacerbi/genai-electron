@@ -268,8 +268,10 @@ describe('DiffusionServerManager', () => {
       // Verify model validation
       expect(mockModelManager.getModelInfo).toHaveBeenCalledWith('sdxl-turbo');
 
-      // Verify system checks
-      expect(mockSystemInfo.canRunModel).toHaveBeenCalledWith(mockModelInfo);
+      // Verify system checks (diffusion server checks total memory, not available)
+      expect(mockSystemInfo.canRunModel).toHaveBeenCalledWith(mockModelInfo, {
+        checkTotalMemory: true,
+      });
 
       // Verify binary download
       expect(mockEnsureBinary).toHaveBeenCalled();

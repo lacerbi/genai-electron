@@ -117,17 +117,28 @@ export class SystemInfo {
    * Check if system can run a specific model
    *
    * @param modelInfo - Model information
+   * @param options - Optional configuration
+   * @param options.checkTotalMemory - If true, checks against total system memory instead of currently available memory.
+   *                                    Use this for servers that load models on-demand (e.g., diffusion server).
+   *                                    Default: false (checks available memory)
    * @returns True if model can run, with reason if false
    *
    * @example
    * ```typescript
+   * // Check if model fits in available memory (default - for servers that load model at startup)
    * const canRun = await systemInfo.canRunModel(modelInfo);
    * if (!canRun.possible) {
    *   console.log(`Cannot run model: ${canRun.reason}`);
    * }
+   *
+   * // Check if model will ever fit in total memory (for servers that load model on-demand)
+   * const canRunEventually = await systemInfo.canRunModel(modelInfo, { checkTotalMemory: true });
    * ```
    */
-  public async canRunModel(modelInfo: ModelInfo): Promise<{
+  public async canRunModel(
+    modelInfo: ModelInfo,
+    options?: { checkTotalMemory?: boolean }
+  ): Promise<{
     possible: boolean;
     reason?: string;
     suggestion?: string;
@@ -138,15 +149,21 @@ export class SystemInfo {
     // Get fresh memory info (not cached) for accurate availability check
     const currentMemory = this.getMemoryInfo();
 
+    // Determine which memory metric to check against
+    const checkTotalMemory = options?.checkTotalMemory ?? false;
+    const memoryToCheck = checkTotalMemory ? currentMemory.total : currentMemory.available;
+    const memoryType = checkTotalMemory ? 'total' : 'available';
+
     // Check if model fits in RAM using real-time memory data
-    const fitsInRAM = currentMemory.available >= requiredMemory;
+    const fitsInRAM = memoryToCheck >= requiredMemory;
 
     if (!fitsInRAM) {
       return {
         possible: false,
-        reason: `Insufficient RAM: model requires ${(requiredMemory / 1024 ** 3).toFixed(1)}GB, but only ${(currentMemory.available / 1024 ** 3).toFixed(1)}GB available`,
-        suggestion:
-          'Try closing other applications or using a smaller quantization (Q4_K_M instead of Q8_0)',
+        reason: `Insufficient RAM: model requires ${(requiredMemory / 1024 ** 3).toFixed(1)}GB, but only ${(memoryToCheck / 1024 ** 3).toFixed(1)}GB ${memoryType}`,
+        suggestion: checkTotalMemory
+          ? 'This model is too large for your system. Try a smaller model or quantization.'
+          : 'Try closing other applications or using a smaller quantization (Q4_K_M instead of Q8_0)',
       };
     }
 
