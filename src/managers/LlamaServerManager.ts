@@ -319,9 +319,13 @@ export class LlamaServerManager extends ServerManager {
     config: ServerConfig,
     modelInfo: any
   ): Promise<LlamaServerConfig> {
-    const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo);
+    console.log('[LlamaServer] autoConfigureIfNeeded called');
+    console.log('[LlamaServer] Input config:', JSON.stringify(config, null, 2));
 
-    return {
+    const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo);
+    console.log('[LlamaServer] Optimal config:', JSON.stringify(optimalConfig, null, 2));
+
+    const finalConfig = {
       ...config,
       threads: config.threads ?? optimalConfig.threads,
       contextSize: config.contextSize ?? optimalConfig.contextSize,
@@ -329,6 +333,18 @@ export class LlamaServerManager extends ServerManager {
       parallelRequests: config.parallelRequests ?? optimalConfig.parallelRequests,
       flashAttention: config.flashAttention ?? optimalConfig.flashAttention,
     } as LlamaServerConfig;
+
+    console.log('[LlamaServer] Final config:', JSON.stringify(finalConfig, null, 2));
+    console.log('[LlamaServer] gpuLayers decision:');
+    console.log('  - config.gpuLayers:', config.gpuLayers);
+    console.log('  - typeof:', typeof config.gpuLayers);
+    console.log('  - is undefined?:', config.gpuLayers === undefined);
+    console.log('  - is null?:', config.gpuLayers === null);
+    console.log('  - is 0?:', config.gpuLayers === 0);
+    console.log('  - optimalConfig.gpuLayers:', optimalConfig.gpuLayers);
+    console.log('  - final value:', finalConfig.gpuLayers);
+
+    return finalConfig;
   }
 
   /**
