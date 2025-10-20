@@ -1044,6 +1044,10 @@ Located in Resource Monitor tab with 4 diagnostic buttons:
 - 🔄 Cross-platform validation (Windows, macOS, Linux)
 - 📋 Create pull request after validation completes
 
+**Future Improvements / Technical Debt**
+- Automatic model introspection: Query llama.cpp for model metadata (layer count, KV cache cost, etc.) instead of estimating
+- Refactor example app features to library: Move reusable functionality from electron-control-panel back into genai-electron core (see ChatGPT conversation for details)
+
 **Phase 3: Production Core** (Planned)
 - Resume interrupted downloads
 - Enhanced SHA256 checksum verification
