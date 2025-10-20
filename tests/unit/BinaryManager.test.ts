@@ -91,8 +91,22 @@ let spawnBehavior: SpawnBehavior = {};
 let spawnBehaviors: SpawnBehavior[] = [];
 let spawnCallIndex = 0;
 
-jest.unstable_mockModule('child_process', () => ({
-  spawn: jest.fn((command: string, args: string[], options: any) => {
+// Helper API for setting spawn responses (clearer intent for test scenarios)
+const setSpawnResponses = (responses: SpawnBehavior[]) => {
+  spawnBehaviors = responses;
+  spawnCallIndex = 0;
+};
+
+const setSpawnResponse = (response: SpawnBehavior) => {
+  spawnBehavior = response;
+  setSpawnResponses([]);
+  spawnCallIndex = 0;
+};
+
+// Helper function to create spawn implementation
+// This will be reapplied after each jest.resetMocks()
+const createSpawnImplementation = () => {
+  return (command: string, args: string[], options: any) => {
     // Determine which behavior to use (array takes precedence)
     const currentBehavior = spawnBehaviors.length > 0
       ? spawnBehaviors[spawnCallIndex++ % spawnBehaviors.length]
@@ -102,8 +116,8 @@ jest.unstable_mockModule('child_process', () => ({
     const mockStdout = {
       on: jest.fn((event: string, handler: Function) => {
         if (event === 'data' && currentBehavior.stdout) {
-          // Emit synchronously for simplicity in tests
-          handler(Buffer.from(currentBehavior.stdout));
+          // Use setImmediate for more realistic async behavior
+          setImmediate(() => handler(Buffer.from(currentBehavior.stdout!)));
         }
         return mockStdout;
       }),
@@ -112,8 +126,8 @@ jest.unstable_mockModule('child_process', () => ({
     const mockStderr = {
       on: jest.fn((event: string, handler: Function) => {
         if (event === 'data' && currentBehavior.stderr) {
-          // Emit synchronously for simplicity in tests
-          handler(Buffer.from(currentBehavior.stderr));
+          // Use setImmediate for more realistic async behavior
+          setImmediate(() => handler(Buffer.from(currentBehavior.stderr!)));
         }
         return mockStderr;
       }),
@@ -126,13 +140,15 @@ jest.unstable_mockModule('child_process', () => ({
       kill: jest.fn(),
       on: jest.fn((event: string, handler: Function) => {
         if (event === 'exit' && !currentBehavior.shouldError && !currentBehavior.shouldTimeout) {
-          // Emit synchronously for simplicity in tests
-          const exitCode = currentBehavior.exitCode ?? 0;
-          const signal = currentBehavior.signal ?? null;
-          handler(exitCode, signal);
+          // Use setImmediate for more realistic async behavior
+          setImmediate(() => {
+            const exitCode = currentBehavior.exitCode ?? 0;
+            const signal = currentBehavior.signal ?? null;
+            handler(exitCode, signal);
+          });
         } else if (event === 'error' && currentBehavior.shouldError) {
-          // Emit synchronously for simplicity in tests
-          handler(new Error(currentBehavior.errorMessage || 'Spawn error'));
+          // Use setImmediate for more realistic async behavior
+          setImmediate(() => handler(new Error(currentBehavior.errorMessage || 'Spawn error')));
         }
         // If shouldTimeout is true, don't emit any events (simulates hanging)
         return mockChild;
@@ -140,7 +156,14 @@ jest.unstable_mockModule('child_process', () => ({
     };
 
     return mockChild;
-  }),
+  };
+};
+
+// Create the mock spawn function that will be exported from child_process
+const mockSpawnFn = jest.fn();
+
+jest.unstable_mockModule('child_process', () => ({
+  spawn: mockSpawnFn,
 }));
 
 // Mock gpu-detect
@@ -161,6 +184,9 @@ jest.unstable_mockModule('adm-zip', () => ({
 // Import after mocking
 const { BinaryManager } = await import('../../src/managers/BinaryManager.js');
 const { BinaryError } = await import('../../src/errors/index.js');
+
+// Import spawn to get reference to the mocked function
+const { spawn: mockSpawn } = await import('child_process');
 
 describe('BinaryManager', () => {
   // Sample variant configs for testing
@@ -188,6 +214,9 @@ describe('BinaryManager', () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
+    // Reapply spawn implementation after jest.resetMocks() clears it
+    (mockSpawn as jest.Mock).mockImplementation(createSpawnImplementation());
+
     // Default mock implementations
     mockFileExists.mockResolvedValue(false);
     mockEnsureDirectory.mockResolvedValue(undefined);
@@ -211,9 +240,7 @@ describe('BinaryManager', () => {
     mockExtractAllTo.mockReturnValue(undefined);
 
     // Reset spawn behavior for each test (tests will configure as needed)
-    spawnBehavior = { stdout: 'version 1.0', stderr: '', exitCode: 0 };
-    spawnBehaviors = []; // Clear multi-call behaviors
-    spawnCallIndex = 0; // Reset call counter
+    setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
 
     // Default: Mock CUDA GPU detected (to not filter CUDA variants in most tests)
     mockDetectGPU.mockResolvedValue({
@@ -268,10 +295,10 @@ describe('BinaryManager', () => {
     it('should re-download if existing binary does not work', async () => {
       mockFileExists.mockResolvedValueOnce(true); // Binary exists
       // First spawn call fails, subsequent ones succeed
-      spawnBehaviors = [
+      setSpawnResponses([
         { exitCode: 1, stderr: 'Execution failed' }, // First call fails
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // Subsequent calls succeed
-      ];
+      ]);
 
       const result = await binaryManager.ensureBinary();
 
@@ -286,10 +313,10 @@ describe('BinaryManager', () => {
 
     it('should try variants in priority order when no cache exists', async () => {
       // First variant (CUDA) fails testBinary, second (CPU) succeeds
-      spawnBehaviors = [
+      setSpawnResponses([
         { exitCode: 1, stderr: 'CUDA not available' }, // First call (CUDA) fails
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // Subsequent calls (CPU) succeed
-      ];
+      ]);
 
       const result = await binaryManager.ensureBinary();
 
@@ -336,7 +363,7 @@ describe('BinaryManager', () => {
 
     it('should throw BinaryError if all variants fail', async () => {
       // Make all variants fail testBinary
-      spawnBehavior = { exitCode: 1, stderr: 'No drivers available' };
+      setSpawnResponse({ exitCode: 1, stderr: 'No drivers available' });
 
       // Test the error (only call once to avoid double execution)
       await expect(binaryManager.ensureBinary()).rejects.toThrow(BinaryError);
@@ -463,10 +490,10 @@ describe('BinaryManager', () => {
     it('should return false when binary execution fails', async () => {
       mockFileExists.mockResolvedValue(true);
       // First call fails (existing binary check), subsequent calls succeed (after re-download)
-      spawnBehaviors = [
+      setSpawnResponses([
         { exitCode: 1, stderr: 'Missing CUDA drivers' },
         { stdout: 'version 1.0', stderr: '', exitCode: 0 },
-      ];
+      ]);
 
       // Should re-download and succeed
       const result = await binaryManager.ensureBinary();
@@ -480,10 +507,10 @@ describe('BinaryManager', () => {
   describe('variant fallback behavior', () => {
     it('should successfully fall back from CUDA to CPU variant', async () => {
       // CUDA variant fails, CPU succeeds
-      spawnBehaviors = [
+      setSpawnResponses([
         { exitCode: 1, stderr: 'CUDA drivers not found' }, // First call (CUDA) fails
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // Subsequent calls succeed
-      ];
+      ]);
 
       const result = await binaryManager.ensureBinary();
 
@@ -681,10 +708,10 @@ describe('BinaryManager', () => {
 
     it('should cleanup dependencies if binary test fails', async () => {
       // Make binary test fail on first call, succeed on second
-      spawnBehaviors = [
+      setSpawnResponses([
         { exitCode: 1, stderr: 'Missing drivers' },
         { stdout: 'version 1.0', stderr: '', exitCode: 0 },
-      ];
+      ]);
 
       const managerWithDeps = new BinaryManager({
         type: 'llama',
@@ -709,7 +736,7 @@ describe('BinaryManager', () => {
       mockFileExists.mockResolvedValue(true);
 
       // Mock spawn to succeed for both phases
-      spawnBehavior = { stdout: 'test output', stderr: '', exitCode: 0 };
+      setSpawnResponse({ stdout: 'test output', stderr: '', exitCode: 0 });
 
       const managerWithModel = new BinaryManager({
         type: 'llama',
@@ -742,12 +769,11 @@ describe('BinaryManager', () => {
         'info'
       );
 
-      // Should call execFileAsync for llama-run with GPU testing args
+      // Should call spawn for llama-run with GPU testing args (timeout handled internally)
       expect(mockSpawn).toHaveBeenCalledWith(
         expect.stringContaining('llama-run'),
         expect.arrayContaining(['-ngl', '1', testModelPath, 'What is 2+2? Just answer with the number.']),
         expect.objectContaining({
-          timeout: 15000,
           stdio: ['ignore', 'pipe', 'pipe']
         })
       );
@@ -758,11 +784,11 @@ describe('BinaryManager', () => {
 
       // First variant: Phase 1 fails (first spawn call fails)
       // Second variant: Phase 1 & 2 succeed (second and third spawn calls succeed)
-      spawnBehaviors = [
+      setSpawnResponses([
         { exitCode: 1, stderr: 'Binary not working' }, // First variant Phase 1 fails
         { stdout: 'success', stderr: '', exitCode: 0 }, // Second variant Phase 1 succeeds
         { stdout: 'success', stderr: '', exitCode: 0 }, // Second variant Phase 2 succeeds
-      ];
+      ]);
 
       // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
       mockFileExists.mockImplementation(async (path) => {
@@ -825,12 +851,12 @@ describe('BinaryManager', () => {
 
       // Phase 1 succeeds for both, Phase 2 fails for CUDA (GPU error), succeeds for CPU
       // Sequence: CUDA Phase1, CUDA Phase2 (fail), CPU Phase1, CPU Phase2 (success)
-      spawnBehaviors = [
+      setSpawnResponses([
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CUDA Phase 1 success
         { stdout: '', stderr: 'CUDA error: out of memory', exitCode: 0 }, // CUDA Phase 2 GPU error
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CPU Phase 1 success
         { stdout: 'success', stderr: '', exitCode: 0 }, // CPU Phase 2 success
-      ];
+      ]);
 
       const managerWithModel = new BinaryManager({
         type: 'llama',
@@ -928,7 +954,7 @@ describe('BinaryManager', () => {
       mockFileExists.mockResolvedValue(true);
 
       // Mock exec to succeed for both phases
-      spawnBehavior = { stdout: '', stderr: '', exitCode: 0 };
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
 
       const diffusionManager = new BinaryManager({
         type: 'diffusion',
@@ -961,7 +987,7 @@ describe('BinaryManager', () => {
         'info'
       );
 
-      // Should call sd with tiny image generation args
+      // Should call sd with tiny image generation args (timeout handled internally)
       expect(mockSpawn).toHaveBeenCalledWith(
         expect.anything(),
         expect.arrayContaining([
@@ -977,7 +1003,6 @@ describe('BinaryManager', () => {
           '1',
         ]),
         expect.objectContaining({
-          timeout: 15000,
           stdio: ['ignore', 'pipe', 'pipe']
         })
       );
@@ -1002,12 +1027,12 @@ describe('BinaryManager', () => {
 
       // Phase 1 succeeds for both, Phase 2 times out for first variant, succeeds for second
       // Sequence: CUDA Phase1, CUDA Phase2 (timeout), CPU Phase1, CPU Phase2 (success)
-      spawnBehaviors = [
+      setSpawnResponses([
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CUDA Phase 1 success
         { shouldError: true, errorMessage: 'Timeout' }, // CUDA Phase 2 timeout
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CPU Phase 1 success
         { stdout: 'success', stderr: '', exitCode: 0 }, // CPU Phase 2 success
-      ];
+      ]);
 
       const managerWithModel = new BinaryManager({
         type: 'llama',
