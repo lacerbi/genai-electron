@@ -41,6 +41,10 @@ export function setupServerEventForwarding(): void {
     });
   });
 
+  llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
+    mainWindow.webContents.send('server:binary-log', data);
+  });
+
   // Diffusion server events
   diffusionServer.on('started', () => {
     mainWindow.webContents.send('diffusion:started');
@@ -55,6 +59,10 @@ export function setupServerEventForwarding(): void {
       message: error.message,
       stack: error.stack,
     });
+  });
+
+  diffusionServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
+    mainWindow.webContents.send('diffusion:binary-log', data);
   });
 }
 

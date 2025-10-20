@@ -8,6 +8,7 @@ import TestChat from './TestChat';
 import { useServerStatus } from './hooks/useServerStatus';
 import { useServerLogs } from './hooks/useServerLogs';
 import { useModels } from './hooks/useModels';
+import type { BinaryLogEvent } from '../types/api';
 import './LlamaServerControl.css';
 
 interface ServerConfigForm {
@@ -40,12 +41,35 @@ const LlamaServerControl: React.FC = () => {
   const [stopLoading, setStopLoading] = useState(false);
   const [restartLoading, setRestartLoading] = useState(false);
 
+  // Binary setup logs (during server startup)
+  const [binaryLogs, setBinaryLogs] = useState<Array<BinaryLogEvent & { timestamp: Date }>>([]);
+
   // Set first model as default when models load
   useEffect(() => {
     if (models.length > 0 && !config.modelId) {
       setConfig((prev) => ({ ...prev, modelId: models[0].id }));
     }
   }, [models, config.modelId]);
+
+  // Listen for binary-log events
+  useEffect(() => {
+    const handleBinaryLog = (data: BinaryLogEvent) => {
+      setBinaryLogs((prev) => [...prev, { ...data, timestamp: new Date() }]);
+    };
+
+    window.api.on('server:binary-log', handleBinaryLog);
+
+    return () => {
+      window.api.off('server:binary-log');
+    };
+  }, []);
+
+  // Clear binary logs when server reaches running state
+  useEffect(() => {
+    if (status.status === 'running') {
+      setBinaryLogs([]);
+    }
+  }, [status.status]);
 
   const handleStart = async () => {
     if (!config.modelId) {
@@ -124,6 +148,20 @@ const LlamaServerControl: React.FC = () => {
           )}
         </div>
       </Card>
+
+      {/* Binary Setup Status (shown during startup) */}
+      {binaryLogs.length > 0 && (
+        <Card title="Binary Setup Status">
+          <div className="binary-logs">
+            {binaryLogs.map((log, idx) => (
+              <div key={idx} className={`binary-log-entry binary-log-${log.level}`}>
+                <span className="binary-log-level">[{log.level.toUpperCase()}]</span>
+                <span className="binary-log-message">{log.message}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {/* Configuration */}
       <Card title="Configuration">

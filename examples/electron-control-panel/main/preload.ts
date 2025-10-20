@@ -69,9 +69,11 @@ contextBridge.exposeInMainWorld('api', {
       'server:started',
       'server:stopped',
       'server:crashed',
+      'server:binary-log',
       'diffusion:started',
       'diffusion:stopped',
       'diffusion:crashed',
+      'diffusion:binary-log',
     ];
 
     if (validChannels.includes(channel)) {

@@ -5,7 +5,7 @@ import ActionButton from './common/ActionButton';
 import Spinner from './common/Spinner';
 import { useDiffusionServer } from './hooks/useDiffusionServer';
 import { useModels } from './hooks/useModels';
-import type { ImageGenerationResult, ImageSampler } from '../types/api';
+import type { ImageGenerationResult, ImageSampler, BinaryLogEvent } from '../types/api';
 import './DiffusionServerControl.css';
 
 const DiffusionServerControl: React.FC = () => {
@@ -38,12 +38,35 @@ const DiffusionServerControl: React.FC = () => {
   const [generatedImage, setGeneratedImage] = useState<ImageGenerationResult | null>(null);
   const [generateError, setGenerateError] = useState<string>('');
 
+  // Binary setup logs (during server startup)
+  const [binaryLogs, setBinaryLogs] = useState<Array<BinaryLogEvent & { timestamp: Date }>>([]);
+
   // Set first model as default when models load
   useEffect(() => {
     if (models.length > 0 && !selectedModel) {
       setSelectedModel(models[0].id);
     }
   }, [models, selectedModel]);
+
+  // Listen for binary-log events
+  useEffect(() => {
+    const handleBinaryLog = (data: BinaryLogEvent) => {
+      setBinaryLogs((prev) => [...prev, { ...data, timestamp: new Date() }]);
+    };
+
+    window.api.on('diffusion:binary-log', handleBinaryLog);
+
+    return () => {
+      window.api.off('diffusion:binary-log');
+    };
+  }, []);
+
+  // Clear binary logs when server reaches running state
+  useEffect(() => {
+    if (serverInfo.status === 'running') {
+      setBinaryLogs([]);
+    }
+  }, [serverInfo.status]);
 
   // Preset change handlers
   const handleDimensionPresetChange = (value: string) => {
@@ -194,6 +217,20 @@ const DiffusionServerControl: React.FC = () => {
           )}
         </div>
       </Card>
+
+      {/* Binary Setup Status (shown during startup) */}
+      {binaryLogs.length > 0 && (
+        <Card title="Binary Setup Status">
+          <div className="binary-logs">
+            {binaryLogs.map((log, idx) => (
+              <div key={idx} className={`binary-log-entry binary-log-${log.level}`}>
+                <span className="binary-log-level">[{log.level.toUpperCase()}]</span>
+                <span className="binary-log-message">{log.message}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
 
       {/* Server Configuration */}
       <Card title="Server Configuration">

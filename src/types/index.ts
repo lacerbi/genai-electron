@@ -31,6 +31,7 @@ export type {
   LlamaServerConfig,
   ServerEvent,
   ServerEventData,
+  BinaryLogEvent,
 } from './servers.js';
 
 // Image generation types

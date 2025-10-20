@@ -33,6 +33,7 @@ import { getPlatformKey } from '../utils/platform-utils.js';
  * - 'stopped': When server stops
  * - 'crashed': When server crashes unexpectedly
  * - 'restarted': When server restarts after a crash
+ * - 'binary-log': When binary download/testing emits log messages (message: string, level: 'info' | 'warn' | 'error')
  *
  * @example
  * ```typescript
@@ -410,11 +411,12 @@ export abstract class ServerManager extends EventEmitter {
       platformKey,
       variants: variants || [],
       testModelPath,
-      log: this.logManager
-        ? (message, level = 'info') => {
-            this.logManager?.write(message, level).catch(() => void 0);
-          }
-        : undefined,
+      log: (message, level = 'info') => {
+        // Write to log file
+        this.logManager?.write(message, level).catch(() => void 0);
+        // Emit event for UI
+        this.emit('binary-log', { message, level });
+      },
     });
 
     // Download and install binary

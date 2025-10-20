@@ -224,3 +224,60 @@
   color: #8e8e93;
   margin-right: 8px;
 }
+
+/* Binary Setup Logs */
+.binary-logs {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: var(--spacing-md);
+  background-color: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.binary-log-entry {
+  padding: var(--spacing-xs) var(--spacing-sm);
+  margin-bottom: var(--spacing-xs);
+  border-radius: 3px;
+  display: flex;
+  gap: var(--spacing-sm);
+}
+
+.binary-log-level {
+  font-weight: 600;
+  min-width: 60px;
+  flex-shrink: 0;
+}
+
+.binary-log-message {
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+/* Level-specific styling */
+.binary-log-info {
+  background-color: rgba(33, 150, 243, 0.1);
+}
+
+.binary-log-info .binary-log-level {
+  color: var(--status-blue);
+}
+
+.binary-log-warn {
+  background-color: rgba(255, 193, 7, 0.1);
+}
+
+.binary-log-warn .binary-log-level {
+  color: var(--status-yellow);
+}
+
+.binary-log-error {
+  background-color: rgba(244, 67, 54, 0.1);
+}
+
+.binary-log-error .binary-log-level {
+  color: var(--status-red);
+}

@@ -143,6 +143,12 @@ export interface LogEntry {
   timestamp: string;
 }
 
+// Binary Download/Testing Log Event
+export interface BinaryLogEvent {
+  message: string;
+  level: 'info' | 'warn' | 'error';
+}
+
 // ========================================
 // Phase 2: Image Generation Types
 // ========================================
