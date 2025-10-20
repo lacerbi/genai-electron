@@ -20,49 +20,73 @@ export function setupDownloadProgressForwarding(): void {
 
 /**
  * Forward server events to renderer
+ *
+ * Note: Gets the window dynamically on each event emission to avoid
+ * timing issues where this function is called before window creation.
  */
 export function setupServerEventForwarding(): void {
-  const mainWindow = BrowserWindow.getAllWindows()[0];
-  if (!mainWindow) return;
-
   // LLM server events
   llamaServer.on('started', () => {
-    mainWindow.webContents.send('server:started');
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('server:started');
+    }
   });
 
   llamaServer.on('stopped', () => {
-    mainWindow.webContents.send('server:stopped');
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('server:stopped');
+    }
   });
 
   llamaServer.on('crashed', (error: Error) => {
-    mainWindow.webContents.send('server:crashed', {
-      message: error.message,
-      stack: error.stack,
-    });
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('server:crashed', {
+        message: error.message,
+        stack: error.stack,
+      });
+    }
   });
 
   llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
-    mainWindow.webContents.send('server:binary-log', data);
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('server:binary-log', data);
+    }
   });
 
   // Diffusion server events
   diffusionServer.on('started', () => {
-    mainWindow.webContents.send('diffusion:started');
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('diffusion:started');
+    }
   });
 
   diffusionServer.on('stopped', () => {
-    mainWindow.webContents.send('diffusion:stopped');
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('diffusion:stopped');
+    }
   });
 
   diffusionServer.on('crashed', (error: Error) => {
-    mainWindow.webContents.send('diffusion:crashed', {
-      message: error.message,
-      stack: error.stack,
-    });
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('diffusion:crashed', {
+        message: error.message,
+        stack: error.stack,
+      });
+    }
   });
 
   diffusionServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
-    mainWindow.webContents.send('diffusion:binary-log', data);
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('diffusion:binary-log', data);
+    }
   });
 }
 
