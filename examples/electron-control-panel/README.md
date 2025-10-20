@@ -14,6 +14,7 @@ This Electron application showcases genai-electron's Phase 1 & 2 capabilities: s
   - CPU, RAM, GPU, VRAM detection
   - Status indicators and recommendations
   - Model compatibility checking
+  - Auto-refreshes every 5 seconds and on server start/stop events
 
 - **Model Management Tab** - Download and manage models
   - List installed models with metadata (both LLM and Diffusion)
@@ -46,7 +47,9 @@ This Electron application showcases genai-electron's Phase 1 & 2 capabilities: s
 
 - **Resource Monitor Tab** (Phase 2) - Real-time resource tracking
   - System memory usage (total, used, available) with progress bar
+    - Polls every 2 seconds for real-time updates
   - GPU/VRAM usage (conditional, when GPU available)
+    - Updates on server start/stop events
   - Server status grid (LLM + Diffusion servers side-by-side)
   - Resource orchestration status:
     - Offload detection (warns if VRAM constrained)

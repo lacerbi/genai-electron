@@ -183,6 +183,9 @@ export class LlamaServerManager extends ServerManager {
 
       await this.logManager!.write('Server is running and healthy', 'info');
 
+      // Clear system info cache so subsequent memory checks use fresh data
+      this.systemInfo.clearCache();
+
       // Emit started event
       this.emitEvent('started', this.getInfo());
 
@@ -226,6 +229,9 @@ export class LlamaServerManager extends ServerManager {
       if (this.logManager) {
         await this.logManager.write('Server stopped', 'info');
       }
+
+      // Clear system info cache so subsequent memory checks use fresh data
+      this.systemInfo.clearCache();
 
       // Emit stopped event
       this.emitEvent('stopped');

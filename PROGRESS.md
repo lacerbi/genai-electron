@@ -1,6 +1,6 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Phase 2 Complete + Performance Optimization (2025-10-20)
+> **Current Status**: Phase 2 Complete + Performance & Stability Optimization (2025-10-20)
 
 ---
 
@@ -10,14 +10,16 @@
 - **Tests:** ✅ 238/238 passing (100% pass rate - all tests passing!)
 - **Jest:** ✅ Clean exit with no warnings
 - **Branch:** `feat/phase2-app` (Phase 2 example app + binary validation caching)
-- **Last Updated:** 2025-10-20 (Binary validation caching implemented)
+- **Last Updated:** 2025-10-20 (Memory cache staleness fix + binary validation caching)
 
 **Test Suite Breakdown:**
 - Phase 1 Tests: 130 tests (errors, utils, core managers) - ✅ All passing
 - Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator) - ✅ All passing
 - Infrastructure: 58 tests (BinaryManager + health-check + validation cache) - ✅ All passing
 
-**Recent Optimization:** Implemented binary validation caching for 4-20x faster server startup
+**Recent Optimizations:**
+- Binary validation caching (4-20x faster server startup)
+- Memory cache staleness fix (eliminates false "Insufficient RAM" errors)
 
 ---
 
@@ -458,6 +460,112 @@ await llamaServer.start({
 
 ---
 
+## Issue 8: Memory Cache Staleness Bug ✅
+
+**Status:** Resolved (2025-10-20)
+
+### Problem Identified
+
+**User Report:** "I loaded a 6GB LLM in memory (and it works fine) and neither the 'System Info' nor the 'Resource monitor' are updated... more critically it looks like that indeed the internal memory monitoring is not updated as I tried to load the diffusion model and I get 'Error: Insufficient RAM: model requires 3.1GB, but only 2.4GB available'."
+
+**Root Cause Analysis:**
+
+1. **Stale Memory Cache in Model Validation** (`SystemInfo.canRunModel()`):
+   - Used `detect()` which caches results for 60 seconds
+   - After loading 6GB LLM, memory was consumed but cache still showed old (higher) available memory
+   - When loading diffusion model, used stale data and falsely reported insufficient RAM
+
+2. **Stale Memory in Configuration** (`SystemInfo.getOptimalConfig()`):
+   - Same issue - used cached `detect()` for memory calculations
+   - Recommended incorrect context sizes based on outdated memory availability
+
+3. **UI Never Updated** (System Info tab):
+   - Only fetched once on mount
+   - No polling or event listeners
+   - Manual "Refresh" button worked but was still subject to 60-second cache
+
+4. **UI Partially Updated** (Resource Monitor tab):
+   - System RAM polled every 2 seconds (correct)
+   - GPU/VRAM data from cached `detect()` (stale)
+
+### Solution Implemented
+
+**Core Library Fixes:**
+
+1. **Fixed `SystemInfo.canRunModel()`** (`src/system/SystemInfo.ts`):
+   - Replaced `capabilities.memory.available` with real-time `this.getMemoryInfo().available`
+   - Keeps GPU checks from cached capabilities (GPU specs don't change)
+   - Result: Accurate RAM checks even immediately after loading models
+
+2. **Fixed `SystemInfo.getOptimalConfig()`** (`src/system/SystemInfo.ts`):
+   - Uses fresh `getMemoryInfo()` instead of cached memory data for context size calculation
+   - Keeps static hardware info (CPU/GPU) from cache
+   - Result: Accurate configuration recommendations
+
+3. **Added Strategic Cache Invalidation**:
+   - `LlamaServerManager.start()`: Clears cache after successful server start
+   - `LlamaServerManager.stop()`: Clears cache after server stop
+   - `DiffusionServerManager.start()`: Clears cache after successful server start
+   - `DiffusionServerManager.stop()`: Clears cache after server stop
+   - Result: Subsequent operations always use fresh memory data
+
+**UI Enhancements:**
+
+4. **Enhanced `useSystemInfo` hook** (System Info tab):
+   - Added auto-polling every 5 seconds
+   - Added event listeners for server start/stop events (triggers immediate refresh)
+   - Result: System Info tab updates automatically without manual refresh
+
+5. **Enhanced `useResourceMonitor` hook** (Resource Monitor tab):
+   - Added event listeners to refresh GPU capabilities on server events
+   - Result: GPU/VRAM data updates when servers start/stop
+
+**Test Updates:**
+
+6. **Fixed Test Mocks**:
+   - Added `clearCache: jest.fn()` to SystemInfo mocks in 3 test files:
+     - `tests/unit/LlamaServerManager.test.ts`
+     - `tests/unit/DiffusionServerManager.test.ts`
+     - `tests/unit/ResourceOrchestrator.test.ts`
+
+### Implementation Details
+
+**Files Modified (Library - 3):**
+- `src/system/SystemInfo.ts` - Real-time memory in `canRunModel()` and `getOptimalConfig()`
+- `src/managers/LlamaServerManager.ts` - Cache clearing after start/stop
+- `src/managers/DiffusionServerManager.ts` - Cache clearing after start/stop
+
+**Files Modified (Example App - 3):**
+- `examples/.../hooks/useSystemInfo.ts` - Auto-polling and event listeners
+- `examples/.../hooks/useResourceMonitor.ts` - Event-driven capability refresh
+- (Plus 3 test files updated)
+
+**Test Status:**
+- ✅ All 238 tests passing (100% pass rate)
+- ✅ TypeScript compiles with 0 errors
+- ✅ No regressions
+
+### Impact
+
+**Before Fix:**
+- ❌ False "Insufficient RAM" errors when loading models sequentially
+- ❌ System Info showed stale memory data (up to 60 seconds old)
+- ❌ Resource Monitor showed stale GPU data
+- ❌ ResourceOrchestrator made decisions on outdated information
+
+**After Fix:**
+- ✅ Models can be loaded sequentially without false RAM errors
+- ✅ System Info auto-updates every 5s + on server events
+- ✅ Resource Monitor shows real-time memory and event-driven GPU updates
+- ✅ ResourceOrchestrator makes accurate offload decisions
+
+**User Experience:**
+- Can now load LLM, then load diffusion model without errors
+- UI reflects memory changes automatically
+- No manual refresh required
+
+---
+
 ## Key Achievements
 
 ### Test Infrastructure
@@ -500,6 +608,7 @@ await llamaServer.start({
 - ✅ Added architecture support for multi-file binary variants (main executable + runtime dependencies)
 - ✅ Added CUDA GPU detection before attempting CUDA variant downloads
 - ✅ **Implemented binary validation caching** (4-20x faster server startup)
+- ✅ **Fixed memory cache staleness bug** (Issue 8 - eliminates false "Insufficient RAM" errors)
 - 🔄 Testing resource orchestration with real workloads
 - 🔄 Verification of model management across both types
 - 🔄 Cross-platform testing (Windows, macOS, Linux)

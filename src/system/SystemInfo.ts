@@ -135,13 +135,16 @@ export class SystemInfo {
     const capabilities = await this.detect();
     const requiredMemory = modelInfo.size * 1.2; // 20% overhead
 
-    // Check if model fits in RAM
-    const fitsInRAM = capabilities.memory.available >= requiredMemory;
+    // Get fresh memory info (not cached) for accurate availability check
+    const currentMemory = this.getMemoryInfo();
+
+    // Check if model fits in RAM using real-time memory data
+    const fitsInRAM = currentMemory.available >= requiredMemory;
 
     if (!fitsInRAM) {
       return {
         possible: false,
-        reason: `Insufficient RAM: model requires ${(requiredMemory / 1024 ** 3).toFixed(1)}GB, but only ${(capabilities.memory.available / 1024 ** 3).toFixed(1)}GB available`,
+        reason: `Insufficient RAM: model requires ${(requiredMemory / 1024 ** 3).toFixed(1)}GB, but only ${(currentMemory.available / 1024 ** 3).toFixed(1)}GB available`,
         suggestion:
           'Try closing other applications or using a smaller quantization (Q4_K_M instead of Q8_0)',
       };
@@ -174,9 +177,12 @@ export class SystemInfo {
   public async getOptimalConfig(modelInfo: ModelInfo): Promise<Partial<ServerConfig>> {
     const capabilities = await this.detect();
 
+    // Get fresh memory info (not cached) for accurate context size calculation
+    const currentMemory = this.getMemoryInfo();
+
     const config: Partial<ServerConfig> = {
       threads: getRecommendedThreads(capabilities.cpu.cores),
-      contextSize: this.recommendContextSize(capabilities.memory.available, modelInfo.size),
+      contextSize: this.recommendContextSize(currentMemory.available, modelInfo.size),
       parallelRequests: this.recommendParallelRequests(capabilities.cpu.cores),
     };
 

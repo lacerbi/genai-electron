@@ -10,6 +10,7 @@ import type { ServerConfig, ImageGenerationConfig } from '../../src/types/index.
 const mockSystemInfo = {
   detect: jest.fn(),
   getMemoryInfo: jest.fn(),
+  clearCache: jest.fn(),
 };
 
 jest.unstable_mockModule('../../src/system/SystemInfo.js', () => ({

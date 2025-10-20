@@ -159,6 +159,10 @@ export class DiffusionServerManager extends ServerManager {
       this.setStatus('running');
 
       await this.logManager!.write('Diffusion server is running', 'info');
+
+      // Clear system info cache so subsequent memory checks use fresh data
+      this.systemInfo.clearCache();
+
       this.emitEvent('started', this.getInfo());
 
       return this.getInfo() as DiffusionServerInfo;
@@ -211,6 +215,9 @@ export class DiffusionServerManager extends ServerManager {
       if (this.logManager) {
         await this.logManager.write('Diffusion server stopped', 'info');
       }
+
+      // Clear system info cache so subsequent memory checks use fresh data
+      this.systemInfo.clearCache();
 
       this.emitEvent('stopped');
     } catch (error) {

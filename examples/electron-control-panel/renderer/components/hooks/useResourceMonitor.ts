@@ -10,7 +10,7 @@ export function useResourceMonitor() {
   const [capabilities, setCapabilities] = useState<SystemCapabilities | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Fetch GPU capabilities once on mount
+  // Fetch GPU capabilities on mount and refresh on server events
   useEffect(() => {
     const fetchCapabilities = async () => {
       try {
@@ -22,6 +22,27 @@ export function useResourceMonitor() {
     };
 
     fetchCapabilities();
+
+    // Also listen to server events to refresh capabilities (cache cleared on server start/stop)
+    if (window.api && window.api.on) {
+      const handleServerEvent = () => {
+        fetchCapabilities(); // Refresh after server events (memory/GPU may have changed)
+      };
+
+      window.api.on('server:started', handleServerEvent);
+      window.api.on('server:stopped', handleServerEvent);
+      window.api.on('diffusion:started', handleServerEvent);
+      window.api.on('diffusion:stopped', handleServerEvent);
+
+      return () => {
+        if (window.api && window.api.off) {
+          window.api.off('server:started', handleServerEvent);
+          window.api.off('server:stopped', handleServerEvent);
+          window.api.off('diffusion:started', handleServerEvent);
+          window.api.off('diffusion:stopped', handleServerEvent);
+        }
+      };
+    }
   }, []);
 
   const fetchUsage = useCallback(async () => {

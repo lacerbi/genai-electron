@@ -74,6 +74,10 @@ console.log('GPU Layers:', capabilities.recommendations.gpuLayers);
 
 **Caching**: Results are cached for 60 seconds. Subsequent calls within this window return cached data without re-detecting hardware.
 
+**Automatic Cache Clearing**: The cache is automatically cleared when servers start or stop (via `LlamaServerManager` and `DiffusionServerManager`). This ensures that subsequent memory checks reflect the actual available RAM after models are loaded or unloaded.
+
+**Memory Checks Use Real-Time Data**: The `canRunModel()` and `getOptimalConfig()` methods use real-time `getMemoryInfo()` for memory availability checks, ensuring accurate resource validation even when the capabilities cache is active. Static hardware info (CPU cores, GPU specs) is taken from the cache.
+
 ---
 
 #### `getMemoryInfo(): MemoryInfo`
