@@ -497,6 +497,13 @@ app.whenReady().then(setupAI).catch(console.error);
 - **Image generation**: HTTP wrapper created by genai-electron that spawns stable-diffusion.cpp
 - **Resource management**: ResourceOrchestrator automatically offloads LLM when resources are constrained
 - **Automatic reasoning**: Reasoning-capable models get `--jinja --reasoning-format deepseek` flags automatically
+- **Binary management**: Automatic variant selection with real GPU functionality testing
+  - Downloads appropriate binary on first `start()` call (~50-100MB)
+  - Tests variants in priority order: CUDA → Vulkan → CPU
+  - Runs real GPU inference test (1 token for LLM, 64x64 image for diffusion)
+  - Detects CUDA errors and automatically falls back to Vulkan
+  - Caches working variant for fast subsequent starts
+  - Zero configuration required - works automatically
 
 ## Platform Support
 
@@ -528,7 +535,8 @@ app.whenReady().then(setupAI).catch(console.error);
 - ✅ Automatic LLM offload/reload on resource constraints
 - ✅ Progress tracking for image generation
 - ✅ Binary management with variant testing
-- ✅ Comprehensive testing (50 tests passing)
+- ✅ Real CUDA functionality testing (detects broken GPU before caching)
+- ✅ Comprehensive testing (231 tests passing, 100% pass rate)
 
 ### Phase 3: Production Core (Next)
 - 🔄 Resume interrupted downloads

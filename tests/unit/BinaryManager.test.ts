@@ -647,4 +647,167 @@ describe('BinaryManager', () => {
       expect(mockCleanupExtraction).toHaveBeenCalled();
     });
   });
+
+  describe('real functionality testing', () => {
+    it('should run real functionality test when testModelPath is provided', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // Mock exec to succeed for real test
+      mockExecFileAsync.mockResolvedValue({ stdout: 'test output', stderr: '' });
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await managerWithModel.ensureBinary();
+
+      // Should call execFileAsync with model path and GPU testing args
+      expect(mockExecFileAsync).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.arrayContaining(['-m', testModelPath, '-ngl', '1']),
+        expect.objectContaining({ timeout: 30000 })
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Running real functionality test with model...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Real functionality test passed (GPU inference successful)',
+        'info'
+      );
+    });
+
+    it('should detect CUDA errors in real functionality test', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // Mock exec to return CUDA error for first variant, success for second
+      mockExecFileAsync
+        .mockResolvedValueOnce({
+          stdout: '',
+          stderr: 'CUDA error: out of memory',
+        })
+        .mockResolvedValue({
+          stdout: 'success',
+          stderr: '',
+        });
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant, cpuVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await managerWithModel.ensureBinary();
+
+      // Should detect CUDA error and try next variant
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Real functionality test detected GPU error'),
+        'warn'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Real functionality test failed (GPU inference error), variant will be skipped',
+        'warn'
+      );
+      // Should have tried CPU variant as fallback
+      expect(mockDownload).toHaveBeenCalledTimes(2);
+    });
+
+    it('should fall back to basic test when no testModelPath provided', async () => {
+      // No testModelPath provided
+      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+
+      const managerWithoutModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      await managerWithoutModel.ensureBinary();
+
+      // Should use basic --version test (not real functionality test)
+      expect(mockExecFileAsync).toHaveBeenCalledWith(
+        expect.anything(),
+        ['--version'],
+        expect.objectContaining({ timeout: 5000 })
+      );
+      expect(mockLogger).not.toHaveBeenCalledWith(
+        'Running real functionality test with model...',
+        'info'
+      );
+    });
+
+    it('should run diffusion test with correct args when testModelPath provided', async () => {
+      const testModelPath = '/mock/models/test-diffusion.safetensors';
+
+      // Mock exec to succeed
+      mockExecFileAsync.mockResolvedValue({ stdout: '', stderr: '' });
+
+      const diffusionManager = new BinaryManager({
+        type: 'diffusion',
+        binaryName: 'sd',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await diffusionManager.ensureBinary();
+
+      // Should call sd with tiny image generation args
+      expect(mockExecFileAsync).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.arrayContaining([
+          '-m',
+          testModelPath,
+          '-p',
+          'test',
+          '--width',
+          '64',
+          '--height',
+          '64',
+          '--steps',
+          '1',
+        ]),
+        expect.objectContaining({ timeout: 30000 })
+      );
+    });
+
+    it('should treat timeout as test failure', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // Mock exec to timeout for first variant, succeed for second
+      mockExecFileAsync
+        .mockRejectedValueOnce(new Error('Timeout'))
+        .mockResolvedValue({ stdout: 'success', stderr: '' });
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant, cpuVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await managerWithModel.ensureBinary();
+
+      // Should log timeout as failure and try next variant
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Real functionality test failed'),
+        'warn'
+      );
+      // Should have tried CPU variant
+      expect(mockDownload).toHaveBeenCalledTimes(2);
+    });
+  });
 });

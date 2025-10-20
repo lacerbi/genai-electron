@@ -122,8 +122,8 @@ export class LlamaServerManager extends ServerManager {
         );
       }
 
-      // 3. Ensure binary is downloaded
-      this.binaryPath = await this.ensureBinary();
+      // 3. Ensure binary is downloaded (pass model path for real functionality testing)
+      this.binaryPath = await this.ensureBinary(modelInfo.path);
 
       // 4. Check if port is in use
       await this.checkPortAvailability(config.port);
@@ -283,12 +283,13 @@ export class LlamaServerManager extends ServerManager {
    *
    * For updating to new llama.cpp releases, see docs/dev/UPDATING-BINARIES.md
    *
+   * @param modelPath - Optional model path for real functionality testing
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails for all variants
    * @private
    */
-  private async ensureBinary(): Promise<string> {
-    return this.ensureBinaryHelper('llama', 'llama-server', BINARY_VERSIONS.llamaServer);
+  private async ensureBinary(modelPath?: string): Promise<string> {
+    return this.ensureBinaryHelper('llama', 'llama-server', BINARY_VERSIONS.llamaServer, modelPath);
   }
 
   /**

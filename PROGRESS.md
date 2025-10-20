@@ -7,15 +7,15 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors (library + example app)
-- **Tests:** ✅ 226/226 passing (100% pass rate - library only)
+- **Tests:** ✅ 231/231 passing (100% pass rate - library only)
 - **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `feat/phase2-app` (Phase 2 example app implementation + CUDA runtime dependencies)
-- **Last Updated:** 2025-10-19 (Issue 5 resolved - CUDA runtime dependencies)
+- **Branch:** `feat/phase2-app` (Phase 2 example app + CUDA dependencies + real functionality testing)
+- **Last Updated:** 2025-10-19 (Real CUDA functionality testing implemented)
 
 **Test Suite Breakdown:**
 - Phase 1 Tests: 130 tests (errors, utils, core managers)
 - Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator)
-- Infrastructure: 46 tests (BinaryManager + CUDA dependency support, health-check)
+- Infrastructure: 51 tests (BinaryManager + CUDA dependencies + real functionality testing, health-check)
 
 ---
 
@@ -232,6 +232,31 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
   - Dependencies verified with SHA256 checksums before extraction
   - Clean fallback chain: CUDA (with deps) → Vulkan → CPU
   - Future-proof for other dependencies (ROCm, Vulkan layers, etc.)
+
+**Real CUDA Functionality Testing** ✅ **IMPLEMENTED**
+- **Problem:** Issue 5 solved dependency downloads, but basic `--version`/`--help` test didn't catch broken CUDA
+  - CUDA binaries could load without runtime DLLs but fail during actual GPU inference
+  - System would cache broken CUDA variant as "working", never trying Vulkan fallback
+  - Users experienced: Binary test passes → CUDA selected → inference hangs/crashes
+- **Solution Implemented (2025-10-19):**
+  - ✅ Added optional real functionality testing during variant selection
+  - ✅ When model available: runs actual GPU inference test (1 token for LLM, 64x64 image for diffusion)
+  - ✅ Tests force GPU usage (`-ngl 1` for LLM, GPU layers for diffusion)
+  - ✅ Detects CUDA errors in output ("CUDA error", "failed to allocate", "out of memory", etc.)
+  - ✅ Automatic fallback to Vulkan if CUDA test fails (logs warning, tries next variant)
+  - ✅ Falls back to basic test if no model available (backward compatible)
+  - ✅ Added 5 new tests for real functionality testing (231/231 passing)
+- **Behavior:**
+  - First call to `start()` downloads binary and runs real test (2-10 seconds)
+  - Working variant cached for fast subsequent starts
+  - Broken CUDA automatically skipped, Vulkan selected instead
+  - Zero API changes - completely automatic
+- **Testing Coverage:**
+  - ✅ Real test success path
+  - ✅ CUDA error detection and fallback
+  - ✅ Timeout handling (prevents hanging)
+  - ✅ Diffusion-specific test args
+  - ✅ Backward compatibility (no model = basic test)
 
 ### Manual Testing Results (2025-10-19)
 

@@ -389,6 +389,7 @@ export abstract class ServerManager extends EventEmitter {
    * @param type - Binary type ('llama' or 'diffusion')
    * @param binaryName - Name of the binary (e.g., 'llama-server')
    * @param binaryConfig - Binary configuration from BINARY_VERSIONS
+   * @param testModelPath - Optional path to model for real functionality testing
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails for all variants
    * @protected
@@ -396,7 +397,8 @@ export abstract class ServerManager extends EventEmitter {
   protected async ensureBinaryHelper(
     type: 'llama' | 'diffusion',
     binaryName: string,
-    binaryConfig: any
+    binaryConfig: any,
+    testModelPath?: string
   ): Promise<string> {
     const platformKey = getPlatformKey();
     const variants = binaryConfig.variants[platformKey];
@@ -407,6 +409,7 @@ export abstract class ServerManager extends EventEmitter {
       binaryName,
       platformKey,
       variants: variants || [],
+      testModelPath,
       log: this.logManager
         ? (message, level = 'info') => {
             this.logManager?.write(message, level).catch(() => void 0);

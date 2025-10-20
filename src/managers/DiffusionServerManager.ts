@@ -138,8 +138,8 @@ export class DiffusionServerManager extends ServerManager {
         );
       }
 
-      // 3. Ensure binary is downloaded
-      this.binaryPath = await this.ensureBinary();
+      // 3. Ensure binary is downloaded (pass model path for real functionality testing)
+      this.binaryPath = await this.ensureBinary(modelInfo.path);
 
       // 4. Check if port is in use
       const port = config.port || DEFAULT_PORTS.diffusion;
@@ -276,12 +276,13 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Ensure stable-diffusion.cpp binary is downloaded
    *
+   * @param modelPath - Optional model path for real functionality testing
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails
    * @private
    */
-  private async ensureBinary(): Promise<string> {
-    return this.ensureBinaryHelper('diffusion', 'sd', BINARY_VERSIONS.diffusionCpp);
+  private async ensureBinary(modelPath?: string): Promise<string> {
+    return this.ensureBinaryHelper('diffusion', 'sd', BINARY_VERSIONS.diffusionCpp, modelPath);
   }
 
   /**

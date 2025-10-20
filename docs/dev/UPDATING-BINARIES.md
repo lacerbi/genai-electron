@@ -405,6 +405,68 @@ When updating to a new release that requires dependencies:
 ]
 ```
 
+## Real Functionality Testing
+
+The library automatically performs real GPU functionality testing during variant selection to catch broken CUDA/GPU acceleration before caching a variant as "working".
+
+### How It Works
+
+**When a model is available:**
+1. BinaryManager downloads variant (e.g., CUDA)
+2. Downloads dependencies if needed (CUDA runtime DLLs)
+3. Runs **real inference test** instead of just `--version`:
+   - **LLM**: Generates 1 token with GPU layers forced (`-ngl 1`)
+   - **Diffusion**: Generates 64x64 image with 1 step
+4. Parses output for GPU errors:
+   - "CUDA error"
+   - "failed to allocate"
+   - "out of memory"
+   - "Vulkan error"
+   - etc.
+5. If test fails: Logs warning, tries next variant
+6. If test succeeds: Caches variant for fast subsequent starts
+
+**When no model is available:**
+- Falls back to basic `--version`/`--help` test
+- Less reliable but ensures binary at least loads
+
+### Why This Matters
+
+**Problem Solved:**
+- CUDA binaries can pass `--version` test even with missing/broken runtime DLLs
+- Binary gets cached as "working" but fails during actual inference
+- System never tries Vulkan fallback
+
+**With Real Functionality Testing:**
+- Detects broken CUDA during first `start()` call
+- Automatically falls back to Vulkan if CUDA is broken
+- Prevents caching non-functional variants
+
+### Testing Manually
+
+If you need to manually test a binary variant with real functionality:
+
+**For llama-server:**
+```bash
+cd /path/to/binaries
+./llama-server -m /path/to/model.gguf -p "Hi" -n 1 --ctx-size 512 -ngl 1
+# Check stderr for "CUDA error" or other GPU errors
+```
+
+**For stable-diffusion.cpp:**
+```bash
+cd /path/to/binaries
+./sd -m /path/to/model.safetensors -p "test" -o test.png --width 64 --height 64 --steps 1
+# Check stderr for "CUDA error" or "Vulkan error"
+```
+
+### Implementation Details
+
+- **Location**: `src/managers/BinaryManager.ts` - `runRealFunctionalityTest()` method
+- **Timeout**: 30 seconds (prevents hanging on broken binaries)
+- **Error Patterns**: See `errorPatterns` array in `runRealFunctionalityTest()`
+- **Automatic**: No configuration needed, happens transparently during `start()`
+
 ## Related Files
 
 - **Binary configuration**: `src/config/defaults.ts`

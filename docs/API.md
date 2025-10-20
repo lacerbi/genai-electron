@@ -486,9 +486,23 @@ await llamaServer.start({
 - `ServerError` - Server failed to start
 - `PortInUseError` - Port already in use
 - `InsufficientResourcesError` - Not enough RAM/VRAM
-- `BinaryError` - Binary download or execution failed
+- `BinaryError` - Binary download or execution failed (all variants failed)
 
-**Note**: First run will download llama-server binary (~50-100MB) for your platform.
+**Binary Download and Variant Testing**:
+
+On first call to `start()`, the library automatically:
+1. **Downloads** appropriate binary if not present (~50-100MB)
+2. **Tests variants** in priority order: CUDA → Vulkan → CPU
+3. **Runs real functionality test**:
+   - Generates 1 token with GPU layers enabled (`-ngl 1`)
+   - Verifies CUDA actually works (not just that binary loads)
+   - Parses output for GPU errors ("CUDA error", "failed to allocate", etc.)
+4. **Falls back automatically** if test fails:
+   - Example: Broken CUDA → tries Vulkan → CPU
+   - Logs warnings but continues with working variant
+5. **Caches working variant** for fast subsequent starts
+
+**Note**: Real functionality testing only runs if model is downloaded. If model doesn't exist yet, falls back to basic `--version` test. This means optimal variant selection happens automatically when you call `start()` with a valid model.
 
 ---
 
@@ -797,9 +811,23 @@ console.log('Diffusion server started with custom settings');
 - `ServerError` - Server failed to start
 - `PortInUseError` - Port already in use
 - `InsufficientResourcesError` - Not enough RAM/VRAM
-- `BinaryError` - Binary download or execution failed
+- `BinaryError` - Binary download or execution failed (all variants failed)
 
-**Note**: First run will download stable-diffusion.cpp binary (~50-100MB) for your platform.
+**Binary Download and Variant Testing**:
+
+On first call to `start()`, the library automatically:
+1. **Downloads** appropriate binary if not present (~50-100MB)
+2. **Tests variants** in priority order: CUDA → Vulkan → CPU
+3. **Runs real functionality test**:
+   - Generates tiny 64x64 image with 1 diffusion step
+   - Verifies CUDA/GPU acceleration actually works
+   - Parses output for GPU errors ("CUDA error", "Vulkan error", etc.)
+4. **Falls back automatically** if test fails:
+   - Example: Broken CUDA → tries Vulkan → CPU
+   - Logs warnings but continues with working variant
+5. **Caches working variant** for fast subsequent starts
+
+**Note**: Real functionality testing only runs if model is downloaded. If model doesn't exist yet, falls back to basic `--help` test. This means optimal variant selection happens automatically when you call `start()` with a valid model.
 
 ---
 
