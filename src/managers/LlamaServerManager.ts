@@ -101,7 +101,6 @@ export class LlamaServerManager extends ServerManager {
     }
 
     this.setStatus('starting');
-    this._config = config;
 
     try {
       // 1. Validate model exists
@@ -131,16 +130,19 @@ export class LlamaServerManager extends ServerManager {
       // 5. Auto-configure if needed
       const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo);
 
-      // 6. Initialize log manager
+      // 6. Save final configuration (AFTER auto-configuration)
+      this._config = finalConfig;
+
+      // 7. Initialize log manager
       await this.initializeLogManager(
         'llama-server.log',
         `Starting llama-server on port ${finalConfig.port}`
       );
 
-      // 7. Build command-line arguments
+      // 8. Build command-line arguments
       const args = this.buildCommandLineArgs(finalConfig, modelInfo);
 
-      // 8. Verify binary exists before spawning
+      // 9. Verify binary exists before spawning
       if (!this.binaryPath) {
         throw new ServerError('Binary path is not set', {
           suggestion: 'This is an internal error - binary should have been downloaded',
@@ -159,7 +161,7 @@ export class LlamaServerManager extends ServerManager {
         'info'
       );
 
-      // 9. Spawn the process
+      // 10. Spawn the process
       const { pid } = this.processManager.spawn(this.binaryPath, args, {
         onStdout: (data) => this.handleStdout(data),
         onStderr: (data) => this.handleStderr(data),
