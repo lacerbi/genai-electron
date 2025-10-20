@@ -692,8 +692,8 @@ describe('BinaryManager', () => {
       // Should call execFileAsync for llama-run with GPU testing args
       expect(mockExecFileAsync).toHaveBeenCalledWith(
         expect.stringContaining('llama-run'),
-        expect.arrayContaining(['-ngl', '1', '-n', '1', testModelPath, 'Hi']),
-        expect.objectContaining({ timeout: 30000 })
+        expect.arrayContaining(['-ngl', '1', testModelPath, 'What is 2+2? Just answer with the number.']),
+        expect.objectContaining({ timeout: 15000 })
       );
     });
 
@@ -933,7 +933,7 @@ describe('BinaryManager', () => {
           '--steps',
           '1',
         ]),
-        expect.objectContaining({ timeout: 30000 })
+        expect.objectContaining({ timeout: 15000 })
       );
     });
 

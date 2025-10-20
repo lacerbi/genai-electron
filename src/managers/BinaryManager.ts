@@ -430,17 +430,16 @@ export class BinaryManager {
           return false;
         }
 
-        // Test llama-run with minimal 1-token generation
+        // Test llama-run with simple math question
         // -ngl 1 forces at least 1 GPU layer (tests CUDA/GPU)
+        // Note: -n is an alias for -ngl (GPU layers), not token count
         testArgs = [
           '-ngl',
-          '1', // Force GPU usage
-          '-n',
-          '1', // Only generate 1 token
+          '1', // Force GPU usage (1+ GPU layers)
           modelPath,
-          'Hi', // Prompt
+          'What is 2+2? Just answer with the number.', // Deterministic prompt
         ];
-        timeout = 30000; // 30 seconds should be enough for 1 token
+        timeout = 15000; // 15 seconds for simple math
       } else {
         // For diffusion, use sd directly (it's already one-shot)
         testBinaryPath = binaryPath;
@@ -461,7 +460,7 @@ export class BinaryManager {
           '--steps',
           '1',
         ];
-        timeout = 30000; // 30 seconds for tiny image
+        timeout = 15000; // 15 seconds for tiny image
       }
 
       // Run the test
@@ -499,6 +498,41 @@ export class BinaryManager {
     } catch (error) {
       // Test failed - could be timeout, crash, or other issue
       const errorMsg = error instanceof Error ? error.message : String(error);
+
+      // Extract stdout/stderr from error (child_process includes partial output even on failure)
+      const stdout = (error as any).stdout || '';
+      const stderr = (error as any).stderr || '';
+
+      // Log partial output for debugging visibility
+      if (stdout || stderr) {
+        this.log(
+          `Phase 2 output before failure:\nstdout: ${stdout.slice(0, 500)}\nstderr: ${stderr.slice(0, 500)}`,
+          'warn'
+        );
+      }
+
+      // Still check for GPU errors in partial output
+      const output = `${stdout} ${stderr}`.toLowerCase();
+      const errorPatterns = [
+        'cuda error',
+        'cuda_error',
+        'failed to allocate',
+        'vkcreatedevice failed',
+        'vulkan error',
+        'gpu error',
+        'out of memory',
+        'llama_model_load: error',
+        'failed to load model',
+        'error: invalid argument',
+      ];
+
+      for (const pattern of errorPatterns) {
+        if (output.includes(pattern)) {
+          this.log(`Phase 2: ✗ GPU error detected in output: ${pattern}`, 'warn');
+          return false;
+        }
+      }
+
       this.log(`Phase 2: ✗ Real functionality test failed: ${errorMsg}`, 'warn');
       return false;
     }
