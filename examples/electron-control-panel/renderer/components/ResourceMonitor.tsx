@@ -4,6 +4,7 @@ import StatusIndicator from './common/StatusIndicator';
 import ProgressBar from './common/ProgressBar';
 import ActionButton from './common/ActionButton';
 import { useResourceMonitor } from './hooks/useResourceMonitor';
+import { DebugPanel } from './DebugPanel';
 import './ResourceMonitor.css';
 
 const ResourceMonitor: React.FC = () => {
@@ -226,6 +227,9 @@ const ResourceMonitor: React.FC = () => {
           </div>
         )}
       </Card>
+
+      {/* Debug Tools */}
+      <DebugPanel />
     </div>
   );
 };

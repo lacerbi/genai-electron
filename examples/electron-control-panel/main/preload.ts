@@ -60,6 +60,14 @@ contextBridge.exposeInMainWorld('api', {
     getUsage: () => ipcRenderer.invoke('resources:getUsage'),
   },
 
+  // Debug APIs
+  debug: {
+    getLLMConfig: () => ipcRenderer.invoke('debug:llmConfig'),
+    getSystemCapabilities: () => ipcRenderer.invoke('debug:systemCapabilities'),
+    getOptimalConfig: (modelId: string) => ipcRenderer.invoke('debug:optimalConfig', modelId),
+    getResourceEstimates: () => ipcRenderer.invoke('debug:resourceEstimates'),
+  },
+
   // Event listeners
   on: (channel: string, callback: (...args: unknown[]) => void) => {
     const validChannels = [
@@ -136,6 +144,12 @@ export type WindowAPI = {
     getSavedState: () => Promise<unknown>;
     clearSavedState: () => Promise<void>;
     getUsage: () => Promise<unknown>;
+  };
+  debug: {
+    getLLMConfig: () => Promise<unknown>;
+    getSystemCapabilities: () => Promise<unknown>;
+    getOptimalConfig: (modelId: string) => Promise<unknown>;
+    getResourceEstimates: () => Promise<unknown>;
   };
   on: (channel: string, callback: (...args: unknown[]) => void) => void;
   off: (channel: string) => void;
