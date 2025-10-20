@@ -23,10 +23,7 @@ import { detectGPU } from '../system/gpu-detect.js';
 import AdmZip from 'adm-zip';
 import path from 'path';
 import { promises as fs } from 'fs';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-
-const execFileAsync = promisify(execFile);
+import { spawn } from 'child_process';
 
 /**
  * Configuration for binary download and management
@@ -362,6 +359,78 @@ export class BinaryManager {
   }
 
   /**
+   * Execute a process with proper stdio handling and timeout
+   *
+   * Uses spawn instead of execFile to ensure stdio configuration is properly applied.
+   * Promisified execFile doesn't support custom stdio options, causing hangs.
+   *
+   * @param command - Command to execute
+   * @param args - Command arguments
+   * @param timeoutMs - Timeout in milliseconds
+   * @returns Promise resolving to stdout and stderr
+   * @private
+   */
+  private spawnWithTimeout(
+    command: string,
+    args: string[],
+    timeoutMs: number
+  ): Promise<{ stdout: string; stderr: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, {
+        stdio: ['ignore', 'pipe', 'pipe'], // stdin ignored, stdout/stderr piped
+      });
+
+      let stdout = '';
+      let stderr = '';
+      let timedOut = false;
+
+      // Timeout handler
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGTERM');
+        reject(new Error(`Process timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+
+      // Collect stdout
+      child.stdout?.on('data', (data: Buffer) => {
+        stdout += data.toString('utf8');
+      });
+
+      // Collect stderr
+      child.stderr?.on('data', (data: Buffer) => {
+        stderr += data.toString('utf8');
+      });
+
+      // Handle process exit
+      child.on('exit', (code, signal) => {
+        clearTimeout(timer);
+        if (timedOut) return; // Already rejected
+
+        if (code === 0) {
+          resolve({ stdout, stderr });
+        } else {
+          const error: any = new Error(
+            `Process exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`
+          );
+          error.code = code;
+          error.signal = signal;
+          error.stdout = stdout;
+          error.stderr = stderr;
+          reject(error);
+        }
+      });
+
+      // Handle spawn errors (e.g., ENOENT)
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        if (!timedOut) {
+          reject(error);
+        }
+      });
+    });
+  }
+
+  /**
    * Run Phase 1: Basic validation test
    *
    * Tests that the primary server binary executes correctly.
@@ -381,7 +450,7 @@ export class BinaryManager {
       // Use different test flags based on binary type
       const testArgs = type === 'llama' ? ['--version'] : ['--help'];
 
-      await execFileAsync(binaryPath, testArgs, { timeout: 5000 });
+      await this.spawnWithTimeout(binaryPath, testArgs, 5000);
 
       this.log(`Phase 1: ✓ Binary validation passed (${testArgs[0]})`, 'info');
       return true;
@@ -463,17 +532,8 @@ export class BinaryManager {
         timeout = 15000; // 15 seconds for tiny image
       }
 
-      // Run the test
-      const { stdout, stderr } = await execFileAsync(testBinaryPath, testArgs, {
-        timeout,
-        encoding: 'utf-8',
-        maxBuffer: 10 * 1024 * 1024, // 10MB buffer to capture all output
-        // CRITICAL: Explicitly configure stdio to prevent hanging
-        // 'ignore' = close stdin immediately (process doesn't wait for input)
-        // 'pipe' = capture stdout/stderr for error detection
-        // Type cast needed because stdio is valid for execFile but not in promisified type definition
-        stdio: ['ignore', 'pipe', 'pipe'],
-      } as any);
+      // Run the test using spawn (properly supports stdio configuration)
+      const { stdout, stderr } = await this.spawnWithTimeout(testBinaryPath, testArgs, timeout);
 
       // Check for GPU/CUDA error messages in output
       const output = `${stdout} ${stderr}`.toLowerCase();
