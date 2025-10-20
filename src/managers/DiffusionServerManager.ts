@@ -265,9 +265,14 @@ export class DiffusionServerManager extends ServerManager {
 
     // Use orchestrator if available (automatic resource management)
     // Otherwise use direct execution (legacy behavior)
+    console.log('[DiffusionServer] generateImage called');
+    console.log('[DiffusionServer] orchestrator exists:', !!this.orchestrator);
+
     if (this.orchestrator) {
+      console.log('[DiffusionServer] Using orchestrator for automatic resource management');
       return this.orchestrator.orchestrateImageGeneration(config);
     } else {
+      console.log('[DiffusionServer] No orchestrator - using direct execution');
       return this.executeImageGeneration(config);
     }
   }
