@@ -717,6 +717,16 @@ llamaServer.on('crashed', (error: Error) => {
 });
 ```
 
+#### `'binary-log'`
+
+Emitted during binary download and variant testing.
+
+```typescript
+llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
+  console.log(`[${data.level.toUpperCase()}] ${data.message}`);
+});
+```
+
 **Example (Complete Event Handling)**:
 ```typescript
 llamaServer.on('started', () => {
@@ -1065,6 +1075,16 @@ Emitted when server crashes unexpectedly.
 ```typescript
 diffusionServer.on('crashed', (error: Error) => {
   console.error('Diffusion server crashed:', error.message);
+});
+```
+
+#### `'binary-log'`
+
+Emitted during binary download and variant testing.
+
+```typescript
+diffusionServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
+  console.log(`[${data.level.toUpperCase()}] ${data.message}`);
 });
 ```
 

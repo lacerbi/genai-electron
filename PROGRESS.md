@@ -258,6 +258,22 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
   - ✅ Diffusion-specific test args
   - ✅ Backward compatibility (no model = basic test)
 
+**Issue 6: Binary Variant Testing Visibility** ✅ **RESOLVED**
+- **Problem:** Binary variant testing (CUDA → Vulkan → CPU) happened silently with no UI feedback
+  - Users couldn't see which variants were being tried
+  - No visibility into download progress or test failures
+  - Difficult to debug why specific variants (e.g., CUDA) were failing
+- **Solution Implemented (2025-10-20):**
+  - ✅ Added `'binary-log'` event to ServerManager (emits during download/test)
+  - ✅ Added BinaryLogEvent type with message and level (info/warn/error)
+  - ✅ Binary Setup Status card in both LLM and Diffusion Server tabs
+  - ✅ Color-coded log display with auto-hide when server starts
+  - ✅ Fixed event forwarding timing bug (window capture issue)
+- **Result:**
+  - Real-time visibility into variant selection process
+  - Shows download progress, test results, and failure reasons
+  - Users can see exactly which variant was selected and why
+
 ### Manual Testing Results (2025-10-19)
 
 **Diffusion Server Testing:**
