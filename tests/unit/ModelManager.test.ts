@@ -96,6 +96,11 @@ jest.unstable_mockModule('../../src/utils/gguf-parser.js', () => ({
       'llama.context_length': 4096,
       'llama.attention.head_count': 32,
       'llama.embedding_length': 4096,
+      'llama.feed_forward_length': 11008,
+      'llama.vocab_size': 32000,
+      'llama.rope.dimension_count': 128,
+      'llama.rope.freq_base': 10000,
+      'llama.attention.layer_norm_rms_epsilon': 1e-5,
     },
     tensorInfos: [],
   }),
@@ -111,13 +116,21 @@ jest.unstable_mockModule('../../src/utils/gguf-parser.js', () => ({
       'llama.context_length': 4096,
       'llama.attention.head_count': 32,
       'llama.embedding_length': 4096,
+      'llama.feed_forward_length': 11008,
+      'llama.vocab_size': 32000,
+      'llama.rope.dimension_count': 128,
+      'llama.rope.freq_base': 10000,
+      'llama.attention.layer_norm_rms_epsilon': 1e-5,
     },
     tensorInfos: [],
   }),
-  extractLayerCount: () => 32,
-  extractContextLength: () => 4096,
-  extractAttentionHeadCount: () => 32,
-  extractEmbeddingLength: () => 4096,
+  getArchField: (metadata: Record<string, unknown>, fieldPath: string) => {
+    const arch = metadata['general.architecture'];
+    if (arch && typeof arch === 'string') {
+      return metadata[`${arch}.${fieldPath}`];
+    }
+    return undefined;
+  },
 }));
 
 // Mock model metadata helpers - use plain functions for ESM compatibility
