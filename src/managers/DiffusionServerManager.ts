@@ -688,6 +688,13 @@ export class DiffusionServerManager extends ServerManager {
       } else if (this.currentStage === 'diffusion') {
         this.diffusionProgress = { current, total };
         this.reportProgress(config);
+      } else if (this.currentStage === undefined) {
+        // If stage not set yet but we're seeing progress bars, assume it's loading
+        // This handles the case where progress bars arrive before stage detection
+        this.currentStage = 'loading';
+        this.loadStartTime = Date.now();
+        this.loadProgress = { current, total };
+        this.reportProgress(config);
       }
     }
   }
