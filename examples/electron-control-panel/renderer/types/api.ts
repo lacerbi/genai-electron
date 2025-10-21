@@ -203,6 +203,11 @@ export interface ImageGenerationResult {
   height: number;
 }
 
+export interface ImageGenerationProgress {
+  currentStep: number;
+  totalSteps: number;
+}
+
 export interface DiffusionServerInfo {
   status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
   health: 'unknown' | 'healthy' | 'unhealthy';

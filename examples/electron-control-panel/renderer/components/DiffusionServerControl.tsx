@@ -5,7 +5,12 @@ import ActionButton from './common/ActionButton';
 import Spinner from './common/Spinner';
 import { useDiffusionServer } from './hooks/useDiffusionServer';
 import { useModels } from './hooks/useModels';
-import type { ImageGenerationResult, ImageSampler, BinaryLogEvent } from '../types/api';
+import type {
+  ImageGenerationResult,
+  ImageGenerationProgress,
+  ImageSampler,
+  BinaryLogEvent,
+} from '../types/api';
 import './DiffusionServerControl.css';
 
 const DiffusionServerControl: React.FC = () => {
@@ -41,6 +46,10 @@ const DiffusionServerControl: React.FC = () => {
   // Binary setup logs (during server startup)
   const [binaryLogs, setBinaryLogs] = useState<Array<BinaryLogEvent & { timestamp: Date }>>([]);
 
+  // Image generation progress
+  const [generationProgress, setGenerationProgress] =
+    useState<ImageGenerationProgress | null>(null);
+
   // Set first model as default when models load
   useEffect(() => {
     if (models.length > 0 && !selectedModel) {
@@ -58,6 +67,19 @@ const DiffusionServerControl: React.FC = () => {
 
     return () => {
       window.api.off('diffusion:binary-log');
+    };
+  }, []);
+
+  // Listen for image generation progress events
+  useEffect(() => {
+    const handleProgress = (data: ImageGenerationProgress) => {
+      setGenerationProgress(data);
+    };
+
+    window.api.on('diffusion:progress', handleProgress);
+
+    return () => {
+      window.api.off('diffusion:progress');
     };
   }, []);
 
@@ -142,6 +164,7 @@ const DiffusionServerControl: React.FC = () => {
     setGenerating(true);
     setGenerateError('');
     setGeneratedImage(null);
+    setGenerationProgress(null); // Reset progress
 
     try {
       const result = await window.api.diffusion.generateImage({
@@ -159,6 +182,7 @@ const DiffusionServerControl: React.FC = () => {
       setGenerateError((err as Error).message);
     } finally {
       setGenerating(false);
+      setGenerationProgress(null); // Clear progress when done
     }
   };
 
@@ -505,7 +529,9 @@ const DiffusionServerControl: React.FC = () => {
               {generating ? (
                 <>
                   <Spinner size="small" />
-                  Generating...
+                  {generationProgress
+                    ? `Generating... Step ${generationProgress.currentStep}/${generationProgress.totalSteps} (${Math.round((generationProgress.currentStep / generationProgress.totalSteps) * 100)}%)`
+                    : 'Generating...'}
                 </>
               ) : (
                 'Generate Image'

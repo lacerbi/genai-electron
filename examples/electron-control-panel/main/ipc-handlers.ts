@@ -11,7 +11,7 @@ import {
   sendDownloadError,
   sendImageProgress,
 } from './genai-api.js';
-import { LogManager } from 'genai-electron';
+import { LogManager, MetadataFetchStrategy } from 'genai-electron';
 import { LLMService } from 'genai-lite';
 
 /**
@@ -117,7 +117,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(
     'models:updateMetadata',
-    async (_event, modelId: string, options?: { source?: string }) => {
+    async (_event, modelId: string, options?: { source?: MetadataFetchStrategy }) => {
       try {
         return await modelManager.updateModelMetadata(modelId, options);
       } catch (error) {
