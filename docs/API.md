@@ -1692,9 +1692,9 @@ Complete metadata extracted from GGUF model files.
 ```typescript
 interface GGUFMetadata {
   version?: number;              // GGUF format version
-  tensor_count?: bigint;         // Number of tensors
-  kv_count?: bigint;             // Number of metadata key-value pairs
-  architecture?: string;         // Model architecture
+  tensor_count?: number;         // Number of tensors (converted from BigInt for JSON serialization)
+  kv_count?: number;             // Number of metadata key-value pairs (converted from BigInt)
+  architecture?: string;         // Model architecture (e.g., "llama", "gemma3", "qwen3")
   general_name?: string;         // Model name from GGUF
   file_type?: number;            // Quantization type
   block_count?: number;          // Number of layers (ACTUAL, not estimated!)
@@ -1736,12 +1736,18 @@ if (model.ggufMetadata) {
 
 **Architecture Support:**
 
-Different model architectures have different metadata fields:
-- **llama**: `llama.block_count`, `llama.context_length`, `llama.attention.head_count`
-- **mamba**: `mamba.block_count`, `mamba.context_length`
-- **gpt2**: `gpt2.block_count`, `gpt2.context_length`
+The library uses generic architecture field extraction with `getArchField()`, supporting ANY model architecture dynamically:
+- **Llama family**: llama, llama2, llama3
+- **Gemma family**: gemma, gemma2, gemma3
+- **Qwen family**: qwen, qwen2, qwen3
+- **Other**: mistral, phi, mamba, gpt2, gpt-neox, falcon, and any future architectures
 
-The library automatically extracts the correct fields based on the architecture.
+Different architectures have their metadata in architecture-prefixed fields:
+- **llama**: `llama.block_count`, `llama.context_length`, `llama.attention.head_count`
+- **gemma3**: `gemma3.block_count`, `gemma3.context_length`, `gemma3.attention.head_count`
+- **qwen3**: `qwen3.block_count`, `qwen3.context_length`, `qwen3.attention.head_count`
+
+The library automatically extracts the correct fields using the `general.architecture` value.
 
 ### ServerStatus
 
@@ -2119,6 +2125,82 @@ if (response.object === 'chat.completion') {
   console.log('Answer:', response.choices[0].message.content);
   console.log('Reasoning:', response.choices[0].reasoning); // Model's thinking process
 }
+```
+
+### GGUF Metadata Extraction
+
+**Generic Architecture Support**
+
+The GGUF parser uses a generic helper function that works with ANY model architecture dynamically.
+
+```typescript
+import { getArchField } from 'genai-electron';
+
+// Get metadata-specific field for any architecture
+const metadata = {
+  'general.architecture': 'gemma3',
+  'gemma3.block_count': 48,
+  'gemma3.context_length': 131072
+};
+
+const blockCount = getArchField(metadata, 'block_count');
+console.log('Block count:', blockCount); // 48
+
+const contextLen = getArchField(metadata, 'context_length');
+console.log('Context length:', contextLen); // 131072
+```
+
+**How it works:**
+- Reads `general.architecture` from metadata (e.g., "gemma3", "qwen3", "llama")
+- Dynamically constructs field path: `${architecture}.${fieldPath}`
+- Returns the value or `undefined` if not found
+
+**Supported architectures:**
+- **Llama family**: llama, llama2, llama3
+- **Gemma family**: gemma, gemma2, gemma3
+- **Qwen family**: qwen, qwen2, qwen3
+- **Other**: mistral, phi, mamba, gpt2, gpt-neox, falcon, and more
+- **Future-proof**: Any new architecture works automatically!
+
+**Extracted fields:**
+```typescript
+getArchField(metadata, 'block_count')                        // Layer count
+getArchField(metadata, 'context_length')                     // Context window
+getArchField(metadata, 'attention.head_count')               // Attention heads
+getArchField(metadata, 'embedding_length')                   // Embedding dim
+getArchField(metadata, 'feed_forward_length')                // FF layer size
+getArchField(metadata, 'vocab_size')                         // Vocabulary size
+getArchField(metadata, 'rope.dimension_count')               // RoPE dimensions
+getArchField(metadata, 'rope.freq_base')                     // RoPE frequency base
+getArchField(metadata, 'attention.layer_norm_rms_epsilon')   // RMS epsilon
+```
+
+**Example with different architectures:**
+
+```typescript
+// Gemma3 model
+const gemma = {
+  'general.architecture': 'gemma3',
+  'gemma3.block_count': 48,
+  'gemma3.context_length': 131072
+};
+console.log(getArchField(gemma, 'block_count')); // 48
+
+// Qwen3 model
+const qwen = {
+  'general.architecture': 'qwen3',
+  'qwen3.block_count': 64,
+  'qwen3.context_length': 32768
+};
+console.log(getArchField(qwen, 'block_count')); // 64
+
+// Llama model
+const llama = {
+  'general.architecture': 'llama',
+  'llama.block_count': 32,
+  'llama.context_length': 4096
+};
+console.log(getArchField(llama, 'block_count')); // 32
 ```
 
 ---

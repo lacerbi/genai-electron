@@ -23,6 +23,12 @@ This Electron application showcases genai-electron's Phase 1 & 2 capabilities: s
   - Real-time download progress
   - Delete models with confirmation
   - Disk usage statistics
+  - **📊 GGUF Metadata Viewer** - Complete model information modal
+    - Auto-fetches metadata for models without GGUF data
+    - Essential fields: Architecture, Layer Count, Context Length, File Type
+    - Advanced fields (collapsible): All technical metadata fields
+    - Raw JSON viewer with smart truncation (handles 50k+ item arrays!)
+    - Refresh Metadata and Copy to Clipboard buttons
 
 - **LLM Server Tab** - llama-server lifecycle management
   - Start/stop/restart server with visual status
