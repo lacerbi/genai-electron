@@ -14,7 +14,9 @@ const GGUFInfoModal: React.FC<GGUFInfoModalProps> = ({ model, isOpen, onClose, o
   const [error, setError] = useState<string | null>(null);
   const [metadata, setMetadata] = useState<GGUFMetadata | undefined>(model.ggufMetadata);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showRawJson, setShowRawJson] = useState(false);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [copyRawSuccess, setCopyRawSuccess] = useState(false);
 
   // Auto-fetch metadata if missing when modal opens
   useEffect(() => {
@@ -55,6 +57,21 @@ const GGUFInfoModal: React.FC<GGUFInfoModalProps> = ({ model, isOpen, onClose, o
       },
       () => {
         setError('Failed to copy to clipboard');
+      }
+    );
+  };
+
+  const handleCopyRawJson = () => {
+    if (!metadata?.raw) return;
+
+    const jsonString = JSON.stringify(metadata.raw, null, 2);
+    navigator.clipboard.writeText(jsonString).then(
+      () => {
+        setCopyRawSuccess(true);
+        setTimeout(() => setCopyRawSuccess(false), 2000);
+      },
+      () => {
+        setError('Failed to copy raw JSON to clipboard');
       }
     );
   };
@@ -177,6 +194,36 @@ const GGUFInfoModal: React.FC<GGUFInfoModalProps> = ({ model, isOpen, onClose, o
                       <label>Attention RMS Epsilon:</label>
                       <span>{formatValue(metadata.attention_layer_norm_rms_epsilon)}</span>
                     </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Raw JSON Section (Collapsible) */}
+              <div className="gguf-section">
+                <button
+                  className="gguf-toggle-advanced"
+                  onClick={() => setShowRawJson(!showRawJson)}
+                >
+                  {showRawJson ? '▼' : '▶'} Raw JSON
+                </button>
+
+                {showRawJson && (
+                  <div className="gguf-raw-json">
+                    {metadata.raw ? (
+                      <>
+                        <pre className="gguf-json-display">
+                          <code>{JSON.stringify(metadata.raw, null, 2)}</code>
+                        </pre>
+                        <button
+                          className="gguf-copy-raw-btn"
+                          onClick={handleCopyRawJson}
+                        >
+                          {copyRawSuccess ? '✓ Copied!' : '📋 Copy Raw JSON'}
+                        </button>
+                      </>
+                    ) : (
+                      <p className="gguf-no-raw">No raw metadata available</p>
+                    )}
                   </div>
                 )}
               </div>

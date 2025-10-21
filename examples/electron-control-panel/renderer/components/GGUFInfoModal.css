@@ -316,6 +316,54 @@
   background-color: var(--bg-tertiary);
 }
 
+/* Raw JSON Section */
+.gguf-raw-json {
+  animation: expandDown 0.3s ease-out;
+}
+
+.gguf-json-display {
+  background-color: #1a1a1a;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: var(--spacing-md);
+  margin: var(--spacing-md) 0;
+  max-height: 400px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d4d4d4;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.gguf-json-display code {
+  font-family: inherit;
+  color: inherit;
+}
+
+.gguf-copy-raw-btn {
+  padding: var(--spacing-sm) var(--spacing-md);
+  background-color: var(--accent-blue);
+  color: white;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+  margin-bottom: var(--spacing-md);
+}
+
+.gguf-copy-raw-btn:hover {
+  background-color: var(--accent-blue-hover);
+}
+
+.gguf-no-raw {
+  color: var(--text-secondary);
+  font-style: italic;
+  padding: var(--spacing-md);
+}
+
 /* Responsive adjustments */
 @media (max-width: 600px) {
   .gguf-modal-container {
