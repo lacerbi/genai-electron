@@ -82,13 +82,13 @@ jest.unstable_mockModule('../../src/config/reasoning-models.js', () => ({
   detectReasoningSupport: jest.fn().mockReturnValue(false),
 }));
 
-// Mock GGUF parser
+// Mock GGUF parser - use plain async functions for ESM compatibility
 jest.unstable_mockModule('../../src/utils/gguf-parser.js', () => ({
-  fetchGGUFMetadata: jest.fn().mockResolvedValue({
+  fetchGGUFMetadata: async () => ({
     metadata: {
       'version': 3,
-      'tensor_count': 291,
-      'kv_count': 19,
+      'tensor_count': 291n, // BigInt - matches real GGUF format
+      'kv_count': 19n,      // BigInt - matches real GGUF format
       'general.architecture': 'llama',
       'general.name': 'Test Model',
       'general.file_type': 10,
@@ -99,11 +99,11 @@ jest.unstable_mockModule('../../src/utils/gguf-parser.js', () => ({
     },
     tensorInfos: [],
   }),
-  fetchLocalGGUFMetadata: jest.fn().mockResolvedValue({
+  fetchLocalGGUFMetadata: async () => ({
     metadata: {
       'version': 3,
-      'tensor_count': 291,
-      'kv_count': 19,
+      'tensor_count': 291n, // BigInt - matches real GGUF format
+      'kv_count': 19n,      // BigInt - matches real GGUF format
       'general.architecture': 'llama',
       'general.name': 'Test Model',
       'general.file_type': 10,
@@ -114,21 +114,21 @@ jest.unstable_mockModule('../../src/utils/gguf-parser.js', () => ({
     },
     tensorInfos: [],
   }),
-  extractLayerCount: jest.fn().mockReturnValue(32),
-  extractContextLength: jest.fn().mockReturnValue(4096),
-  extractAttentionHeadCount: jest.fn().mockReturnValue(32),
-  extractEmbeddingLength: jest.fn().mockReturnValue(4096),
+  extractLayerCount: () => 32,
+  extractContextLength: () => 4096,
+  extractAttentionHeadCount: () => 32,
+  extractEmbeddingLength: () => 4096,
 }));
 
-// Mock model metadata helpers
+// Mock model metadata helpers - use plain functions for ESM compatibility
 jest.unstable_mockModule('../../src/utils/model-metadata-helpers.js', () => ({
-  getLayerCountWithFallback: jest.fn().mockReturnValue(32),
-  getContextLengthWithFallback: jest.fn().mockReturnValue(4096),
-  getArchitectureWithFallback: jest.fn().mockReturnValue('llama'),
-  getAttentionHeadCountWithFallback: jest.fn().mockReturnValue(32),
-  getEmbeddingLengthWithFallback: jest.fn().mockReturnValue(4096),
-  hasGGUFMetadata: jest.fn().mockReturnValue(true),
-  getMetadataCompleteness: jest.fn().mockReturnValue(100),
+  getLayerCountWithFallback: () => 32,
+  getContextLengthWithFallback: () => 4096,
+  getArchitectureWithFallback: () => 'llama',
+  getAttentionHeadCountWithFallback: () => 32,
+  getEmbeddingLengthWithFallback: () => 4096,
+  hasGGUFMetadata: () => true,
+  getMetadataCompleteness: () => 100,
 }));
 
 // Import after mocking
