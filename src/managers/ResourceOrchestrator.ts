@@ -234,7 +234,9 @@ export class ResourceOrchestrator {
     try {
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
       const gpuLayers = config.gpuLayers || 0;
-      const totalLayers = 32; // Rough estimate for typical LLM
+
+      // Get actual layer count from GGUF metadata (or fallback to estimation)
+      const totalLayers = await this.modelManager.getModelLayerCount(config.modelId);
 
       console.log('[Orchestrator] LLM model:', config.modelId);
       console.log('[Orchestrator] LLM model size:', modelInfo.size / (1024 ** 3), 'GB');

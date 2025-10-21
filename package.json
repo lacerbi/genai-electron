@@ -66,6 +66,7 @@
     "LICENSE"
   ],
   "dependencies": {
+    "@huggingface/gguf": "^0.3.2",
     "adm-zip": "^0.5.16"
   }
 }

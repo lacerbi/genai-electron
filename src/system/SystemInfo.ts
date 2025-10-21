@@ -14,6 +14,10 @@ import { getMemoryInfo, estimateVRAM } from './memory-detect.js';
 import { detectGPU, calculateGPULayers } from './gpu-detect.js';
 import { getPlatform } from '../utils/platform-utils.js';
 import { RECOMMENDED_QUANTIZATIONS } from '../config/defaults.js';
+import {
+  getLayerCountWithFallback,
+  getContextLengthWithFallback,
+} from '../utils/model-metadata-helpers.js';
 
 /**
  * System information singleton
@@ -197,18 +201,24 @@ export class SystemInfo {
     // Get fresh memory info (not cached) for accurate context size calculation
     const currentMemory = this.getMemoryInfo();
 
+    // Use GGUF context length if available, otherwise fall back to recommendation
+    const contextLength = getContextLengthWithFallback(modelInfo);
+    const contextSize = Math.min(
+      contextLength,
+      this.recommendContextSize(currentMemory.available, modelInfo.size)
+    );
+
     const config: Partial<ServerConfig> = {
       threads: getRecommendedThreads(capabilities.cpu.cores),
-      contextSize: this.recommendContextSize(currentMemory.available, modelInfo.size),
+      contextSize,
       parallelRequests: this.recommendParallelRequests(capabilities.cpu.cores),
     };
 
     // Add GPU layers if GPU is available
     if (capabilities.gpu.available && capabilities.gpu.vram) {
-      // Estimate total layers (rough approximation based on model size)
-      // 7B models: ~32 layers, 13B: ~40 layers, 70B: ~80 layers
-      const estimatedLayers = Math.round(modelInfo.size / (150 * 1024 ** 2));
-      config.gpuLayers = calculateGPULayers(estimatedLayers, capabilities.gpu.vram, modelInfo.size);
+      // Use actual layer count from GGUF metadata (or fallback to estimation)
+      const actualLayers = getLayerCountWithFallback(modelInfo);
+      config.gpuLayers = calculateGPULayers(actualLayers, capabilities.gpu.vram, modelInfo.size);
     } else {
       config.gpuLayers = 0; // CPU-only
     }

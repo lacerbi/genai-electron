@@ -4,7 +4,7 @@
  */
 
 import path from 'node:path';
-import type { ModelInfo, ModelType, DownloadConfig } from '../types/index.js';
+import type { ModelInfo, ModelType, DownloadConfig, GGUFMetadata } from '../types/index.js';
 import { ModelNotFoundError, DownloadError } from '../errors/index.js';
 import { storageManager } from './StorageManager.js';
 import { Downloader } from '../download/Downloader.js';
@@ -12,6 +12,19 @@ import { getHuggingFaceURL } from '../download/huggingface.js';
 import { calculateSHA256, formatChecksum } from '../download/checksum.js';
 import { fileExists, getFileSize, sanitizeFilename } from '../utils/file-utils.js';
 import { detectReasoningSupport } from '../config/reasoning-models.js';
+import {
+  fetchGGUFMetadata,
+  fetchLocalGGUFMetadata,
+  extractLayerCount,
+  extractContextLength,
+  extractAttentionHeadCount,
+  extractEmbeddingLength,
+} from '../utils/gguf-parser.js';
+import {
+  getLayerCountWithFallback,
+  getContextLengthWithFallback,
+  getArchitectureWithFallback,
+} from '../utils/model-metadata-helpers.js';
 
 /**
  * Model manager for downloading and managing AI models
@@ -153,6 +166,41 @@ export class ModelManager {
       });
     }
 
+    // Fetch GGUF metadata before downloading
+    // This validates the file is a valid GGUF and extracts model information
+    let ggufMetadata: GGUFMetadata | undefined;
+    try {
+      const parsedGGUF = await fetchGGUFMetadata(downloadURL);
+
+      // Extract and store key metadata fields
+      ggufMetadata = {
+        version: parsedGGUF.metadata['version'] as number | undefined,
+        tensor_count: parsedGGUF.metadata['tensor_count'] as bigint | undefined,
+        kv_count: parsedGGUF.metadata['kv_count'] as bigint | undefined,
+        architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
+        general_name: parsedGGUF.metadata['general.name'] as string | undefined,
+        file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
+        block_count: extractLayerCount(parsedGGUF.metadata),
+        context_length: extractContextLength(parsedGGUF.metadata),
+        attention_head_count: extractAttentionHeadCount(parsedGGUF.metadata),
+        embedding_length: extractEmbeddingLength(parsedGGUF.metadata),
+        // Store complete raw metadata (JSON-serializable)
+        raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
+      };
+    } catch (error) {
+      // Per user requirement: fail download if metadata fetch fails
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new DownloadError(
+        `Failed to fetch GGUF metadata before download: ${errorMessage}`,
+        {
+          url: downloadURL,
+          originalError: error,
+          suggestion:
+            'Verify the URL points to a valid GGUF file. Check network connectivity if the error persists.',
+        }
+      );
+    }
+
     // Download the model
     await this.downloader.download({
       url: downloadURL,
@@ -203,6 +251,7 @@ export class ModelManager {
       },
       checksum,
       supportsReasoning,
+      ggufMetadata, // Include GGUF metadata
     };
 
     // Save metadata
@@ -332,6 +381,203 @@ export class ModelManager {
       // If URL parsing fails, use a generic filename
       return 'model.gguf';
     }
+  }
+
+  /**
+   * Convert GGUF metadata to JSON-serializable format
+   *
+   * Handles BigInt conversion and filters out non-serializable values
+   */
+  private convertToSerializableMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+    const serializable: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(metadata)) {
+      if (typeof value === 'bigint') {
+        // Convert BigInt to number (safe for values within Number.MAX_SAFE_INTEGER)
+        serializable[key] = Number(value);
+      } else if (Array.isArray(value)) {
+        // Handle arrays (tokenizer tokens, scores, etc.)
+        serializable[key] = value.map((item) => {
+          if (typeof item === 'bigint') {
+            return Number(item);
+          }
+          return item;
+        });
+      } else if (typeof value === 'object' && value !== null) {
+        // Skip complex objects that might not be serializable
+        // We already extract key fields individually
+        continue;
+      } else {
+        serializable[key] = value;
+      }
+    }
+
+    return serializable;
+  }
+
+  /**
+   * Update GGUF metadata for an existing model
+   *
+   * Fetches and stores GGUF metadata for models that were downloaded
+   * before GGUF integration. Does not re-download the model file.
+   *
+   * @param id - Model ID
+   * @returns Updated model information
+   * @throws {ModelNotFoundError} If model doesn't exist
+   * @throws {DownloadError} If metadata fetch fails
+   *
+   * @example
+   * ```typescript
+   * // Update metadata for an existing model
+   * const updatedModel = await modelManager.updateModelMetadata('llama-2-7b');
+   * console.log('Layer count:', updatedModel.ggufMetadata?.block_count);
+   * ```
+   */
+  public async updateModelMetadata(id: string): Promise<ModelInfo> {
+    // Get existing model info
+    const modelInfo = await this.getModelInfo(id);
+
+    // Try fetching from original source URL first (remote)
+    let ggufMetadata: GGUFMetadata | undefined;
+
+    if (modelInfo.source.url) {
+      try {
+        const parsedGGUF = await fetchGGUFMetadata(modelInfo.source.url);
+
+        ggufMetadata = {
+          version: parsedGGUF.metadata['version'] as number | undefined,
+          tensor_count: parsedGGUF.metadata['tensor_count'] as bigint | undefined,
+          kv_count: parsedGGUF.metadata['kv_count'] as bigint | undefined,
+          architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
+          general_name: parsedGGUF.metadata['general.name'] as string | undefined,
+          file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
+          block_count: extractLayerCount(parsedGGUF.metadata),
+          context_length: extractContextLength(parsedGGUF.metadata),
+          attention_head_count: extractAttentionHeadCount(parsedGGUF.metadata),
+          embedding_length: extractEmbeddingLength(parsedGGUF.metadata),
+          raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
+        };
+      } catch (remoteError) {
+        // If remote fetch fails, try local file
+        try {
+          const parsedGGUF = await fetchLocalGGUFMetadata(modelInfo.path);
+
+          ggufMetadata = {
+            version: parsedGGUF.metadata['version'] as number | undefined,
+            tensor_count: parsedGGUF.metadata['tensor_count'] as bigint | undefined,
+            kv_count: parsedGGUF.metadata['kv_count'] as bigint | undefined,
+            architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
+            general_name: parsedGGUF.metadata['general.name'] as string | undefined,
+            file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
+            block_count: extractLayerCount(parsedGGUF.metadata),
+            context_length: extractContextLength(parsedGGUF.metadata),
+            attention_head_count: extractAttentionHeadCount(parsedGGUF.metadata),
+            embedding_length: extractEmbeddingLength(parsedGGUF.metadata),
+            raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
+          };
+        } catch (localError) {
+          // Both remote and local fetch failed
+          const remoteMsg = remoteError instanceof Error ? remoteError.message : String(remoteError);
+          const localMsg = localError instanceof Error ? localError.message : String(localError);
+          throw new DownloadError(
+            `Failed to fetch GGUF metadata from both remote and local sources`,
+            {
+              modelId: id,
+              remoteError: remoteMsg,
+              localError: localMsg,
+            }
+          );
+        }
+      }
+    } else {
+      // No source URL, try local file only
+      const parsedGGUF = await fetchLocalGGUFMetadata(modelInfo.path);
+
+      ggufMetadata = {
+        version: parsedGGUF.metadata['version'] as number | undefined,
+        tensor_count: parsedGGUF.metadata['tensor_count'] as bigint | undefined,
+        kv_count: parsedGGUF.metadata['kv_count'] as bigint | undefined,
+        architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
+        general_name: parsedGGUF.metadata['general.name'] as string | undefined,
+        file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
+        block_count: extractLayerCount(parsedGGUF.metadata),
+        context_length: extractContextLength(parsedGGUF.metadata),
+        attention_head_count: extractAttentionHeadCount(parsedGGUF.metadata),
+        embedding_length: extractEmbeddingLength(parsedGGUF.metadata),
+        raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
+      };
+    }
+
+    // Update model info with new metadata
+    const updatedModelInfo: ModelInfo = {
+      ...modelInfo,
+      ggufMetadata,
+    };
+
+    // Save updated metadata
+    await storageManager.saveModelMetadata(updatedModelInfo);
+
+    return updatedModelInfo;
+  }
+
+  /**
+   * Get layer count for a model
+   *
+   * Uses GGUF metadata if available, falls back to estimation.
+   *
+   * @param id - Model ID
+   * @returns Layer count (actual or estimated)
+   * @throws {ModelNotFoundError} If model doesn't exist
+   *
+   * @example
+   * ```typescript
+   * const layers = await modelManager.getModelLayerCount('llama-2-7b');
+   * console.log(`Model has ${layers} layers`);
+   * ```
+   */
+  public async getModelLayerCount(id: string): Promise<number> {
+    const modelInfo = await this.getModelInfo(id);
+    return getLayerCountWithFallback(modelInfo);
+  }
+
+  /**
+   * Get context length for a model
+   *
+   * Uses GGUF metadata if available, falls back to default.
+   *
+   * @param id - Model ID
+   * @returns Context length (actual or default)
+   * @throws {ModelNotFoundError} If model doesn't exist
+   *
+   * @example
+   * ```typescript
+   * const contextLen = await modelManager.getModelContextLength('llama-2-7b');
+   * console.log(`Context window: ${contextLen} tokens`);
+   * ```
+   */
+  public async getModelContextLength(id: string): Promise<number> {
+    const modelInfo = await this.getModelInfo(id);
+    return getContextLengthWithFallback(modelInfo);
+  }
+
+  /**
+   * Get architecture type for a model
+   *
+   * Uses GGUF metadata if available, falls back to default.
+   *
+   * @param id - Model ID
+   * @returns Architecture type (e.g., 'llama', 'mamba', 'gpt2')
+   * @throws {ModelNotFoundError} If model doesn't exist
+   *
+   * @example
+   * ```typescript
+   * const arch = await modelManager.getModelArchitecture('llama-2-7b');
+   * console.log(`Architecture: ${arch}`);
+   * ```
+   */
+  public async getModelArchitecture(id: string): Promise<string> {
+    const modelInfo = await this.getModelInfo(id);
+    return getArchitectureWithFallback(modelInfo);
   }
 }
 

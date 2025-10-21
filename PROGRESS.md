@@ -7,15 +7,22 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors (library + example app)
-- **Tests:** ✅ 238/238 passing (100% pass rate - all tests passing!)
+- **Tests:** ⚠️ 234/238 passing (98.3% - 4 tests need mock updates for GGUF integration)
 - **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `feat/phase2-app` (Phase 2 example app + orchestration fixes)
-- **Last Updated:** 2025-10-20 (Fixed auto-config not saving to this._config - Issue 11 - ORCHESTRATION NOW WORKS!)
+- **Branch:** `feat/phase2-app` (Phase 2 + GGUF metadata integration)
+- **Last Updated:** 2025-10-21 (GGUF metadata integration - accurate model information!)
 
 **Test Suite Breakdown:**
 - Phase 1 Tests: 130 tests (errors, utils, core managers) - ✅ All passing
 - Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator) - ✅ All passing
 - Infrastructure: 58 tests (BinaryManager + health-check + validation cache) - ✅ All passing
+
+**Recent Features:**
+- **GGUF Integration:** Accurate model metadata extraction (no more guessing layer counts!) 🎯
+  - Pre-download validation using @huggingface/gguf library
+  - Stores complete GGUF metadata (layer count, context length, architecture, etc.)
+  - Automatic fallback for models downloaded before this feature
+  - New ModelManager methods: `updateModelMetadata()`, `getModelLayerCount()`, etc.
 
 **Recent Critical Fixes:**
 - **Issue 11:** Fixed auto-config not saving to this._config (orchestration now works!) ⚡
@@ -993,6 +1000,129 @@ Located in Resource Monitor tab with 4 diagnostic buttons:
 
 ---
 
+## GGUF Metadata Integration ⚡
+
+**Status:** Implementation Complete, Test Fixes In Progress (2025-10-21)
+
+**Overview:**
+Integrated the `@huggingface/gguf` library to extract accurate model metadata from GGUF files **before downloading**. This eliminates guesswork and enables pre-download validation, accurate resource planning, and better auto-configuration.
+
+### Core Features Implemented
+
+**1. GGUF Parser Utility** (`src/utils/gguf-parser.ts`)
+- ✅ `fetchGGUFMetadata(url)` - Remote GGUF metadata extraction (pre-download)
+- ✅ `fetchLocalGGUFMetadata(path)` - Local file metadata extraction
+- ✅ Helper functions for extracting:
+  - Layer count (actual, not estimated!)
+  - Context length
+  - Attention head count
+  - Embedding length
+  - Architecture type
+- ✅ Support for multiple architectures (llama, mamba, gpt2, etc.)
+
+**2. Enhanced Type System** (`src/types/models.ts`)
+- ✅ `GGUFMetadata` interface with 15+ typed fields
+- ✅ Added `ggufMetadata?` to `ModelInfo` interface
+- ✅ Stores complete raw metadata (JSON-serializable)
+- ✅ Backward compatible (optional field)
+
+**3. Metadata Fallback Helpers** (`src/utils/model-metadata-helpers.ts`)
+- ✅ `getLayerCountWithFallback()` - GGUF metadata → estimation
+- ✅ `getContextLengthWithFallback()` - GGUF metadata → defaults
+- ✅ `getArchitectureWithFallback()` - GGUF metadata → 'llama'
+- ✅ `hasGGUFMetadata()` - Check if model has metadata
+- ✅ `getMetadataCompleteness()` - Calculate % of fields present
+- ✅ Ensures backward compatibility with old models
+
+**4. ModelManager Enhancements** (`src/managers/ModelManager.ts`)
+- ✅ **Pre-download metadata fetch** - Validates GGUF before downloading GBs
+- ✅ **Fails fast** if metadata fetch fails (per user requirement)
+- ✅ **Stores metadata** with model automatically
+- ✅ New methods:
+  - `updateModelMetadata(id)` - Update existing models without re-downloading
+  - `getModelLayerCount(id)` - Get actual layer count
+  - `getModelContextLength(id)` - Get actual context length
+  - `getModelArchitecture(id)` - Get architecture type
+- ✅ Converts BigInt to JSON-serializable format
+- ✅ Tries remote URL first, falls back to local file
+
+**5. ResourceOrchestrator Integration** (`src/managers/ResourceOrchestrator.ts`)
+- ✅ Uses **actual layer count** from GGUF metadata
+- ✅ Replaces hardcoded `totalLayers = 32` estimation
+- ✅ More accurate VRAM/RAM calculations
+- ✅ Better offload decisions
+
+**6. SystemInfo Integration** (`src/system/SystemInfo.ts`)
+- ✅ Uses **actual context length** from GGUF metadata
+- ✅ Uses **actual layer count** for GPU layer calculations
+- ✅ More accurate optimal configuration recommendations
+- ✅ Falls back gracefully for models without metadata
+
+### Benefits
+
+- 🎯 **No More Guessing**: Actual layer counts from model files
+- ✅ **Pre-Download Validation**: Know model specs before downloading GBs
+- 🚀 **Better Auto-Configuration**: Use model's actual context length
+- 💾 **Accurate Resource Planning**: Real VRAM/RAM calculations
+- 🔍 **Model Verification**: Confirm architecture matches expected type
+- 🔄 **Future-Proof**: Complete metadata stored for future features
+- 📦 **Minimal Size**: ~500KB-1MB metadata vs 2-20GB models (0.005%-0.05%)
+
+### Implementation Stats
+
+- **New Files:** 3 (gguf-parser.ts, model-metadata-helpers.ts, types updated)
+- **Modified Files:** 3 (ModelManager.ts, ResourceOrchestrator.ts, SystemInfo.ts)
+- **Lines Added:** ~600-800 lines of implementation code
+- **Dependencies:** Added `@huggingface/gguf` v0.3.2
+
+### Testing Status
+
+- ✅ Library builds with 0 TypeScript errors
+- ⚠️ 234/238 tests passing (98.3%)
+- 🔧 4 ModelManager tests need mock updates (in progress)
+  - Tests were written before GGUF integration
+  - Need to mock `fetchGGUFMetadata()` in test setup
+  - Expected fix: Add jest.unstable_mockModule() for GGUF parser
+
+### Migration Path
+
+- ✅ New models automatically get GGUF metadata during download
+- ✅ Old models gracefully fall back to estimation
+- ✅ `updateModelMetadata(id)` allows retroactive metadata extraction
+- ✅ Zero breaking changes to existing APIs
+
+### Example: Before vs After
+
+**Before GGUF Integration:**
+```typescript
+// ResourceOrchestrator.ts
+const totalLayers = 32; // ❌ Rough estimate for typical LLM
+const gpuRatio = Math.min(gpuLayers / totalLayers, 1.0);
+```
+
+**After GGUF Integration:**
+```typescript
+// ResourceOrchestrator.ts
+const totalLayers = await this.modelManager.getModelLayerCount(config.modelId);
+// ✅ Actual layer count: 32 for Llama-2-7B, 80 for Llama-2-70B, etc.
+const gpuRatio = Math.min(gpuLayers / totalLayers, 1.0);
+```
+
+**Impact Example:**
+- Llama-2-7B: 32 layers (was: estimated 32) ✅
+- Llama-2-13B: 40 layers (was: estimated 32) ❌ 25% error
+- Llama-2-70B: 80 layers (was: estimated 32) ❌ 150% error
+
+### Next Steps
+
+1. ✅ Core implementation complete
+2. 🔧 Fix 4 failing ModelManager tests (add GGUF mocks)
+3. 📝 Add comprehensive test coverage for GGUF integration
+4. 📖 Update API documentation (API.md, README.md)
+5. 🎨 Optional: Add UI in electron-control-panel to show GGUF metadata
+
+---
+
 ## Key Achievements
 
 ### Test Infrastructure
@@ -1045,7 +1175,7 @@ Located in Resource Monitor tab with 4 diagnostic buttons:
 - 📋 Create pull request after validation completes
 
 **Future Improvements / Technical Debt**
-- Automatic model introspection: Query llama.cpp for model metadata (layer count, KV cache cost, etc.) instead of estimating
+- ✅ ~~Automatic model introspection~~ → **IMPLEMENTED** as GGUF metadata integration (2025-10-21)
 - Refactor example app features to library: Move reusable functionality from electron-control-panel back into genai-electron core (see ChatGPT conversation for details)
 
 **Phase 3: Production Core** (Planned)

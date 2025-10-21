@@ -20,6 +20,7 @@ export type {
   DownloadConfig,
   DownloadProgress,
   DownloadProgressCallback,
+  GGUFMetadata,
 } from './models.js';
 
 // Server types

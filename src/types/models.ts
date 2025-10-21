@@ -26,6 +26,67 @@ export interface ModelSource {
 }
 
 /**
+ * GGUF metadata extracted from model file
+ *
+ * Contains architecture-specific metadata from GGUF format.
+ * All fields are optional as they depend on the model architecture.
+ */
+export interface GGUFMetadata {
+  /** GGUF version */
+  version?: number;
+
+  /** Number of tensors in the model */
+  tensor_count?: bigint;
+
+  /** Number of key-value metadata pairs */
+  kv_count?: bigint;
+
+  /** Model architecture (e.g., "llama", "mamba", "gpt2") */
+  architecture?: string;
+
+  /** General model name from GGUF */
+  general_name?: string;
+
+  /** File type / quantization type */
+  file_type?: number;
+
+  /** Number of layers/blocks in the model */
+  block_count?: number;
+
+  /** Context length (maximum sequence length) */
+  context_length?: number;
+
+  /** Number of attention heads */
+  attention_head_count?: number;
+
+  /** Embedding dimension length */
+  embedding_length?: number;
+
+  /** Feed-forward length */
+  feed_forward_length?: number;
+
+  /** RMS normalization epsilon */
+  attention_layer_norm_rms_epsilon?: number;
+
+  /** Vocabulary size */
+  vocab_size?: number;
+
+  /** Rope dimension count */
+  rope_dimension_count?: number;
+
+  /** Rope frequency base */
+  rope_freq_base?: number;
+
+  /**
+   * Complete raw metadata from GGUF file
+   *
+   * Contains all metadata key-value pairs including architecture-specific fields,
+   * tokenizer data, and tensor information. Stored as JSON-serializable object.
+   */
+  raw?: Record<string, unknown>;
+}
+
+/**
  * Model metadata and information
  */
 export interface ModelInfo {
@@ -62,6 +123,21 @@ export interface ModelInfo {
    * Automatically detected based on GGUF filename patterns (e.g., qwen3, deepseek-r1).
    */
   supportsReasoning?: boolean;
+
+  /**
+   * GGUF metadata extracted from the model file
+   *
+   * Contains accurate model information including:
+   * - Layer count (block_count)
+   * - Context length
+   * - Architecture type
+   * - Attention heads
+   * - And more...
+   *
+   * Available for models downloaded after GGUF integration.
+   * May be undefined for models downloaded before this feature.
+   */
+  ggufMetadata?: GGUFMetadata;
 }
 
 /**
