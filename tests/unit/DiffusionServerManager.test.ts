@@ -430,10 +430,11 @@ describe('DiffusionServerManager', () => {
       // Wait for spawn to be called (after async log write)
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Simulate progress updates from stdout
-      spawnedProcess.stdout.emit('data', 'step 5/30\n');
-      spawnedProcess.stdout.emit('data', 'step 10/30\n');
-      spawnedProcess.stdout.emit('data', 'step 30/30\n');
+      // Simulate realistic progress updates from stdout
+      spawnedProcess.stdout.emit('data', '[INFO ] stable-diffusion.cpp:2121 - generating image: 1/1 - seed 12345\n');
+      spawnedProcess.stdout.emit('data', '  |====================                              | 5/30 - 2.50it/s\n');
+      spawnedProcess.stdout.emit('data', '  |========================================          | 10/30 - 2.50it/s\n');
+      spawnedProcess.stdout.emit('data', '  |==================================================| 30/30 - 2.50it/s\n');
 
       // Simulate successful completion
       spawnedProcess.emit('exit', 0, null);

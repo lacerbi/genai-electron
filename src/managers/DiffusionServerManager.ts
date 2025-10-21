@@ -76,6 +76,25 @@ export class DiffusionServerManager extends ServerManager {
   };
   private currentModelInfo?: ModelInfo;
 
+  // Time estimates for progress calculation (self-calibrating)
+  private modelLoadTime = 2000; // Fixed cost in ms
+  private diffusionTimePerStepPerMegapixel = 150; // Time per step per megapixel in ms
+  private vaeTimePerMegapixel = 4000; // Time per megapixel in ms
+
+  // Current generation timing and progress tracking
+  private generationStartTime?: number;
+  private loadStartTime?: number;
+  private loadEndTime?: number;
+  private diffusionStartTime?: number;
+  private diffusionEndTime?: number;
+  private vaeStartTime?: number;
+  private vaeEndTime?: number;
+  private syntheticProgressInterval?: NodeJS.Timeout;
+  private currentStage?: 'loading' | 'diffusion' | 'vae';
+  private totalEstimatedTime = 0;
+  private loadProgress = { current: 0, total: 0 };
+  private diffusionProgress = { current: 0, total: 0 };
+
   /**
    * Create a new DiffusionServerManager
    *
@@ -433,6 +452,9 @@ export class DiffusionServerManager extends ServerManager {
       });
     }
 
+    // Initialize progress tracking
+    this.initializeProgressTracking(config);
+
     // Build command-line arguments
     const args = this.buildDiffusionArgs(config, this.currentModelInfo);
 
@@ -449,20 +471,16 @@ export class DiffusionServerManager extends ServerManager {
     const generationPromise = new Promise<ImageGenerationResult>((resolve, reject) => {
       const spawnResult = this.processManager.spawn(this.binaryPath!, args, {
         onStdout: (data) => {
-          // Parse progress from stdout
-          // stable-diffusion.cpp outputs: "step 5/20"
-          const match = data.match(/step (\d+)\/(\d+)/i);
-          if (match && match[1] && match[2] && config.onProgress) {
-            const current = parseInt(match[1], 10);
-            const total = parseInt(match[2], 10);
-            config.onProgress(current, total);
-          }
+          this.processStdoutForProgress(data, config);
           this.logManager?.write(data, 'info').catch(() => void 0);
         },
         onStderr: (data) => {
           this.logManager?.write(data, 'warn').catch(() => void 0);
         },
         onExit: async (code) => {
+          // Clean up synthetic progress interval
+          this.cleanupSyntheticProgress();
+
           if (cancelled) {
             reject(new Error('Image generation cancelled'));
             return;
@@ -477,6 +495,9 @@ export class DiffusionServerManager extends ServerManager {
           try {
             const imageBuffer = await fs.readFile(outputPath);
             await deleteFile(outputPath).catch(() => void 0);
+
+            // Update time estimates based on actual generation times
+            this.updateTimeEstimates(config);
 
             resolve({
               image: imageBuffer,
@@ -495,6 +516,7 @@ export class DiffusionServerManager extends ServerManager {
           }
         },
         onError: (error) => {
+          this.cleanupSyntheticProgress();
           reject(
             new ServerError('Failed to spawn stable-diffusion.cpp', {
               error: error.message,
@@ -510,6 +532,7 @@ export class DiffusionServerManager extends ServerManager {
       promise: generationPromise,
       cancel: () => {
         cancelled = true;
+        this.cleanupSyntheticProgress();
         if (pid !== undefined) {
           this.processManager.kill(pid, 5000).catch(() => void 0);
         }
@@ -590,5 +613,207 @@ export class DiffusionServerManager extends ServerManager {
     }
 
     return args;
+  }
+
+  /**
+   * Initialize progress tracking for a new generation
+   * @private
+   */
+  private initializeProgressTracking(config: ImageGenerationConfig): void {
+    const width = config.width || 512;
+    const height = config.height || 512;
+    const steps = config.steps || 20;
+    const megapixels = (width * height) / 1_000_000;
+
+    // Calculate total estimated time
+    this.totalEstimatedTime =
+      this.modelLoadTime +
+      steps * megapixels * this.diffusionTimePerStepPerMegapixel +
+      megapixels * this.vaeTimePerMegapixel;
+
+    // Reset tracking variables
+    this.generationStartTime = Date.now();
+    this.currentStage = undefined;
+    this.loadStartTime = undefined;
+    this.loadEndTime = undefined;
+    this.diffusionStartTime = undefined;
+    this.diffusionEndTime = undefined;
+    this.vaeStartTime = undefined;
+    this.vaeEndTime = undefined;
+    this.loadProgress = { current: 0, total: 0 };
+    this.diffusionProgress = { current: 0, total: 0 };
+  }
+
+  /**
+   * Process stdout data for progress tracking
+   * @private
+   */
+  private processStdoutForProgress(data: string, config: ImageGenerationConfig): void {
+    // Detect stage transitions
+    if (data.includes('loading tensors from')) {
+      this.currentStage = 'loading';
+      this.loadStartTime = Date.now();
+    } else if (data.includes('generating image:') || data.includes('sampling using')) {
+      if (this.currentStage === 'loading') {
+        this.loadEndTime = Date.now();
+      }
+      this.currentStage = 'diffusion';
+      this.diffusionStartTime = Date.now();
+    } else if (data.includes('decoding 1 latents')) {
+      if (this.currentStage === 'diffusion') {
+        this.diffusionEndTime = Date.now();
+      }
+      this.currentStage = 'vae';
+      this.vaeStartTime = Date.now();
+      // Start synthetic progress for VAE stage
+      this.startSyntheticVaeProgress(config);
+    } else if (data.includes('decode_first_stage completed')) {
+      this.vaeEndTime = Date.now();
+      this.cleanupSyntheticProgress();
+      // Report 100% completion
+      if (config.onProgress) {
+        config.onProgress(100, 100);
+      }
+    }
+
+    // Parse progress bar: "| X/Y -"
+    const progressMatch = data.match(/\|\s*(\d+)\/(\d+)\s*-/);
+    if (progressMatch && progressMatch[1] && progressMatch[2]) {
+      const current = parseInt(progressMatch[1], 10);
+      const total = parseInt(progressMatch[2], 10);
+
+      if (this.currentStage === 'loading') {
+        this.loadProgress = { current, total };
+        this.reportProgress(config);
+      } else if (this.currentStage === 'diffusion') {
+        this.diffusionProgress = { current, total };
+        this.reportProgress(config);
+      }
+    }
+  }
+
+  /**
+   * Report current progress based on all stage timings
+   * @private
+   */
+  private reportProgress(config: ImageGenerationConfig): void {
+    if (!config.onProgress || !this.generationStartTime) return;
+
+    let elapsedTotal = 0;
+
+    // Loading stage
+    if (this.currentStage === 'loading') {
+      const elapsedLoad = Date.now() - (this.loadStartTime || this.generationStartTime);
+      elapsedTotal = elapsedLoad;
+    }
+    // Diffusion stage
+    else if (this.currentStage === 'diffusion') {
+      const actualLoadTime = this.loadEndTime
+        ? this.loadEndTime - (this.loadStartTime || this.generationStartTime)
+        : this.modelLoadTime;
+      const elapsedDiffusion = Date.now() - (this.diffusionStartTime || Date.now());
+      elapsedTotal = actualLoadTime + elapsedDiffusion;
+    }
+    // VAE stage (handled by synthetic progress)
+    else if (this.currentStage === 'vae') {
+      const actualLoadTime = this.loadEndTime
+        ? this.loadEndTime - (this.loadStartTime || this.generationStartTime)
+        : this.modelLoadTime;
+      const actualDiffusionTime = this.diffusionEndTime
+        ? this.diffusionEndTime - (this.diffusionStartTime || Date.now())
+        : 0;
+      const elapsedVae = Date.now() - (this.vaeStartTime || Date.now());
+      elapsedTotal = actualLoadTime + actualDiffusionTime + elapsedVae;
+    }
+
+    // Calculate percentage
+    const percentage = Math.min(100, Math.round((elapsedTotal / this.totalEstimatedTime) * 100));
+
+    // Report progress based on current stage
+    if (this.currentStage === 'loading' && this.loadProgress.total > 0) {
+      // For loading: use actual progress bar values
+      config.onProgress(this.loadProgress.current, this.loadProgress.total);
+    } else if (this.currentStage === 'diffusion' && this.diffusionProgress.total > 0) {
+      // For diffusion: use actual step count
+      config.onProgress(this.diffusionProgress.current, this.diffusionProgress.total);
+    } else {
+      // For other cases, report synthetic percentage-based progress
+      const syntheticTotal = 100;
+      const syntheticCurrent = Math.round(percentage);
+      config.onProgress(syntheticCurrent, syntheticTotal);
+    }
+  }
+
+  /**
+   * Start synthetic progress updates for VAE stage
+   * @private
+   */
+  private startSyntheticVaeProgress(config: ImageGenerationConfig): void {
+    if (!config.onProgress) return;
+
+    // Clean up any existing interval
+    this.cleanupSyntheticProgress();
+
+    const vaeStartTime = this.vaeStartTime || Date.now();
+
+    // Update progress every 100ms
+    this.syntheticProgressInterval = setInterval(() => {
+      const elapsedVae = Date.now() - vaeStartTime;
+
+      // Get actual times for previous stages
+      const actualLoadTime = this.loadEndTime
+        ? this.loadEndTime - (this.loadStartTime || this.generationStartTime!)
+        : this.modelLoadTime;
+      const actualDiffusionTime = this.diffusionEndTime
+        ? this.diffusionEndTime - (this.diffusionStartTime || vaeStartTime)
+        : 0;
+
+      // Calculate total progress
+      const elapsedTotal = actualLoadTime + actualDiffusionTime + elapsedVae;
+      const percentage = Math.min(100, Math.round((elapsedTotal / this.totalEstimatedTime) * 100));
+
+      // Report as synthetic step count
+      config.onProgress!(percentage, 100);
+    }, 100);
+  }
+
+  /**
+   * Clean up synthetic progress interval
+   * @private
+   */
+  private cleanupSyntheticProgress(): void {
+    if (this.syntheticProgressInterval) {
+      clearInterval(this.syntheticProgressInterval);
+      this.syntheticProgressInterval = undefined;
+    }
+  }
+
+  /**
+   * Update time estimates based on actual generation times
+   * @private
+   */
+  private updateTimeEstimates(config: ImageGenerationConfig): void {
+    const width = config.width || 512;
+    const height = config.height || 512;
+    const steps = config.steps || 20;
+    const megapixels = (width * height) / 1_000_000;
+
+    // Update model load time (fixed cost)
+    if (this.loadStartTime && this.loadEndTime) {
+      const actualLoadTime = this.loadEndTime - this.loadStartTime;
+      this.modelLoadTime = actualLoadTime;
+    }
+
+    // Update diffusion time per step per megapixel
+    if (this.diffusionStartTime && this.diffusionEndTime) {
+      const actualDiffusionTime = this.diffusionEndTime - this.diffusionStartTime;
+      this.diffusionTimePerStepPerMegapixel = actualDiffusionTime / (steps * megapixels);
+    }
+
+    // Update VAE time per megapixel
+    if (this.vaeStartTime && this.vaeEndTime) {
+      const actualVaeTime = this.vaeEndTime - this.vaeStartTime;
+      this.vaeTimePerMegapixel = actualVaeTime / megapixels;
+    }
   }
 }
