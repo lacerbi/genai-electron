@@ -115,13 +115,16 @@ export function registerIpcHandlers(): void {
     }
   });
 
-  ipcMain.handle('models:updateMetadata', async (_event, modelId: string) => {
-    try {
-      return await modelManager.updateModelMetadata(modelId);
-    } catch (error) {
-      throw new Error(`Failed to update model metadata: ${(error as Error).message}`);
+  ipcMain.handle(
+    'models:updateMetadata',
+    async (_event, modelId: string, options?: { source?: string }) => {
+      try {
+        return await modelManager.updateModelMetadata(modelId, options);
+      } catch (error) {
+        throw new Error(`Failed to update model metadata: ${(error as Error).message}`);
+      }
     }
-  });
+  );
 
   // Note: getStorageInfo will be added in a future version of genai-electron
   // For now, storage info can be calculated from model list

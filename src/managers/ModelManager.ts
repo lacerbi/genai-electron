@@ -4,7 +4,7 @@
  */
 
 import path from 'node:path';
-import type { ModelInfo, ModelType, DownloadConfig, GGUFMetadata } from '../types/index.js';
+import type { ModelInfo, ModelType, DownloadConfig, GGUFMetadata, MetadataFetchStrategy } from '../types/index.js';
 import { ModelNotFoundError, DownloadError } from '../errors/index.js';
 import { storageManager } from './StorageManager.js';
 import { Downloader } from '../download/Downloader.js';
@@ -164,30 +164,7 @@ export class ModelManager {
     let ggufMetadata: GGUFMetadata | undefined;
     try {
       const parsedGGUF = await fetchGGUFMetadata(downloadURL);
-
-      // Extract and store key metadata fields
-      ggufMetadata = {
-        version: parsedGGUF.metadata['version'] as number | undefined,
-        tensor_count: this.convertBigIntToNumber(parsedGGUF.metadata['tensor_count']),
-        kv_count: this.convertBigIntToNumber(parsedGGUF.metadata['kv_count']),
-        architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
-        general_name: parsedGGUF.metadata['general.name'] as string | undefined,
-        file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
-        block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
-        context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
-        attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as number | undefined,
-        embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
-        feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as number | undefined,
-        attention_layer_norm_rms_epsilon: getArchField(
-          parsedGGUF.metadata,
-          'attention.layer_norm_rms_epsilon'
-        ) as number | undefined,
-        vocab_size: getArchField(parsedGGUF.metadata, 'vocab_size') as number | undefined,
-        rope_dimension_count: getArchField(parsedGGUF.metadata, 'rope.dimension_count') as number | undefined,
-        rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
-        // Store complete raw metadata (JSON-serializable)
-        raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
-      };
+      ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
     } catch (error) {
       // Per user requirement: fail download if metadata fetch fails
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -430,120 +407,206 @@ export class ModelManager {
   }
 
   /**
+   * Helper method to create GGUFMetadata from parsed GGUF data
+   * Reduces code duplication across download and metadata update operations
+   *
+   * @private
+   */
+  private createGGUFMetadataFromParsed(parsedGGUF: { metadata: Record<string, unknown> }): GGUFMetadata {
+    return {
+      version: parsedGGUF.metadata['version'] as number | undefined,
+      tensor_count: this.convertBigIntToNumber(parsedGGUF.metadata['tensor_count']),
+      kv_count: this.convertBigIntToNumber(parsedGGUF.metadata['kv_count']),
+      architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
+      general_name: parsedGGUF.metadata['general.name'] as string | undefined,
+      file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
+      block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
+      context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
+      attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as number | undefined,
+      embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
+      feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as number | undefined,
+      attention_layer_norm_rms_epsilon: getArchField(
+        parsedGGUF.metadata,
+        'attention.layer_norm_rms_epsilon'
+      ) as number | undefined,
+      vocab_size: getArchField(parsedGGUF.metadata, 'vocab_size') as number | undefined,
+      rope_dimension_count: getArchField(parsedGGUF.metadata, 'rope.dimension_count') as number | undefined,
+      rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
+      raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
+    };
+  }
+
+  /**
    * Update GGUF metadata for an existing model
    *
    * Fetches and stores GGUF metadata for models that were downloaded
    * before GGUF integration. Does not re-download the model file.
    *
    * @param id - Model ID
+   * @param options - Optional configuration for metadata fetch
+   * @param options.source - Strategy for fetching metadata (default: 'local-only')
    * @returns Updated model information
    * @throws {ModelNotFoundError} If model doesn't exist
    * @throws {DownloadError} If metadata fetch fails
    *
    * @example
    * ```typescript
-   * // Update metadata for an existing model
+   * // Update metadata for an existing model (default: local-only)
    * const updatedModel = await modelManager.updateModelMetadata('llama-2-7b');
    * console.log('Layer count:', updatedModel.ggufMetadata?.block_count);
+   *
+   * // Force fetch from remote source
+   * const freshMetadata = await modelManager.updateModelMetadata('llama-2-7b', { source: 'remote-only' });
+   *
+   * // Try local first, fallback to remote
+   * const resilient = await modelManager.updateModelMetadata('llama-2-7b', { source: 'local-remote' });
    * ```
    */
-  public async updateModelMetadata(id: string): Promise<ModelInfo> {
+  public async updateModelMetadata(id: string, options?: { source?: MetadataFetchStrategy }): Promise<ModelInfo> {
     // Get existing model info
     const modelInfo = await this.getModelInfo(id);
 
-    // Try fetching from original source URL first (remote)
+    // Determine fetch strategy (default: local-only)
+    const strategy = options?.source ?? 'local-only';
+
     let ggufMetadata: GGUFMetadata | undefined;
 
-    if (modelInfo.source.url) {
-      try {
-        const parsedGGUF = await fetchGGUFMetadata(modelInfo.source.url);
-
-        ggufMetadata = {
-          version: parsedGGUF.metadata['version'] as number | undefined,
-          tensor_count: this.convertBigIntToNumber(parsedGGUF.metadata['tensor_count']),
-          kv_count: this.convertBigIntToNumber(parsedGGUF.metadata['kv_count']),
-          architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
-          general_name: parsedGGUF.metadata['general.name'] as string | undefined,
-          file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
-          block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
-          context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
-          attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as number | undefined,
-          embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
-          feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as number | undefined,
-          attention_layer_norm_rms_epsilon: getArchField(
-            parsedGGUF.metadata,
-            'attention.layer_norm_rms_epsilon'
-          ) as number | undefined,
-          vocab_size: getArchField(parsedGGUF.metadata, 'vocab_size') as number | undefined,
-          rope_dimension_count: getArchField(parsedGGUF.metadata, 'rope.dimension_count') as number | undefined,
-          rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
-          raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
-        };
-      } catch (remoteError) {
-        // If remote fetch fails, try local file
+    // Implement each strategy
+    switch (strategy) {
+      case 'local-only': {
+        // Read from local file only
         try {
           const parsedGGUF = await fetchLocalGGUFMetadata(modelInfo.path);
-
-          ggufMetadata = {
-            version: parsedGGUF.metadata['version'] as number | undefined,
-            tensor_count: this.convertBigIntToNumber(parsedGGUF.metadata['tensor_count']),
-            kv_count: this.convertBigIntToNumber(parsedGGUF.metadata['kv_count']),
-            architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
-            general_name: parsedGGUF.metadata['general.name'] as string | undefined,
-            file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
-            block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
-            context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
-            attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as number | undefined,
-            embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
-            feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as number | undefined,
-            attention_layer_norm_rms_epsilon: getArchField(
-              parsedGGUF.metadata,
-              'attention.layer_norm_rms_epsilon'
-            ) as number | undefined,
-            vocab_size: getArchField(parsedGGUF.metadata, 'vocab_size') as number | undefined,
-            rope_dimension_count: getArchField(parsedGGUF.metadata, 'rope.dimension_count') as number | undefined,
-            rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
-            raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
-          };
-        } catch (localError) {
-          // Both remote and local fetch failed
-          const remoteMsg = remoteError instanceof Error ? remoteError.message : String(remoteError);
-          const localMsg = localError instanceof Error ? localError.message : String(localError);
+          ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
           throw new DownloadError(
-            `Failed to fetch GGUF metadata from both remote and local sources`,
+            `Failed to read GGUF metadata from local file: ${errorMsg}`,
             {
               modelId: id,
-              remoteError: remoteMsg,
-              localError: localMsg,
+              path: modelInfo.path,
+              suggestion: 'The file may be corrupted. Try re-downloading the model or use source: "remote-only" to fetch from the original URL.',
             }
           );
         }
+        break;
       }
-    } else {
-      // No source URL, try local file only
-      const parsedGGUF = await fetchLocalGGUFMetadata(modelInfo.path);
 
-      ggufMetadata = {
-        version: parsedGGUF.metadata['version'] as number | undefined,
-        tensor_count: this.convertBigIntToNumber(parsedGGUF.metadata['tensor_count']),
-        kv_count: this.convertBigIntToNumber(parsedGGUF.metadata['kv_count']),
-        architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
-        general_name: parsedGGUF.metadata['general.name'] as string | undefined,
-        file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
-        block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
-        context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
-        attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as number | undefined,
-        embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
-        feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as number | undefined,
-        attention_layer_norm_rms_epsilon: getArchField(
-          parsedGGUF.metadata,
-          'attention.layer_norm_rms_epsilon'
-        ) as number | undefined,
-        vocab_size: getArchField(parsedGGUF.metadata, 'vocab_size') as number | undefined,
-        rope_dimension_count: getArchField(parsedGGUF.metadata, 'rope.dimension_count') as number | undefined,
-        rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
-        raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
-      };
+      case 'remote-only': {
+        // Fetch from remote URL only
+        if (!modelInfo.source.url) {
+          throw new DownloadError(
+            'Cannot fetch remote metadata: No source URL available for this model',
+            {
+              modelId: id,
+              suggestion: 'This model does not have a source URL. Use source: "local-only" instead.',
+            }
+          );
+        }
+
+        try {
+          const parsedGGUF = await fetchGGUFMetadata(modelInfo.source.url);
+          ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          throw new DownloadError(
+            `Failed to fetch GGUF metadata from remote URL: ${errorMsg}`,
+            {
+              modelId: id,
+              url: modelInfo.source.url,
+              suggestion: 'Check network connectivity. If the URL is no longer valid, use source: "local-only" to read from the downloaded file.',
+            }
+          );
+        }
+        break;
+      }
+
+      case 'local-remote': {
+        // Try local first, fallback to remote
+        try {
+          const parsedGGUF = await fetchLocalGGUFMetadata(modelInfo.path);
+          ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+        } catch (localError) {
+          // Local failed, try remote
+          if (!modelInfo.source.url) {
+            const localMsg = localError instanceof Error ? localError.message : String(localError);
+            throw new DownloadError(
+              `Failed to read GGUF metadata from local file and no remote URL available: ${localMsg}`,
+              {
+                modelId: id,
+                path: modelInfo.path,
+              }
+            );
+          }
+
+          try {
+            const parsedGGUF = await fetchGGUFMetadata(modelInfo.source.url);
+            ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+          } catch (remoteError) {
+            // Both failed
+            const localMsg = localError instanceof Error ? localError.message : String(localError);
+            const remoteMsg = remoteError instanceof Error ? remoteError.message : String(remoteError);
+            throw new DownloadError(
+              'Failed to fetch GGUF metadata from both local and remote sources',
+              {
+                modelId: id,
+                localError: localMsg,
+                remoteError: remoteMsg,
+              }
+            );
+          }
+        }
+        break;
+      }
+
+      case 'remote-local': {
+        // Try remote first, fallback to local
+        if (modelInfo.source.url) {
+          try {
+            const parsedGGUF = await fetchGGUFMetadata(modelInfo.source.url);
+            ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+          } catch (remoteError) {
+            // Remote failed, try local
+            try {
+              const parsedGGUF = await fetchLocalGGUFMetadata(modelInfo.path);
+              ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+            } catch (localError) {
+              // Both failed
+              const remoteMsg = remoteError instanceof Error ? remoteError.message : String(remoteError);
+              const localMsg = localError instanceof Error ? localError.message : String(localError);
+              throw new DownloadError(
+                'Failed to fetch GGUF metadata from both remote and local sources',
+                {
+                  modelId: id,
+                  remoteError: remoteMsg,
+                  localError: localMsg,
+                }
+              );
+            }
+          }
+        } else {
+          // No remote URL, fall back to local only
+          try {
+            const parsedGGUF = await fetchLocalGGUFMetadata(modelInfo.path);
+            ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            throw new DownloadError(
+              `No remote URL available and local fetch failed: ${errorMsg}`,
+              {
+                modelId: id,
+                path: modelInfo.path,
+              }
+            );
+          }
+        }
+        break;
+      }
+
+      default: {
+        // TypeScript should prevent this, but handle it for safety
+        throw new DownloadError(`Invalid metadata fetch strategy: ${strategy}`);
+      }
     }
 
     // Update model info with new metadata

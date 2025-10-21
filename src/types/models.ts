@@ -9,6 +9,17 @@
 export type ModelType = 'llm' | 'diffusion';
 
 /**
+ * Strategy for fetching GGUF metadata when updating model metadata
+ *
+ * @remarks
+ * - `local-only`: Read from local file only (default, fast, offline-capable)
+ * - `remote-only`: Fetch from remote URL only (requires network)
+ * - `local-remote`: Try local first, fallback to remote if local fails
+ * - `remote-local`: Try remote first, fallback to local if remote fails
+ */
+export type MetadataFetchStrategy = 'local-only' | 'remote-only' | 'local-remote' | 'remote-local';
+
+/**
  * Model source information
  */
 export interface ModelSource {

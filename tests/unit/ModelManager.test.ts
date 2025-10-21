@@ -432,6 +432,148 @@ describe('ModelManager', () => {
     });
   });
 
+  describe('updateModelMetadata()', () => {
+    beforeEach(() => {
+      // Reset mocks before each test
+      mockStorageManager.listModelFiles.mockReset();
+      mockStorageManager.loadModelMetadata.mockReset();
+      mockStorageManager.saveModelMetadata.mockReset();
+    });
+
+    describe('local-only strategy (default)', () => {
+      it('should fetch metadata from local file with default options', async () => {
+        // Setup: Model exists in storage
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model');
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(result.ggufMetadata?.context_length).toBe(4096);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+      it('should fetch metadata from local file with explicit local-only option', async () => {
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', { source: 'local-only' });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+    });
+
+    describe('remote-only strategy', () => {
+      it('should fetch metadata from remote URL only', async () => {
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', { source: 'remote-only' });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+      it('should throw error if no remote URL available', async () => {
+        const modelWithoutURL = {
+          ...mockModelInfo,
+          source: {
+            ...mockModelInfo.source,
+            url: '', // No URL
+          },
+        };
+
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(modelWithoutURL);
+
+        await expect(
+          modelManager.updateModelMetadata('test-model', { source: 'remote-only' })
+        ).rejects.toThrow(/No source URL available/);
+      });
+
+    });
+
+    describe('local-remote strategy', () => {
+      it('should fetch from local and skip remote on success', async () => {
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', { source: 'local-remote' });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+    });
+
+    describe('remote-local strategy', () => {
+      it('should fetch from remote and skip local on success', async () => {
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', { source: 'remote-local' });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+
+      it('should use local-only if no remote URL available', async () => {
+        const modelWithoutURL = {
+          ...mockModelInfo,
+          source: {
+            ...mockModelInfo.source,
+            url: '', // No URL
+          },
+        };
+
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(modelWithoutURL);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', { source: 'remote-local' });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+    });
+
+    it('should throw error for model that does not exist', async () => {
+      mockStorageManager.listModelFiles.mockResolvedValue([]);
+
+      await expect(modelManager.updateModelMetadata('nonexistent')).rejects.toThrow('Model not found');
+    });
+  });
+
   describe('Error handling', () => {
     it('should provide meaningful error messages', async () => {
       mockStorageManager.listModelFiles.mockRejectedValue(new Error('Disk read error'));

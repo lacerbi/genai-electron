@@ -247,6 +247,8 @@ export type {
   DownloadConfig,
   DownloadProgress,
   DownloadProgressCallback,
+  GGUFMetadata,
+  MetadataFetchStrategy,
   // Server types
   ServerStatus,
   HealthStatus,

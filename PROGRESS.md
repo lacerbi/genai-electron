@@ -7,17 +7,25 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors (library + example app)
-- **Tests:** ✅ 238/238 passing (100% - all tests green!)
+- **Tests:** ✅ 246/246 passing (100% - all tests green!)
 - **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `feat/phase2-app` (Phase 2 + GGUF UI + generic architecture support)
-- **Last Updated:** 2025-10-21 (GGUF UI viewer + generic architecture support!)
+- **Branch:** `feat/phase2-app` (Phase 2 + GGUF UI + metadata strategies)
+- **Last Updated:** 2025-10-21 (Configurable metadata fetch strategies!)
 
 **Test Suite Breakdown:**
-- Phase 1 Tests: 130 tests (errors, utils, core managers) - ✅ All passing
+- Phase 1 Tests: 138 tests (errors, utils, core managers) - ✅ All passing
 - Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator) - ✅ All passing
 - Infrastructure: 58 tests (BinaryManager + health-check + validation cache) - ✅ All passing
 
 **Recent Features:**
+- **Configurable Metadata Fetch Strategies:** Full control over metadata source! 🎛️
+  - New `source` parameter for `updateModelMetadata()` with 4 strategies
+  - `'local-only'` (default) - Fast, offline-capable, reads from downloaded file
+  - `'remote-only'` - Force fetch from source URL (verify against source of truth)
+  - `'local-remote'` - Try local first, fallback to remote (resilient)
+  - `'remote-local'` - Try remote first, fallback to local (authoritative + offline)
+  - Improved default: local-first (faster, works offline) vs old remote-first behavior
+  - Comprehensive docs with comparison table and use cases
 - **GGUF UI Viewer:** Complete metadata viewer in electron-control-panel! 📊
   - 📊 GGUF Info button next to each model
   - Auto-fetches metadata for models without GGUF data

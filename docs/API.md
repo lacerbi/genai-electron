@@ -443,7 +443,7 @@ try {
 
 ---
 
-#### `updateModelMetadata(id: string): Promise<ModelInfo>`
+#### `updateModelMetadata(id: string, options?: { source?: MetadataFetchStrategy }): Promise<ModelInfo>`
 
 Updates GGUF metadata for an existing model without re-downloading.
 
@@ -451,28 +451,72 @@ Useful for models downloaded before GGUF integration or to refresh metadata.
 
 **Parameters**:
 - `id: string` - Model ID
+- `options?: { source?: MetadataFetchStrategy }` - Optional configuration
+  - `source?: MetadataFetchStrategy` - Where to fetch metadata from (default: `'local-only'`)
+    - `'local-only'` - Read from local file only (fast, offline-capable)
+    - `'remote-only'` - Fetch from remote URL only (requires network)
+    - `'local-remote'` - Try local first, fallback to remote if local fails
+    - `'remote-local'` - Try remote first, fallback to local if remote fails
 
 **Returns**: `Promise<ModelInfo>` - Updated model information with GGUF metadata
 
-**Example**:
+**Example (Default - Local Only)**:
 ```typescript
-// Update metadata for an existing model
+// Update metadata from local file (default, fast, works offline)
 const updated = await modelManager.updateModelMetadata('llama-2-7b');
 
 console.log('Updated model information:');
 console.log('Layer count:', updated.ggufMetadata?.block_count);
 console.log('Context length:', updated.ggufMetadata?.context_length);
 console.log('Architecture:', updated.ggufMetadata?.architecture);
-
-// Now the model has accurate GGUF metadata
-if (updated.ggufMetadata) {
-  console.log('✅ GGUF metadata successfully extracted');
-}
 ```
+
+**Example (Remote Only - Force Fresh from Source)**:
+```typescript
+// Force fetch from original URL (useful if local file suspected corrupted)
+const fresh = await modelManager.updateModelMetadata('llama-2-7b', {
+  source: 'remote-only'
+});
+
+console.log('Fresh metadata from source:', fresh.ggufMetadata?.block_count);
+```
+
+**Example (Local + Remote Fallback - Resilient)**:
+```typescript
+// Try local first (fast), fallback to remote if local fails
+const resilient = await modelManager.updateModelMetadata('llama-2-7b', {
+  source: 'local-remote'
+});
+
+console.log('Metadata (resilient fetch):', resilient.ggufMetadata);
+```
+
+**Example (Remote + Local Fallback)**:
+```typescript
+// Try remote first (authoritative), fallback to local if network fails
+const authoritative = await modelManager.updateModelMetadata('llama-2-7b', {
+  source: 'remote-local'
+});
+
+console.log('Metadata (authoritative fetch):', authoritative.ggufMetadata);
+```
+
+**Strategy Use Cases**:
+
+| Strategy | Speed | Offline | Use When |
+|----------|-------|---------|----------|
+| `local-only` (default) | Fastest | ✅ Yes | Normal refresh, file is trusted |
+| `remote-only` | Slowest | ❌ No | Verify against source, suspect local corruption |
+| `local-remote` | Fast | ✅ Partial | Want speed + resilience |
+| `remote-local` | Slow | ✅ Partial | Want authoritative + offline fallback |
 
 **Throws**:
 - `ModelNotFoundError` if model doesn't exist
-- `DownloadError` if metadata fetch fails
+- `DownloadError` if metadata fetch fails (strategy-dependent):
+  - `local-only`: Throws if local file unreadable
+  - `remote-only`: Throws if no URL or network fails
+  - `local-remote`: Throws only if both fail
+  - `remote-local`: Throws only if both fail
 
 ---
 

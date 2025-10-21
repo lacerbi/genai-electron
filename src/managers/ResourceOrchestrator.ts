@@ -250,8 +250,8 @@ export class ResourceOrchestrator {
           vram: modelInfo.size * gpuRatio * 1.2,
         };
         console.log('[Orchestrator] LLM usage (mixed):', {
-          ram: result.ram / (1024 ** 3) + ' GB',
-          vram: result.vram / (1024 ** 3) + ' GB'
+          ram: `${result.ram / (1024 ** 3)  } GB`,
+          vram: `${result.vram / (1024 ** 3)  } GB`
         });
         return result;
       } else {
@@ -261,7 +261,7 @@ export class ResourceOrchestrator {
           vram: 0,
         };
         console.log('[Orchestrator] LLM usage (CPU-only):', {
-          ram: result.ram / (1024 ** 3) + ' GB',
+          ram: `${result.ram / (1024 ** 3)  } GB`,
           vram: '0 GB'
         });
         return result;
