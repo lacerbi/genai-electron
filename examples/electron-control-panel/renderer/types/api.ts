@@ -203,9 +203,13 @@ export interface ImageGenerationResult {
   height: number;
 }
 
+export type ImageGenerationStage = 'loading' | 'diffusion' | 'decoding';
+
 export interface ImageGenerationProgress {
   currentStep: number;
   totalSteps: number;
+  stage: ImageGenerationStage;
+  percentage?: number;
 }
 
 export interface DiffusionServerInfo {

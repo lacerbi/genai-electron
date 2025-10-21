@@ -529,9 +529,17 @@ const DiffusionServerControl: React.FC = () => {
               {generating ? (
                 <>
                   <Spinner size="small" />
-                  {generationProgress
-                    ? `Generating... Step ${generationProgress.currentStep}/${generationProgress.totalSteps} (${Math.round((generationProgress.currentStep / generationProgress.totalSteps) * 100)}%)`
-                    : 'Generating...'}
+                  {generationProgress ? (
+                    generationProgress.stage === 'loading' ? (
+                      `Generating (loading) ${Math.round(generationProgress.percentage || 0)}%`
+                    ) : generationProgress.stage === 'diffusion' ? (
+                      `Generating (diffusion step ${generationProgress.currentStep}/${generationProgress.totalSteps}) ${Math.round(generationProgress.percentage || 0)}%`
+                    ) : (
+                      `Generating (decoding) ${Math.round(generationProgress.percentage || 0)}%`
+                    )
+                  ) : (
+                    'Generating...'
+                  )}
                 </>
               ) : (
                 'Generate Image'

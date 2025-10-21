@@ -19,6 +19,28 @@ export type ImageSampler =
   | 'lcm';
 
 /**
+ * Image generation progress stage
+ */
+export type ImageGenerationStage = 'loading' | 'diffusion' | 'decoding';
+
+/**
+ * Image generation progress information
+ */
+export interface ImageGenerationProgress {
+  /** Current step within the stage */
+  currentStep: number;
+
+  /** Total steps in the stage */
+  totalSteps: number;
+
+  /** Current stage of generation */
+  stage: ImageGenerationStage;
+
+  /** Overall progress percentage (0-100) */
+  percentage?: number;
+}
+
+/**
  * Image generation request configuration
  */
 export interface ImageGenerationConfig {
@@ -46,8 +68,13 @@ export interface ImageGenerationConfig {
   /** Sampler algorithm (default: 'euler_a') */
   sampler?: ImageSampler;
 
-  /** Progress callback (currentStep, totalSteps) */
-  onProgress?: (currentStep: number, totalSteps: number) => void;
+  /** Progress callback with stage information */
+  onProgress?: (
+    currentStep: number,
+    totalSteps: number,
+    stage: ImageGenerationStage,
+    percentage?: number
+  ) => void;
 }
 
 /**

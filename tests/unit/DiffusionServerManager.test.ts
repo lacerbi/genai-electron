@@ -472,10 +472,10 @@ describe('DiffusionServerManager', () => {
       expect(args).toContain('--sampling-method');
       expect(args).toContain('euler_a');
 
-      // Verify progress callbacks were called
-      expect(progressCallback).toHaveBeenCalledWith(5, 30);
-      expect(progressCallback).toHaveBeenCalledWith(10, 30);
-      expect(progressCallback).toHaveBeenCalledWith(30, 30);
+      // Verify progress callbacks were called with stage information
+      expect(progressCallback).toHaveBeenCalledWith(5, 30, 'diffusion', expect.any(Number));
+      expect(progressCallback).toHaveBeenCalledWith(10, 30, 'diffusion', expect.any(Number));
+      expect(progressCallback).toHaveBeenCalledWith(30, 30, 'diffusion', expect.any(Number));
 
       // Verify temp file was deleted
       expect(mockDeleteFile).toHaveBeenCalled();

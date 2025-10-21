@@ -670,9 +670,9 @@ export class DiffusionServerManager extends ServerManager {
     } else if (data.includes('decode_first_stage completed')) {
       this.vaeEndTime = Date.now();
       this.cleanupSyntheticProgress();
-      // Report 100% completion
+      // Report 100% completion with decoding stage
       if (config.onProgress) {
-        config.onProgress(100, 100);
+        config.onProgress(0, 0, 'decoding', 100);
       }
     }
 
@@ -699,6 +699,39 @@ export class DiffusionServerManager extends ServerManager {
   private reportProgress(config: ImageGenerationConfig): void {
     if (!config.onProgress || !this.generationStartTime) return;
 
+    // Calculate overall percentage
+    const percentage = this.calculateOverallPercentage();
+
+    // Report progress based on current stage with stage information
+    if (this.currentStage === 'loading' && this.loadProgress.total > 0) {
+      // For loading: use actual progress bar values with loading stage
+      config.onProgress(
+        this.loadProgress.current,
+        this.loadProgress.total,
+        'loading',
+        percentage
+      );
+    } else if (this.currentStage === 'diffusion' && this.diffusionProgress.total > 0) {
+      // For diffusion: use actual step count with diffusion stage
+      config.onProgress(
+        this.diffusionProgress.current,
+        this.diffusionProgress.total,
+        'diffusion',
+        percentage
+      );
+    } else if (this.currentStage === 'vae') {
+      // For VAE: no step count, just percentage with decoding stage
+      config.onProgress(0, 0, 'decoding', percentage);
+    }
+  }
+
+  /**
+   * Calculate overall progress percentage
+   * @private
+   */
+  private calculateOverallPercentage(): number {
+    if (!this.generationStartTime || this.totalEstimatedTime === 0) return 0;
+
     let elapsedTotal = 0;
 
     // Loading stage
@@ -714,7 +747,7 @@ export class DiffusionServerManager extends ServerManager {
       const elapsedDiffusion = Date.now() - (this.diffusionStartTime || Date.now());
       elapsedTotal = actualLoadTime + elapsedDiffusion;
     }
-    // VAE stage (handled by synthetic progress)
+    // VAE stage
     else if (this.currentStage === 'vae') {
       const actualLoadTime = this.loadEndTime
         ? this.loadEndTime - (this.loadStartTime || this.generationStartTime)
@@ -726,22 +759,7 @@ export class DiffusionServerManager extends ServerManager {
       elapsedTotal = actualLoadTime + actualDiffusionTime + elapsedVae;
     }
 
-    // Calculate percentage
-    const percentage = Math.min(100, Math.round((elapsedTotal / this.totalEstimatedTime) * 100));
-
-    // Report progress based on current stage
-    if (this.currentStage === 'loading' && this.loadProgress.total > 0) {
-      // For loading: use actual progress bar values
-      config.onProgress(this.loadProgress.current, this.loadProgress.total);
-    } else if (this.currentStage === 'diffusion' && this.diffusionProgress.total > 0) {
-      // For diffusion: use actual step count
-      config.onProgress(this.diffusionProgress.current, this.diffusionProgress.total);
-    } else {
-      // For other cases, report synthetic percentage-based progress
-      const syntheticTotal = 100;
-      const syntheticCurrent = Math.round(percentage);
-      config.onProgress(syntheticCurrent, syntheticTotal);
-    }
+    return Math.min(100, Math.round((elapsedTotal / this.totalEstimatedTime) * 100));
   }
 
   /**
@@ -754,26 +772,13 @@ export class DiffusionServerManager extends ServerManager {
     // Clean up any existing interval
     this.cleanupSyntheticProgress();
 
-    const vaeStartTime = this.vaeStartTime || Date.now();
-
     // Update progress every 100ms
     this.syntheticProgressInterval = setInterval(() => {
-      const elapsedVae = Date.now() - vaeStartTime;
+      // Calculate overall percentage
+      const percentage = this.calculateOverallPercentage();
 
-      // Get actual times for previous stages
-      const actualLoadTime = this.loadEndTime
-        ? this.loadEndTime - (this.loadStartTime || this.generationStartTime!)
-        : this.modelLoadTime;
-      const actualDiffusionTime = this.diffusionEndTime
-        ? this.diffusionEndTime - (this.diffusionStartTime || vaeStartTime)
-        : 0;
-
-      // Calculate total progress
-      const elapsedTotal = actualLoadTime + actualDiffusionTime + elapsedVae;
-      const percentage = Math.min(100, Math.round((elapsedTotal / this.totalEstimatedTime) * 100));
-
-      // Report as synthetic step count
-      config.onProgress!(percentage, 100);
+      // Report VAE decoding progress with stage information
+      config.onProgress!(0, 0, 'decoding', percentage);
     }, 100);
   }
 

@@ -326,9 +326,14 @@ export function registerIpcHandlers(): void {
         cfgScale: config.cfgScale || 7.5,
         seed: config.seed || -1,
         sampler: config.sampler || 'euler_a',
-        // Progress callback to send updates to renderer
-        onProgress: (currentStep: number, totalSteps: number) => {
-          sendImageProgress(currentStep, totalSteps);
+        // Progress callback to send updates to renderer with stage information
+        onProgress: (
+          currentStep: number,
+          totalSteps: number,
+          stage: 'loading' | 'diffusion' | 'decoding',
+          percentage?: number
+        ) => {
+          sendImageProgress(currentStep, totalSteps, stage, percentage);
         },
       });
 

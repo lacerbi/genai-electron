@@ -41,6 +41,8 @@ export type {
   ImageSampler,
   ImageGenerationConfig,
   ImageGenerationResult,
+  ImageGenerationProgress,
+  ImageGenerationStage,
   DiffusionServerConfig,
   DiffusionServerInfo,
 } from './images.js';
