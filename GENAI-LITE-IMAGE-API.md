@@ -184,7 +184,7 @@ type ImageProgressCallback = (progress: {
 
 ### 4.6 Configuration Defaults
 - `ImageService` should derive base URLs using the following priority (highest first):
-  1. `request.settings.providerBaseUrl` (if we choose to expose per-request override in the future).
+  1. `request.settings.providerBaseUrl` (reserved for a future enhancement; not currently exposed).
   2. `options.baseUrls?.[providerId]` supplied when constructing the service.
   3. Environment variables (per provider):
      - OpenAI: `OPENAI_API_BASE_URL` (defaults to `https://api.openai.com/v1`).
@@ -677,7 +677,7 @@ const image = new ImageService(fromEnvironment);
    - Provide public methods & error envelopes.
 3. **Register Default Adapters**
    - `OpenAIImageAdapter` (HTTP POST `/images/generations`).
-   - `ElectronDiffusionAdapter` (HTTP POST `/generate` or actual genai-electron endpoint).
+   - `ElectronDiffusionAdapter` (HTTP POST `/v1/images/generations`).
 4. **Integrate Presets**
    - Load `image-presets.json`.
    - Document how to extend/replace via `ImageServiceOptions`.
@@ -700,8 +700,8 @@ const image = new ImageService(fromEnvironment);
 - genai-electron diffusion API (Phase 2):
   - Base URL: `http://localhost:8081` (override via `GENAI_ELECTRON_IMAGE_BASE_URL`).
   - Endpoints: `GET /health`, `POST /v1/images/generations`.
-  - Request fields: `prompt`, `negativePrompt`, `width`, `height`, `steps`, `cfgScale`, `seed`, `sampler`.
-  - Response includes: binary PNG, `timeTaken`, `seed`.
+  - Request fields: `prompt`, `negativePrompt`, `width`, `height`, `steps`, `cfgScale`, `seed`, `sampler`, `count`.
+  - Response includes: base64 images array, `timeTaken`, `seed` values (per image).
 - Reuse existing HTTP utilities, logging, and error wrappers in genai-lite.
 - Ensure new code follows existing coding standards (TypeScript strict mode, tests).
 
