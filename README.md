@@ -20,6 +20,7 @@ An Electron-specific library for managing local AI model servers and resources. 
 - ✅ **System capability detection** - Automatic detection of RAM, CPU, GPU, and VRAM
 - ✅ **Model storage** - Organized model management in Electron userData directory
 - ✅ **Model downloads** - Download GGUF models from direct URLs with progress tracking
+- ✅ **GGUF metadata extraction** - Accurate model information (layer count, context length, architecture) extracted before download
 - ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
 - ✅ **Reasoning model support** - Automatic detection and configuration for reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS)
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
@@ -68,6 +69,8 @@ async function setupLocalAI() {
       url: 'https://huggingface.co/TheBloke/Llama-2-7B-GGUF/resolve/main/llama-2-7b.Q4_K_M.gguf',
       name: 'Llama 2 7B',
       type: 'llm',
+      // GGUF metadata is automatically extracted before download
+      // Provides: layer count, context length, architecture, etc.
       onProgress: (downloaded, total) => {
         const percent = ((downloaded / total) * 100).toFixed(1);
         console.log(`Download progress: ${percent}%`);
@@ -202,6 +205,21 @@ if (modelInfo.supportsReasoning) {
   console.log('✅ Model supports reasoning (automatic flag injection enabled)');
   console.log('llama-server will use: --jinja --reasoning-format deepseek');
 }
+
+// Access accurate model information from GGUF metadata
+if (modelInfo.ggufMetadata) {
+  console.log('Layer count:', modelInfo.ggufMetadata.block_count);
+  console.log('Context length:', modelInfo.ggufMetadata.context_length);
+  console.log('Architecture:', modelInfo.ggufMetadata.architecture);
+}
+
+// Or use convenience methods
+const layerCount = await modelManager.getModelLayerCount('my-model');
+const contextLength = await modelManager.getModelContextLength('my-model');
+console.log(`Model has ${layerCount} layers and ${contextLength} token context`);
+
+// Update metadata for models downloaded before GGUF integration
+await modelManager.updateModelMetadata('my-model');
 
 // Verify model integrity
 const isValid = await modelManager.verifyModel('my-model');

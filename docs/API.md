@@ -307,6 +307,16 @@ try {
 }
 ```
 
+**GGUF Metadata Extraction**:
+
+GGUF metadata is automatically extracted from the model file **before** downloading:
+- ✅ **Pre-download validation** - Confirms file is a valid GGUF
+- ✅ **Accurate information** - Layer count, context length, architecture
+- ✅ **No guessing** - Real values from model file
+- ✅ **Fast failure** - Fails immediately if not a valid GGUF (saves bandwidth)
+
+The metadata is stored with the model and accessible via `model.ggufMetadata`.
+
 ---
 
 #### `deleteModel(id: string): Promise<void>`
@@ -430,6 +440,135 @@ try {
   }
 }
 ```
+
+---
+
+#### `updateModelMetadata(id: string): Promise<ModelInfo>`
+
+Updates GGUF metadata for an existing model without re-downloading.
+
+Useful for models downloaded before GGUF integration or to refresh metadata.
+
+**Parameters**:
+- `id: string` - Model ID
+
+**Returns**: `Promise<ModelInfo>` - Updated model information with GGUF metadata
+
+**Example**:
+```typescript
+// Update metadata for an existing model
+const updated = await modelManager.updateModelMetadata('llama-2-7b');
+
+console.log('Updated model information:');
+console.log('Layer count:', updated.ggufMetadata?.block_count);
+console.log('Context length:', updated.ggufMetadata?.context_length);
+console.log('Architecture:', updated.ggufMetadata?.architecture);
+
+// Now the model has accurate GGUF metadata
+if (updated.ggufMetadata) {
+  console.log('✅ GGUF metadata successfully extracted');
+}
+```
+
+**Throws**:
+- `ModelNotFoundError` if model doesn't exist
+- `DownloadError` if metadata fetch fails
+
+---
+
+#### `getModelLayerCount(id: string): Promise<number>`
+
+Gets the actual layer count for a model.
+
+Uses GGUF metadata if available, falls back to estimation for older models.
+
+**Parameters**:
+- `id: string` - Model ID
+
+**Returns**: `Promise<number>` - Layer count (actual or estimated)
+
+**Example**:
+```typescript
+const layers = await modelManager.getModelLayerCount('llama-2-7b');
+console.log(`Model has ${layers} layers`);
+
+// Use for GPU offloading calculations
+const gpuLayers = 24; // Want to offload 24 layers to GPU
+const gpuRatio = gpuLayers / layers;
+console.log(`Offloading ${(gpuRatio * 100).toFixed(1)}% to GPU`);
+
+// Check if offloading request is valid
+if (gpuLayers > layers) {
+  console.warn(`Cannot offload ${gpuLayers} layers - model only has ${layers}`);
+}
+```
+
+**Throws**: `ModelNotFoundError` if model doesn't exist
+
+---
+
+#### `getModelContextLength(id: string): Promise<number>`
+
+Gets the actual context length for a model.
+
+Uses GGUF metadata if available, falls back to default for older models.
+
+**Parameters**:
+- `id: string` - Model ID
+
+**Returns**: `Promise<number>` - Context length in tokens
+
+**Example**:
+```typescript
+const contextLen = await modelManager.getModelContextLength('llama-2-7b');
+console.log(`Context window: ${contextLen} tokens`);
+
+// Use for appropriate context size configuration
+const config = {
+  modelId: 'llama-2-7b',
+  contextSize: Math.min(contextLen, 8192), // Don't exceed model's capacity
+  port: 8080
+};
+
+await llamaServer.start(config);
+console.log(`Started with context size: ${config.contextSize}`);
+```
+
+**Throws**: `ModelNotFoundError` if model doesn't exist
+
+---
+
+#### `getModelArchitecture(id: string): Promise<string>`
+
+Gets the architecture type for a model.
+
+Uses GGUF metadata if available, falls back to 'llama' for LLM models.
+
+**Parameters**:
+- `id: string` - Model ID
+
+**Returns**: `Promise<string>` - Architecture type (e.g., 'llama', 'mamba', 'gpt2')
+
+**Example**:
+```typescript
+const arch = await modelManager.getModelArchitecture('llama-2-7b');
+console.log(`Architecture: ${arch}`);
+
+// Verify architecture matches expected type
+if (arch !== 'llama') {
+  console.warn('⚠️  This model may not work with llama-server');
+  console.warn(`Expected: llama, Got: ${arch}`);
+} else {
+  console.log('✅ Model architecture verified');
+}
+
+// Different architectures may require different server configurations
+const serverConfig = arch === 'mamba'
+  ? { /* Mamba-specific config */ }
+  : { /* Llama-specific config */ };
+```
+
+**Throws**: `ModelNotFoundError` if model doesn't exist
 
 ---
 
@@ -1487,6 +1626,7 @@ interface ModelInfo {
   source: ModelSource;        // Download source info
   checksum?: string;          // SHA256 checksum (if provided)
   supportsReasoning?: boolean; // Whether model supports reasoning (auto-detected)
+  ggufMetadata?: GGUFMetadata; // GGUF metadata (extracted during download)
 }
 ```
 
@@ -1500,6 +1640,33 @@ Supported model families:
 - **GPT-OSS**: OpenAI's open-source reasoning model
 
 See [Reasoning Model Detection](#reasoning-model-detection) for details.
+
+**GGUF Metadata:**
+
+The `ggufMetadata` field contains accurate model information extracted from the GGUF file during download:
+- `block_count` - Actual number of layers (no estimation!)
+- `context_length` - Maximum sequence length the model supports
+- `architecture` - Model architecture ('llama', 'mamba', 'gpt2', etc.)
+- `attention_head_count` - Number of attention heads
+- `embedding_length` - Embedding dimension
+- Plus 10+ additional fields and complete raw metadata
+
+**Example**:
+```typescript
+const model = await modelManager.getModelInfo('llama-2-7b');
+if (model.ggufMetadata) {
+  console.log('✅ Accurate metadata available');
+  console.log('Layers:', model.ggufMetadata.block_count);
+  console.log('Context:', model.ggufMetadata.context_length);
+  console.log('Architecture:', model.ggufMetadata.architecture);
+} else {
+  console.log('⚠️  Using estimated values (model downloaded before GGUF integration)');
+  // Update metadata: await modelManager.updateModelMetadata('llama-2-7b');
+}
+```
+
+For models downloaded before GGUF integration, this field may be `undefined`.
+Use `modelManager.updateModelMetadata(id)` to add metadata without re-downloading.
 
 ### ModelType
 
@@ -1517,6 +1684,64 @@ interface ModelSource {
   file?: string;            // HuggingFace file (if applicable)
 }
 ```
+
+### GGUFMetadata
+
+Complete metadata extracted from GGUF model files.
+
+```typescript
+interface GGUFMetadata {
+  version?: number;              // GGUF format version
+  tensor_count?: bigint;         // Number of tensors
+  kv_count?: bigint;             // Number of metadata key-value pairs
+  architecture?: string;         // Model architecture
+  general_name?: string;         // Model name from GGUF
+  file_type?: number;            // Quantization type
+  block_count?: number;          // Number of layers (ACTUAL, not estimated!)
+  context_length?: number;       // Maximum sequence length
+  attention_head_count?: number; // Number of attention heads
+  embedding_length?: number;     // Embedding dimension
+  feed_forward_length?: number;  // Feed-forward layer size
+  vocab_size?: number;           // Vocabulary size
+  rope_dimension_count?: number; // RoPE dimension count
+  rope_freq_base?: number;       // RoPE frequency base
+  attention_layer_norm_rms_epsilon?: number; // RMS normalization epsilon
+  raw?: Record<string, unknown>; // Complete raw metadata (JSON-serializable)
+}
+```
+
+**Key Fields:**
+- `block_count` - Use for GPU offloading calculations (actual layer count)
+- `context_length` - Use for context size configuration (model's max capacity)
+- `architecture` - Use for compatibility verification
+
+**Example:**
+```typescript
+const model = await modelManager.getModelInfo('llama-2-7b');
+if (model.ggufMetadata) {
+  console.log('✅ Accurate metadata available');
+  console.log('Layers:', model.ggufMetadata.block_count);
+  console.log('Context:', model.ggufMetadata.context_length);
+  console.log('Architecture:', model.ggufMetadata.architecture);
+
+  // Use for precise GPU offloading
+  const totalLayers = model.ggufMetadata.block_count || 32;
+  const gpuLayers = Math.min(24, totalLayers);
+  console.log(`Offloading ${gpuLayers}/${totalLayers} layers to GPU`);
+} else {
+  console.log('⚠️  Using estimated values (model downloaded before GGUF integration)');
+  // Update metadata: await modelManager.updateModelMetadata('llama-2-7b');
+}
+```
+
+**Architecture Support:**
+
+Different model architectures have different metadata fields:
+- **llama**: `llama.block_count`, `llama.context_length`, `llama.attention.head_count`
+- **mamba**: `mamba.block_count`, `mamba.context_length`
+- **gpt2**: `gpt2.block_count`, `gpt2.context_length`
+
+The library automatically extracts the correct fields based on the architecture.
 
 ### ServerStatus
 
