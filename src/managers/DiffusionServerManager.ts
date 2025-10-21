@@ -78,8 +78,8 @@ export class DiffusionServerManager extends ServerManager {
 
   // Time estimates for progress calculation (self-calibrating)
   private modelLoadTime = 2000; // Fixed cost in ms
-  private diffusionTimePerStepPerMegapixel = 150; // Time per step per megapixel in ms
-  private vaeTimePerMegapixel = 4000; // Time per megapixel in ms
+  private diffusionTimePerStepPerMegapixel = 1000; // Time per step per megapixel in ms
+  private vaeTimePerMegapixel = 8000; // Time per megapixel in ms
 
   // Current generation timing and progress tracking
   private generationStartTime?: number;
