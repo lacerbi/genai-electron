@@ -1,14 +1,8 @@
 import React from 'react';
 import ActionButton from './common/ActionButton';
+import GGUFInfoModal from './GGUFInfoModal';
+import type { ModelInfo } from '../types/api';
 import './ModelList.css';
-
-interface ModelInfo {
-  id: string;
-  name: string;
-  type: 'llm' | 'diffusion';
-  size: number;
-  downloadedAt: string;
-}
 
 interface ModelListProps {
   models: ModelInfo[];
@@ -31,6 +25,8 @@ const ModelList: React.FC<ModelListProps> = ({ models, onDelete, onVerify }) => 
 
   const [verifyingId, setVerifyingId] = React.useState<string | null>(null);
   const [deletingId, setDeletingId] = React.useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = React.useState<ModelInfo | null>(null);
+  const [isModalOpen, setIsModalOpen] = React.useState(false);
 
   const handleVerify = async (modelId: string) => {
     setVerifyingId(modelId);
@@ -45,6 +41,26 @@ const ModelList: React.FC<ModelListProps> = ({ models, onDelete, onVerify }) => 
     setDeletingId(modelId);
     await onDelete(modelId);
     setDeletingId(null);
+  };
+
+  const handleShowGGUFInfo = (model: ModelInfo) => {
+    setSelectedModel(model);
+    setIsModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    setIsModalOpen(false);
+    setSelectedModel(null);
+  };
+
+  const handleRefreshMetadata = async (modelId: string): Promise<ModelInfo> => {
+    const updatedModel = await window.api.models.updateMetadata(modelId);
+    // Update the model in the list
+    const modelIndex = models.findIndex((m) => m.id === modelId);
+    if (modelIndex !== -1) {
+      models[modelIndex] = updatedModel;
+    }
+    return updatedModel;
   };
 
   return (
@@ -71,6 +87,13 @@ const ModelList: React.FC<ModelListProps> = ({ models, onDelete, onVerify }) => 
               <td>{formatBytes(model.size)}</td>
               <td className="model-date">{formatDate(model.downloadedAt)}</td>
               <td className="model-actions">
+                <button
+                  className="gguf-info-btn"
+                  onClick={() => handleShowGGUFInfo(model)}
+                  title="View GGUF Metadata"
+                >
+                  📊
+                </button>
                 <ActionButton
                   variant="secondary"
                   onClick={() => handleVerify(model.id)}
@@ -90,6 +113,14 @@ const ModelList: React.FC<ModelListProps> = ({ models, onDelete, onVerify }) => 
           ))}
         </tbody>
       </table>
+      {selectedModel && (
+        <GGUFInfoModal
+          model={selectedModel}
+          isOpen={isModalOpen}
+          onClose={handleCloseModal}
+          onRefresh={handleRefreshMetadata}
+        />
+      )}
     </div>
   );
 };

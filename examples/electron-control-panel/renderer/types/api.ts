@@ -13,6 +13,7 @@ export interface WindowAPI {
     getInfo: (modelId: string) => Promise<ModelInfo>;
     verify: (modelId: string) => Promise<boolean>;
     getStorageInfo: () => Promise<StorageInfo>;
+    updateMetadata: (modelId: string) => Promise<ModelInfo>;
   };
   server: {
     start: (config: LlamaServerConfig) => Promise<void>;
@@ -84,6 +85,25 @@ export interface MemoryInfo {
 }
 
 // Model Types
+export interface GGUFMetadata {
+  version?: number;
+  tensor_count?: bigint | number;
+  kv_count?: bigint | number;
+  architecture?: string;
+  general_name?: string;
+  file_type?: number;
+  block_count?: number;
+  context_length?: number;
+  attention_head_count?: number;
+  embedding_length?: number;
+  feed_forward_length?: number;
+  vocab_size?: number;
+  rope_dimension_count?: number;
+  rope_freq_base?: number;
+  attention_layer_norm_rms_epsilon?: number;
+  raw?: Record<string, unknown>;
+}
+
 export interface ModelInfo {
   id: string;
   name: string;
@@ -96,6 +116,7 @@ export interface ModelInfo {
     file?: string;
     url?: string;
   };
+  ggufMetadata?: GGUFMetadata;
 }
 
 export interface DownloadConfig {

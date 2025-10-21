@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('api', {
     delete: (modelId: string) => ipcRenderer.invoke('models:delete', modelId),
     getInfo: (modelId: string) => ipcRenderer.invoke('models:getInfo', modelId),
     verify: (modelId: string) => ipcRenderer.invoke('models:verify', modelId),
+    updateMetadata: (modelId: string) => ipcRenderer.invoke('models:updateMetadata', modelId),
     getStorageInfo: () => ipcRenderer.invoke('models:getStorageInfo'),
   },
 
