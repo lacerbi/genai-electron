@@ -9,6 +9,49 @@ interface GGUFInfoModalProps {
   onRefresh: (modelId: string) => Promise<ModelInfo>;
 }
 
+/**
+ * Recursively truncate large arrays and long strings for display performance
+ *
+ * @param value - The value to potentially truncate
+ * @param maxArrayItems - Maximum number of array items to show (default: 20)
+ * @param maxStringLength - Maximum string length to show (default: 500)
+ * @returns Truncated copy of the value with indicators for removed content
+ */
+function truncateLargeValues(
+  value: unknown,
+  maxArrayItems = 20,
+  maxStringLength = 500
+): unknown {
+  // Handle arrays
+  if (Array.isArray(value)) {
+    if (value.length > maxArrayItems) {
+      const truncated = value.slice(0, maxArrayItems);
+      const remaining = value.length - maxArrayItems;
+      return [...truncated, `... (${remaining.toLocaleString()} more items)`];
+    }
+    // Recursively process array items
+    return value.map((item) => truncateLargeValues(item, maxArrayItems, maxStringLength));
+  }
+
+  // Handle objects
+  if (typeof value === 'object' && value !== null) {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      result[key] = truncateLargeValues(val, maxArrayItems, maxStringLength);
+    }
+    return result;
+  }
+
+  // Handle strings
+  if (typeof value === 'string' && value.length > maxStringLength) {
+    const remaining = value.length - maxStringLength;
+    return value.substring(0, maxStringLength) + `... (${remaining.toLocaleString()} more chars)`;
+  }
+
+  // Return primitives as-is (numbers, booleans, null, undefined)
+  return value;
+}
+
 const GGUFInfoModal: React.FC<GGUFInfoModalProps> = ({ model, isOpen, onClose, onRefresh }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -212,13 +255,13 @@ const GGUFInfoModal: React.FC<GGUFInfoModalProps> = ({ model, isOpen, onClose, o
                     {metadata.raw ? (
                       <>
                         <pre className="gguf-json-display">
-                          <code>{JSON.stringify(metadata.raw, null, 2)}</code>
+                          <code>{JSON.stringify(truncateLargeValues(metadata.raw), null, 2)}</code>
                         </pre>
                         <button
                           className="gguf-copy-raw-btn"
                           onClick={handleCopyRawJson}
                         >
-                          {copyRawSuccess ? '✓ Copied!' : '📋 Copy Raw JSON'}
+                          {copyRawSuccess ? '✓ Copied!' : '📋 Copy Raw JSON (Full)'}
                         </button>
                       </>
                     ) : (
