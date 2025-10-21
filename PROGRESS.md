@@ -18,6 +18,14 @@
 - Infrastructure: 58 tests (BinaryManager + health-check + validation cache) - ✅ All passing
 
 **Recent Features:**
+- **Multi-Stage Image Generation Progress:** Real-time feedback across all stages! 🎯
+  - Loading stage: Shows model tensor loading progress
+  - Diffusion stage: Shows actual sampling steps (e.g., "step 2/8")
+  - Decoding stage: Shows VAE decoding progress
+  - Self-calibrating time estimates adapt to hardware and image size
+  - Overall percentage displayed across all stages
+  - Stage-specific UI messages: "Generating (loading) 12%" → "Generating (diffusion step 2/8) 45%" → "Generating (decoding) 88%"
+  - **Implementation:** Parses stable-diffusion.cpp stdout for progress bars, tracks stage transitions, calculates weighted progress based on actual timings
 - **Configurable Metadata Fetch Strategies:** Full control over metadata source! 🎛️
   - New `source` parameter for `updateModelMetadata()` with 4 strategies
   - `'local-remote'` (default) - Fast + resilient: tries local first, auto-fallback to remote
@@ -89,7 +97,8 @@
 **Core Features Implemented:**
 - ✅ **DiffusionServerManager**: HTTP wrapper for stable-diffusion.cpp
   - On-demand spawning of executable for image generation
-  - Progress tracking via stdout parsing
+  - **Multi-stage progress tracking:** Loading → Diffusion → Decoding with stage-specific messages
+  - Self-calibrating time estimates for accurate overall progress
   - Binary management with variant testing and fallback
   - Full error handling and log capture
 
@@ -135,7 +144,10 @@ Fully implemented Phase 2 features in the electron-control-panel example app, ad
   - 8 sampler options: euler_a, euler, heun, dpm2, dpm++2s_a, dpm++2m, dpm++2mv2, lcm
   - Seed support (random or fixed)
 - ✅ Generated image display with metadata (dimensions, time taken, seed)
-- ✅ Real-time progress indicator during generation
+- ✅ Real-time multi-stage progress indicator during generation
+  - Shows loading, diffusion steps, and VAE decoding stages
+  - Stage-specific messages with overall percentage
+  - Self-calibrating for accurate time estimates
 - ✅ Busy state indicator (prevents server stop during generation)
 - ✅ Health check monitoring
 

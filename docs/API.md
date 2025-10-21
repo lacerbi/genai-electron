@@ -1147,9 +1147,14 @@ const result = await diffusionServer.generateImage({
   cfgScale: 8.0,
   seed: 42,  // For reproducibility
   sampler: 'dpm++2m',
-  onProgress: (currentStep, totalSteps) => {
-    const percent = ((currentStep / totalSteps) * 100).toFixed(1);
-    console.log(`Generating: ${currentStep}/${totalSteps} (${percent}%)`);
+  onProgress: (currentStep, totalSteps, stage, percentage) => {
+    if (stage === 'loading') {
+      console.log(`Loading model... ${Math.round(percentage || 0)}%`);
+    } else if (stage === 'diffusion') {
+      console.log(`Generating (step ${currentStep}/${totalSteps}): ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`Decoding: ${Math.round(percentage || 0)}%`);
+    }
   }
 });
 
@@ -1450,8 +1455,14 @@ const result = await orchestrator.orchestrateImageGeneration({
   width: 1024,
   height: 1024,
   steps: 50,
-  onProgress: (currentStep, totalSteps) => {
-    console.log(`Progress: ${currentStep}/${totalSteps}`);
+  onProgress: (currentStep, totalSteps, stage, percentage) => {
+    if (stage === 'loading') {
+      console.log(`Loading: ${Math.round(percentage || 0)}%`);
+    } else if (stage === 'diffusion') {
+      console.log(`Step ${currentStep}/${totalSteps}: ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`Decoding: ${Math.round(percentage || 0)}%`);
+    }
   }
 });
 
@@ -1848,7 +1859,12 @@ interface ImageGenerationConfig {
   cfgScale?: number;                 // Guidance scale (default: 7.5)
   seed?: number;                     // Random seed (-1 = random)
   sampler?: ImageSampler;            // Sampler algorithm (default: 'euler_a')
-  onProgress?: (currentStep: number, totalSteps: number) => void; // Progress callback
+  onProgress?: (
+    currentStep: number,
+    totalSteps: number,
+    stage: 'loading' | 'diffusion' | 'decoding',
+    percentage?: number
+  ) => void; // Progress callback with stage information
 }
 ```
 
@@ -1881,6 +1897,83 @@ type ImageSampler =
   | 'dpm++2m'      // DPM++ 2M (good quality)
   | 'dpm++2mv2'    // DPM++ 2M v2
   | 'lcm';         // LCM (very fast, fewer steps)
+```
+
+#### ImageGenerationStage
+
+Stage of image generation process.
+
+```typescript
+type ImageGenerationStage =
+  | 'loading'     // Model tensors being loaded into memory
+  | 'diffusion'   // Denoising steps (main generation process)
+  | 'decoding';   // VAE decoding latents to final image
+```
+
+#### ImageGenerationProgress
+
+Progress information emitted during image generation.
+
+```typescript
+interface ImageGenerationProgress {
+  currentStep: number;              // Current step within the stage
+  totalSteps: number;               // Total steps in the stage
+  stage: ImageGenerationStage;      // Current stage
+  percentage?: number;              // Overall progress percentage (0-100)
+}
+```
+
+### Progress Tracking
+
+Image generation progress tracking provides detailed stage information:
+
+**Stages:**
+
+1. **Loading** (~20% of time): Model tensors loading into memory
+   - Reports: tensor count (e.g., 1500/2641)
+   - UI suggestion: "Loading model..."
+
+2. **Diffusion** (~30-50% of time): Denoising steps
+   - Reports: actual step count (e.g., 2/4, 15/30)
+   - UI suggestion: "Generating (step X/Y)"
+
+3. **Decoding** (~30-50% of time): VAE decoding
+   - Reports: estimated progress
+   - UI suggestion: "Decoding..."
+
+**Self-Calibrating Estimates:**
+
+The system automatically calibrates time estimates based on actual hardware performance:
+- First generation uses reasonable defaults
+- Subsequent generations adapt to image size and step count
+- Provides accurate overall percentage across all stages
+
+**Example Progress Display:**
+
+```typescript
+const result = await diffusionServer.generateImage({
+  prompt: 'A serene mountain landscape',
+  width: 1024,
+  height: 1024,
+  steps: 30,
+  onProgress: (current, total, stage, percentage) => {
+    if (stage === 'loading') {
+      console.log(`Loading model... ${Math.round(percentage || 0)}%`);
+    } else if (stage === 'diffusion') {
+      console.log(`Generating (step ${current}/${total}): ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`Decoding: ${Math.round(percentage || 0)}%`);
+    }
+  }
+});
+
+// Output:
+// Loading model... 12%
+// Generating (step 1/30): 25%
+// Generating (step 15/30): 55%
+// Generating (step 30/30): 75%
+// Decoding: 88%
+// Decoding: 100%
 ```
 
 #### DiffusionServerConfig
@@ -2377,9 +2470,15 @@ async function main() {
       width: 1024,
       height: 1024,
       steps: 30,
-      onProgress: (currentStep, totalSteps) => {
-        const percent = ((currentStep / totalSteps) * 100).toFixed(1);
-        process.stdout.write(`\rImage Generation: ${percent}% (${currentStep}/${totalSteps})`);
+      onProgress: (currentStep, totalSteps, stage, percentage) => {
+        const pct = Math.round(percentage || 0);
+        if (stage === 'loading') {
+          process.stdout.write(`\rLoading model: ${pct}%`);
+        } else if (stage === 'diffusion') {
+          process.stdout.write(`\rGenerating (step ${currentStep}/${totalSteps}): ${pct}%`);
+        } else {
+          process.stdout.write(`\rDecoding: ${pct}%`);
+        }
       }
     });
 
