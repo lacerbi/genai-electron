@@ -12,14 +12,7 @@ import { getHuggingFaceURL } from '../download/huggingface.js';
 import { calculateSHA256, formatChecksum } from '../download/checksum.js';
 import { fileExists, getFileSize, sanitizeFilename } from '../utils/file-utils.js';
 import { detectReasoningSupport } from '../config/reasoning-models.js';
-import {
-  fetchGGUFMetadata,
-  fetchLocalGGUFMetadata,
-  extractLayerCount,
-  extractContextLength,
-  extractAttentionHeadCount,
-  extractEmbeddingLength,
-} from '../utils/gguf-parser.js';
+import { fetchGGUFMetadata, fetchLocalGGUFMetadata, getArchField } from '../utils/gguf-parser.js';
 import {
   getLayerCountWithFallback,
   getContextLengthWithFallback,
@@ -180,10 +173,18 @@ export class ModelManager {
         architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
         general_name: parsedGGUF.metadata['general.name'] as string | undefined,
         file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
-        block_count: extractLayerCount(parsedGGUF.metadata),
-        context_length: extractContextLength(parsedGGUF.metadata),
-        attention_head_count: extractAttentionHeadCount(parsedGGUF.metadata),
-        embedding_length: extractEmbeddingLength(parsedGGUF.metadata),
+        block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
+        context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
+        attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as number | undefined,
+        embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
+        feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as number | undefined,
+        attention_layer_norm_rms_epsilon: getArchField(
+          parsedGGUF.metadata,
+          'attention.layer_norm_rms_epsilon'
+        ) as number | undefined,
+        vocab_size: getArchField(parsedGGUF.metadata, 'vocab_size') as number | undefined,
+        rope_dimension_count: getArchField(parsedGGUF.metadata, 'rope.dimension_count') as number | undefined,
+        rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
         // Store complete raw metadata (JSON-serializable)
         raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
       };
@@ -464,10 +465,18 @@ export class ModelManager {
           architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
           general_name: parsedGGUF.metadata['general.name'] as string | undefined,
           file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
-          block_count: extractLayerCount(parsedGGUF.metadata),
-          context_length: extractContextLength(parsedGGUF.metadata),
-          attention_head_count: extractAttentionHeadCount(parsedGGUF.metadata),
-          embedding_length: extractEmbeddingLength(parsedGGUF.metadata),
+          block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
+          context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
+          attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as number | undefined,
+          embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
+          feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as number | undefined,
+          attention_layer_norm_rms_epsilon: getArchField(
+            parsedGGUF.metadata,
+            'attention.layer_norm_rms_epsilon'
+          ) as number | undefined,
+          vocab_size: getArchField(parsedGGUF.metadata, 'vocab_size') as number | undefined,
+          rope_dimension_count: getArchField(parsedGGUF.metadata, 'rope.dimension_count') as number | undefined,
+          rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
           raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
         };
       } catch (remoteError) {
@@ -482,10 +491,18 @@ export class ModelManager {
             architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
             general_name: parsedGGUF.metadata['general.name'] as string | undefined,
             file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
-            block_count: extractLayerCount(parsedGGUF.metadata),
-            context_length: extractContextLength(parsedGGUF.metadata),
-            attention_head_count: extractAttentionHeadCount(parsedGGUF.metadata),
-            embedding_length: extractEmbeddingLength(parsedGGUF.metadata),
+            block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
+            context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
+            attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as number | undefined,
+            embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
+            feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as number | undefined,
+            attention_layer_norm_rms_epsilon: getArchField(
+              parsedGGUF.metadata,
+              'attention.layer_norm_rms_epsilon'
+            ) as number | undefined,
+            vocab_size: getArchField(parsedGGUF.metadata, 'vocab_size') as number | undefined,
+            rope_dimension_count: getArchField(parsedGGUF.metadata, 'rope.dimension_count') as number | undefined,
+            rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
             raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
           };
         } catch (localError) {
@@ -513,10 +530,18 @@ export class ModelManager {
         architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
         general_name: parsedGGUF.metadata['general.name'] as string | undefined,
         file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
-        block_count: extractLayerCount(parsedGGUF.metadata),
-        context_length: extractContextLength(parsedGGUF.metadata),
-        attention_head_count: extractAttentionHeadCount(parsedGGUF.metadata),
-        embedding_length: extractEmbeddingLength(parsedGGUF.metadata),
+        block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
+        context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
+        attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as number | undefined,
+        embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
+        feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as number | undefined,
+        attention_layer_norm_rms_epsilon: getArchField(
+          parsedGGUF.metadata,
+          'attention.layer_norm_rms_epsilon'
+        ) as number | undefined,
+        vocab_size: getArchField(parsedGGUF.metadata, 'vocab_size') as number | undefined,
+        rope_dimension_count: getArchField(parsedGGUF.metadata, 'rope.dimension_count') as number | undefined,
+        rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
         raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
       };
     }

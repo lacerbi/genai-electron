@@ -131,113 +131,27 @@ export async function fetchLocalGGUFMetadata(filePath: string): Promise<ParsedGG
 }
 
 /**
- * Extract layer count from GGUF metadata
+ * Extract an architecture-specific field from GGUF metadata
  *
- * Supports multiple architectures (llama, mamba, etc.)
+ * Dynamically constructs field path using the model's architecture prefix.
+ * For example, if architecture is "gemma3" and fieldPath is "block_count",
+ * it will look for "gemma3.block_count" in the metadata.
  *
  * @param metadata - Parsed GGUF metadata
- * @returns Layer count or undefined if not found
+ * @param fieldPath - Field path without architecture prefix (e.g., 'block_count', 'attention.head_count')
+ * @returns Field value or undefined if not found
  *
  * @example
  * ```typescript
  * const parsed = await fetchGGUFMetadata(url);
- * const layers = extractLayerCount(parsed.metadata);
- * console.log('Model has', layers, 'layers');
+ * const blockCount = getArchField(parsed.metadata, 'block_count'); // Works for llama, gemma3, qwen3, etc.
+ * const headCount = getArchField(parsed.metadata, 'attention.head_count');
  * ```
  */
-export function extractLayerCount(metadata: Record<string, unknown>): number | undefined {
-  // Try different architecture-specific keys
-  const architecture = metadata['general.architecture'];
-
-  if (architecture === 'llama') {
-    return metadata['llama.block_count'] as number | undefined;
-  } else if (architecture === 'mamba') {
-    return metadata['mamba.block_count'] as number | undefined;
-  } else if (architecture === 'gpt2') {
-    return metadata['gpt2.block_count'] as number | undefined;
+export function getArchField(metadata: Record<string, unknown>, fieldPath: string): unknown {
+  const arch = metadata['general.architecture'];
+  if (arch && typeof arch === 'string') {
+    return metadata[`${arch}.${fieldPath}`];
   }
-
-  // Try generic block_count key
-  const blockCount = metadata['block_count'];
-  if (typeof blockCount === 'number') {
-    return blockCount;
-  }
-
-  return undefined;
-}
-
-/**
- * Extract context length from GGUF metadata
- *
- * Supports multiple architectures (llama, mamba, gpt2, etc.)
- *
- * @param metadata - Parsed GGUF metadata
- * @returns Context length or undefined if not found
- *
- * @example
- * ```typescript
- * const parsed = await fetchGGUFMetadata(url);
- * const contextLen = extractContextLength(parsed.metadata);
- * console.log('Context window:', contextLen);
- * ```
- */
-export function extractContextLength(metadata: Record<string, unknown>): number | undefined {
-  // Try different architecture-specific keys
-  const architecture = metadata['general.architecture'];
-
-  if (architecture === 'llama') {
-    return metadata['llama.context_length'] as number | undefined;
-  } else if (architecture === 'mamba') {
-    return metadata['mamba.context_length'] as number | undefined;
-  } else if (architecture === 'gpt2') {
-    return metadata['gpt2.context_length'] as number | undefined;
-  }
-
-  // Try generic context_length key
-  const contextLength = metadata['context_length'];
-  if (typeof contextLength === 'number') {
-    return contextLength;
-  }
-
-  return undefined;
-}
-
-/**
- * Extract attention head count from GGUF metadata
- *
- * Supports multiple architectures
- *
- * @param metadata - Parsed GGUF metadata
- * @returns Attention head count or undefined if not found
- */
-export function extractAttentionHeadCount(metadata: Record<string, unknown>): number | undefined {
-  const architecture = metadata['general.architecture'];
-
-  if (architecture === 'llama') {
-    return metadata['llama.attention.head_count'] as number | undefined;
-  } else if (architecture === 'gpt2') {
-    return metadata['gpt2.attention.head_count'] as number | undefined;
-  }
-
-  return undefined;
-}
-
-/**
- * Extract embedding length from GGUF metadata
- *
- * Useful for calculating model size and resource requirements
- *
- * @param metadata - Parsed GGUF metadata
- * @returns Embedding length or undefined if not found
- */
-export function extractEmbeddingLength(metadata: Record<string, unknown>): number | undefined {
-  const architecture = metadata['general.architecture'];
-
-  if (architecture === 'llama') {
-    return metadata['llama.embedding_length'] as number | undefined;
-  } else if (architecture === 'gpt2') {
-    return metadata['gpt2.embedding_length'] as number | undefined;
-  }
-
   return undefined;
 }
