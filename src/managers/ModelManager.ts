@@ -444,30 +444,33 @@ export class ModelManager {
    *
    * @param id - Model ID
    * @param options - Optional configuration for metadata fetch
-   * @param options.source - Strategy for fetching metadata (default: 'local-only')
+   * @param options.source - Strategy for fetching metadata (default: 'local-remote')
    * @returns Updated model information
    * @throws {ModelNotFoundError} If model doesn't exist
    * @throws {DownloadError} If metadata fetch fails
    *
    * @example
    * ```typescript
-   * // Update metadata for an existing model (default: local-only)
+   * // Default: Try local first, fallback to remote (fast + resilient)
    * const updatedModel = await modelManager.updateModelMetadata('llama-2-7b');
    * console.log('Layer count:', updatedModel.ggufMetadata?.block_count);
+   *
+   * // Force local only (fastest, but may fail on corruption)
+   * const localOnly = await modelManager.updateModelMetadata('llama-2-7b', { source: 'local-only' });
    *
    * // Force fetch from remote source
    * const freshMetadata = await modelManager.updateModelMetadata('llama-2-7b', { source: 'remote-only' });
    *
-   * // Try local first, fallback to remote
-   * const resilient = await modelManager.updateModelMetadata('llama-2-7b', { source: 'local-remote' });
+   * // Try remote first, fallback to local
+   * const authoritative = await modelManager.updateModelMetadata('llama-2-7b', { source: 'remote-local' });
    * ```
    */
   public async updateModelMetadata(id: string, options?: { source?: MetadataFetchStrategy }): Promise<ModelInfo> {
     // Get existing model info
     const modelInfo = await this.getModelInfo(id);
 
-    // Determine fetch strategy (default: local-only)
-    const strategy = options?.source ?? 'local-only';
+    // Determine fetch strategy (default: local-remote for speed + resilience)
+    const strategy = options?.source ?? 'local-remote';
 
     let ggufMetadata: GGUFMetadata | undefined;
 

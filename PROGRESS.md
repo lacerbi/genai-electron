@@ -20,12 +20,17 @@
 **Recent Features:**
 - **Configurable Metadata Fetch Strategies:** Full control over metadata source! 🎛️
   - New `source` parameter for `updateModelMetadata()` with 4 strategies
-  - `'local-only'` (default) - Fast, offline-capable, reads from downloaded file
+  - `'local-remote'` (default) - Fast + resilient: tries local first, auto-fallback to remote
+  - `'local-only'` - Fastest, offline-only, reads from downloaded file
   - `'remote-only'` - Force fetch from source URL (verify against source of truth)
-  - `'local-remote'` - Try local first, fallback to remote (resilient)
   - `'remote-local'` - Try remote first, fallback to local (authoritative + offline)
-  - Improved default: local-first (faster, works offline) vs old remote-first behavior
+  - Smart default handles file corruption gracefully via automatic fallback
   - Comprehensive docs with comparison table and use cases
+  - **Rationale:** Default changed to `local-remote` after discovering that some GGUF files
+    trigger "ArrayBuffer.prototype.resize: Invalid length" errors when read locally
+    (likely file corruption or parser edge case). The `local-remote` strategy provides
+    the same speed when local file works, but automatically recovers by fetching from
+    remote URL when local parsing fails.
 - **GGUF UI Viewer:** Complete metadata viewer in electron-control-panel! 📊
   - 📊 GGUF Info button next to each model
   - Auto-fetches metadata for models without GGUF data

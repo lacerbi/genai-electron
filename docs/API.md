@@ -452,17 +452,17 @@ Useful for models downloaded before GGUF integration or to refresh metadata.
 **Parameters**:
 - `id: string` - Model ID
 - `options?: { source?: MetadataFetchStrategy }` - Optional configuration
-  - `source?: MetadataFetchStrategy` - Where to fetch metadata from (default: `'local-only'`)
-    - `'local-only'` - Read from local file only (fast, offline-capable)
+  - `source?: MetadataFetchStrategy` - Where to fetch metadata from (default: `'local-remote'`)
+    - `'local-remote'` - Try local first, fallback to remote if local fails (default)
+    - `'local-only'` - Read from local file only (fastest, offline-capable)
     - `'remote-only'` - Fetch from remote URL only (requires network)
-    - `'local-remote'` - Try local first, fallback to remote if local fails
     - `'remote-local'` - Try remote first, fallback to local if remote fails
 
 **Returns**: `Promise<ModelInfo>` - Updated model information with GGUF metadata
 
-**Example (Default - Local Only)**:
+**Example (Default - Local + Remote Fallback)**:
 ```typescript
-// Update metadata from local file (default, fast, works offline)
+// Update metadata from local file first, fallback to remote if needed (default)
 const updated = await modelManager.updateModelMetadata('llama-2-7b');
 
 console.log('Updated model information:');
@@ -505,9 +505,9 @@ console.log('Metadata (authoritative fetch):', authoritative.ggufMetadata);
 
 | Strategy | Speed | Offline | Use When |
 |----------|-------|---------|----------|
-| `local-only` (default) | Fastest | ✅ Yes | Normal refresh, file is trusted |
+| `local-remote` (default) | Fast | ✅ Partial | Want speed + resilience (recommended) |
+| `local-only` | Fastest | ✅ Yes | Certain local file is good |
 | `remote-only` | Slowest | ❌ No | Verify against source, suspect local corruption |
-| `local-remote` | Fast | ✅ Partial | Want speed + resilience |
 | `remote-local` | Slow | ✅ Partial | Want authoritative + offline fallback |
 
 **Throws**:
