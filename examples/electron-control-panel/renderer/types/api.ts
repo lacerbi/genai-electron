@@ -87,8 +87,8 @@ export interface MemoryInfo {
 // Model Types
 export interface GGUFMetadata {
   version?: number;
-  tensor_count?: bigint | number;
-  kv_count?: bigint | number;
+  tensor_count?: number;
+  kv_count?: number;
   architecture?: string;
   general_name?: string;
   file_type?: number;

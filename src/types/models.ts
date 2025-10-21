@@ -36,10 +36,10 @@ export interface GGUFMetadata {
   version?: number;
 
   /** Number of tensors in the model */
-  tensor_count?: bigint;
+  tensor_count?: number;
 
   /** Number of key-value metadata pairs */
-  kv_count?: bigint;
+  kv_count?: number;
 
   /** Model architecture (e.g., "llama", "mamba", "gpt2") */
   architecture?: string;

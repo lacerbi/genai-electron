@@ -175,8 +175,8 @@ export class ModelManager {
       // Extract and store key metadata fields
       ggufMetadata = {
         version: parsedGGUF.metadata['version'] as number | undefined,
-        tensor_count: parsedGGUF.metadata['tensor_count'] as bigint | undefined,
-        kv_count: parsedGGUF.metadata['kv_count'] as bigint | undefined,
+        tensor_count: this.convertBigIntToNumber(parsedGGUF.metadata['tensor_count']),
+        kv_count: this.convertBigIntToNumber(parsedGGUF.metadata['kv_count']),
         architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
         general_name: parsedGGUF.metadata['general.name'] as string | undefined,
         file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
@@ -416,6 +416,19 @@ export class ModelManager {
   }
 
   /**
+   * Safely convert BigInt to number for JSON serialization
+   *
+   * @param value - Value that might be BigInt
+   * @returns Number if BigInt, undefined otherwise
+   */
+  private convertBigIntToNumber(value: unknown): number | undefined {
+    if (typeof value === 'bigint') {
+      return Number(value);
+    }
+    return value as number | undefined;
+  }
+
+  /**
    * Update GGUF metadata for an existing model
    *
    * Fetches and stores GGUF metadata for models that were downloaded
@@ -446,8 +459,8 @@ export class ModelManager {
 
         ggufMetadata = {
           version: parsedGGUF.metadata['version'] as number | undefined,
-          tensor_count: parsedGGUF.metadata['tensor_count'] as bigint | undefined,
-          kv_count: parsedGGUF.metadata['kv_count'] as bigint | undefined,
+          tensor_count: this.convertBigIntToNumber(parsedGGUF.metadata['tensor_count']),
+          kv_count: this.convertBigIntToNumber(parsedGGUF.metadata['kv_count']),
           architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
           general_name: parsedGGUF.metadata['general.name'] as string | undefined,
           file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
@@ -464,8 +477,8 @@ export class ModelManager {
 
           ggufMetadata = {
             version: parsedGGUF.metadata['version'] as number | undefined,
-            tensor_count: parsedGGUF.metadata['tensor_count'] as bigint | undefined,
-            kv_count: parsedGGUF.metadata['kv_count'] as bigint | undefined,
+            tensor_count: this.convertBigIntToNumber(parsedGGUF.metadata['tensor_count']),
+            kv_count: this.convertBigIntToNumber(parsedGGUF.metadata['kv_count']),
             architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
             general_name: parsedGGUF.metadata['general.name'] as string | undefined,
             file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
@@ -495,8 +508,8 @@ export class ModelManager {
 
       ggufMetadata = {
         version: parsedGGUF.metadata['version'] as number | undefined,
-        tensor_count: parsedGGUF.metadata['tensor_count'] as bigint | undefined,
-        kv_count: parsedGGUF.metadata['kv_count'] as bigint | undefined,
+        tensor_count: this.convertBigIntToNumber(parsedGGUF.metadata['tensor_count']),
+        kv_count: this.convertBigIntToNumber(parsedGGUF.metadata['kv_count']),
         architecture: parsedGGUF.metadata['general.architecture'] as string | undefined,
         general_name: parsedGGUF.metadata['general.name'] as string | undefined,
         file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
