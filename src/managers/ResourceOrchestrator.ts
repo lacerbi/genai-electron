@@ -179,11 +179,11 @@ export class ResourceOrchestrator {
       const threshold = totalVRAM * 0.75;
 
       console.log('[Orchestrator] VRAM Analysis:');
-      console.log('  - LLM VRAM usage:', (llamaUsage.vram || 0) / (1024 ** 3), 'GB');
-      console.log('  - Diffusion VRAM usage:', (diffusionUsage.vram || 0) / (1024 ** 3), 'GB');
-      console.log('  - Total VRAM needed:', vramNeeded / (1024 ** 3), 'GB');
-      console.log('  - Total VRAM available:', totalVRAM / (1024 ** 3), 'GB');
-      console.log('  - Threshold (75%):', threshold / (1024 ** 3), 'GB');
+      console.log('  - LLM VRAM usage:', (llamaUsage.vram || 0) / 1024 ** 3, 'GB');
+      console.log('  - Diffusion VRAM usage:', (diffusionUsage.vram || 0) / 1024 ** 3, 'GB');
+      console.log('  - Total VRAM needed:', vramNeeded / 1024 ** 3, 'GB');
+      console.log('  - Total VRAM available:', totalVRAM / 1024 ** 3, 'GB');
+      console.log('  - Threshold (75%):', threshold / 1024 ** 3, 'GB');
       console.log('  - Offload needed:', vramNeeded > threshold);
 
       // Need offload if combined VRAM usage > 75% of total
@@ -194,11 +194,11 @@ export class ResourceOrchestrator {
       const threshold = memory.available * 0.75;
 
       console.log('[Orchestrator] RAM Analysis:');
-      console.log('  - LLM RAM usage:', llamaUsage.ram / (1024 ** 3), 'GB');
-      console.log('  - Diffusion RAM usage:', diffusionUsage.ram / (1024 ** 3), 'GB');
-      console.log('  - Total RAM needed:', ramNeeded / (1024 ** 3), 'GB');
-      console.log('  - Available RAM:', memory.available / (1024 ** 3), 'GB');
-      console.log('  - Threshold (75%):', threshold / (1024 ** 3), 'GB');
+      console.log('  - LLM RAM usage:', llamaUsage.ram / 1024 ** 3, 'GB');
+      console.log('  - Diffusion RAM usage:', diffusionUsage.ram / 1024 ** 3, 'GB');
+      console.log('  - Total RAM needed:', ramNeeded / 1024 ** 3, 'GB');
+      console.log('  - Available RAM:', memory.available / 1024 ** 3, 'GB');
+      console.log('  - Threshold (75%):', threshold / 1024 ** 3, 'GB');
       console.log('  - Offload needed:', ramNeeded > threshold);
 
       // Need offload if combined RAM usage > 75% of available
@@ -239,7 +239,7 @@ export class ResourceOrchestrator {
       const totalLayers = await this.modelManager.getModelLayerCount(config.modelId);
 
       console.log('[Orchestrator] LLM model:', config.modelId);
-      console.log('[Orchestrator] LLM model size:', modelInfo.size / (1024 ** 3), 'GB');
+      console.log('[Orchestrator] LLM model size:', modelInfo.size / 1024 ** 3, 'GB');
       console.log('[Orchestrator] LLM GPU layers:', gpuLayers, '/', totalLayers);
 
       if (gpuLayers > 0) {
@@ -250,8 +250,8 @@ export class ResourceOrchestrator {
           vram: modelInfo.size * gpuRatio * 1.2,
         };
         console.log('[Orchestrator] LLM usage (mixed):', {
-          ram: `${result.ram / (1024 ** 3)  } GB`,
-          vram: `${result.vram / (1024 ** 3)  } GB`
+          ram: `${result.ram / 1024 ** 3} GB`,
+          vram: `${result.vram / 1024 ** 3} GB`,
         });
         return result;
       } else {
@@ -261,8 +261,8 @@ export class ResourceOrchestrator {
           vram: 0,
         };
         console.log('[Orchestrator] LLM usage (CPU-only):', {
-          ram: `${result.ram / (1024 ** 3)  } GB`,
-          vram: '0 GB'
+          ram: `${result.ram / 1024 ** 3} GB`,
+          vram: '0 GB',
         });
         return result;
       }
@@ -296,7 +296,7 @@ export class ResourceOrchestrator {
     try {
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
       console.log('[Orchestrator] Diffusion model:', config.modelId);
-      console.log('[Orchestrator] Diffusion model size:', modelInfo.size / (1024 ** 3), 'GB');
+      console.log('[Orchestrator] Diffusion model size:', modelInfo.size / 1024 ** 3, 'GB');
 
       // Diffusion models typically need similar VRAM/RAM as their size
       const usage = modelInfo.size * 1.2;
@@ -304,7 +304,7 @@ export class ResourceOrchestrator {
         ram: usage,
         vram: usage,
       };
-      console.log('[Orchestrator] Diffusion usage:', usage / (1024 ** 3), 'GB (both RAM and VRAM)');
+      console.log('[Orchestrator] Diffusion usage:', usage / 1024 ** 3, 'GB (both RAM and VRAM)');
       return result;
     } catch (error) {
       // If we can't get model info, return conservative estimate
@@ -340,7 +340,7 @@ export class ResourceOrchestrator {
     console.log('[Orchestrator] Saving LLM state:', {
       modelId: config.modelId,
       port: config.port,
-      gpuLayers: config.gpuLayers
+      gpuLayers: config.gpuLayers,
     });
 
     this.savedLLMState = {
@@ -375,7 +375,7 @@ export class ResourceOrchestrator {
       // Restart with saved configuration
       console.log('[Orchestrator] Restarting LLM with saved config:', {
         modelId: this.savedLLMState.config.modelId,
-        port: this.savedLLMState.config.port
+        port: this.savedLLMState.config.port,
       });
       await this.llamaServer.start(this.savedLLMState.config);
       console.log('[Orchestrator] ✅ LLM server restarted successfully');

@@ -339,7 +339,10 @@ describe('ResourceOrchestrator', () => {
       const result = await orchestrator.orchestrateImageGeneration(imageConfig);
 
       expect(result).toBeDefined();
-      expect(consoleErrorSpy).toHaveBeenCalledWith('[Orchestrator] ❌ Failed to reload LLM:', expect.any(Error));
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        '[Orchestrator] ❌ Failed to reload LLM:',
+        expect.any(Error)
+      );
 
       consoleErrorSpy.mockRestore();
     });

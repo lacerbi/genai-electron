@@ -45,6 +45,8 @@ export type {
   ImageGenerationStage,
   DiffusionServerConfig,
   DiffusionServerInfo,
+  GenerationStatus,
+  GenerationState,
 } from './images.js';
 
 /**

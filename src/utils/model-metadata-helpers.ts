@@ -68,7 +68,7 @@ export function getContextLengthWithFallback(modelInfo: ModelInfo): number {
   }
 
   // Fallback: Default based on model size
-  const sizeGB = modelInfo.size / (1024 ** 3);
+  const sizeGB = modelInfo.size / 1024 ** 3;
 
   if (sizeGB >= 30) {
     // Very large models (70B+) often have 8K+ context
@@ -137,7 +137,7 @@ export function getAttentionHeadCountWithFallback(modelInfo: ModelInfo): number 
   }
 
   // Fallback: Estimate based on model size
-  const sizeGB = modelInfo.size / (1024 ** 3);
+  const sizeGB = modelInfo.size / 1024 ** 3;
 
   if (sizeGB >= 60) {
     // 70B+ models
@@ -171,7 +171,7 @@ export function getEmbeddingLengthWithFallback(modelInfo: ModelInfo): number {
   }
 
   // Fallback: Estimate based on model size
-  const sizeGB = modelInfo.size / (1024 ** 3);
+  const sizeGB = modelInfo.size / 1024 ** 3;
 
   if (sizeGB >= 60) {
     // 70B+ models

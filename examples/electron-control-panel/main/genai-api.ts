@@ -82,12 +82,15 @@ export function setupServerEventForwarding(): void {
     }
   });
 
-  diffusionServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
-    const mainWindow = BrowserWindow.getAllWindows()[0];
-    if (mainWindow) {
-      mainWindow.webContents.send('diffusion:binary-log', data);
+  diffusionServer.on(
+    'binary-log',
+    (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
+      const mainWindow = BrowserWindow.getAllWindows()[0];
+      if (mainWindow) {
+        mainWindow.webContents.send('diffusion:binary-log', data);
+      }
     }
-  });
+  );
 }
 
 /**

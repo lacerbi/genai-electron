@@ -47,10 +47,10 @@ export async function fetchGGUFMetadata(url: string): Promise<ParsedGGUFData> {
 
     // Validate we got valid data
     if (!result.metadata || !result.tensorInfos) {
-      throw new DownloadError(
-        'Invalid GGUF file: missing metadata or tensor information',
-        { url, result }
-      );
+      throw new DownloadError('Invalid GGUF file: missing metadata or tensor information', {
+        url,
+        result,
+      });
     }
 
     return {
@@ -64,15 +64,12 @@ export async function fetchGGUFMetadata(url: string): Promise<ParsedGGUFData> {
     }
 
     const errorMessage = error instanceof Error ? error.message : String(error);
-    throw new DownloadError(
-      `Failed to fetch GGUF metadata from URL: ${errorMessage}`,
-      {
-        url,
-        originalError: error,
-        suggestion:
-          'Verify the URL points to a valid GGUF file and is accessible. Check network connectivity if the error persists.',
-      }
-    );
+    throw new DownloadError(`Failed to fetch GGUF metadata from URL: ${errorMessage}`, {
+      url,
+      originalError: error,
+      suggestion:
+        'Verify the URL points to a valid GGUF file and is accessible. Check network connectivity if the error persists.',
+    });
   }
 }
 
@@ -101,10 +98,10 @@ export async function fetchLocalGGUFMetadata(filePath: string): Promise<ParsedGG
 
     // Validate we got valid data
     if (!result.metadata || !result.tensorInfos) {
-      throw new DownloadError(
-        'Invalid GGUF file: missing metadata or tensor information',
-        { filePath, result }
-      );
+      throw new DownloadError('Invalid GGUF file: missing metadata or tensor information', {
+        filePath,
+        result,
+      });
     }
 
     return {
@@ -118,15 +115,12 @@ export async function fetchLocalGGUFMetadata(filePath: string): Promise<ParsedGG
     }
 
     const errorMessage = error instanceof Error ? error.message : String(error);
-    throw new DownloadError(
-      `Failed to read GGUF metadata from local file: ${errorMessage}`,
-      {
-        filePath,
-        originalError: error,
-        suggestion:
-          'Verify the file exists and is a valid GGUF format. The file may be corrupted if it was not fully downloaded.',
-      }
-    );
+    throw new DownloadError(`Failed to read GGUF metadata from local file: ${errorMessage}`, {
+      filePath,
+      originalError: error,
+      suggestion:
+        'Verify the file exists and is a valid GGUF format. The file may be corrupted if it was not fully downloaded.',
+    });
   }
 }
 

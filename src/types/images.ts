@@ -38,6 +38,12 @@ export interface ImageGenerationProgress {
 
   /** Overall progress percentage (0-100) */
   percentage?: number;
+
+  /** Current image being generated (1-indexed, for batch generation) */
+  currentImage?: number;
+
+  /** Total images in batch (for batch generation) */
+  totalImages?: number;
 }
 
 /**
@@ -67,6 +73,9 @@ export interface ImageGenerationConfig {
 
   /** Sampler algorithm (default: 'euler_a') */
   sampler?: ImageSampler;
+
+  /** Number of images to generate (default: 1, recommended max: 5) */
+  count?: number;
 
   /** Progress callback with stage information */
   onProgress?: (
@@ -152,4 +161,59 @@ export interface DiffusionServerInfo {
 
   /** Whether currently generating an image */
   busy?: boolean;
+}
+
+/**
+ * Generation status for async API
+ */
+export type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error';
+
+/**
+ * Generation state for async API registry
+ */
+export interface GenerationState {
+  /** Unique generation ID */
+  id: string;
+
+  /** Current status */
+  status: GenerationStatus;
+
+  /** Timestamp when generation was created */
+  createdAt: number;
+
+  /** Timestamp when generation was last updated */
+  updatedAt: number;
+
+  /** Original request configuration */
+  config: ImageGenerationConfig;
+
+  /** Progress information (when status is 'in_progress') */
+  progress?: ImageGenerationProgress;
+
+  /** Final result (when status is 'complete') */
+  result?: {
+    /** Array of generated images */
+    images: {
+      /** Base64-encoded PNG image data */
+      image: string;
+      /** Seed used for generation */
+      seed: number;
+      /** Image width */
+      width: number;
+      /** Image height */
+      height: number;
+    }[];
+    /** Image format (always 'png') */
+    format: 'png';
+    /** Total time taken in milliseconds */
+    timeTaken: number;
+  };
+
+  /** Error details (when status is 'error') */
+  error?: {
+    /** Error message */
+    message: string;
+    /** Error code */
+    code: string;
+  };
 }

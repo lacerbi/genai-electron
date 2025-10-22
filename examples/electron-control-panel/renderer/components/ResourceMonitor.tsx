@@ -184,8 +184,8 @@ const ResourceMonitor: React.FC = () => {
             <div className="saved-state-info">
               <h4>⚠️ LLM Server Offloaded</h4>
               <p className="warning-message">
-                The LLM server was temporarily stopped to free resources for image generation.
-                It will be automatically restarted when generation completes.
+                The LLM server was temporarily stopped to free resources for image generation. It
+                will be automatically restarted when generation completes.
               </p>
               <div className="saved-state-details">
                 <p>

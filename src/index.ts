@@ -185,6 +185,7 @@ export { ModelManager } from './managers/ModelManager.js';
 export { LlamaServerManager } from './managers/LlamaServerManager.js';
 export { DiffusionServerManager } from './managers/DiffusionServerManager.js';
 export { ResourceOrchestrator } from './managers/ResourceOrchestrator.js';
+export { GenerationRegistry } from './managers/GenerationRegistry.js';
 export { ServerManager } from './managers/ServerManager.js';
 export { StorageManager } from './managers/StorageManager.js';
 export { ProcessManager } from './process/ProcessManager.js';
@@ -201,6 +202,7 @@ export { getMemoryInfo, estimateVRAM } from './system/memory-detect.js';
 export { detectGPU } from './system/gpu-detect.js';
 export { getHuggingFaceURL, parseHuggingFaceURL } from './download/huggingface.js';
 export { calculateSHA256, verifyChecksum } from './download/checksum.js';
+export { generateId } from './utils/generation-id.js';
 export {
   getPlatform,
   getArchitecture,
@@ -259,10 +261,14 @@ export type {
   ServerEventData,
   // Image generation types (Phase 2)
   ImageSampler,
+  ImageGenerationStage,
+  ImageGenerationProgress,
   ImageGenerationConfig,
   ImageGenerationResult,
   DiffusionServerConfig,
   DiffusionServerInfo,
+  GenerationStatus,
+  GenerationState,
   // Utility types
   Optional,
   RequiredKeys,

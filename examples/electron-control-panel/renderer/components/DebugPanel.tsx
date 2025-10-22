@@ -66,10 +66,12 @@ export function DebugPanel() {
   };
 
   const formatResourceEstimates = (data: any): string => {
-    return '=== Resource Estimates ===\n' +
-           'See terminal console for detailed output\n' +
-           '(Too complex to format in UI)\n' +
-           '==========================';
+    return (
+      '=== Resource Estimates ===\n' +
+      'See terminal console for detailed output\n' +
+      '(Too complex to format in UI)\n' +
+      '=========================='
+    );
   };
 
   const handlePrintLLMConfig = async () => {

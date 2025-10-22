@@ -91,7 +91,12 @@ export class BinaryManager {
       const cache = JSON.parse(cacheContent) as ValidationCache;
 
       // Validate cache structure
-      if (cache.variant && cache.checksum && cache.validatedAt && typeof cache.phase1Passed === 'boolean') {
+      if (
+        cache.variant &&
+        cache.checksum &&
+        cache.validatedAt &&
+        typeof cache.phase1Passed === 'boolean'
+      ) {
         return cache;
       }
 
@@ -186,10 +191,13 @@ export class BinaryManager {
     variants = await this.filterVariantsByCudaAvailability(variants);
 
     if (variants.length === 0) {
-      throw new BinaryError(`No compatible binary variants available for platform: ${platformKey}`, {
-        platform: platformKey,
-        suggestion: 'All variants were filtered out (e.g., CUDA variants on non-NVIDIA system)',
-      });
+      throw new BinaryError(
+        `No compatible binary variants available for platform: ${platformKey}`,
+        {
+          platform: platformKey,
+          suggestion: 'All variants were filtered out (e.g., CUDA variants on non-NVIDIA system)',
+        }
+      );
     }
 
     // Ensure binary directory exists
@@ -579,10 +587,7 @@ export class BinaryManager {
    * @returns True if real inference test succeeds
    * @private
    */
-  private async runRealFunctionalityTest(
-    binaryPath: string,
-    modelPath: string
-  ): Promise<boolean> {
+  private async runRealFunctionalityTest(binaryPath: string, modelPath: string): Promise<boolean> {
     const { type } = this.config;
 
     try {

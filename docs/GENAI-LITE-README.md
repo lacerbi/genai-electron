@@ -1,11 +1,12 @@
 # genai-lite
 
-A lightweight, portable Node.js/TypeScript library providing a unified interface for interacting with multiple Generative AI providers—both cloud-based (OpenAI, Anthropic, Google Gemini, Mistral) and local (llama.cpp).
+A lightweight, portable Node.js/TypeScript library providing a unified interface for interacting with multiple Generative AI providers—both cloud-based (OpenAI, Anthropic, Google Gemini, Mistral) and local (llama.cpp, stable-diffusion.cpp). Supports both LLM chat and AI image generation.
 
 ## Features
 
 - 🔌 **Unified API** - Single interface for multiple AI providers
 - 🏠 **Local & Cloud Models** - Run models locally with llama.cpp or use cloud APIs
+- 🖼️ **Image Generation** - First-class support for AI image generation (OpenAI, local diffusion)
 - 🔐 **Flexible API Key Management** - Bring your own key storage solution
 - 📦 **Zero Electron Dependencies** - Works in any Node.js environment
 - 🎯 **TypeScript First** - Full type safety and IntelliSense support
@@ -56,7 +57,7 @@ const llmService = new LLMService(async () => 'not-needed');
 
 const response = await llmService.sendMessage({
   providerId: 'llamacpp',
-  modelId: 'llama-3-8b-instruct',  // Must match your loaded model
+  modelId: 'llamacpp',  // Generic ID for whatever model is loaded
   messages: [
     { role: 'system', content: 'You are a helpful assistant.' },
     { role: 'user', content: 'Explain quantum computing briefly.' }
@@ -70,15 +71,373 @@ if (response.object === 'chat.completion') {
 
 See the [llama.cpp Integration](#llamacpp-integration) section for setup details.
 
-## Example Application
+## Image Generation
 
-For a complete, production-ready example showcasing all genai-lite capabilities, see the **[chat-demo](examples/chat-demo)** interactive web application. The demo includes:
+genai-lite provides first-class support for AI image generation alongside its LLM capabilities. Generate images using cloud providers (OpenAI) or run diffusion models locally via genai-electron.
+
+### Quick Start - OpenAI Images
+
+```typescript
+import { ImageService, fromEnvironment } from 'genai-lite';
+
+// Create service with API key provider
+const imageService = new ImageService(fromEnvironment);
+
+const result = await imageService.generateImage({
+  providerId: 'openai-images',
+  modelId: 'gpt-image-1-mini',
+  prompt: 'A serene mountain lake at sunrise, photorealistic',
+  settings: {
+    width: 1024,
+    height: 1024,
+    quality: 'high'
+  }
+});
+
+if (result.object === 'image.result') {
+  // Save the generated image
+  const fs = require('fs');
+  fs.writeFileSync('output.png', result.data[0].data);
+  console.log('Image generated successfully!');
+} else {
+  console.error('Error:', result.error.message);
+}
+```
+
+### Quick Start - Local Diffusion
+
+```typescript
+import { ImageService } from 'genai-lite';
+
+// Start genai-electron diffusion server first on port 8081
+const imageService = new ImageService(async () => 'not-needed');
+
+const result = await imageService.generateImage({
+  providerId: 'genai-electron-images',
+  modelId: 'stable-diffusion',
+  prompt: 'A majestic dragon soaring through clouds, highly detailed',
+  settings: {
+    width: 1024,
+    height: 1024,
+    diffusion: {
+      negativePrompt: 'blurry, low quality, distorted',
+      steps: 30,
+      cfgScale: 7.5,
+      sampler: 'dpm++2m',
+      seed: 42  // Optional: for reproducible results
+    }
+  }
+});
+
+if (result.object === 'image.result') {
+  console.log('Generated image with seed:', result.data[0].seed);
+  // Save the image
+  require('fs').writeFileSync('dragon.png', result.data[0].data);
+}
+```
+
+### Supported Image Providers
+
+#### OpenAI Images
+
+**Models:**
+- `gpt-image-1` - Latest OpenAI image model with advanced features (32K character prompts)
+- `gpt-image-1-mini` - Fast and efficient, default model (32K character prompts)
+- `dall-e-3` - High-quality image generation (4K character prompts)
+- `dall-e-2` - Cost-effective generation (1K character prompts)
+
+**Configuration:**
+```bash
+export OPENAI_API_KEY=sk-...
+# Optional: override base URL
+export OPENAI_API_BASE_URL=https://api.openai.com/v1
+```
+
+**Capabilities:**
+- Multiple images per request (n parameter, except dall-e-3 which only supports n=1)
+- Quality settings: `auto`, `high`, `medium`, `low`, `hd`, `standard`
+- Style options: `vivid` (hyper-real), `natural` (photographic)
+- Multiple formats: PNG, JPEG, WebP
+- Hosted URLs or base64 response
+
+#### Local Diffusion (genai-electron)
+
+**Models:**
+- `stable-diffusion` - Generic model ID for whatever model is loaded in genai-electron
+
+**Configuration:**
+```bash
+# Optional: override base URL (default: http://localhost:8081)
+export GENAI_ELECTRON_IMAGE_BASE_URL=http://localhost:8081
+```
+
+**Capabilities:**
+- Negative prompts for better control
+- Multiple samplers: `euler_a`, `euler`, `heun`, `dpm2`, `dpm++2s_a`, `dpm++2m`, `dpm++2mv2`, `lcm`
+- Adjustable steps (1-150), CFG scale (1.0-30.0)
+- Custom seeds for reproducibility
+- Real-time progress callbacks
+- Batch generation support
+
+### Advanced Usage
+
+#### Using Image Presets
+
+genai-lite includes 12 built-in presets for common use cases:
+
+```typescript
+const imageService = new ImageService(fromEnvironment);
+
+// List available presets
+const presets = imageService.getPresets();
+console.log(presets.map(p => p.id));
+
+// Use a preset
+const result = await imageService.generateImage({
+  presetId: 'openai-dalle-3-hd',
+  prompt: 'A futuristic city at night'
+});
+
+// Override preset settings
+const result = await imageService.generateImage({
+  presetId: 'genai-electron-sdxl-quality',
+  prompt: 'A portrait of a wise old wizard',
+  settings: {
+    width: 768,  // Override preset's 1024x1024
+    height: 1024,
+    diffusion: {
+      steps: 40  // Override preset's 30 steps
+    }
+  }
+});
+```
+
+**Available Presets:**
+- **OpenAI:** `openai-gpt-image-1-mini-default`, `openai-gpt-image-1-quality`, `openai-dalle-3-hd`, `openai-dalle-3-natural`, `openai-dalle-2-default`, `openai-dalle-2-fast`
+- **Local Diffusion:** `genai-electron-sdxl-quality`, `genai-electron-sdxl-balanced`, `genai-electron-sdxl-fast`, `genai-electron-sdxl-portrait`, `genai-electron-sdxl-turbo`, `genai-electron-sdxl-lightning`
+
+#### Progress Callbacks (Local Diffusion)
+
+Monitor generation progress in real-time with local diffusion models:
+
+```typescript
+const result = await imageService.generateImage({
+  providerId: 'genai-electron-images',
+  modelId: 'stable-diffusion',
+  prompt: 'A detailed landscape painting',
+  settings: {
+    width: 1024,
+    height: 1024,
+    diffusion: {
+      steps: 30,
+      onProgress: (progress) => {
+        console.log(`Stage: ${progress.stage}`);
+        console.log(`Step ${progress.currentStep}/${progress.totalSteps}`);
+        console.log(`Progress: ${progress.percentage?.toFixed(1)}%`);
+
+        // Update your UI progress bar
+        // updateProgressBar(progress.percentage);
+      }
+    }
+  }
+});
+```
+
+**Progress stages:**
+- `loading` - Model is being loaded
+- `diffusion` - Actively generating the image
+- `decoding` - Converting latents to final image
+
+#### Generating Multiple Images
+
+Request multiple variations in a single call:
+
+```typescript
+// OpenAI - multiple images
+const result = await imageService.generateImage({
+  providerId: 'openai-images',
+  modelId: 'gpt-image-1-mini',
+  prompt: 'A cute robot assistant',
+  count: 4,  // Generate 4 variations
+  settings: {
+    width: 512,
+    height: 512
+  }
+});
+
+// genai-electron - batch generation
+const result = await imageService.generateImage({
+  providerId: 'genai-electron-images',
+  modelId: 'stable-diffusion',
+  prompt: 'Fantasy character concept art',
+  count: 3,
+  settings: {
+    diffusion: {
+      steps: 20,
+      // Each image gets a different seed automatically
+    }
+  }
+});
+
+// Process all generated images
+result.data.forEach((image, index) => {
+  require('fs').writeFileSync(`output-${index}.png`, image.data);
+  console.log(`Image ${index} seed:`, image.seed);
+});
+```
+
+#### Provider-Specific Settings
+
+**OpenAI-specific settings:**
+
+```typescript
+const result = await imageService.generateImage({
+  providerId: 'openai-images',
+  modelId: 'gpt-image-1',
+  prompt: 'A professional product photo',
+  settings: {
+    width: 1024,
+    height: 1024,
+    quality: 'high',
+    style: 'natural',
+    openai: {
+      outputFormat: 'png',  // 'png', 'jpeg', 'webp'
+      background: 'transparent',  // 'auto', 'transparent', 'white', 'black'
+      moderation: 'auto',  // 'auto', 'high', 'low'
+      compression: 0.8  // 0.0-1.0 for JPEG/WebP
+    }
+  }
+});
+```
+
+**Diffusion-specific settings:**
+
+```typescript
+const result = await imageService.generateImage({
+  providerId: 'genai-electron-images',
+  modelId: 'stable-diffusion',
+  prompt: 'A mystical forest with glowing mushrooms',
+  settings: {
+    width: 1024,
+    height: 1024,
+    diffusion: {
+      negativePrompt: 'ugly, blurry, low quality, oversaturated',
+      steps: 30,  // More steps = higher quality (1-150)
+      cfgScale: 7.5,  // Prompt adherence (1.0-30.0)
+      sampler: 'dpm++2m',  // Sampling algorithm
+      seed: 12345  // For reproducibility
+    }
+  }
+});
+```
+
+**Available samplers:**
+- `euler_a` - Fast, good for most use cases
+- `euler` - Similar to euler_a but deterministic
+- `dpm++2m` - High quality, recommended for final images
+- `dpm++2s_a` - Good balance of speed and quality
+- `heun` - High quality but slower
+- `lcm` - Extremely fast (for LCM models)
+
+#### Error Handling
+
+```typescript
+const result = await imageService.generateImage({
+  providerId: 'openai-images',
+  modelId: 'gpt-image-1-mini',
+  prompt: 'A beautiful sunset'
+});
+
+if (result.object === 'error') {
+  switch (result.error.type) {
+    case 'authentication_error':
+      console.error('Invalid API key');
+      break;
+    case 'rate_limit_error':
+      console.error('Rate limit exceeded');
+      break;
+    case 'validation_error':
+      console.error('Invalid request:', result.error.message);
+      break;
+    case 'network_error':
+      console.error('Server not reachable:', result.error.message);
+      break;
+    default:
+      console.error('Error:', result.error.message);
+  }
+}
+```
+
+### Custom Presets
+
+Extend or replace default presets:
+
+```typescript
+import { ImageService, fromEnvironment, ImagePreset } from 'genai-lite';
+
+const customPresets: ImagePreset[] = [
+  {
+    id: 'my-portrait-preset',
+    displayName: 'Custom Portrait Generator',
+    description: 'Optimized for portrait photography',
+    providerId: 'genai-electron-images',
+    modelId: 'stable-diffusion',
+    settings: {
+      width: 768,
+      height: 1024,
+      diffusion: {
+        steps: 35,
+        cfgScale: 8.0,
+        sampler: 'dpm++2m',
+        negativePrompt: 'deformed, ugly, bad anatomy'
+      }
+    }
+  }
+];
+
+const imageService = new ImageService(fromEnvironment, {
+  presets: customPresets,
+  presetMode: 'extend'  // 'extend' adds to defaults, 'replace' uses only custom
+});
+```
+
+### TypeScript Types
+
+```typescript
+import type {
+  ImageService,
+  ImageGenerationRequest,
+  ImageGenerationResponse,
+  ImageFailureResponse,
+  ImageGenerationSettings,
+  DiffusionSettings,
+  OpenAISpecificSettings,
+  ImagePreset,
+  ImageProviderInfo,
+  ImageModelInfo,
+  GeneratedImage,
+  ImageProgressCallback
+} from 'genai-lite';
+```
+
+## Example Applications
+
+### LLM Chat Demo
+For a complete, production-ready example showcasing genai-lite's LLM capabilities, see the **[chat-demo](examples/chat-demo)** interactive web application. Features include:
 - Multi-provider chat interface with all supported providers
 - Template rendering and model presets
 - llama.cpp utilities (tokenization, embeddings, health checks)
 - Settings persistence, export/import features
 
-The chat-demo serves as both a comprehensive showcase and a quick-test environment for library changes.
+### Image Generation Demo
+For image generation capabilities, see the **[image-gen-demo](examples/image-gen-demo)** interactive web application. Features include:
+- Multi-provider image generation (OpenAI Images, local diffusion)
+- Size presets and batch generation
+- Full-screen image lightbox with keyboard navigation
+- Progress monitoring for diffusion models
+- Comprehensive settings for all DALL-E models
+
+Both demos serve as comprehensive showcases and quick-test environments for library changes.
 
 ## API Key Management
 
@@ -149,15 +508,12 @@ const llmService = new LLMService(myKeyProvider);
 
 ### llama.cpp (Local Models)
 
-Run models locally via [llama.cpp](https://github.com/ggml-org/llama.cpp) server. Model IDs can be any name—they're not validated since you load your own GGUF models.
+Run models locally via [llama.cpp](https://github.com/ggml-org/llama.cpp) server. Use the generic `'llamacpp'` model ID—the actual model is determined by what you loaded in the llama.cpp server.
 
 **Automatic Capability Detection:** genai-lite automatically detects capabilities (reasoning support, context windows, token limits) for known open-weights models (Qwen3, etc.) by matching the GGUF filename from the server. No configuration needed.
 
-**Example models:**
-- `llama-3-8b-instruct` - Llama 3 8B Instruct
-- `llama-3-70b-instruct` - Llama 3 70B Instruct
-- `mistral-7b-instruct` - Mistral 7B Instruct
-- `my-custom-model` - Any custom model you've loaded
+**Model ID:**
+- `llamacpp` - Generic ID for whatever model the llama.cpp server has loaded
 
 **Setup:**
 
@@ -175,7 +531,7 @@ const service = new LLMService(async () => 'not-needed');
 
 const response = await service.sendMessage({
   providerId: 'llamacpp',
-  modelId: 'llama-3-8b-instruct', // Must match your loaded model name
+  modelId: 'llamacpp', // Generic ID for loaded model
   messages: [{ role: 'user', content: 'Hello!' }]
 });
 ```
@@ -823,7 +1179,7 @@ const service = new LLMService(async () => 'not-needed');
 
 const response = await service.sendMessage({
   providerId: 'llamacpp',
-  modelId: 'llama-3-8b-instruct',  // Arbitrary name matching your model
+  modelId: 'llamacpp',  // Generic ID for loaded model
   messages: [
     { role: 'system', content: 'You are a helpful assistant.' },
     { role: 'user', content: 'Explain quantum computing in simple terms.' }
@@ -872,7 +1228,7 @@ service.registerAdapter(
 // Use them
 const response = await service.sendMessage({
   providerId: 'llamacpp-small',
-  modelId: 'llama-3-8b',
+  modelId: 'llamacpp',
   messages: [{ role: 'user', content: 'Hello!' }]
 });
 ```
@@ -993,7 +1349,7 @@ if (response.object === 'error') {
 
 ### Best Practices
 
-1. **Model Naming**: Use descriptive model IDs (e.g., `llama-3-8b-instruct`) since llama.cpp accepts any name
+1. **Model ID**: Always use `'llamacpp'` as the model ID—the actual model is determined by what you loaded in the server
 2. **Context Size**: Set appropriate context (`-c` flag) when starting the server
 3. **Parallel Requests**: Configure slots (`-np`) based on your hardware
 4. **Health Monitoring**: Enable `checkHealth` for production to detect server issues early
@@ -1490,7 +1846,12 @@ These utilities enable:
 
 ## Examples
 
-See the **[chat-demo](examples/chat-demo)** application for a complete working example that demonstrates all library features in a production-ready React + Express application.
+genai-lite includes two complete demo applications:
+
+- **[chat-demo](examples/chat-demo)** - Full-featured LLM chat interface with all providers, template rendering, and advanced features
+- **[image-gen-demo](examples/image-gen-demo)** - Interactive image generation UI with OpenAI and local diffusion support
+
+Both are production-ready React + Express applications that demonstrate library features and serve as testing environments.
 
 ## Contributing
 

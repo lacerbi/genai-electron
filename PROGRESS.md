@@ -1,20 +1,21 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Phase 2 Complete - Ready for Phase 3 (2025-10-21)
+> **Current Status**: Phase 2.5 Complete - Async Image Generation API (2025-10-23)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors (library + example app)
-- **Tests:** ✅ 246/246 passing (100% pass rate)
+- **Tests:** ✅ 273/273 passing (100% pass rate)
 - **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `feat/phase2-app` (Phase 2 complete + GGUF integration)
-- **Last Updated:** 2025-10-21
+- **Branch:** `feat/phase2-app` (Phase 2.5 complete - Async API + Batch Generation)
+- **Last Updated:** 2025-10-23
 
 **Test Suite Breakdown:**
 - Phase 1 Tests: 138 tests (errors, utils, core managers)
 - Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator)
+- Phase 2.5 Tests: 27 tests (GenerationRegistry, async API)
 - Infrastructure: 58 tests (BinaryManager, health-check, validation cache)
 
 ---
@@ -54,6 +55,35 @@
 - ServerManager refactoring (eliminated ~100+ lines of duplication)
 
 **Detailed Progress:** See `docs/dev/phase2/` for complete Phase 2 planning, logs, and app development details
+
+### Phase 2.5: Async Image Generation API ✅ (2025-10-23)
+
+**Core Features:**
+- Async polling pattern for image generation (POST returns ID, GET polls status/progress)
+- Batch generation support with `count` parameter (1-5 images per request)
+- GenerationRegistry for in-memory state management with TTL cleanup
+- Progress tracking for batched operations (currentImage/totalImages fields)
+- Sequential batch generation with automatic seed incrementation
+
+**Deliverables:**
+- GenerationRegistry class with automatic cleanup (configurable TTL)
+- Refactored HTTP endpoints (breaking change from synchronous to async)
+- 27 comprehensive unit tests for GenerationRegistry
+- Updated type definitions (GenerationStatus, GenerationState, batch progress fields)
+- Exported utilities (generateId) and new types
+
+**Technical Details:**
+- Breaking API change: `/v1/images/generations` POST now returns `{id, status, createdAt}` immediately
+- New endpoint: `GET /v1/images/generations/:id` for polling status/progress/result
+- Registry TTL: 5 minutes default (configurable via `IMAGE_RESULT_TTL_MS` env var)
+- Cleanup interval: 1 minute default (configurable via `IMAGE_CLEANUP_INTERVAL_MS` env var)
+- Batch generation: Sequential execution with overall progress calculation
+- Error codes: SERVER_BUSY, NOT_FOUND, INVALID_REQUEST, BACKEND_ERROR, IO_ERROR
+
+**Migration Impact:**
+- HTTP clients must migrate from blocking pattern to polling pattern
+- Example app will need updates to use async API
+- Backward compatibility: None (intentional breaking change for better UX)
 
 ---
 

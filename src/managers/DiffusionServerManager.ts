@@ -14,6 +14,7 @@ import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
 import { ResourceOrchestrator } from './ResourceOrchestrator.js';
+import { GenerationRegistry } from './GenerationRegistry.js';
 import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import { getTempPath } from '../config/paths.js';
@@ -68,6 +69,7 @@ export class DiffusionServerManager extends ServerManager {
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
   private orchestrator?: ResourceOrchestrator;
+  private registry: GenerationRegistry;
   private binaryPath?: string;
   private httpServer?: http.Server;
   private currentGeneration?: {
@@ -111,6 +113,12 @@ export class DiffusionServerManager extends ServerManager {
     this.processManager = new ProcessManager();
     this.modelManager = modelManager;
     this.systemInfo = systemInfo;
+
+    // Initialize generation registry for async API
+    this.registry = new GenerationRegistry({
+      maxResultAgeMs: parseInt(process.env.IMAGE_RESULT_TTL_MS || '300000', 10), // 5 minutes default
+      cleanupIntervalMs: parseInt(process.env.IMAGE_CLEANUP_INTERVAL_MS || '60000', 10), // 1 minute default
+    });
 
     // Create orchestrator if llamaServer is provided (enables automatic resource management)
     if (llamaServer) {
@@ -237,6 +245,9 @@ export class DiffusionServerManager extends ServerManager {
         this.httpServer = undefined;
       }
 
+      // Cleanup registry
+      this.registry.destroy();
+
       this.setStatus('stopped');
       this._port = 0;
 
@@ -328,11 +339,17 @@ export class DiffusionServerManager extends ServerManager {
    * @private
    */
   private async ensureBinary(modelPath?: string, forceValidation = false): Promise<string> {
-    return this.ensureBinaryHelper('diffusion', 'sd', BINARY_VERSIONS.diffusionCpp, modelPath, forceValidation);
+    return this.ensureBinaryHelper(
+      'diffusion',
+      'sd',
+      BINARY_VERSIONS.diffusionCpp,
+      modelPath,
+      forceValidation
+    );
   }
 
   /**
-   * Create HTTP server
+   * Create HTTP server with async generation endpoints
    *
    * @param config - Server configuration
    * @private
@@ -343,7 +360,7 @@ export class DiffusionServerManager extends ServerManager {
     this.httpServer = http.createServer(async (req, res) => {
       // Enable CORS
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
       if (req.method === 'OPTIONS') {
@@ -360,45 +377,31 @@ export class DiffusionServerManager extends ServerManager {
           return;
         }
 
-        // Image generation endpoint
+        // Start async image generation (POST /v1/images/generations)
         if (req.url === '/v1/images/generations' && req.method === 'POST') {
-          // Parse request body
-          const body = await this.parseRequestBody(req);
-          const imageConfig: ImageGenerationConfig = JSON.parse(body);
+          await this.handleStartGeneration(req, res);
+          return;
+        }
 
-          // Validate required fields
-          if (!imageConfig.prompt) {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Missing required field: prompt' }));
-            return;
-          }
-
-          // Generate image
-          const result = await this.generateImage(imageConfig);
-
-          // Return result
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(
-            JSON.stringify({
-              image: result.image.toString('base64'),
-              format: result.format,
-              timeTaken: result.timeTaken,
-              seed: result.seed,
-              width: result.width,
-              height: result.height,
-            })
-          );
+        // Get generation status/result (GET /v1/images/generations/:id)
+        const getMatch = req.url?.match(/^\/v1\/images\/generations\/([^/]+)$/);
+        if (getMatch && getMatch[1] && req.method === 'GET') {
+          const generationId = getMatch[1];
+          await this.handleGetGeneration(generationId, res);
           return;
         }
 
         // Not found
         res.writeHead(404, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Not found' }));
+        res.end(JSON.stringify({ error: { message: 'Not found', code: 'NOT_FOUND' } }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(
           JSON.stringify({
-            error: error instanceof Error ? error.message : 'Internal server error',
+            error: {
+              message: error instanceof Error ? error.message : 'Internal server error',
+              code: 'INTERNAL_ERROR',
+            },
           })
         );
       }
@@ -411,6 +414,193 @@ export class DiffusionServerManager extends ServerManager {
     });
 
     await this.logManager?.write(`HTTP server listening on port ${port}`, 'info');
+  }
+
+  /**
+   * Handle POST /v1/images/generations - Start async generation
+   * @private
+   */
+  private async handleStartGeneration(
+    req: http.IncomingMessage,
+    res: http.ServerResponse
+  ): Promise<void> {
+    // Parse request body
+    const body = await this.parseRequestBody(req);
+    const imageConfig: ImageGenerationConfig = JSON.parse(body);
+
+    // Validate required fields
+    if (!imageConfig.prompt) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { message: 'Missing required field: prompt', code: 'INVALID_REQUEST' },
+        })
+      );
+      return;
+    }
+
+    // Validate count parameter
+    if (imageConfig.count !== undefined) {
+      if (imageConfig.count < 1 || imageConfig.count > 5) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            error: { message: 'count must be between 1 and 5', code: 'INVALID_REQUEST' },
+          })
+        );
+        return;
+      }
+    }
+
+    // Check if server is busy
+    if (this.currentGeneration) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: {
+            message: 'Server is busy generating another image',
+            code: 'SERVER_BUSY',
+            suggestion: 'Wait for current generation to complete and try again',
+          },
+        })
+      );
+      return;
+    }
+
+    // Create generation entry in registry
+    const id = this.registry.create(imageConfig);
+
+    // Start generation asynchronously (don't await)
+    this.runAsyncGeneration(id, imageConfig).catch((error) => {
+      this.registry.update(id, {
+        status: 'error',
+        error: {
+          message: error instanceof Error ? error.message : 'Unknown error',
+          code: this.mapErrorCode(error),
+        },
+      });
+    });
+
+    // Return generation ID immediately
+    res.writeHead(201, { 'Content-Type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        id,
+        status: 'pending',
+        createdAt: Date.now(),
+      })
+    );
+  }
+
+  /**
+   * Handle GET /v1/images/generations/:id - Get generation status/result
+   * @private
+   */
+  private async handleGetGeneration(id: string, res: http.ServerResponse): Promise<void> {
+    const state = this.registry.get(id);
+
+    if (!state) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Generation not found', code: 'NOT_FOUND' } }));
+      return;
+    }
+
+    // Build response based on status
+    const response: any = {
+      id: state.id,
+      status: state.status,
+      createdAt: state.createdAt,
+      updatedAt: state.updatedAt,
+    };
+
+    if (state.status === 'in_progress' && state.progress) {
+      response.progress = state.progress;
+    }
+
+    if (state.status === 'complete' && state.result) {
+      response.result = state.result;
+    }
+
+    if (state.status === 'error' && state.error) {
+      response.error = state.error;
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(response));
+  }
+
+  /**
+   * Run async generation and update registry
+   * @private
+   */
+  private async runAsyncGeneration(id: string, config: ImageGenerationConfig): Promise<void> {
+    const startTime = Date.now();
+
+    // Update to in_progress
+    this.registry.update(id, { status: 'in_progress' });
+
+    // Wrap onProgress to update registry
+    const wrappedConfig: ImageGenerationConfig = {
+      ...config,
+      onProgress: (currentStep, totalSteps, stage, percentage) => {
+        this.registry.update(id, {
+          progress: {
+            currentStep,
+            totalSteps,
+            stage,
+            percentage,
+            currentImage:
+              config.count && config.count > 1
+                ? Math.floor((percentage || 0) / (100 / config.count)) + 1
+                : undefined,
+            totalImages: config.count && config.count > 1 ? config.count : undefined,
+          },
+        });
+        // Also call original callback if provided
+        config.onProgress?.(currentStep, totalSteps, stage, percentage);
+      },
+    };
+
+    // Generate images (batch or single)
+    const count = config.count || 1;
+    const results =
+      count > 1
+        ? await this.executeBatchGeneration(wrappedConfig)
+        : [await this.executeImageGeneration(wrappedConfig)];
+
+    // Convert results to base64 for JSON response
+    const images = results.map((result) => ({
+      image: result.image.toString('base64'),
+      seed: result.seed,
+      width: result.width,
+      height: result.height,
+    }));
+
+    // Update registry with complete result
+    this.registry.update(id, {
+      status: 'complete',
+      result: {
+        images,
+        format: 'png',
+        timeTaken: Date.now() - startTime,
+      },
+    });
+  }
+
+  /**
+   * Map error to error code
+   * @private
+   */
+  private mapErrorCode(error: unknown): string {
+    if (error instanceof Error) {
+      const message = error.message.toLowerCase();
+      if (message.includes('server is busy')) return 'SERVER_BUSY';
+      if (message.includes('not running')) return 'SERVER_NOT_RUNNING';
+      if (message.includes('failed to spawn')) return 'BACKEND_ERROR';
+      if (message.includes('exited with code')) return 'BACKEND_ERROR';
+      if (message.includes('failed to read')) return 'IO_ERROR';
+    }
+    return 'UNKNOWN_ERROR';
   }
 
   /**
@@ -547,6 +737,52 @@ export class DiffusionServerManager extends ServerManager {
       this.currentGeneration = undefined;
       throw error;
     }
+  }
+
+  /**
+   * Execute batch image generation (multiple images sequentially)
+   *
+   * Generates multiple images by calling executeImageGeneration in a loop.
+   * Updates progress to reflect overall batch progress.
+   *
+   * @param config - Image generation configuration with count parameter
+   * @returns Array of generated image results
+   * @internal
+   */
+  public async executeBatchGeneration(
+    config: ImageGenerationConfig
+  ): Promise<ImageGenerationResult[]> {
+    const count = config.count || 1;
+    const images: ImageGenerationResult[] = [];
+
+    for (let i = 0; i < count; i++) {
+      // Calculate seed for this image
+      const imageSeed =
+        config.seed !== undefined && config.seed !== -1 ? config.seed + i : undefined;
+
+      // Wrap progress callback to include batch information
+      const wrappedConfig: ImageGenerationConfig = {
+        ...config,
+        seed: imageSeed,
+        onProgress: config.onProgress
+          ? (currentStep, totalSteps, stage, percentage) => {
+              // Calculate overall batch percentage
+              const completedImages = i;
+              const currentImageProgress = (percentage || 0) / 100;
+              const overallPercentage = ((completedImages + currentImageProgress) / count) * 100;
+
+              // Call original progress callback with batch information
+              config.onProgress!(currentStep, totalSteps, stage, overallPercentage);
+            }
+          : undefined,
+      };
+
+      // Generate single image
+      const result = await this.executeImageGeneration(wrappedConfig);
+      images.push(result);
+    }
+
+    return images;
   }
 
   /**
@@ -712,12 +948,7 @@ export class DiffusionServerManager extends ServerManager {
     // Report progress based on current stage with stage information
     if (this.currentStage === 'loading' && this.loadProgress.total > 0) {
       // For loading: use actual progress bar values with loading stage
-      config.onProgress(
-        this.loadProgress.current,
-        this.loadProgress.total,
-        'loading',
-        percentage
-      );
+      config.onProgress(this.loadProgress.current, this.loadProgress.total, 'loading', percentage);
     } else if (this.currentStage === 'diffusion' && this.diffusionProgress.total > 0) {
       // For diffusion: use actual step count with diffusion stage
       config.onProgress(

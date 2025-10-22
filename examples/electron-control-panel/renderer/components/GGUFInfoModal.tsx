@@ -17,11 +17,7 @@ interface GGUFInfoModalProps {
  * @param maxStringLength - Maximum string length to show (default: 500)
  * @returns Truncated copy of the value with indicators for removed content
  */
-function truncateLargeValues(
-  value: unknown,
-  maxArrayItems = 20,
-  maxStringLength = 500
-): unknown {
+function truncateLargeValues(value: unknown, maxArrayItems = 20, maxStringLength = 500): unknown {
   // Handle arrays
   if (Array.isArray(value)) {
     if (value.length > maxArrayItems) {
@@ -133,7 +129,9 @@ const GGUFInfoModal: React.FC<GGUFInfoModalProps> = ({ model, isOpen, onClose, o
       <div className="gguf-modal-container" onClick={(e) => e.stopPropagation()}>
         <div className="gguf-modal-header">
           <h2>GGUF Model Information</h2>
-          <button className="gguf-modal-close" onClick={onClose}>×</button>
+          <button className="gguf-modal-close" onClick={onClose}>
+            ×
+          </button>
         </div>
 
         <div className="gguf-modal-content">
@@ -257,10 +255,7 @@ const GGUFInfoModal: React.FC<GGUFInfoModalProps> = ({ model, isOpen, onClose, o
                         <pre className="gguf-json-display">
                           <code>{JSON.stringify(truncateLargeValues(metadata.raw), null, 2)}</code>
                         </pre>
-                        <button
-                          className="gguf-copy-raw-btn"
-                          onClick={handleCopyRawJson}
-                        >
+                        <button className="gguf-copy-raw-btn" onClick={handleCopyRawJson}>
                           {copyRawSuccess ? '✓ Copied!' : '📋 Copy Raw JSON (Full)'}
                         </button>
                       </>

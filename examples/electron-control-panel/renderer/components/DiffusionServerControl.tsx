@@ -47,8 +47,9 @@ const DiffusionServerControl: React.FC = () => {
   const [binaryLogs, setBinaryLogs] = useState<Array<BinaryLogEvent & { timestamp: Date }>>([]);
 
   // Image generation progress
-  const [generationProgress, setGenerationProgress] =
-    useState<ImageGenerationProgress | null>(null);
+  const [generationProgress, setGenerationProgress] = useState<ImageGenerationProgress | null>(
+    null
+  );
 
   // Set first model as default when models load
   useEffect(() => {
@@ -529,17 +530,13 @@ const DiffusionServerControl: React.FC = () => {
               {generating ? (
                 <>
                   <Spinner size="small" />
-                  {generationProgress ? (
-                    generationProgress.stage === 'loading' ? (
-                      `Generating (loading) ${Math.round(generationProgress.percentage || 0)}%`
-                    ) : generationProgress.stage === 'diffusion' ? (
-                      `Generating (diffusion step ${generationProgress.currentStep}/${generationProgress.totalSteps}) ${Math.round(generationProgress.percentage || 0)}%`
-                    ) : (
-                      `Generating (decoding) ${Math.round(generationProgress.percentage || 0)}%`
-                    )
-                  ) : (
-                    'Generating...'
-                  )}
+                  {generationProgress
+                    ? generationProgress.stage === 'loading'
+                      ? `Generating (loading) ${Math.round(generationProgress.percentage || 0)}%`
+                      : generationProgress.stage === 'diffusion'
+                        ? `Generating (diffusion step ${generationProgress.currentStep}/${generationProgress.totalSteps}) ${Math.round(generationProgress.percentage || 0)}%`
+                        : `Generating (decoding) ${Math.round(generationProgress.percentage || 0)}%`
+                    : 'Generating...'}
                 </>
               ) : (
                 'Generate Image'

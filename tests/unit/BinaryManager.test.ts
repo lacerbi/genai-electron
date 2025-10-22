@@ -108,9 +108,10 @@ const setSpawnResponse = (response: SpawnBehavior) => {
 const createSpawnImplementation = () => {
   return (command: string, args: string[], options: any) => {
     // Determine which behavior to use (array takes precedence)
-    const currentBehavior = spawnBehaviors.length > 0
-      ? spawnBehaviors[spawnCallIndex++ % spawnBehaviors.length]
-      : spawnBehavior;
+    const currentBehavior =
+      spawnBehaviors.length > 0
+        ? spawnBehaviors[spawnCallIndex++ % spawnBehaviors.length]
+        : spawnBehavior;
 
     // Create mock EventEmitter-like object for stdout/stderr
     const mockStdout = {
@@ -584,10 +585,7 @@ describe('BinaryManager', () => {
         destination: expect.stringContaining('.cuda.zip'),
         onProgress: expect.any(Function),
       });
-      expect(mockLogger).toHaveBeenCalledWith(
-        expect.stringContaining('CUDA GPU detected'),
-        'info'
-      );
+      expect(mockLogger).toHaveBeenCalledWith(expect.stringContaining('CUDA GPU detected'), 'info');
       expect(result).toBe('/mock/binaries/llama/llama-server.exe');
     });
 
@@ -780,9 +778,14 @@ describe('BinaryManager', () => {
       // Should call spawn for llama-run with GPU testing args (timeout handled internally)
       expect(mockSpawn).toHaveBeenCalledWith(
         expect.stringContaining('llama-run'),
-        expect.arrayContaining(['-ngl', '1', testModelPath, 'What is 2+2? Just answer with the number.']),
+        expect.arrayContaining([
+          '-ngl',
+          '1',
+          testModelPath,
+          'What is 2+2? Just answer with the number.',
+        ]),
         expect.objectContaining({
-          stdio: ['ignore', 'pipe', 'pipe']
+          stdio: ['ignore', 'pipe', 'pipe'],
         })
       );
     });
@@ -1011,7 +1014,7 @@ describe('BinaryManager', () => {
           '1',
         ]),
         expect.objectContaining({
-          stdio: ['ignore', 'pipe', 'pipe']
+          stdio: ['ignore', 'pipe', 'pipe'],
         })
       );
     });
@@ -1102,7 +1105,10 @@ describe('BinaryManager', () => {
       // Should use cached validation
       expect(result).toBe(binaryPath);
       expect(mockLogger).toHaveBeenCalledWith('Verifying binary integrity...', 'info');
-      expect(mockLogger).toHaveBeenCalledWith('Using cached validation result (binary verified)', 'info');
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Using cached validation result (binary verified)',
+        'info'
+      );
       expect(mockLogger).toHaveBeenCalledWith(expect.stringContaining('Last validated:'), 'info');
 
       // Should NOT run tests (spawn not called)
@@ -1190,7 +1196,10 @@ describe('BinaryManager', () => {
       const result = await manager.ensureBinary(true); // forceValidation=true
 
       // Should log force validation
-      expect(mockLogger).toHaveBeenCalledWith('Force validation requested, re-running tests...', 'info');
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Force validation requested, re-running tests...',
+        'info'
+      );
 
       // Should run validation tests even though cache is valid
       expect(mockSpawn).toHaveBeenCalled();
@@ -1250,8 +1259,8 @@ describe('BinaryManager', () => {
       expect(mockSpawn).toHaveBeenCalled();
 
       // Should save validation cache after successful validation
-      const validationCacheCalls = (mockWriteFile as jest.Mock).mock.calls.filter(
-        call => call[0].includes('.validation.json')
+      const validationCacheCalls = (mockWriteFile as jest.Mock).mock.calls.filter((call) =>
+        call[0].includes('.validation.json')
       );
       expect(validationCacheCalls.length).toBeGreaterThan(0);
       expect(validationCacheCalls[0][1]).toContain('new-checksum');
