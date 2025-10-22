@@ -989,7 +989,7 @@ await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
 
 The `DiffusionServerManager` class manages the diffusion HTTP wrapper server for local image generation using stable-diffusion.cpp.
 
-**Architecture Note**: Unlike llama-server (which is a native HTTP server), stable-diffusion.cpp is a one-shot executable. DiffusionServerManager creates an HTTP wrapper server that spawns stable-diffusion.cpp on-demand for each image generation request.
+**Architecture Note**: Unlike llama-server (which is a native HTTP server), stable-diffusion.cpp is a one-shot executable. DiffusionServerManager creates an HTTP wrapper server that spawns stable-diffusion.cpp on-demand for each image generation request. Resource orchestration (automatic LLM offload/reload) works for both the Node.js API and HTTP endpoints.
 
 ### Import
 

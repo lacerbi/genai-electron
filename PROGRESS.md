@@ -68,6 +68,7 @@
 **Deliverables:**
 - GenerationRegistry class with automatic cleanup (configurable TTL)
 - Refactored HTTP endpoints (breaking change from synchronous to async)
+- HTTP endpoints preserve ResourceOrchestrator integration (automatic LLM offload)
 - 27 comprehensive unit tests for GenerationRegistry
 - Updated type definitions (GenerationStatus, GenerationState, batch progress fields)
 - Exported utilities (generateId) and new types

@@ -874,6 +874,8 @@ const result = await diffusionServer.generateImage({
 });
 ```
 
+**Orchestration Support:** The HTTP endpoints (`POST /v1/images/generations`) automatically use ResourceOrchestrator if available, just like the Node.js API. This means LLM servers are automatically offloaded when VRAM is constrained, preventing system crashes.
+
 ### 7.2 Type Updates for ImageGenerationConfig
 
 The `ImageGenerationConfig` type needs to be updated to include the `count` parameter:
