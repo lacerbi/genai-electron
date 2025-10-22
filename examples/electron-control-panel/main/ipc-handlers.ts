@@ -12,7 +12,7 @@ import {
   sendImageProgress,
 } from './genai-api.js';
 import { LogManager, MetadataFetchStrategy } from 'genai-electron';
-import { LLMService } from 'genai-lite';
+import { LLMService, ImageService } from 'genai-lite';
 
 /**
  * Register all IPC handlers
@@ -312,38 +312,65 @@ export function registerIpcHandlers(): void {
     }
   });
 
-  // Generate image using diffusionServer.generateImage() (with automatic orchestration)
+  // Generate image using genai-lite ImageService (with automatic orchestration)
   ipcMain.handle('diffusion:generate', async (_event, config) => {
     try {
-      // Call diffusionServer.generateImage() which automatically uses ResourceOrchestrator
-      // when configured with llamaServer (as done in src/index.ts)
-      const result = await diffusionServer.generateImage({
+      // Create ImageService instance (genai-electron-images doesn't need API keys)
+      const imageService = new ImageService(async () => 'not-needed');
+
+      // Get diffusion server info to ensure it's running
+      const serverInfo = diffusionServer.getInfo();
+      if (serverInfo.status !== 'running') {
+        throw new Error('Diffusion server is not running');
+      }
+
+      // Track generation time
+      const startTime = Date.now();
+
+      // Generate image using genai-lite with genai-electron-images provider
+      const result = await imageService.generateImage({
+        providerId: 'genai-electron-images',
+        modelId: 'stable-diffusion', // Generic ID for whatever model is loaded
         prompt: config.prompt,
-        negativePrompt: config.negativePrompt,
-        width: config.width || 512,
-        height: config.height || 512,
-        steps: config.steps || 20,
-        cfgScale: config.cfgScale || 7.5,
-        seed: config.seed || -1,
-        sampler: config.sampler || 'euler_a',
-        // Progress callback to send updates to renderer with stage information
-        onProgress: (
-          currentStep: number,
-          totalSteps: number,
-          stage: 'loading' | 'diffusion' | 'decoding',
-          percentage?: number
-        ) => {
-          sendImageProgress(currentStep, totalSteps, stage, percentage);
+        settings: {
+          width: config.width || 512,
+          height: config.height || 512,
+          diffusion: {
+            negativePrompt: config.negativePrompt,
+            steps: config.steps || 20,
+            cfgScale: config.cfgScale || 7.5,
+            seed: config.seed || -1,
+            sampler: config.sampler || 'euler_a',
+            // Progress callback to send updates to renderer
+            onProgress: (progress) => {
+              sendImageProgress(
+                progress.currentStep,
+                progress.totalSteps,
+                progress.stage,
+                progress.percentage
+              );
+            },
+          },
         },
       });
 
-      // Convert Buffer to base64 data URL for renderer
+      const timeTaken = Date.now() - startTime;
+
+      // Handle error response
+      if (result.object === 'error') {
+        throw new Error(result.error.message);
+      }
+
+      // Extract image data from genai-lite response
+      const imageData = result.data[0];
+
+      // Return in format expected by renderer
       return {
-        imageDataUrl: `data:image/png;base64,${result.image.toString('base64')}`,
-        timeTaken: result.timeTaken,
-        seed: result.seed,
-        width: result.width,
-        height: result.height,
+        imageDataUrl: `data:image/png;base64,${imageData.data.toString('base64')}`,
+        timeTaken,
+        seed: imageData.seed || -1,
+        width: imageData.width,
+        height: imageData.height,
       };
     } catch (error) {
       throw new Error(`Failed to generate image: ${(error as Error).message}`);
