@@ -204,6 +204,11 @@ npm run format
 - `ipc-handlers.ts` - IPC handler registration
 - `genai-api.ts` - Wrapper for genai-electron calls
 
+**API Integration:**
+- Uses genai-lite's `LLMService` and `ImageService` for all AI operations
+- genai-electron handles infrastructure (servers, binaries, resources)
+- Demonstrates recommended pattern: genai-lite for API, genai-electron for runtime
+
 ### Renderer Process (`renderer/`)
 
 - `index.tsx` - React entry point
@@ -229,7 +234,7 @@ These example apps have different focuses:
 | ------------------------ | ---------------------------------------------- | ---------------------------------------------- |
 | **Focus**                | API features (templates, providers, reasoning) | Infrastructure (downloads, servers, resources) |
 | **Use case**             | Chat interface showcase                        | Developer/admin control panel                  |
-| **genai-lite usage**     | Heavy (main focus)                             | Light (testing only)                           |
+| **genai-lite usage**     | Heavy (main focus)                             | Medium (LLM + Image APIs)                      |
 | **genai-electron usage** | None                                           | Heavy (main focus)                             |
 
 The control-panel's test chat is intentionally minimal—it verifies the server works. For advanced chat features, see genai-lite's chat-demo.

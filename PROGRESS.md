@@ -85,6 +85,20 @@
 - Example app will need updates to use async API
 - Backward compatibility: None (intentional breaking change for better UX)
 
+### Phase 2.6: genai-lite Integration ✅ (2025-10-23)
+
+**Core Changes:**
+- Migrated electron-control-panel to use genai-lite 0.5.0 ImageService API
+- Image generation now uses genai-electron-images provider (replaces direct genai-electron calls)
+- LLM operations continue using LLMService with llamacpp provider
+- Removed unused `resources:orchestrateGeneration` handler (legacy code cleanup)
+
+**Deliverables:**
+- Example app demonstrates best practice architecture pattern
+- Clean separation: genai-lite for unified API layer, genai-electron for runtime infrastructure
+- All AI operations (LLM + image generation) now go through genai-lite
+- Reduced API surface by removing redundant code paths
+
 ---
 
 ## Key Features Delivered
