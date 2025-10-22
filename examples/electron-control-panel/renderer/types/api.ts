@@ -40,7 +40,6 @@ export interface WindowAPI {
     generateImage: (config: ImageGenerationConfig, port?: number) => Promise<ImageGenerationResult>;
   };
   resources: {
-    orchestrateGeneration: (config: ImageGenerationConfig) => Promise<ImageGenerationResult>;
     wouldNeedOffload: () => Promise<boolean>;
     getSavedState: () => Promise<SavedLLMState | null>;
     clearSavedState: () => Promise<void>;

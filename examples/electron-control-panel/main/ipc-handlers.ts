@@ -381,24 +381,6 @@ export function registerIpcHandlers(): void {
   // Resource Orchestrator Handlers (Phase 2)
   // ========================================
 
-  ipcMain.handle('resources:orchestrateGeneration', async (_event, config) => {
-    try {
-      const orchestrator = getOrchestrator();
-      const result = await orchestrator.orchestrateImageGeneration(config);
-
-      // Convert Buffer to base64 data URL
-      return {
-        imageDataUrl: `data:image/png;base64,${result.image.toString('base64')}`,
-        timeTaken: result.timeTaken,
-        seed: result.seed,
-        width: result.width,
-        height: result.height,
-      };
-    } catch (error) {
-      throw new Error(`Failed to orchestrate image generation: ${(error as Error).message}`);
-    }
-  });
-
   ipcMain.handle('resources:wouldNeedOffload', async () => {
     try {
       const orchestrator = getOrchestrator();

@@ -53,8 +53,6 @@ contextBridge.exposeInMainWorld('api', {
 
   // Resource Orchestrator APIs (Phase 2)
   resources: {
-    orchestrateGeneration: (config: unknown) =>
-      ipcRenderer.invoke('resources:orchestrateGeneration', config),
     wouldNeedOffload: () => ipcRenderer.invoke('resources:wouldNeedOffload'),
     getSavedState: () => ipcRenderer.invoke('resources:getSavedState'),
     clearSavedState: () => ipcRenderer.invoke('resources:clearSavedState'),
@@ -140,7 +138,6 @@ export type WindowAPI = {
     generateImage: (config: unknown, port?: number) => Promise<unknown>;
   };
   resources: {
-    orchestrateGeneration: (config: unknown) => Promise<unknown>;
     wouldNeedOffload: () => Promise<boolean>;
     getSavedState: () => Promise<unknown>;
     clearSavedState: () => Promise<void>;
