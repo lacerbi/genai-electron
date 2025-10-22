@@ -561,12 +561,21 @@ export class DiffusionServerManager extends ServerManager {
       },
     };
 
-    // Generate images (batch or single)
+    // Generate images (batch or single, with orchestration if available)
     const count = config.count || 1;
-    const results =
-      count > 1
-        ? await this.executeBatchGeneration(wrappedConfig)
-        : [await this.executeImageGeneration(wrappedConfig)];
+    let results: ImageGenerationResult[];
+
+    if (count > 1) {
+      // Batch generation (orchestration not yet supported for batch)
+      results = await this.executeBatchGeneration(wrappedConfig);
+    } else {
+      // Single image: use orchestrator if available (same logic as public generateImage method)
+      if (this.orchestrator) {
+        results = [await this.orchestrator.orchestrateImageGeneration(wrappedConfig)];
+      } else {
+        results = [await this.executeImageGeneration(wrappedConfig)];
+      }
+    }
 
     // Convert results to base64 for JSON response
     const images = results.map((result) => ({
