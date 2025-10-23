@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.2.0 (Phase 2.6 - Async API & genai-lite Integration)
+> **Version**: 0.3.0 (Phase 2.6 - Async API & genai-lite Integration)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.

@@ -1,6 +1,6 @@
 # genai-electron Development Setup
 
-> **Version**: 0.2.0 (Phase 2.6 Complete)
+> **Version**: 0.3.0 (Phase 2.6 Complete)
 > **Last Updated**: 2025-10-23
 
 Complete guide for setting up the genai-electron development environment.
