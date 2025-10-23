@@ -11,7 +11,7 @@ import {
   sendDownloadError,
   sendImageProgress,
 } from './genai-api.js';
-import { MetadataFetchStrategy } from 'genai-electron';
+import { MetadataFetchStrategy, formatErrorForUI } from 'genai-electron';
 import { LLMService, ImageService } from 'genai-lite';
 
 /**
@@ -137,16 +137,8 @@ export function registerIpcHandlers(): void {
     try {
       await llamaServer.start(config);
     } catch (error) {
-      const err = error as Error;
-      // Provide helpful error messages
-      if (err.message.includes('RAM') || err.message.includes('memory')) {
-        throw new Error(`Insufficient RAM: ${err.message}`);
-      } else if (err.message.includes('port')) {
-        throw new Error(`Port conflict: ${err.message}`);
-      } else if (err.message.includes('model')) {
-        throw new Error(`Model error: ${err.message}`);
-      }
-      throw new Error(`Failed to start server: ${err.message}`);
+      const formatted = formatErrorForUI(error);
+      throw new Error(`${formatted.title}: ${formatted.message}`);
     }
   });
 

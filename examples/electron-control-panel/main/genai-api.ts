@@ -94,27 +94,6 @@ export function setupServerEventForwarding(): void {
 }
 
 /**
- * Cleanup servers on app quit
- */
-export async function cleanupServers(): Promise<void> {
-  try {
-    // Stop LLM server if running
-    const llamaStatus = llamaServer.getStatus();
-    if (llamaStatus === 'running') {
-      await llamaServer.stop();
-    }
-
-    // Stop diffusion server if running
-    const diffusionStatus = diffusionServer.getStatus();
-    if (diffusionStatus === 'running') {
-      await diffusionServer.stop();
-    }
-  } catch (error) {
-    console.error('Error stopping servers during cleanup:', error);
-  }
-}
-
-/**
  * Send download progress to renderer
  */
 export function sendDownloadProgress(downloaded: number, total: number, modelName: string): void {

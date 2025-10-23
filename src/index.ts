@@ -225,6 +225,9 @@ export {
   sanitizeFilename,
 } from './utils/file-utils.js';
 export { detectReasoningSupport, REASONING_MODEL_PATTERNS } from './config/reasoning-models.js';
+export { attachAppLifecycle } from './utils/electron-lifecycle.js';
+export { formatErrorForUI } from './utils/error-helpers.js';
+export type { UIErrorFormat } from './utils/error-helpers.js';
 
 // ============================================================================
 // Configuration and Paths

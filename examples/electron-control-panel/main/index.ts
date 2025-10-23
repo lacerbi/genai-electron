@@ -2,7 +2,8 @@ import { app, BrowserWindow } from 'electron';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { registerIpcHandlers } from './ipc-handlers.js';
-import { cleanupServers } from './genai-api.js';
+import { attachAppLifecycle } from 'genai-electron';
+import { llamaServer, diffusionServer } from './genai-api.js';
 import squirrelStartup from 'electron-squirrel-startup';
 
 // ES module compatibility: Define __dirname
@@ -57,6 +58,9 @@ app.on('ready', async () => {
 
   // Create window
   createWindow();
+
+  // Attach automatic cleanup handlers for graceful shutdown
+  attachAppLifecycle(app, { llamaServer, diffusionServer });
 });
 
 // Quit when all windows are closed
@@ -71,18 +75,6 @@ app.on('activate', () => {
   // dock icon is clicked and there are no other windows open
   if (BrowserWindow.getAllWindows().length === 0) {
     createWindow();
-  }
-});
-
-// Cleanup on quit
-app.on('before-quit', async (event) => {
-  event.preventDefault();
-  try {
-    await cleanupServers();
-  } catch (error) {
-    console.error('Error during cleanup:', error);
-  } finally {
-    app.exit(0);
   }
 });
 
