@@ -651,11 +651,19 @@ export class DiffusionServerManager extends ServerManager {
       });
     }
 
+    // Normalize seed: generate random seed if not provided or negative
+    const normalizedConfig = {
+      ...config,
+      seed: config.seed === undefined || config.seed < 0
+        ? this.generateRandomSeed()
+        : config.seed
+    };
+
     // Initialize progress tracking
-    this.initializeProgressTracking(config);
+    this.initializeProgressTracking(normalizedConfig);
 
     // Build command-line arguments
-    const args = this.buildDiffusionArgs(config, this.currentModelInfo);
+    const args = this.buildDiffusionArgs(normalizedConfig, this.currentModelInfo);
 
     // Output file path
     const outputPath = getTempPath(`sd-output-${Date.now()}.png`);
@@ -670,7 +678,7 @@ export class DiffusionServerManager extends ServerManager {
     const generationPromise = new Promise<ImageGenerationResult>((resolve, reject) => {
       const spawnResult = this.processManager.spawn(this.binaryPath!, args, {
         onStdout: (data) => {
-          this.processStdoutForProgress(data, config);
+          this.processStdoutForProgress(data, normalizedConfig);
           this.logManager?.write(data, 'info').catch(() => void 0);
         },
         onStderr: (data) => {
@@ -696,15 +704,15 @@ export class DiffusionServerManager extends ServerManager {
             await deleteFile(outputPath).catch(() => void 0);
 
             // Update time estimates based on actual generation times
-            this.updateTimeEstimates(config);
+            this.updateTimeEstimates(normalizedConfig);
 
             resolve({
               image: imageBuffer,
               format: 'png',
               timeTaken: Date.now() - startTime,
-              seed: config.seed || -1,
-              width: config.width || 512,
-              height: config.height || 512,
+              seed: normalizedConfig.seed,
+              width: normalizedConfig.width || 512,
+              height: normalizedConfig.height || 512,
             });
           } catch (error) {
             reject(
@@ -766,8 +774,12 @@ export class DiffusionServerManager extends ServerManager {
 
     for (let i = 0; i < count; i++) {
       // Calculate seed for this image
+      // If user provided a non-negative seed, use seed+i for variations
+      // Otherwise, generate a fresh random seed for each image
       const imageSeed =
-        config.seed !== undefined && config.seed !== -1 ? config.seed + i : undefined;
+        config.seed !== undefined && config.seed >= 0
+          ? config.seed + i
+          : this.generateRandomSeed();
 
       // Wrap progress callback to include batch information
       const wrappedConfig: ImageGenerationConfig = {
@@ -836,8 +848,8 @@ export class DiffusionServerManager extends ServerManager {
       args.push('--cfg-scale', String(config.cfgScale));
     }
 
-    // Seed
-    if (config.seed !== undefined && config.seed !== -1) {
+    // Seed (always present after normalization in executeImageGeneration)
+    if (config.seed !== undefined) {
       args.push('-s', String(config.seed));
     }
 
@@ -858,6 +870,16 @@ export class DiffusionServerManager extends ServerManager {
     }
 
     return args;
+  }
+
+  /**
+   * Generate a random non-negative seed for image generation
+   * @returns Random non-negative integer seed (0 to 2147483646)
+   * @private
+   */
+  private generateRandomSeed(): number {
+    // Generate random non-negative 32-bit integer
+    return Math.floor(Math.random() * 2147483647);
   }
 
   /**
