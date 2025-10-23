@@ -205,6 +205,7 @@ npm run format
 - `genai-api.ts` - Wrapper for genai-electron calls
 
 **API Integration:**
+
 - Uses genai-lite's `LLMService` and `ImageService` for all AI operations
 - genai-electron handles infrastructure (servers, binaries, resources)
 - Demonstrates recommended pattern: genai-lite for API, genai-electron for runtime

@@ -28,6 +28,13 @@ Complete API reference for genai-electron covering:
 8. [Types and Interfaces](#types-and-interfaces)
 9. [Error Classes](#error-classes)
 10. [Utilities](#utilities)
+    - [Platform Detection](#platform-detection)
+    - [File Utilities](#file-utilities)
+    - [Reasoning Model Detection](#reasoning-model-detection)
+    - [ID Generation](#id-generation)
+    - [GGUF Metadata Extraction](#gguf-metadata-extraction)
+    - [Lifecycle Management](#lifecycle-management)
+    - [Error Formatting](#error-formatting)
 
 ---
 
@@ -944,6 +951,62 @@ console.log(`Total log entries: ${allLogs.length}`);
 [2025-10-16T10:30:01.500Z] [info] Server listening on port 8080
 [2025-10-16T10:30:05.123Z] [info] Request completed in 234ms
 ```
+
+---
+
+#### `getStructuredLogs(lines?: number): Promise<LogEntry[]>`
+
+Gets recent server logs as structured objects with parsed timestamps, levels, and messages.
+
+This method parses raw log strings into structured `LogEntry` objects, making it easier to filter, format, and display logs in your application. Use this instead of `getLogs()` when you need programmatic access to log components.
+
+**Parameters**:
+- `lines?: number` - Optional - Number of lines to retrieve (default: 100)
+
+**Returns**: `Promise<LogEntry[]>` - Array of structured log entries
+
+**LogEntry Interface**:
+```typescript
+interface LogEntry {
+  timestamp: string;  // ISO 8601 timestamp
+  level: string;      // 'info', 'warn', 'error', 'debug', etc.
+  message: string;    // Log message content
+}
+```
+
+**Example**:
+```typescript
+// Get last 50 logs as structured objects
+const logs = await llamaServer.getStructuredLogs(50);
+
+// Filter by log level
+const errors = logs.filter(entry => entry.level === 'error');
+console.log(`Found ${errors.length} errors`);
+
+// Format for display
+logs.forEach(entry => {
+  const time = new Date(entry.timestamp).toLocaleTimeString();
+  console.log(`[${time}] ${entry.level.toUpperCase()}: ${entry.message}`);
+});
+
+// Search for specific messages
+const modelLogs = logs.filter(entry => entry.message.includes('model'));
+console.log('Model-related logs:', modelLogs);
+```
+
+**Comparison with `getLogs()`**:
+- **`getLogs()`**: Returns raw strings - Use when you want unprocessed log lines
+- **`getStructuredLogs()`**: Returns parsed objects - Use when you need to filter, search, or format logs
+
+**Fallback Handling**:
+If a log line cannot be parsed (malformed format), a fallback entry is created with:
+- `timestamp`: Current time
+- `level`: 'info'
+- `message`: The original unparsed line
+
+This ensures all logs are accessible even if formatting is inconsistent.
+
+**Note**: Available on both `LlamaServerManager` and `DiffusionServerManager`.
 
 ---
 
@@ -2819,6 +2882,98 @@ interface GenerationState {
 
 ---
 
+### LogEntry
+
+Structured log entry with parsed components.
+
+```typescript
+interface LogEntry {
+  timestamp: string;  // ISO 8601 timestamp
+  level: LogLevel;    // Log level
+  message: string;    // Log message content
+}
+```
+
+**Usage**: Returned by `getStructuredLogs()` method on server managers.
+
+**Example**:
+```typescript
+const logs = await llamaServer.getStructuredLogs(50);
+
+// Access structured components
+logs.forEach(entry => {
+  console.log('Time:', entry.timestamp);
+  console.log('Level:', entry.level);
+  console.log('Message:', entry.message);
+});
+
+// Filter by level
+const errors = logs.filter(e => e.level === 'error');
+const warnings = logs.filter(e => e.level === 'warn');
+```
+
+### LogLevel
+
+Supported log levels.
+
+```typescript
+type LogLevel = 'info' | 'warn' | 'error' | 'debug';
+```
+
+**Usage**: Indicates the severity or type of log message.
+
+**Common levels**:
+- `info` - General informational messages
+- `warn` - Warning messages (non-critical issues)
+- `error` - Error messages (failures, exceptions)
+- `debug` - Debug/verbose messages
+
+### SavedLLMState
+
+State information saved during LLM server offload operations.
+
+```typescript
+interface SavedLLMState {
+  config: ServerConfig;   // Server configuration at time of offload
+  wasRunning: boolean;    // Whether server was running before offload
+  savedAt: Date;          // When the state was saved
+}
+```
+
+**Usage**: Used by `ResourceOrchestrator` to restore LLM server after resource-intensive operations (like image generation).
+
+**Export**:
+```typescript
+import type { SavedLLMState } from 'genai-electron';
+```
+
+**Example**:
+```typescript
+import { ResourceOrchestrator } from 'genai-electron';
+import type { SavedLLMState } from 'genai-electron';
+
+const orchestrator = new ResourceOrchestrator(
+  systemInfo,
+  llamaServer,
+  diffusionServer
+);
+
+// Check if LLM state was saved (indicates temporary offload)
+const savedState: SavedLLMState | null = orchestrator.getSavedState();
+
+if (savedState) {
+  console.log('LLM was offloaded at:', savedState.savedAt);
+  console.log('Was running:', savedState.wasRunning);
+  console.log('Config:', savedState.config);
+}
+```
+
+**Related Methods**:
+- `ResourceOrchestrator.getSavedState()` - Returns current saved state or null
+- `ResourceOrchestrator.clearSavedState()` - Clears saved state
+
+---
+
 ## Error Classes
 
 All errors extend `GenaiElectronError` which provides:
@@ -3177,6 +3332,178 @@ const llama = {
 };
 console.log(getArchField(llama, 'block_count')); // 32
 ```
+
+---
+
+### Lifecycle Management
+
+#### `attachAppLifecycle(app, managers)`
+
+Attach automatic cleanup handlers to Electron app lifecycle for graceful server shutdown.
+
+Registers a `before-quit` event listener that gracefully stops all running servers before the application exits. This ensures proper cleanup of resources and processes.
+
+**Parameters**:
+- `app: App` - Electron app instance
+- `managers: ServerManagers` - Server managers to clean up on app quit
+  - `llamaServer?: LlamaServerManager` - LLM server manager (optional)
+  - `diffusionServer?: DiffusionServerManager` - Diffusion server manager (optional)
+
+**Returns**: `void`
+
+**Example (Both Servers)**:
+```typescript
+import { app } from 'electron';
+import { attachAppLifecycle, llamaServer, diffusionServer } from 'genai-electron';
+
+app.whenReady().then(() => {
+  // Setup your app...
+
+  // Attach lifecycle handlers for automatic cleanup
+  attachAppLifecycle(app, { llamaServer, diffusionServer });
+});
+```
+
+**Example (LLM Only)**:
+```typescript
+import { app } from 'electron';
+import { attachAppLifecycle, llamaServer } from 'genai-electron';
+
+app.whenReady().then(() => {
+  // Attach lifecycle handler for LLM server only
+  attachAppLifecycle(app, { llamaServer });
+});
+```
+
+**Example (Diffusion Only)**:
+```typescript
+import { app } from 'electron';
+import { attachAppLifecycle, diffusionServer } from 'genai-electron';
+
+app.whenReady().then(() => {
+  // Attach lifecycle handler for diffusion server only
+  attachAppLifecycle(app, { diffusionServer });
+});
+```
+
+**Behavior**:
+1. Registers `before-quit` event listener on the Electron app
+2. Prevents default quit to allow cleanup
+3. Stops all running servers gracefully (checks status first)
+4. Logs cleanup progress to console
+5. Exits app with code 0 after cleanup
+
+**Notes**:
+- Only stops servers that are currently running
+- Errors during cleanup are logged but don't prevent app quit
+- Call this function after `app.whenReady()` or in your main process initialization
+
+---
+
+### Error Formatting
+
+#### `formatErrorForUI(error)`
+
+Format an error for display in UI with consistent structure and user-friendly messages.
+
+Converts library error classes into a consistent, user-friendly format with clear titles, messages, and actionable remediation steps. This eliminates the need for brittle substring matching on error messages and provides a consistent error experience across applications.
+
+**Parameters**:
+- `error: unknown` - Error to format (any type)
+
+**Returns**: `UIErrorFormat` - Formatted error object
+```typescript
+interface UIErrorFormat {
+  code: string;           // Error code for programmatic handling
+  title: string;          // Short, human-readable error title
+  message: string;        // Detailed error message
+  remediation?: string;   // Optional suggested remediation steps
+}
+```
+
+**Example (Basic Usage)**:
+```typescript
+import { formatErrorForUI } from 'genai-electron';
+
+try {
+  await llamaServer.start(config);
+} catch (error) {
+  const formatted = formatErrorForUI(error);
+  console.error(`${formatted.title}: ${formatted.message}`);
+  if (formatted.remediation) {
+    console.log('Suggestion:', formatted.remediation);
+  }
+}
+```
+
+**Example (IPC Handler)**:
+```typescript
+import { ipcMain } from 'electron';
+import { formatErrorForUI, llamaServer } from 'genai-electron';
+
+ipcMain.handle('server:start', async (_event, config) => {
+  try {
+    await llamaServer.start(config);
+    return { success: true };
+  } catch (error) {
+    const formatted = formatErrorForUI(error);
+    throw new Error(`${formatted.title}: ${formatted.message}`);
+  }
+});
+```
+
+**Example (Programmatic Error Handling)**:
+```typescript
+try {
+  await modelManager.downloadModel(config);
+} catch (error) {
+  const formatted = formatErrorForUI(error);
+
+  switch (formatted.code) {
+    case 'INSUFFICIENT_RESOURCES':
+      // Show disk space warning
+      showDiskSpaceWarning(formatted.message, formatted.remediation);
+      break;
+    case 'DOWNLOAD_FAILED':
+      // Retry download
+      if (await confirmRetry(formatted.message)) {
+        retryDownload();
+      }
+      break;
+    case 'MODEL_NOT_FOUND':
+      // Show model selection dialog
+      showModelSelector();
+      break;
+    default:
+      // Generic error handling
+      showErrorDialog(formatted.title, formatted.message);
+      break;
+  }
+}
+```
+
+**Supported Error Classes**:
+
+| Error Class | Code | Title | Remediation Example |
+|-------------|------|-------|---------------------|
+| `ModelNotFoundError` | `MODEL_NOT_FOUND` | Model Not Found | Check that the model ID is correct... |
+| `DownloadError` | `DOWNLOAD_FAILED` | Download Failed | Check your internet connection... |
+| `InsufficientResourcesError` | `INSUFFICIENT_RESOURCES` | Not Enough Resources | Try closing other applications... |
+| `PortInUseError` | `PORT_IN_USE` | Port Already In Use | Choose a different port... |
+| `ServerError` | `SERVER_ERROR` | Server Error | Check the server logs... |
+| `FileSystemError` | `FILE_SYSTEM_ERROR` | File System Error | Check permissions and disk space... |
+| `ChecksumError` | `CHECKSUM_MISMATCH` | Checksum Verification Failed | The file may be corrupted... |
+| `BinaryError` | `BINARY_ERROR` | Binary Error | Try restarting to trigger fresh download... |
+| `GenaiElectronError` | (varies) | Operation Failed | (from error details) |
+| `Error` | `UNKNOWN_ERROR` | Unknown Error | Please try again... |
+| Other | `UNKNOWN_ERROR` | Unknown Error | Please try again... |
+
+**Benefits**:
+- Eliminates brittle substring matching on error messages
+- Provides consistent error format across all apps
+- Includes actionable remediation suggestions
+- Safe handling of unknown error types
+- Suitable for both console logging and UI display
 
 ---
 

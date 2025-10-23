@@ -18,7 +18,7 @@ import { ServerError } from '../errors/index.js';
 /**
  * Saved LLM state for restoration
  */
-interface SavedLLMState {
+export interface SavedLLMState {
   /** LLM server configuration */
   config: ServerConfig;
   /** Whether LLM was running before offload */

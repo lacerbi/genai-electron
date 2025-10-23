@@ -7,9 +7,9 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors (library + example app)
-- **Tests:** ✅ 273/273 passing (100% pass rate)
+- **Tests:** ✅ 287/287 passing (100% pass rate)
 - **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `feat/phase2-app` (Phase 2.6 complete - genai-lite Integration + Orchestration Fix)
+- **Branch:** `feat/extraction` (Library Extraction Phase 1 - Part 1 complete)
 - **Last Updated:** 2025-10-23
 
 **Test Suite Breakdown:**
@@ -17,6 +17,7 @@
 - Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator)
 - Phase 2.5 Tests: 27 tests (GenerationRegistry, async API)
 - Infrastructure: 58 tests (BinaryManager, health-check, validation cache)
+- Phase 3 Prep Tests: 14 tests (structured-logs API - getStructuredLogs())
 
 ---
 
@@ -99,6 +100,108 @@
 - Clean separation: genai-lite for unified API layer, genai-electron for runtime infrastructure
 - All AI operations (LLM + image generation) now go through genai-lite
 - Reduced API surface by removing redundant code paths
+
+### Phase 3 Prep: Library Extraction Phase 1 ✅ COMPLETE (2025-10-23)
+
+**Goal:** Extract reusable patterns from electron-control-panel into genai-electron library (following LIBRARY-EXTRACTION-PLAN.md)
+
+#### Part 1: Type Consolidation & Structured Logs
+
+**Completed Tasks:**
+
+1. ✅ **Type Consolidation**
+   - Exported `SavedLLMState` type from `ResourceOrchestrator.ts` (was internal interface)
+   - Added `SavedLLMState` to `src/index.ts` exports
+   - Updated `examples/electron-control-panel/renderer/types/api.ts` to import types from genai-electron library
+   - App now uses library types instead of duplicates (eliminates type drift)
+   - Clear separation: Library types vs app-specific adaptations documented
+
+2. ✅ **Structured Logs API**
+   - Added `getStructuredLogs(limit?: number): Promise<LogEntry[]>` method to `ServerManager` base class
+   - Automatically inherited by `LlamaServerManager` and `DiffusionServerManager`
+   - Parses raw log strings into structured `LogEntry` objects (timestamp, level, message)
+   - Fallback handling for malformed log entries
+   - Updated example app IPC handlers (`server:logs`, `diffusion:logs`) to use new API
+   - Removed manual `LogManager.parseEntry()` calls from app code (now handled by library)
+   - Removed unused `LogManager` import from `ipc-handlers.ts`
+
+3. ✅ **Unit Tests (Part 1)**
+   - Created comprehensive test suite: `tests/unit/structured-logs.test.ts`
+   - Tests for both `LlamaServerManager` and `DiffusionServerManager`
+   - Tests for `LogManager.parseEntry()` static method
+   - Coverage: Well-formed logs, malformed logs with fallback, limit parameter, error handling
+   - Total: 14 test cases covering all scenarios
+
+**Part 1 Files Modified:**
+- `src/managers/ResourceOrchestrator.ts` - Exported SavedLLMState interface
+- `src/managers/ServerManager.ts` - Added getStructuredLogs() method
+- `src/index.ts` - Added SavedLLMState type export
+- `examples/electron-control-panel/renderer/types/api.ts` - Import library types
+- `examples/electron-control-panel/main/ipc-handlers.ts` - Use getStructuredLogs() API
+- `tests/unit/structured-logs.test.ts` - New comprehensive test suite (14 tests)
+
+#### Part 2: Lifecycle & Error Helpers
+
+**Completed Tasks:**
+
+1. ✅ **Lifecycle Helper**
+   - Added `attachAppLifecycle(app, managers)` utility in `src/utils/electron-lifecycle.ts`
+   - Automatic graceful shutdown with server cleanup on app quit
+   - Registers `before-quit` listener and stops all running servers
+   - Supports both LLM and diffusion servers (optional parameters)
+   - Updated example app `main/index.ts` to use helper (removed manual cleanup)
+   - Removed `cleanupServers()` function from `main/genai-api.ts` (now in library)
+
+2. ✅ **Error Normalization Helper**
+   - Added `formatErrorForUI(error)` utility in `src/utils/error-helpers.ts`
+   - Converts all 8 library error classes to structured `UIErrorFormat` objects
+   - Returns: `{ code, title, message, remediation }` for every error
+   - Maps unknown errors to safe fallback format
+   - Updated example app `main/ipc-handlers.ts` to use helper
+   - Removed brittle substring matching on error messages
+   - Exported `UIErrorFormat` type from `src/index.ts`
+
+3. ✅ **Unit Tests (Part 2)**
+   - Created `tests/unit/electron-lifecycle.test.ts` - 11 test cases
+     - Tests app quit handling, server cleanup, error handling
+     - Tests with/without servers provided, mixed server states
+   - Created `tests/unit/error-helpers.test.ts` - 22 test cases
+     - Tests all 8 error class mappings with proper codes/titles/messages
+     - Tests unknown errors, null/undefined, Error objects
+     - Tests remediation suggestions from error details
+
+**Part 2 Files Modified:**
+- `src/utils/electron-lifecycle.ts` - New lifecycle helper (90 lines)
+- `src/utils/error-helpers.ts` - New error formatter (225 lines)
+- `src/index.ts` - Export new utilities and UIErrorFormat type
+- `examples/electron-control-panel/main/index.ts` - Use attachAppLifecycle
+- `examples/electron-control-panel/main/genai-api.ts` - Remove cleanupServers function
+- `examples/electron-control-panel/main/ipc-handlers.ts` - Use formatErrorForUI
+- `tests/unit/electron-lifecycle.test.ts` - New test suite (11 tests)
+- `tests/unit/error-helpers.test.ts` - New test suite (22 tests)
+
+**Build Status:**
+- ✅ Library builds successfully (0 TypeScript errors)
+- ✅ All 320 tests pass (287 existing + 33 new)
+- ✅ 16 test suites, all passing
+- ✅ Example app builds successfully
+
+**Overall Impact:**
+
+**All 4 "Move now" items from LIBRARY-EXTRACTION-PLAN.md complete:**
+1. ✅ Type Consolidation (use existing exports)
+2. ✅ Structured Logs API (additive method)
+3. ✅ Lifecycle/Cleanup Helper (optional utility)
+4. ✅ Error Normalization Helper (UI-friendly formatting)
+
+**Benefits Delivered:**
+- Reduces app code by ~27 lines
+- Eliminates brittle error substring matching
+- Consistent error handling across all apps
+- One-line lifecycle setup with `attachAppLifecycle()`
+- Type safety improved (library is source of truth)
+- Reduced code duplication between library and apps
+- No breaking changes to existing APIs
 
 ---
 
@@ -240,14 +343,45 @@ Key design decisions that inform future development:
 
 ## Current Focus
 
-**Phase 2.6 is complete, tested, and production-ready.**
+**Phase 3 Prep: Library Extraction Phase 1 ✅ COMPLETE (2025-10-23)**
 
-**Current Status:**
-1. ✅ Testing & validation complete
-2. 🔄 Documentation review in progress
-3. 📋 Phase 3 planning preparation
-4. 🎯 Ready for merge and release when approved
+**Summary:**
+- **All 4 "Move now" items complete** - Type consolidation, structured logs, lifecycle helper, error normalization
+- **No breaking changes** - All changes are additive and backward compatible
+- **Library builds clean** - 0 TypeScript errors
+- **All tests pass** - 320/320 (100% pass rate) across 16 suites
+- **Example app updated** - Uses all new library utilities
+- **Type safety improved** - Library is source of truth for types
 
-**Next:** Review documentation completeness, then prepare for Phase 3.
+**Completed in 2 Parts:**
 
-For detailed historical information about Phase 2 app development (Issues 1-11, GGUF integration, debugging process), see `docs/dev/phase2/PHASE2-APP-PROGRESS.md`.
+**Part 1 (Commit 7d59f9c):**
+1. ✅ Type Consolidation (SavedLLMState exported, app using library types)
+2. ✅ Structured Logs API (getStructuredLogs() added to ServerManager)
+3. ✅ Unit tests (14 test cases)
+
+**Part 2 (Commit a16f264):**
+1. ✅ Lifecycle Helper (attachAppLifecycle() for automatic cleanup)
+2. ✅ Error Normalization Helper (formatErrorForUI() for consistent error handling)
+3. ✅ Unit tests (33 test cases: 11 lifecycle + 22 error formatting)
+
+**Files Modified (14 total):**
+- Library: 6 files (2 new utilities, 3 updated managers, index.ts)
+- Example app: 5 files (main/index.ts, genai-api.ts, ipc-handlers.ts, types/api.ts, updated usage)
+- Tests: 3 files (3 new comprehensive test suites)
+
+**Benefits Delivered:**
+- Reduced app code by ~27 lines
+- Eliminates brittle error substring matching
+- One-line lifecycle setup
+- Consistent error format across all apps
+- Better developer experience
+- Foundation for future extractions
+
+**Next Steps:**
+- Review and update documentation (README.md, API.md) with new utilities
+- Consider Phase 3 proper (download resume/cancel, HuggingFace Hub, etc.)
+
+For detailed historical information:
+- Phase 2 app development: `docs/dev/phase2/PHASE2-APP-PROGRESS.md`
+- Library extraction plan: `LIBRARY-EXTRACTION-PLAN.md` (root directory)

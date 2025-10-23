@@ -11,7 +11,7 @@ import {
   sendDownloadError,
   sendImageProgress,
 } from './genai-api.js';
-import { LogManager, MetadataFetchStrategy } from 'genai-electron';
+import { MetadataFetchStrategy, formatErrorForUI } from 'genai-electron';
 import { LLMService, ImageService } from 'genai-lite';
 
 /**
@@ -38,6 +38,14 @@ export function registerIpcHandlers(): void {
       return systemInfo.getMemoryInfo();
     } catch (error) {
       throw new Error(`Failed to get memory info: ${(error as Error).message}`);
+    }
+  });
+
+  ipcMain.handle('system:getGPU', async () => {
+    try {
+      return await systemInfo.getGPUInfo();
+    } catch (error) {
+      throw new Error(`Failed to get GPU info: ${(error as Error).message}`);
     }
   });
 
@@ -137,16 +145,8 @@ export function registerIpcHandlers(): void {
     try {
       await llamaServer.start(config);
     } catch (error) {
-      const err = error as Error;
-      // Provide helpful error messages
-      if (err.message.includes('RAM') || err.message.includes('memory')) {
-        throw new Error(`Insufficient RAM: ${err.message}`);
-      } else if (err.message.includes('port')) {
-        throw new Error(`Port conflict: ${err.message}`);
-      } else if (err.message.includes('model')) {
-        throw new Error(`Model error: ${err.message}`);
-      }
-      throw new Error(`Failed to start server: ${err.message}`);
+      const formatted = formatErrorForUI(error);
+      throw new Error(`${formatted.title}: ${formatted.message}`);
     }
   });
 
@@ -184,23 +184,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('server:logs', async (_event, limit: number) => {
     try {
-      const logStrings = await llamaServer.getLogs(limit);
-
-      // Parse log strings into LogEntry objects
-      return logStrings.map((logLine) => {
-        const parsed = LogManager.parseEntry(logLine);
-
-        // If parsing fails, create a fallback entry
-        if (!parsed) {
-          return {
-            timestamp: new Date().toISOString(),
-            level: 'info',
-            message: logLine,
-          };
-        }
-
-        return parsed;
-      });
+      // Use new getStructuredLogs() API from genai-electron
+      return await llamaServer.getStructuredLogs(limit);
     } catch (error) {
       throw new Error(`Failed to get server logs: ${(error as Error).message}`);
     }
@@ -283,22 +268,8 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('diffusion:logs', async (_event, limit: number) => {
     try {
-      const logStrings = await diffusionServer.getLogs(limit);
-
-      // Parse log strings into LogEntry objects
-      return logStrings.map((logLine) => {
-        const parsed = LogManager.parseEntry(logLine);
-
-        if (!parsed) {
-          return {
-            timestamp: new Date().toISOString(),
-            level: 'info',
-            message: logLine,
-          };
-        }
-
-        return parsed;
-      });
+      // Use new getStructuredLogs() API from genai-electron
+      return await diffusionServer.getStructuredLogs(limit);
     } catch (error) {
       throw new Error(`Failed to get diffusion server logs: ${(error as Error).message}`);
     }

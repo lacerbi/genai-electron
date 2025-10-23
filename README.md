@@ -28,6 +28,7 @@ An Electron-specific library for managing local AI model servers and resources. 
 - ✅ **Batch generation** - Generate multiple image variations in one request (1-5 images)
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when generating images
 - ✅ **Health monitoring** - Real-time server health checks and status tracking
+- ✅ **Structured logs** - Parse server logs into typed objects for easy filtering and display
 - ✅ **Binary management** - Automatic binary download and verification on first run
 - ✅ **Progress tracking** - Real-time progress updates for image generation
 - ✅ **TypeScript-first** - Full type safety with comprehensive type definitions
@@ -49,7 +50,7 @@ npm install electron@>=25.0.0
 ```typescript
 import { app } from 'electron';
 import { LLMService } from 'genai-lite';
-import { systemInfo, modelManager, llamaServer } from 'genai-electron';
+import { systemInfo, modelManager, llamaServer, attachAppLifecycle } from 'genai-electron';
 
 async function setupLocalAI() {
   // 1. Detect system capabilities
@@ -111,14 +112,11 @@ async function setupLocalAI() {
   }
 }
 
-// Cleanup on app quit
-app.on('before-quit', async () => {
-  console.log('Shutting down llama-server...');
-  await llamaServer.stop();
-});
-
 // Run setup when app is ready
 app.whenReady().then(setupLocalAI).catch(console.error);
+
+// Automatic cleanup on app quit
+attachAppLifecycle(app, { llamaServer });
 ```
 
 > **Note**: For image generation examples using `diffusionServer` with automatic resource management, see the [Complete Example](#complete-example-llm--image-generation) section below.
@@ -266,9 +264,15 @@ console.log('Server port:', status.port);
 const isHealthy = await llamaServer.isHealthy();
 console.log('Server is healthy:', isHealthy);
 
-// Get recent logs
+// Get recent logs (raw strings)
 const logs = await llamaServer.getLogs();
 console.log('Recent logs:', logs);
+
+// Get structured logs (parsed objects)
+const structuredLogs = await llamaServer.getStructuredLogs(50);
+structuredLogs.forEach(entry => {
+  console.log(`[${entry.level.toUpperCase()}] ${entry.message}`);
+});
 
 // Restart server
 await llamaServer.restart();
@@ -489,7 +493,7 @@ if (wouldOffload) {
 
 ```typescript
 import { app } from 'electron';
-import { systemInfo, modelManager, llamaServer, diffusionServer } from 'genai-electron';
+import { systemInfo, modelManager, llamaServer, diffusionServer, attachAppLifecycle } from 'genai-electron';
 
 async function setupAI() {
   // 1. Detect system capabilities
@@ -532,13 +536,9 @@ async function setupAI() {
   // Use genai-lite here for LLM interactions...
 }
 
-// Cleanup
-app.on('before-quit', async () => {
-  await llamaServer.stop();
-  await diffusionServer.stop();
-});
-
+// Run setup and attach automatic cleanup
 app.whenReady().then(setupAI).catch(console.error);
+attachAppLifecycle(app, { llamaServer, diffusionServer });
 ```
 
 ## Architecture
@@ -667,6 +667,36 @@ try {
   }
 }
 ```
+
+### Simplified Error Handling with `formatErrorForUI()`
+
+For consistent error formatting across your application, use the `formatErrorForUI()` helper:
+
+```typescript
+import { formatErrorForUI } from 'genai-electron';
+
+try {
+  await llamaServer.start(config);
+} catch (error) {
+  const formatted = formatErrorForUI(error);
+
+  console.error(`${formatted.title}: ${formatted.message}`);
+  if (formatted.remediation) {
+    console.log('Suggestion:', formatted.remediation);
+  }
+
+  // Use the code for programmatic handling
+  if (formatted.code === 'INSUFFICIENT_RESOURCES') {
+    // Show disk space warning in UI
+  }
+}
+```
+
+The helper converts all library errors into a consistent format with:
+- `code` - Error code for programmatic handling
+- `title` - Short, user-friendly title
+- `message` - Detailed error description
+- `remediation` - Optional actionable suggestions
 
 ## Examples
 

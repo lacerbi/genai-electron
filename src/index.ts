@@ -185,6 +185,7 @@ export { ModelManager } from './managers/ModelManager.js';
 export { LlamaServerManager } from './managers/LlamaServerManager.js';
 export { DiffusionServerManager } from './managers/DiffusionServerManager.js';
 export { ResourceOrchestrator } from './managers/ResourceOrchestrator.js';
+export type { SavedLLMState } from './managers/ResourceOrchestrator.js';
 export { GenerationRegistry } from './managers/GenerationRegistry.js';
 export { ServerManager } from './managers/ServerManager.js';
 export { StorageManager } from './managers/StorageManager.js';
@@ -224,6 +225,9 @@ export {
   sanitizeFilename,
 } from './utils/file-utils.js';
 export { detectReasoningSupport, REASONING_MODEL_PATTERNS } from './config/reasoning-models.js';
+export { attachAppLifecycle } from './utils/electron-lifecycle.js';
+export { formatErrorForUI } from './utils/error-helpers.js';
+export type { UIErrorFormat } from './utils/error-helpers.js';
 
 // ============================================================================
 // Configuration and Paths
