@@ -672,7 +672,7 @@ try {
 
 Complete example applications demonstrating genai-electron usage:
 
-- **[electron-control-panel](examples/electron-control-panel/)** - Full-featured Electron app showcasing all library features (coming in Phase 2+)
+- **[electron-control-panel](examples/electron-control-panel/)** - Full-featured Electron app showcasing all library features
 
 ## License
 
