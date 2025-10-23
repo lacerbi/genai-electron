@@ -118,6 +118,34 @@ export class SystemInfo {
   }
 
   /**
+   * Get real-time GPU information (not cached)
+   *
+   * Useful for monitoring VRAM usage during active workloads like image generation.
+   * Unlike detect(), this method always queries the system for current GPU state,
+   * ensuring fresh VRAM availability data.
+   *
+   * @returns Current GPU information
+   *
+   * @example
+   * ```typescript
+   * const gpu = await systemInfo.getGPUInfo();
+   * if (gpu.available && gpu.vramAvailable !== undefined) {
+   *   console.log(`Available VRAM: ${gpu.vramAvailable / (1024 ** 3)} GB`);
+   * }
+   * ```
+   */
+  public async getGPUInfo() {
+    const gpu = await detectGPU();
+
+    // Estimate VRAM if GPU is available but VRAM is not detected
+    if (gpu.available && !gpu.vram) {
+      gpu.vram = (await estimateVRAM(gpu)) ?? undefined;
+    }
+
+    return gpu;
+  }
+
+  /**
    * Check if system can run a specific model
    *
    * @param modelInfo - Model information

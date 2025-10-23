@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('api', {
   system: {
     detect: () => ipcRenderer.invoke('system:detect'),
     getMemory: () => ipcRenderer.invoke('system:getMemory'),
+    getGPU: () => ipcRenderer.invoke('system:getGPU'),
     canRunModel: (modelInfo: unknown) => ipcRenderer.invoke('system:canRunModel', modelInfo),
     getOptimalConfig: (modelInfo: unknown) =>
       ipcRenderer.invoke('system:getOptimalConfig', modelInfo),
@@ -107,6 +108,7 @@ export type WindowAPI = {
   system: {
     detect: () => Promise<unknown>;
     getMemory: () => Promise<unknown>;
+    getGPU: () => Promise<unknown>;
     canRunModel: (modelInfo: unknown) => Promise<{ canRun: boolean; reason?: string }>;
     getOptimalConfig: (modelInfo: unknown) => Promise<unknown>;
   };

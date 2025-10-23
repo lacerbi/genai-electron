@@ -41,6 +41,14 @@ export function registerIpcHandlers(): void {
     }
   });
 
+  ipcMain.handle('system:getGPU', async () => {
+    try {
+      return await systemInfo.getGPUInfo();
+    } catch (error) {
+      throw new Error(`Failed to get GPU info: ${(error as Error).message}`);
+    }
+  });
+
   ipcMain.handle('system:canRunModel', async (_event, modelInfo) => {
     try {
       return await systemInfo.canRunModel(modelInfo);

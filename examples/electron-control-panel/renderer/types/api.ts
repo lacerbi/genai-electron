@@ -2,6 +2,7 @@
 import type {
   SystemCapabilities,
   MemoryInfo,
+  GPUInfo,
   GGUFMetadata,
   ModelInfo,
   DownloadConfig,
@@ -22,6 +23,7 @@ import type {
 export type {
   SystemCapabilities,
   MemoryInfo,
+  GPUInfo,
   GGUFMetadata,
   ModelInfo,
   DownloadConfig,
@@ -99,6 +101,7 @@ export interface WindowAPI {
   system: {
     detect: () => Promise<SystemCapabilities>;
     getMemory: () => Promise<MemoryInfo>;
+    getGPU: () => Promise<GPUInfo>;
     canRunModel: (modelInfo: ModelInfo) => Promise<{ canRun: boolean; reason?: string }>;
     getOptimalConfig: (modelInfo: ModelInfo) => Promise<LlamaServerConfig>;
   };

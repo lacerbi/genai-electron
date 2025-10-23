@@ -109,19 +109,26 @@ export function useResourceMonitor() {
     return () => clearInterval(interval);
   }, [fetchUsage, checkOffloadStatus, checkSavedState]);
 
-  // Poll GPU capabilities every 5 seconds for VRAM updates
+  // Poll GPU info every 5 seconds for real-time VRAM updates (bypasses cache)
   useEffect(() => {
-    const fetchCapabilities = async () => {
+    const fetchGPUInfo = async () => {
       try {
-        const caps = await window.api.system.detect();
-        setCapabilities(caps);
+        const gpuInfo = await window.api.system.getGPU();
+        // Update capabilities with fresh GPU data
+        setCapabilities((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            gpu: gpuInfo,
+          };
+        });
       } catch (err) {
-        console.error('Failed to get system capabilities:', err);
+        console.error('Failed to get GPU info:', err);
       }
     };
 
     const interval = setInterval(() => {
-      fetchCapabilities();
+      fetchGPUInfo();
     }, 5000);
 
     return () => clearInterval(interval);
