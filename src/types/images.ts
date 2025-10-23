@@ -68,7 +68,7 @@ export interface ImageGenerationConfig {
   /** Guidance scale (default: 7.5, higher = closer to prompt) */
   cfgScale?: number;
 
-  /** Random seed for reproducibility (-1 = random) */
+  /** Random seed for reproducibility (undefined or negative = random, actual seed returned in result) */
   seed?: number;
 
   /** Sampler algorithm (default: 'euler_a') */

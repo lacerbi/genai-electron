@@ -1113,7 +1113,7 @@ This happens transparently without any additional code. The orchestration uses a
 - `height?: number` - Optional - Image height in pixels (default: 512)
 - `steps?: number` - Optional - Number of inference steps (default: 20, more = better quality but slower)
 - `cfgScale?: number` - Optional - Guidance scale (default: 7.5, higher = closer to prompt)
-- `seed?: number` - Optional - Random seed for reproducibility (-1 = random)
+- `seed?: number` - Optional - Random seed for reproducibility (undefined or negative = random, actual seed returned in result)
 - `sampler?: ImageSampler` - Optional - Sampler algorithm (default: 'euler_a')
 - `onProgress?: (currentStep: number, totalSteps: number) => void` - Optional - Progress callback
 
@@ -1857,7 +1857,7 @@ interface ImageGenerationConfig {
   height?: number;                   // Image height in pixels (default: 512)
   steps?: number;                    // Inference steps (default: 20)
   cfgScale?: number;                 // Guidance scale (default: 7.5)
-  seed?: number;                     // Random seed (-1 = random)
+  seed?: number;                     // Random seed (undefined or negative = random, actual seed returned)
   sampler?: ImageSampler;            // Sampler algorithm (default: 'euler_a')
   onProgress?: (
     currentStep: number,
