@@ -654,9 +654,7 @@ export class DiffusionServerManager extends ServerManager {
     // Normalize seed: generate random seed if not provided or negative
     const normalizedConfig = {
       ...config,
-      seed: config.seed === undefined || config.seed < 0
-        ? this.generateRandomSeed()
-        : config.seed
+      seed: config.seed === undefined || config.seed < 0 ? this.generateRandomSeed() : config.seed,
     };
 
     // Initialize progress tracking
@@ -777,9 +775,7 @@ export class DiffusionServerManager extends ServerManager {
       // If user provided a non-negative seed, use seed+i for variations
       // Otherwise, generate a fresh random seed for each image
       const imageSeed =
-        config.seed !== undefined && config.seed >= 0
-          ? config.seed + i
-          : this.generateRandomSeed();
+        config.seed !== undefined && config.seed >= 0 ? config.seed + i : this.generateRandomSeed();
 
       // Wrap progress callback to include batch information
       const wrappedConfig: ImageGenerationConfig = {
@@ -1051,7 +1047,10 @@ export class DiffusionServerManager extends ServerManager {
     }, 100);
 
     // Prevent synthetic interval from keeping the event loop alive
-    if (this.syntheticProgressInterval && typeof this.syntheticProgressInterval.unref === 'function') {
+    if (
+      this.syntheticProgressInterval &&
+      typeof this.syntheticProgressInterval.unref === 'function'
+    ) {
       this.syntheticProgressInterval.unref();
     }
   }
