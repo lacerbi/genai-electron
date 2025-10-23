@@ -130,8 +130,12 @@ jest.unstable_mockModule('../../src/config/paths.js', () => ({
     temp: '/tmp/test/temp',
   },
   BASE_DIR: '/tmp/test',
-  getBinaryPath: jest.fn((type: string, platform: string) => `/tmp/test/binaries/${type}/${platform}/binary`),
-  getModelFilePath: jest.fn((type: string, filename: string) => `/tmp/test/models/${type}/${filename}`),
+  getBinaryPath: jest.fn(
+    (type: string, platform: string) => `/tmp/test/binaries/${type}/${platform}/binary`
+  ),
+  getModelFilePath: jest.fn(
+    (type: string, filename: string) => `/tmp/test/models/${type}/${filename}`
+  ),
   getTempPath: jest.fn((filename: string) => `/tmp/test/temp/${filename}`),
 }));
 
@@ -221,8 +225,9 @@ describe('getStructuredLogs()', () => {
     it('should respect the limit parameter', async () => {
       await llamaServer['initializeLogManager']('test-llama.log', 'Test startup');
 
-      const mockLogs = Array.from({ length: 100 }, (_, i) =>
-        `[2025-01-01T10:00:${String(i).padStart(2, '0')}.000Z] [info] Log entry ${i}`
+      const mockLogs = Array.from(
+        { length: 100 },
+        (_, i) => `[2025-01-01T10:00:${String(i).padStart(2, '0')}.000Z] [info] Log entry ${i}`
       );
 
       mockLogManagerGetRecent.mockResolvedValue(mockLogs);

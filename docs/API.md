@@ -28,6 +28,13 @@ Complete API reference for genai-electron covering:
 8. [Types and Interfaces](#types-and-interfaces)
 9. [Error Classes](#error-classes)
 10. [Utilities](#utilities)
+    - [Platform Detection](#platform-detection)
+    - [File Utilities](#file-utilities)
+    - [Reasoning Model Detection](#reasoning-model-detection)
+    - [ID Generation](#id-generation)
+    - [GGUF Metadata Extraction](#gguf-metadata-extraction)
+    - [Lifecycle Management](#lifecycle-management)
+    - [Error Formatting](#error-formatting)
 
 ---
 
@@ -3325,6 +3332,178 @@ const llama = {
 };
 console.log(getArchField(llama, 'block_count')); // 32
 ```
+
+---
+
+### Lifecycle Management
+
+#### `attachAppLifecycle(app, managers)`
+
+Attach automatic cleanup handlers to Electron app lifecycle for graceful server shutdown.
+
+Registers a `before-quit` event listener that gracefully stops all running servers before the application exits. This ensures proper cleanup of resources and processes.
+
+**Parameters**:
+- `app: App` - Electron app instance
+- `managers: ServerManagers` - Server managers to clean up on app quit
+  - `llamaServer?: LlamaServerManager` - LLM server manager (optional)
+  - `diffusionServer?: DiffusionServerManager` - Diffusion server manager (optional)
+
+**Returns**: `void`
+
+**Example (Both Servers)**:
+```typescript
+import { app } from 'electron';
+import { attachAppLifecycle, llamaServer, diffusionServer } from 'genai-electron';
+
+app.whenReady().then(() => {
+  // Setup your app...
+
+  // Attach lifecycle handlers for automatic cleanup
+  attachAppLifecycle(app, { llamaServer, diffusionServer });
+});
+```
+
+**Example (LLM Only)**:
+```typescript
+import { app } from 'electron';
+import { attachAppLifecycle, llamaServer } from 'genai-electron';
+
+app.whenReady().then(() => {
+  // Attach lifecycle handler for LLM server only
+  attachAppLifecycle(app, { llamaServer });
+});
+```
+
+**Example (Diffusion Only)**:
+```typescript
+import { app } from 'electron';
+import { attachAppLifecycle, diffusionServer } from 'genai-electron';
+
+app.whenReady().then(() => {
+  // Attach lifecycle handler for diffusion server only
+  attachAppLifecycle(app, { diffusionServer });
+});
+```
+
+**Behavior**:
+1. Registers `before-quit` event listener on the Electron app
+2. Prevents default quit to allow cleanup
+3. Stops all running servers gracefully (checks status first)
+4. Logs cleanup progress to console
+5. Exits app with code 0 after cleanup
+
+**Notes**:
+- Only stops servers that are currently running
+- Errors during cleanup are logged but don't prevent app quit
+- Call this function after `app.whenReady()` or in your main process initialization
+
+---
+
+### Error Formatting
+
+#### `formatErrorForUI(error)`
+
+Format an error for display in UI with consistent structure and user-friendly messages.
+
+Converts library error classes into a consistent, user-friendly format with clear titles, messages, and actionable remediation steps. This eliminates the need for brittle substring matching on error messages and provides a consistent error experience across applications.
+
+**Parameters**:
+- `error: unknown` - Error to format (any type)
+
+**Returns**: `UIErrorFormat` - Formatted error object
+```typescript
+interface UIErrorFormat {
+  code: string;           // Error code for programmatic handling
+  title: string;          // Short, human-readable error title
+  message: string;        // Detailed error message
+  remediation?: string;   // Optional suggested remediation steps
+}
+```
+
+**Example (Basic Usage)**:
+```typescript
+import { formatErrorForUI } from 'genai-electron';
+
+try {
+  await llamaServer.start(config);
+} catch (error) {
+  const formatted = formatErrorForUI(error);
+  console.error(`${formatted.title}: ${formatted.message}`);
+  if (formatted.remediation) {
+    console.log('Suggestion:', formatted.remediation);
+  }
+}
+```
+
+**Example (IPC Handler)**:
+```typescript
+import { ipcMain } from 'electron';
+import { formatErrorForUI, llamaServer } from 'genai-electron';
+
+ipcMain.handle('server:start', async (_event, config) => {
+  try {
+    await llamaServer.start(config);
+    return { success: true };
+  } catch (error) {
+    const formatted = formatErrorForUI(error);
+    throw new Error(`${formatted.title}: ${formatted.message}`);
+  }
+});
+```
+
+**Example (Programmatic Error Handling)**:
+```typescript
+try {
+  await modelManager.downloadModel(config);
+} catch (error) {
+  const formatted = formatErrorForUI(error);
+
+  switch (formatted.code) {
+    case 'INSUFFICIENT_RESOURCES':
+      // Show disk space warning
+      showDiskSpaceWarning(formatted.message, formatted.remediation);
+      break;
+    case 'DOWNLOAD_FAILED':
+      // Retry download
+      if (await confirmRetry(formatted.message)) {
+        retryDownload();
+      }
+      break;
+    case 'MODEL_NOT_FOUND':
+      // Show model selection dialog
+      showModelSelector();
+      break;
+    default:
+      // Generic error handling
+      showErrorDialog(formatted.title, formatted.message);
+      break;
+  }
+}
+```
+
+**Supported Error Classes**:
+
+| Error Class | Code | Title | Remediation Example |
+|-------------|------|-------|---------------------|
+| `ModelNotFoundError` | `MODEL_NOT_FOUND` | Model Not Found | Check that the model ID is correct... |
+| `DownloadError` | `DOWNLOAD_FAILED` | Download Failed | Check your internet connection... |
+| `InsufficientResourcesError` | `INSUFFICIENT_RESOURCES` | Not Enough Resources | Try closing other applications... |
+| `PortInUseError` | `PORT_IN_USE` | Port Already In Use | Choose a different port... |
+| `ServerError` | `SERVER_ERROR` | Server Error | Check the server logs... |
+| `FileSystemError` | `FILE_SYSTEM_ERROR` | File System Error | Check permissions and disk space... |
+| `ChecksumError` | `CHECKSUM_MISMATCH` | Checksum Verification Failed | The file may be corrupted... |
+| `BinaryError` | `BINARY_ERROR` | Binary Error | Try restarting to trigger fresh download... |
+| `GenaiElectronError` | (varies) | Operation Failed | (from error details) |
+| `Error` | `UNKNOWN_ERROR` | Unknown Error | Please try again... |
+| Other | `UNKNOWN_ERROR` | Unknown Error | Please try again... |
+
+**Benefits**:
+- Eliminates brittle substring matching on error messages
+- Provides consistent error format across all apps
+- Includes actionable remediation suggestions
+- Safe handling of unknown error types
+- Suitable for both console logging and UI display
 
 ---
 

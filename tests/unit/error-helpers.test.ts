@@ -127,11 +127,9 @@ describe('error-helpers', () => {
     });
 
     it('should format generic GenaiElectronError correctly', () => {
-      const error = new GenaiElectronError(
-        'Something went wrong',
-        'CUSTOM_ERROR',
-        { suggestion: 'Try restarting' }
-      );
+      const error = new GenaiElectronError('Something went wrong', 'CUSTOM_ERROR', {
+        suggestion: 'Try restarting',
+      });
       const formatted = formatErrorForUI(error);
 
       expect(formatted.code).toBe('CUSTOM_ERROR');

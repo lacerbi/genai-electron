@@ -155,8 +155,7 @@ export function formatErrorForUI(error: unknown): UIErrorFormat {
       code: error.code,
       title: 'Server Error',
       message: error.message,
-      remediation:
-        'Check the server logs for more details. The server may need to be restarted.',
+      remediation: 'Check the server logs for more details. The server may need to be restarted.',
     };
   }
 
@@ -166,8 +165,7 @@ export function formatErrorForUI(error: unknown): UIErrorFormat {
       code: error.code,
       title: 'File System Error',
       message: error.message,
-      remediation:
-        'Check that you have sufficient permissions and disk space, then try again.',
+      remediation: 'Check that you have sufficient permissions and disk space, then try again.',
     };
   }
 
