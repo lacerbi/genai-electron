@@ -11,6 +11,7 @@ Common issues and solutions for genai-electron. Focus on non-obvious problems wi
 - [Initialization & Cache Issues](#initialization--cache-issues)
 - [Connection Issues](#connection-issues)
 - [FAQ](#faq)
+- [Additional Utilities](#additional-utilities)
 
 ---
 
@@ -376,6 +377,35 @@ llama-server -m model.gguf --port 8080 --embeddings
 ```
 
 Then connect with genai-lite using `LLAMACPP_API_BASE_URL`.
+
+---
+
+## Additional Utilities
+
+genai-electron exports additional utilities for advanced use cases:
+
+**Platform Detection**:
+```typescript
+import {
+  getPlatform,      // 'darwin' | 'win32' | 'linux'
+  getArchitecture,  // 'x64' | 'arm64'
+  getPlatformKey,   // 'darwin-arm64', etc.
+  isMac, isWindows, isLinux, isAppleSilicon
+} from 'genai-electron';
+```
+
+**File Utilities**:
+```typescript
+import {
+  calculateChecksum,  // SHA256 checksum
+  formatBytes,        // Human-readable sizes
+  fileExists,         // Check file existence
+  ensureDirectory,    // Create directory if needed
+  sanitizeFilename    // Safe filenames
+} from 'genai-electron';
+```
+
+These are low-level utilities used internally. Most applications won't need them directly.
 
 ---
 

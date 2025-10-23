@@ -35,7 +35,7 @@
 **Deliverables:**
 - Core library with comprehensive test coverage
 - electron-control-panel example app (System Info, Models, LLM Server tabs)
-- Complete documentation (README.md, docs/API.md, docs/SETUP.md)
+- Complete documentation (README.md, genai-electron-docs/, docs/SETUP.md)
 
 **Detailed Progress:** See `docs/dev/phase1/` for complete Phase 1 planning and logs
 
@@ -278,7 +278,7 @@ Key design decisions that inform future development:
 - **Phase 2 Details:** `docs/dev/phase2/` - Complete planning, logs, app development, and issue resolution
 - **Testing Guide:** `docs/dev/ESM-TESTING-GUIDE.md` - ESM mocking patterns and best practices
 - **Refactoring Analysis:** `docs/dev/REFACTORING-ANALYSIS.md` - ServerManager refactoring journey
-- **API Reference:** `docs/API.md` - Complete API documentation with examples
+- **User Documentation:** `genai-electron-docs/` - Complete API documentation (11 modular files)
 - **Setup Guide:** `docs/SETUP.md` - Development environment setup for all platforms
 - **Architecture:** `DESIGN.md` - Complete architecture and design document with all 5 phases
 
@@ -297,9 +297,9 @@ Key design decisions that inform future development:
 - 🔄 Ready for pull request (pending further review)
 
 **Documentation:**
-- Update API.md with any missing Phase 2 details
 - Review and update SETUP.md for clarity
 - Ensure all examples in README.md are current
+- Maintain genai-electron-docs/ with Phase 2 features
 
 ### Phase 3 Planned Features
 
@@ -379,7 +379,7 @@ Key design decisions that inform future development:
 - Foundation for future extractions
 
 **Next Steps:**
-- Review and update documentation (README.md, API.md) with new utilities
+- Review and update documentation (README.md, genai-electron-docs/) with new utilities
 - Consider Phase 3 proper (download resume/cancel, HuggingFace Hub, etc.)
 
 For detailed historical information:

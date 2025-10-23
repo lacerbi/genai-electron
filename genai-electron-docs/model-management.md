@@ -21,6 +21,7 @@ The `ModelManager` class handles model downloading, storage, and management for 
   - [Automatic Extraction](#automatic-extraction)
   - [updateModelMetadata()](#updatemodelmetadata)
   - [Convenience Methods](#convenience-methods)
+  - [Advanced: GGUF Parsing Utilities](#advanced-gguf-parsing-utilities)
 - [Reasoning Model Detection](#reasoning-model-detection)
 - [Error Handling](#error-handling)
 - [Examples](#examples)
@@ -397,6 +398,33 @@ if (arch !== 'llama') {
 ```
 
 **Supported Architectures**: Uses generic extraction supporting any GGUF architecture (llama, gemma, qwen, mistral, phi, mamba, gpt2, etc.).
+
+---
+
+### Advanced: GGUF Parsing Utilities
+
+For advanced use cases, genai-electron exports low-level utilities for working with GGUF metadata:
+
+```typescript
+import {
+  fetchGGUFMetadata,      // Fetch metadata from remote URL
+  fetchLocalGGUFMetadata, // Read metadata from local file
+  getArchField            // Extract architecture-specific fields
+} from 'genai-electron';
+
+// Fetch metadata before downloading (useful for validation)
+const metadata = await fetchGGUFMetadata('https://huggingface.co/.../model.gguf');
+console.log('Layers:', metadata.block_count);
+console.log('Architecture:', metadata.architecture);
+
+// Read metadata from local file
+const localMetadata = await fetchLocalGGUFMetadata('/path/to/model.gguf');
+
+// Extract architecture-specific fields from raw metadata
+const blockCount = getArchField(metadata.raw, 'block_count');
+```
+
+**Note**: Most users don't need these - `ModelManager.downloadModel()` automatically extracts and stores GGUF metadata. Use these for custom workflows or validation before downloading.
 
 ---
 

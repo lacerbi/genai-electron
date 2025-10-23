@@ -299,6 +299,16 @@ const registry = new GenerationRegistry({
 });
 ```
 
+**ID Generation**: The registry uses `generateId()` internally to create unique IDs. You can import it for custom tracking:
+
+```typescript
+import { generateId } from 'genai-electron';
+
+const customId = generateId(); // e.g., "gen_1729612345678_x7k2p9q4m"
+```
+
+Use cases: custom async operation tracking, request correlation, unique file naming.
+
 **Methods:** `create(config)`, `get(id)`, `update(id, updates)`, `delete(id)`, `getAllIds()`, `size()`, `cleanup(maxAgeMs)`, `clear()`, `destroy()`
 
 **Environment Variables:** Configure TTL with `IMAGE_RESULT_TTL_MS` (default: 300000) and `IMAGE_CLEANUP_INTERVAL_MS` (default: 60000). If polling too slowly, results may expire.
