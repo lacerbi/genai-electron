@@ -14,6 +14,7 @@ The `SystemInfo` class provides system capability detection and intelligent conf
   - [getGPUInfo()](#getgpuinfo)
   - [canRunModel()](#canrunmodel)
   - [getOptimalConfig()](#getoptimalconfig)
+  - [clearCache()](#clearcache)
 - [Caching Behavior](#caching-behavior)
 - [Platform-Specific Detection](#platform-specific-detection)
 - [Examples](#examples)
@@ -256,6 +257,24 @@ await llamaServer.start({
   - **Calculation**: Subtracts model size + 2GB OS overhead from available RAM, then selects context size based on remaining memory (8GB→8K, 4GB→4K, 2GB→2K, else 1K)
 - **parallelRequests**: Concurrent request slots based on available resources
 - **flashAttention**: Whether flash attention should be enabled
+
+---
+
+### clearCache()
+
+Clears the capabilities cache, forcing fresh hardware detection on the next `detect()` call.
+
+**Signature**:
+```typescript
+clearCache(): void
+```
+
+**Example**:
+```typescript
+// After GPU driver update
+systemInfo.clearCache();
+const capabilities = await systemInfo.detect(); // Fresh detection
+```
 
 ---
 

@@ -513,6 +513,7 @@ interface SpawnOptions {
   onStdout?: (data: string) => void;
   onStderr?: (data: string) => void;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
+  onError?: (error: Error) => void;
 }
 ```
 
@@ -551,6 +552,10 @@ type JSONValue =
   | null
   | JSONValue[]
   | { [key: string]: JSONValue };
+
+type AsyncFunction<T = void> = () => Promise<T>;
+
+type CleanupFunction = () => void | Promise<void>;
 ```
 
 ---

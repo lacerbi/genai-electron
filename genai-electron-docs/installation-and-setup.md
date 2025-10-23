@@ -36,7 +36,7 @@ npm install electron@>=25.0.0
 - Architecture: x64
 - GPU: NVIDIA CUDA, AMD ROCm (experimental), Intel
 
-**Technology Stack**: Node.js >=22.0.0, TypeScript ^5.9.3, zero runtime dependencies (Node.js built-ins only).
+**Technology Stack**: Node.js >=22.0.0, TypeScript ^5.7.2, zero runtime dependencies (Node.js built-ins only).
 
 ---
 
