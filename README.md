@@ -28,6 +28,7 @@ An Electron-specific library for managing local AI model servers and resources. 
 - ✅ **Batch generation** - Generate multiple image variations in one request (1-5 images)
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when generating images
 - ✅ **Health monitoring** - Real-time server health checks and status tracking
+- ✅ **Structured logs** - Parse server logs into typed objects for easy filtering and display
 - ✅ **Binary management** - Automatic binary download and verification on first run
 - ✅ **Progress tracking** - Real-time progress updates for image generation
 - ✅ **TypeScript-first** - Full type safety with comprehensive type definitions
@@ -266,9 +267,15 @@ console.log('Server port:', status.port);
 const isHealthy = await llamaServer.isHealthy();
 console.log('Server is healthy:', isHealthy);
 
-// Get recent logs
+// Get recent logs (raw strings)
 const logs = await llamaServer.getLogs();
 console.log('Recent logs:', logs);
+
+// Get structured logs (parsed objects)
+const structuredLogs = await llamaServer.getStructuredLogs(50);
+structuredLogs.forEach(entry => {
+  console.log(`[${entry.level.toUpperCase()}] ${entry.message}`);
+});
 
 // Restart server
 await llamaServer.restart();

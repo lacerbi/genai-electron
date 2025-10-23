@@ -947,6 +947,62 @@ console.log(`Total log entries: ${allLogs.length}`);
 
 ---
 
+#### `getStructuredLogs(lines?: number): Promise<LogEntry[]>`
+
+Gets recent server logs as structured objects with parsed timestamps, levels, and messages.
+
+This method parses raw log strings into structured `LogEntry` objects, making it easier to filter, format, and display logs in your application. Use this instead of `getLogs()` when you need programmatic access to log components.
+
+**Parameters**:
+- `lines?: number` - Optional - Number of lines to retrieve (default: 100)
+
+**Returns**: `Promise<LogEntry[]>` - Array of structured log entries
+
+**LogEntry Interface**:
+```typescript
+interface LogEntry {
+  timestamp: string;  // ISO 8601 timestamp
+  level: string;      // 'info', 'warn', 'error', 'debug', etc.
+  message: string;    // Log message content
+}
+```
+
+**Example**:
+```typescript
+// Get last 50 logs as structured objects
+const logs = await llamaServer.getStructuredLogs(50);
+
+// Filter by log level
+const errors = logs.filter(entry => entry.level === 'error');
+console.log(`Found ${errors.length} errors`);
+
+// Format for display
+logs.forEach(entry => {
+  const time = new Date(entry.timestamp).toLocaleTimeString();
+  console.log(`[${time}] ${entry.level.toUpperCase()}: ${entry.message}`);
+});
+
+// Search for specific messages
+const modelLogs = logs.filter(entry => entry.message.includes('model'));
+console.log('Model-related logs:', modelLogs);
+```
+
+**Comparison with `getLogs()`**:
+- **`getLogs()`**: Returns raw strings - Use when you want unprocessed log lines
+- **`getStructuredLogs()`**: Returns parsed objects - Use when you need to filter, search, or format logs
+
+**Fallback Handling**:
+If a log line cannot be parsed (malformed format), a fallback entry is created with:
+- `timestamp`: Current time
+- `level`: 'info'
+- `message`: The original unparsed line
+
+This ensures all logs are accessible even if formatting is inconsistent.
+
+**Note**: Available on both `LlamaServerManager` and `DiffusionServerManager`.
+
+---
+
 ### Events
 
 The `LlamaServerManager` extends `EventEmitter` and emits lifecycle events.
@@ -2816,6 +2872,98 @@ interface GenerationState {
 ```
 
 **Usage**: This type represents the complete state stored in `GenerationRegistry` and returned by the HTTP GET endpoint.
+
+---
+
+### LogEntry
+
+Structured log entry with parsed components.
+
+```typescript
+interface LogEntry {
+  timestamp: string;  // ISO 8601 timestamp
+  level: LogLevel;    // Log level
+  message: string;    // Log message content
+}
+```
+
+**Usage**: Returned by `getStructuredLogs()` method on server managers.
+
+**Example**:
+```typescript
+const logs = await llamaServer.getStructuredLogs(50);
+
+// Access structured components
+logs.forEach(entry => {
+  console.log('Time:', entry.timestamp);
+  console.log('Level:', entry.level);
+  console.log('Message:', entry.message);
+});
+
+// Filter by level
+const errors = logs.filter(e => e.level === 'error');
+const warnings = logs.filter(e => e.level === 'warn');
+```
+
+### LogLevel
+
+Supported log levels.
+
+```typescript
+type LogLevel = 'info' | 'warn' | 'error' | 'debug';
+```
+
+**Usage**: Indicates the severity or type of log message.
+
+**Common levels**:
+- `info` - General informational messages
+- `warn` - Warning messages (non-critical issues)
+- `error` - Error messages (failures, exceptions)
+- `debug` - Debug/verbose messages
+
+### SavedLLMState
+
+State information saved during LLM server offload operations.
+
+```typescript
+interface SavedLLMState {
+  config: ServerConfig;   // Server configuration at time of offload
+  wasRunning: boolean;    // Whether server was running before offload
+  savedAt: Date;          // When the state was saved
+}
+```
+
+**Usage**: Used by `ResourceOrchestrator` to restore LLM server after resource-intensive operations (like image generation).
+
+**Export**:
+```typescript
+import type { SavedLLMState } from 'genai-electron';
+```
+
+**Example**:
+```typescript
+import { ResourceOrchestrator } from 'genai-electron';
+import type { SavedLLMState } from 'genai-electron';
+
+const orchestrator = new ResourceOrchestrator(
+  systemInfo,
+  llamaServer,
+  diffusionServer
+);
+
+// Check if LLM state was saved (indicates temporary offload)
+const savedState: SavedLLMState | null = orchestrator.getSavedState();
+
+if (savedState) {
+  console.log('LLM was offloaded at:', savedState.savedAt);
+  console.log('Was running:', savedState.wasRunning);
+  console.log('Config:', savedState.config);
+}
+```
+
+**Related Methods**:
+- `ResourceOrchestrator.getSavedState()` - Returns current saved state or null
+- `ResourceOrchestrator.clearSavedState()` - Clears saved state
 
 ---
 
