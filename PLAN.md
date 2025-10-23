@@ -1114,4 +1114,4 @@ The restructuring succeeds when these criteria are met:
 2. Execute Phase 2 (verify against codebase, trim intelligently)
 3. Execute Phase 3 (polish, consistency, verify)
 4. Execute Phase 4 (condense README.md, delete API.md, commit)
-5. Move this PLAN.md to `.ath_materials/` with date prefix for future reference
+5. Move this PLAN.md to `/docs/dev` appropriately renamed with date prefix for future reference
