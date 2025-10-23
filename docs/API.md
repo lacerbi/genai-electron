@@ -449,6 +449,37 @@ try {
 
 ---
 
+#### `isDownloading(): boolean`
+
+Check if a download is currently in progress.
+
+**Returns**: `boolean` - `true` if a download is in progress, `false` otherwise
+
+**Example**:
+```typescript
+// Start download
+modelManager.downloadModel({
+  source: 'url',
+  url: 'https://example.com/model.gguf',
+  name: 'My Model',
+  type: 'llm'
+}).catch(console.error);
+
+// Check download status
+if (modelManager.isDownloading()) {
+  console.log('Download in progress...');
+} else {
+  console.log('No active download');
+}
+```
+
+**Use Case**:
+- Prevent starting multiple simultaneous downloads
+- Display download status in UI
+- Implement download queue management
+
+---
+
 #### `updateModelMetadata(id: string, options?: { source?: MetadataFetchStrategy }): Promise<ModelInfo>`
 
 Updates GGUF metadata for an existing model without re-downloading.
@@ -763,28 +794,6 @@ console.log('Status:', status.status); // 'stopped'
 
 ---
 
-#### `restart(): Promise<ServerInfo>`
-
-Restarts the server with the same configuration.
-
-**Returns**: `Promise<ServerInfo>` - Server information after restart
-
-**Example**:
-```typescript
-console.log('Restarting server...');
-const info = await llamaServer.restart();
-console.log('Server restarted on port', info.port);
-console.log('PID:', info.pid);
-```
-
-**Equivalent to**:
-```typescript
-await llamaServer.stop();
-await llamaServer.start(previousConfig);
-```
-
----
-
 #### `getStatus(): ServerStatus`
 
 Gets current server status as a simple string (synchronous).
@@ -832,6 +841,30 @@ console.log('Model ID:', info.modelId);
 if (info.startedAt) {
   const uptime = Date.now() - new Date(info.startedAt).getTime();
   console.log('Uptime:', Math.floor(uptime / 1000), 'seconds');
+}
+```
+
+---
+
+#### `getHealthStatus(): Promise<HealthStatus>`
+
+Gets detailed health status of the server.
+
+**Returns**: `Promise<HealthStatus>` - Health status: `'ok'`, `'loading'`, `'error'`, or `'unknown'`
+
+**Example**:
+```typescript
+const healthStatus = await llamaServer.getHealthStatus();
+console.log('Health status:', healthStatus);
+
+if (healthStatus === 'ok') {
+  console.log('✅ Server is fully operational');
+} else if (healthStatus === 'loading') {
+  console.log('⏳ Server is still loading the model');
+} else if (healthStatus === 'error') {
+  console.error('❌ Server has encountered an error');
+} else {
+  console.log('❓ Server health status is unknown');
 }
 ```
 
@@ -977,8 +1010,13 @@ llamaServer.on('crashed', (error) => {
   console.log('Attempting restart in 5 seconds...');
   setTimeout(async () => {
     try {
-      await llamaServer.restart();
-      console.log('✅ Server restarted successfully');
+      // Restart by stopping and starting again
+      const previousConfig = llamaServer.getConfig();
+      if (previousConfig) {
+        await llamaServer.stop();
+        await llamaServer.start(previousConfig);
+        console.log('✅ Server restarted successfully');
+      }
     } catch (restartError) {
       console.error('❌ Failed to restart:', restartError);
     }
@@ -2336,6 +2374,7 @@ interface SystemCapabilities {
   gpu: GPUInfo;
   platform: NodeJS.Platform;
   recommendations: SystemRecommendations;
+  detectedAt: string;  // ISO 8601 timestamp of when capabilities were detected
 }
 ```
 
@@ -3044,14 +3083,14 @@ import { generateId } from 'genai-electron';
 
 // Generate a unique ID
 const id = generateId();
-console.log('Generated ID:', id); // e.g., "a3f9d2b8e1c4"
+console.log('Generated ID:', id); // e.g., "gen_1729612345678_x7k2p9q4m"
 
 // Use for custom tracking
 const taskId = generateId();
 console.log('Task ID:', taskId);
 ```
 
-**Returns**: `string` - Random alphanumeric ID (12 characters)
+**Returns**: `string` - Unique ID in format `gen_{timestamp}_{random}` where timestamp is milliseconds since epoch and random is a 9-character alphanumeric string
 
 **Use cases:**
 - Custom async operation tracking

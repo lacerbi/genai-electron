@@ -1049,6 +1049,11 @@ export class DiffusionServerManager extends ServerManager {
       // Report VAE decoding progress with stage information
       config.onProgress!(0, 0, 'decoding', percentage);
     }, 100);
+
+    // Prevent synthetic interval from keeping the event loop alive
+    if (this.syntheticProgressInterval && typeof this.syntheticProgressInterval.unref === 'function') {
+      this.syntheticProgressInterval.unref();
+    }
   }
 
   /**

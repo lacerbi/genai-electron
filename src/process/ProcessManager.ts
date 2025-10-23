@@ -166,6 +166,9 @@ export class ProcessManager {
           }
         }
       }, timeout);
+      if (typeof timeoutId.unref === 'function') {
+        timeoutId.unref();
+      }
 
       try {
         // Try graceful termination first
@@ -180,6 +183,9 @@ export class ProcessManager {
             resolve();
           }
         }, 100);
+        if (typeof checkInterval.unref === 'function') {
+          checkInterval.unref();
+        }
       } catch (error) {
         clearTimeout(timeoutId);
         if ((error as NodeJS.ErrnoException).code === 'ESRCH') {

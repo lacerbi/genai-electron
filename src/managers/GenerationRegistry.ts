@@ -34,6 +34,11 @@ export class GenerationRegistry {
     this.cleanupInterval = setInterval(() => {
       this.cleanup(this.maxResultAgeMs);
     }, cleanupIntervalMs);
+
+    // Allow Node to exit naturally even if cleanup timer is active
+    if (typeof this.cleanupInterval.unref === 'function') {
+      this.cleanupInterval.unref();
+    }
   }
 
   /**
