@@ -57,14 +57,7 @@ node --version  # Should show v22.x.x
 npm --version   # Should show 10.x.x or higher
 ```
 
-#### Electron 25+
-
-While Electron is a peer dependency (not required for development), you'll need it to test integration.
-
-```bash
-npm install -g electron@latest
-electron --version  # Should show 25.0.0 or higher
-```
+**Note**: Electron 25+ is a peer dependency. It's included in the example app (`examples/electron-control-panel`), so no global installation needed for development.
 
 ### Platform-Specific Requirements
 
@@ -178,7 +171,7 @@ dist/
 npm test
 ```
 
-**Current Status**: Phase 1 has basic test infrastructure with error handling tests passing.
+**Current Status**: Phase 2.6 complete with 320 tests across 16 suites, 100% pass rate. All core functionality is fully tested.
 
 ### 5. Verify Everything Works
 
@@ -289,98 +282,32 @@ npm run test:watch
 
 ---
 
-## Platform-Specific Setup
-
-### macOS Development
-
-#### Metal Support
-
-macOS uses Metal for GPU acceleration. No additional setup required on modern Macs.
-
-**Verify Metal Support**:
-```bash
-system_profiler SPDisplaysDataType | grep Metal
-```
-
-#### Code Signing (Optional)
-
-For distribution, you'll need to sign binaries:
-
-```bash
-# Install signing certificate
-# Then in your app:
-electron-builder --mac --sign
-```
-
-### Windows Development
-
-#### CUDA Support (Optional)
-
-For NVIDIA GPU support:
-
-1. Install [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads)
-2. Install [cuDNN](https://developer.nvidia.com/cudnn)
-
-**Verify CUDA**:
-```bash
-nvcc --version
-nvidia-smi
-```
-
-#### Windows Defender
-
-Windows Defender may slow down builds. Add exclusions:
-
-1. Open Windows Security
-2. Virus & threat protection
-3. Manage settings
-4. Add exclusions:
-   - `node_modules` folder
-   - Project directory
-
-### Linux Development
-
-#### GPU Support
-
-**NVIDIA CUDA**:
-```bash
-# Ubuntu/Debian
-sudo apt-get install nvidia-driver-535 nvidia-cuda-toolkit
-
-# Verify
-nvidia-smi
-nvcc --version
-```
-
-**AMD ROCm** (experimental):
-```bash
-# Ubuntu 22.04
-wget https://repo.radeon.com/amdgpu-install/latest/ubuntu/jammy/amdgpu-install.deb
-sudo dpkg -i amdgpu-install.deb
-sudo amdgpu-install --usecase=rocm
-
-# Verify
-rocm-smi
-```
-
----
-
 ## Testing
 
 ### Test Structure
 
+**Current Status**: 320 tests across 16 suites, 100% pass rate, ~80% coverage
+
 ```
 tests/
-├── unit/                     # Unit tests for individual modules
-│   ├── errors.test.ts        # ✅ Complete (14/14 passing)
-│   ├── SystemInfo.test.ts    # Template (needs ESM mocking)
-│   ├── ModelManager.test.ts  # Template (needs ESM mocking)
-│   └── ...
-├── integration/              # Integration tests (future)
-│   └── download.test.ts
-└── e2e/                      # End-to-end tests (future)
-    └── full-workflow.test.ts
+├── unit/                           # Unit tests for all modules
+│   ├── errors.test.ts              # ✅ Error classes (14 tests)
+│   ├── SystemInfo.test.ts          # ✅ System detection (18 tests)
+│   ├── ModelManager.test.ts        # ✅ Model management (42 tests)
+│   ├── LlamaServerManager.test.ts  # ✅ LLM server (38 tests)
+│   ├── DiffusionServerManager.test.ts  # ✅ Image gen server (25 tests)
+│   ├── ResourceOrchestrator.test.ts    # ✅ Resource management (25 tests)
+│   ├── GenerationRegistry.test.ts  # ✅ Async image gen (27 tests)
+│   ├── structured-logs.test.ts     # ✅ Log parsing (14 tests)
+│   ├── electron-lifecycle.test.ts  # ✅ Lifecycle helpers (11 tests)
+│   ├── error-helpers.test.ts       # ✅ Error formatting (22 tests)
+│   ├── validation-cache.test.ts    # ✅ Binary validation (16 tests)
+│   └── ... (16 suites total)
+├── integration/                    # Integration tests (future)
+└── e2e/                           # End-to-end tests (future)
 ```
+
+**ESM Testing**: Full ESM support with Jest 30. See `docs/dev/ESM-TESTING-GUIDE.md` for patterns.
 
 ### Running Tests
 
@@ -418,12 +345,12 @@ describe('ModelNotFoundError', () => {
 });
 ```
 
-### Test Coverage Goals
+### Test Coverage
 
-- **Phase 1**: 60%+ coverage (basic validation)
-- **Phase 3**: 80%+ coverage (production-ready)
+- **Current**: ~80% coverage across all modules (Phase 2.6 complete)
+- **Goal**: 85%+ for Phase 3 (production polish)
 
-Current status: Error handling at 100%, infrastructure in place for full coverage.
+All core functionality is tested: errors, managers, utilities, server lifecycle, resource orchestration, and async APIs.
 
 ---
 
@@ -558,14 +485,6 @@ function process(data: DataType) { ... }
 ```
 
 ### Test Issues
-
-#### "ESM module not found" in tests
-
-**Cause**: Jest ESM support is experimental.
-
-**Current Status**: Basic tests work. Complex module mocking requires Jest ESM maturity (planned for Phase 3).
-
-**Workaround**: Test templates provided in `tests/unit/` for future implementation.
 
 #### Test timeouts
 
@@ -727,11 +646,14 @@ Before submitting PR:
 
 ### Documentation
 
-- [README.md](../README.md) - Project overview
+- [README.md](../README.md) - Project overview and quick start
 - [API.md](API.md) - Complete API reference
-- [DESIGN.md](../DESIGN.md) - Architecture and design
-- [PROGRESS.md](../PROGRESS.md) - Current progress
-- [docs/dev/phase1/](../docs/dev/phase1/) - Phase 1 detailed planning and logs
+- [DESIGN.md](../DESIGN.md) - Architecture and design decisions
+- [PROGRESS.md](../PROGRESS.md) - Implementation progress (Phase 2.6 complete)
+- [ESM-TESTING-GUIDE.md](dev/ESM-TESTING-GUIDE.md) - ESM testing patterns and best practices
+- [2025-10-23-library-extraction-plan.md](dev/2025-10-23-library-extraction-plan.md) - Library extraction pattern reference
+- [docs/dev/phase1/](dev/phase1/) - Phase 1 planning and logs
+- [docs/dev/phase2/](dev/phase2/) - Phase 2 planning and logs
 
 ### External Resources
 
@@ -754,9 +676,11 @@ Before submitting PR:
 Now that your development environment is set up:
 
 1. **Explore the codebase**: Start with `src/index.ts` and explore the modules
-2. **Run the tests**: `npm test` to see what's already tested
-3. **Try the examples**: Check `examples/` for sample applications (coming in Phase 2+)
-4. **Read the API docs**: [API.md](API.md) for complete API reference
-5. **Check the roadmap**: [DESIGN.md](../DESIGN.md) to see what's coming in future phases
+2. **Run the tests**: `npm test` to see all 320 tests in action
+3. **Try the example app**: `cd examples/electron-control-panel && npm install && npm run dev`
+   - Full-featured control panel demonstrating all library features
+   - Shows integration with genai-lite for LLM and image generation
+4. **Read the API docs**: [API.md](API.md) for complete API reference with examples
+5. **Check the roadmap**: [DESIGN.md](../DESIGN.md) for Phase 3+ planned features
 
 Happy coding! 🚀
