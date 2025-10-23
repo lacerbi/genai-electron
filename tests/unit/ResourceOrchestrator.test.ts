@@ -10,6 +10,7 @@ import type { ServerConfig, ImageGenerationConfig } from '../../src/types/index.
 const mockSystemInfo = {
   detect: jest.fn(),
   getMemoryInfo: jest.fn(),
+  clearCache: jest.fn(),
 };
 
 jest.unstable_mockModule('../../src/system/SystemInfo.js', () => ({
@@ -73,6 +74,7 @@ describe('ResourceOrchestrator', () => {
       isRunning: jest.fn(),
       getConfig: jest.fn(),
       generateImage: jest.fn(),
+      executeImageGeneration: jest.fn(),
     };
 
     // Setup default mocks
@@ -107,7 +109,7 @@ describe('ResourceOrchestrator', () => {
 
     mockDiffusionServer.isRunning.mockReturnValue(false);
     mockDiffusionServer.getConfig.mockReturnValue({ modelId: 'sdxl-turbo', port: 8081 });
-    mockDiffusionServer.generateImage.mockResolvedValue({
+    mockDiffusionServer.executeImageGeneration.mockResolvedValue({
       image: Buffer.from('fake-image'),
       format: 'png',
       timeTaken: 5000,
@@ -146,8 +148,8 @@ describe('ResourceOrchestrator', () => {
       expect(mockLlamaServer.stop).not.toHaveBeenCalled();
       expect(mockLlamaServer.start).not.toHaveBeenCalled();
 
-      // Should generate directly
-      expect(mockDiffusionServer.generateImage).toHaveBeenCalledWith(imageConfig);
+      // Should generate directly (using internal method)
+      expect(mockDiffusionServer.executeImageGeneration).toHaveBeenCalledWith(imageConfig);
     });
 
     it('should offload LLM when VRAM is constrained', async () => {
@@ -180,8 +182,8 @@ describe('ResourceOrchestrator', () => {
       // Should offload LLM
       expect(mockLlamaServer.stop).toHaveBeenCalled();
 
-      // Should generate image
-      expect(mockDiffusionServer.generateImage).toHaveBeenCalledWith(imageConfig);
+      // Should generate image (using internal method)
+      expect(mockDiffusionServer.executeImageGeneration).toHaveBeenCalledWith(imageConfig);
 
       // Should reload LLM
       expect(mockLlamaServer.start).toHaveBeenCalledWith({
@@ -296,7 +298,7 @@ describe('ResourceOrchestrator', () => {
       });
 
       // Make image generation fail
-      mockDiffusionServer.generateImage.mockRejectedValue(new Error('Generation failed'));
+      mockDiffusionServer.executeImageGeneration.mockRejectedValue(new Error('Generation failed'));
 
       await expect(orchestrator.orchestrateImageGeneration(imageConfig)).rejects.toThrow(
         'Generation failed'
@@ -337,7 +339,10 @@ describe('ResourceOrchestrator', () => {
       const result = await orchestrator.orchestrateImageGeneration(imageConfig);
 
       expect(result).toBeDefined();
-      expect(consoleErrorSpy).toHaveBeenCalledWith('Failed to reload LLM:', expect.any(Error));
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        '[Orchestrator] ❌ Failed to reload LLM:',
+        expect.any(Error)
+      );
 
       consoleErrorSpy.mockRestore();
     });

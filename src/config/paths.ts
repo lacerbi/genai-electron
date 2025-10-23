@@ -106,7 +106,7 @@ export function getModelFilePath(type: 'llm' | 'diffusion', filename: string): s
  * Automatically adds .exe extension on Windows platforms.
  *
  * @param type - Binary type ('llama' or 'diffusion')
- * @param binaryName - Binary name (e.g., "llama-server", "stable-diffusion")
+ * @param binaryName - Binary name (e.g., "llama-server", "sd")
  * @returns Absolute path to binary file
  *
  * @example

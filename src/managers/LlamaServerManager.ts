@@ -101,7 +101,6 @@ export class LlamaServerManager extends ServerManager {
     }
 
     this.setStatus('starting');
-    this._config = config;
 
     try {
       // 1. Validate model exists
@@ -122,8 +121,8 @@ export class LlamaServerManager extends ServerManager {
         );
       }
 
-      // 3. Ensure binary is downloaded
-      this.binaryPath = await this.ensureBinary();
+      // 3. Ensure binary is downloaded (pass model path for real functionality testing)
+      this.binaryPath = await this.ensureBinary(modelInfo.path, config.forceValidation);
 
       // 4. Check if port is in use
       await this.checkPortAvailability(config.port);
@@ -131,16 +130,19 @@ export class LlamaServerManager extends ServerManager {
       // 5. Auto-configure if needed
       const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo);
 
-      // 6. Initialize log manager
+      // 6. Save final configuration (AFTER auto-configuration)
+      this._config = finalConfig;
+
+      // 7. Initialize log manager
       await this.initializeLogManager(
         'llama-server.log',
         `Starting llama-server on port ${finalConfig.port}`
       );
 
-      // 7. Build command-line arguments
+      // 8. Build command-line arguments
       const args = this.buildCommandLineArgs(finalConfig, modelInfo);
 
-      // 8. Verify binary exists before spawning
+      // 9. Verify binary exists before spawning
       if (!this.binaryPath) {
         throw new ServerError('Binary path is not set', {
           suggestion: 'This is an internal error - binary should have been downloaded',
@@ -159,7 +161,7 @@ export class LlamaServerManager extends ServerManager {
         'info'
       );
 
-      // 9. Spawn the process
+      // 10. Spawn the process
       const { pid } = this.processManager.spawn(this.binaryPath, args, {
         onStdout: (data) => this.handleStdout(data),
         onStderr: (data) => this.handleStderr(data),
@@ -182,6 +184,9 @@ export class LlamaServerManager extends ServerManager {
       this.setStatus('running');
 
       await this.logManager!.write('Server is running and healthy', 'info');
+
+      // Clear system info cache so subsequent memory checks use fresh data
+      this.systemInfo.clearCache();
 
       // Emit started event
       this.emitEvent('started', this.getInfo());
@@ -226,6 +231,9 @@ export class LlamaServerManager extends ServerManager {
       if (this.logManager) {
         await this.logManager.write('Server stopped', 'info');
       }
+
+      // Clear system info cache so subsequent memory checks use fresh data
+      this.systemInfo.clearCache();
 
       // Emit stopped event
       this.emitEvent('stopped');
@@ -279,16 +287,24 @@ export class LlamaServerManager extends ServerManager {
    *
    * Downloads binary from GitHub releases if not present. Tries multiple variants
    * in priority order (CUDA → Vulkan → CPU) and uses the first one that works.
-   * Caches which variant worked for faster startup next time.
+   * Caches validation results for faster startup next time.
    *
    * For updating to new llama.cpp releases, see docs/dev/UPDATING-BINARIES.md
    *
+   * @param modelPath - Optional model path for real functionality testing
+   * @param forceValidation - If true, re-run validation tests even if cached validation exists
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails for all variants
    * @private
    */
-  private async ensureBinary(): Promise<string> {
-    return this.ensureBinaryHelper('llama', 'llama-server', BINARY_VERSIONS.llamaServer);
+  private async ensureBinary(modelPath?: string, forceValidation = false): Promise<string> {
+    return this.ensureBinaryHelper(
+      'llama',
+      'llama-server',
+      BINARY_VERSIONS.llamaServer,
+      modelPath,
+      forceValidation
+    );
   }
 
   /**
@@ -305,9 +321,13 @@ export class LlamaServerManager extends ServerManager {
     config: ServerConfig,
     modelInfo: any
   ): Promise<LlamaServerConfig> {
-    const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo);
+    console.log('[LlamaServer] autoConfigureIfNeeded called');
+    console.log('[LlamaServer] Input config:', JSON.stringify(config, null, 2));
 
-    return {
+    const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo);
+    console.log('[LlamaServer] Optimal config:', JSON.stringify(optimalConfig, null, 2));
+
+    const finalConfig = {
       ...config,
       threads: config.threads ?? optimalConfig.threads,
       contextSize: config.contextSize ?? optimalConfig.contextSize,
@@ -315,6 +335,18 @@ export class LlamaServerManager extends ServerManager {
       parallelRequests: config.parallelRequests ?? optimalConfig.parallelRequests,
       flashAttention: config.flashAttention ?? optimalConfig.flashAttention,
     } as LlamaServerConfig;
+
+    console.log('[LlamaServer] Final config:', JSON.stringify(finalConfig, null, 2));
+    console.log('[LlamaServer] gpuLayers decision:');
+    console.log('  - config.gpuLayers:', config.gpuLayers);
+    console.log('  - typeof:', typeof config.gpuLayers);
+    console.log('  - is undefined?:', config.gpuLayers === undefined);
+    console.log('  - is null?:', config.gpuLayers === null);
+    console.log('  - is 0?:', config.gpuLayers === 0);
+    console.log('  - optimalConfig.gpuLayers:', optimalConfig.gpuLayers);
+    console.log('  - final value:', finalConfig.gpuLayers);
+
+    return finalConfig;
   }
 
   /**

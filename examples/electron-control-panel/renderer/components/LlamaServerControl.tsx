@@ -3,14 +3,15 @@ import Card from './common/Card';
 import StatusIndicator from './common/StatusIndicator';
 import ActionButton from './common/ActionButton';
 import LogViewer from './common/LogViewer';
-import ServerConfig from './ServerConfig';
+import LlamaServerConfig from './LlamaServerConfig';
 import TestChat from './TestChat';
 import { useServerStatus } from './hooks/useServerStatus';
 import { useServerLogs } from './hooks/useServerLogs';
 import { useModels } from './hooks/useModels';
+import type { BinaryLogEvent } from '../types/api';
 import './LlamaServerControl.css';
 
-interface ServerConfigForm {
+interface LlamaServerConfigForm {
   modelId: string;
   port: number;
   contextSize: number;
@@ -26,7 +27,7 @@ const LlamaServerControl: React.FC = () => {
   const { models } = useModels();
 
   const [autoConfig, setAutoConfig] = useState(true);
-  const [config, setConfig] = useState<ServerConfigForm>({
+  const [config, setConfig] = useState<LlamaServerConfigForm>({
     modelId: '',
     port: 8080,
     contextSize: 4096,
@@ -40,12 +41,35 @@ const LlamaServerControl: React.FC = () => {
   const [stopLoading, setStopLoading] = useState(false);
   const [restartLoading, setRestartLoading] = useState(false);
 
+  // Binary setup logs (during server startup)
+  const [binaryLogs, setBinaryLogs] = useState<Array<BinaryLogEvent & { timestamp: Date }>>([]);
+
   // Set first model as default when models load
   useEffect(() => {
     if (models.length > 0 && !config.modelId) {
       setConfig((prev) => ({ ...prev, modelId: models[0].id }));
     }
   }, [models, config.modelId]);
+
+  // Listen for binary-log events
+  useEffect(() => {
+    const handleBinaryLog = (data: BinaryLogEvent) => {
+      setBinaryLogs((prev) => [...prev, { ...data, timestamp: new Date() }]);
+    };
+
+    window.api.on('server:binary-log', handleBinaryLog);
+
+    return () => {
+      window.api.off('server:binary-log');
+    };
+  }, []);
+
+  // Clear binary logs when server reaches running state
+  useEffect(() => {
+    if (status.status === 'running') {
+      setBinaryLogs([]);
+    }
+  }, [status.status]);
 
   const handleStart = async () => {
     if (!config.modelId) {
@@ -58,8 +82,6 @@ const LlamaServerControl: React.FC = () => {
       const startConfig = autoConfig ? { modelId: config.modelId, port: config.port } : config;
 
       await start(startConfig);
-    } catch (err) {
-      // Error is handled by useServerStatus
     } finally {
       setStartLoading(false);
     }
@@ -69,8 +91,6 @@ const LlamaServerControl: React.FC = () => {
     setStopLoading(true);
     try {
       await stop();
-    } catch (err) {
-      // Error is handled by useServerStatus
     } finally {
       setStopLoading(false);
     }
@@ -80,8 +100,6 @@ const LlamaServerControl: React.FC = () => {
     setRestartLoading(true);
     try {
       await restart();
-    } catch (err) {
-      // Error is handled by useServerStatus
     } finally {
       setRestartLoading(false);
     }
@@ -131,9 +149,23 @@ const LlamaServerControl: React.FC = () => {
         </div>
       </Card>
 
+      {/* Binary Setup Status (shown during startup) */}
+      {binaryLogs.length > 0 && (
+        <Card title="Binary Setup Status">
+          <div className="binary-logs">
+            {binaryLogs.map((log, idx) => (
+              <div key={idx} className={`binary-log-entry binary-log-${log.level}`}>
+                <span className="binary-log-level">[{log.level.toUpperCase()}]</span>
+                <span className="binary-log-message">{log.message}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
+
       {/* Configuration */}
       <Card title="Configuration">
-        <ServerConfig
+        <LlamaServerConfig
           models={models}
           config={config}
           onChange={setConfig}

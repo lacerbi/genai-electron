@@ -47,3 +47,52 @@
   gap: var(--spacing-sm);
   justify-content: flex-end;
 }
+
+/* Model type badges */
+.model-type-badge {
+  display: inline-block;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.model-type-llm {
+  background: rgba(10, 132, 255, 0.15);
+  color: #0a84ff;
+}
+
+.model-type-diffusion {
+  background: rgba(155, 89, 182, 0.15);
+  color: #9b59b6;
+}
+
+/* GGUF Info Button */
+.gguf-info-btn {
+  background: none;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 36px;
+  height: 32px;
+}
+
+.gguf-info-btn:hover {
+  background-color: var(--bg-tertiary);
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+  transform: translateY(-1px);
+}
+
+.gguf-info-btn:active {
+  transform: translateY(0);
+}

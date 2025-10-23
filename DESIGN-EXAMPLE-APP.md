@@ -397,7 +397,7 @@ examples/electron-control-panel/
 │   │   │   └── ActionButton.tsx     # Styled button
 │   │   │
 │   │   └── forms/                 # Form components
-│   │       ├── ServerConfig.tsx     # Server configuration form
+│   │       ├── LlamaServerConfig.tsx     # LLM server configuration form
 │   │       └── ModelDownload.tsx    # Model download form
 │   │
 │   ├── hooks/                     # React hooks

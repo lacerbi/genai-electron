@@ -1,39 +1,37 @@
 import { useState, useEffect, useCallback } from 'react';
-import type { LlamaServerConfig } from '../../types/api';
+import type { DiffusionServerInfo } from '../../types/api';
 
-interface ServerInfo {
-  status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
-  health: 'unknown' | 'healthy' | 'unhealthy';
+interface DiffusionServerConfig {
   modelId: string;
-  port: number;
-  pid?: number;
-  startedAt?: string;
-  error?: string;
+  port?: number;
+  threads?: number;
+  gpuLayers?: number;
 }
 
-export function useServerStatus() {
-  const [status, setStatus] = useState<ServerInfo>({
+export function useDiffusionServer() {
+  const [serverInfo, setServerInfo] = useState<DiffusionServerInfo>({
     status: 'stopped',
     health: 'unknown',
     modelId: '',
-    port: 0,
+    port: 8081,
+    busy: false,
   });
   const [isHealthy, setIsHealthy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchStatus = useCallback(async () => {
     // Safety check: ensure window.api exists
-    if (!window.api || !window.api.server) {
-      console.error('window.api not available');
+    if (!window.api || !window.api.diffusion) {
+      console.error('window.api.diffusion not available');
       return;
     }
 
     try {
-      const newStatus = await window.api.server.status();
-      setStatus(newStatus as ServerInfo);
+      const newStatus = await window.api.diffusion.status();
+      setServerInfo(newStatus);
 
-      if ((newStatus as ServerInfo).status === 'running') {
-        const health = await window.api.server.health();
+      if (newStatus.status === 'running') {
+        const health = await window.api.diffusion.health();
         setIsHealthy(health);
       } else {
         setIsHealthy(false);
@@ -50,7 +48,7 @@ export function useServerStatus() {
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
-  // Listen to server events
+  // Listen to diffusion server events
   useEffect(() => {
     // Safety check: ensure window.api exists
     if (!window.api || !window.api.on) {
@@ -58,32 +56,32 @@ export function useServerStatus() {
       return;
     }
 
-    window.api.on('server:started', () => {
+    window.api.on('diffusion:started', () => {
       fetchStatus();
     });
 
-    window.api.on('server:stopped', () => {
+    window.api.on('diffusion:stopped', () => {
       fetchStatus();
     });
 
-    window.api.on('server:crashed', (errorData: { message: string; stack?: string }) => {
-      setError(`Server crashed: ${errorData.message}`);
+    window.api.on('diffusion:crashed', (errorData: { message: string; stack?: string }) => {
+      setError(`Diffusion server crashed: ${errorData.message}`);
       fetchStatus();
     });
 
     return () => {
       if (window.api && window.api.off) {
-        window.api.off('server:started');
-        window.api.off('server:stopped');
-        window.api.off('server:crashed');
+        window.api.off('diffusion:started');
+        window.api.off('diffusion:stopped');
+        window.api.off('diffusion:crashed');
       }
     };
   }, [fetchStatus]);
 
-  const start = async (config: LlamaServerConfig) => {
+  const start = async (config: DiffusionServerConfig) => {
     setError(null);
     try {
-      await window.api.server.start(config);
+      await window.api.diffusion.start(config);
       await fetchStatus();
     } catch (err) {
       setError((err as Error).message);
@@ -94,18 +92,7 @@ export function useServerStatus() {
   const stop = async () => {
     setError(null);
     try {
-      await window.api.server.stop();
-      await fetchStatus();
-    } catch (err) {
-      setError((err as Error).message);
-      throw err;
-    }
-  };
-
-  const restart = async () => {
-    setError(null);
-    try {
-      await window.api.server.restart();
+      await window.api.diffusion.stop();
       await fetchStatus();
     } catch (err) {
       setError((err as Error).message);
@@ -114,12 +101,11 @@ export function useServerStatus() {
   };
 
   return {
-    status,
+    serverInfo,
     isHealthy,
     error,
     start,
     stop,
-    restart,
     refresh: fetchStatus,
   };
 }

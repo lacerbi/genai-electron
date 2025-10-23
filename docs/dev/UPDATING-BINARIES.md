@@ -310,14 +310,174 @@ Different GPU configurations require different binaries:
 
 The library tests each variant with `--version` to verify drivers are present before using it.
 
+## Handling Binary Dependencies (CUDA Runtime DLLs)
+
+Some binary variants require additional dependencies to function correctly. The most common example is CUDA variants on Windows, which need CUDA runtime DLLs.
+
+### When Dependencies Are Needed
+
+**CUDA Variants (Windows only):**
+- llama.cpp CUDA: Requires `cudart-llama-bin-win-cuda-12.4-x64.zip`
+- stable-diffusion.cpp CUDA: Requires `cudart-sd-bin-win-cu12-x64.zip`
+
+**Vulkan/CPU Variants:**
+- No dependencies needed (work out of the box)
+
+### Adding Dependencies to Configuration
+
+Dependencies are added to the `dependencies` array in `BinaryVariantConfig`:
+
+```typescript
+{
+  type: 'cuda' as BinaryVariant,
+  url: 'https://github.com/.../llama-cuda.zip',
+  checksum: 'abc123...',
+  dependencies: [
+    {
+      url: 'https://github.com/.../cudart-llama.zip',
+      checksum: 'def456...',
+      description: 'CUDA 12.4 runtime libraries required for NVIDIA GPU acceleration',
+    },
+  ],
+}
+```
+
+### Extracting Dependency Checksums
+
+Follow the same process as for main binaries (see "Step 1: Extract SHA256 Checksums" above):
+
+1. Navigate to the release page
+2. Click "Show more assets" to expand full list
+3. Find the dependency file (e.g., `cudart-llama-bin-win-cuda-12.4-x64.zip`)
+4. Extract the SHA256 checksum following the same pattern
+
+**Example (from llama.cpp b6784):**
+```
+cudart-llama-bin-win-cuda-12.4-x64.zip | 8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6
+```
+
+### How Dependencies Work
+
+1. **Download Order:** Dependencies are downloaded BEFORE the main binary
+2. **Extraction:** Dependencies are extracted to the same directory as the main binary
+3. **Testing:** Binary is tested WITH dependencies present
+4. **Cleanup:** If binary test fails, BOTH binary and dependencies are cleaned up
+5. **Deployment:** All files (binary + dependencies) are copied to the final binaries directory
+
+### CUDA GPU Detection
+
+The library automatically detects CUDA GPU availability and skips CUDA variants on systems without NVIDIA GPUs. This prevents unnecessary downloads (~100-200MB per binary type).
+
+**Behavior:**
+- NVIDIA GPU detected → Try CUDA variant (with dependencies)
+- AMD/Intel GPU detected → Skip CUDA, try Vulkan
+- No GPU detected → Skip CUDA, try CPU
+
+### Update Checklist (with Dependencies)
+
+When updating to a new release that requires dependencies:
+
+- [ ] Extract SHA256 for main binary
+- [ ] Extract SHA256 for dependency (if CUDA variant)
+- [ ] Update main binary URL and checksum
+- [ ] Add or update `dependencies` array
+- [ ] Verify dependency URL is correct
+- [ ] Test download on target platform
+- [ ] Confirm binary works with dependencies
+
+### Example: Updating llama.cpp with CUDA Dependencies
+
+```typescript
+'win32-x64': [
+  {
+    type: 'cuda' as BinaryVariant,
+    url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/llama-b6784-bin-win-cuda-12.4-x64.zip',
+    checksum: 'a7a8981f742cdc0e1c93c02caa955fb2ad2716407fb3556cbc71e7e4e44f7d72',
+    dependencies: [
+      {
+        url: 'https://github.com/ggml-org/llama.cpp/releases/download/b6784/cudart-llama-bin-win-cuda-12.4-x64.zip',
+        checksum: '8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6',
+        description: 'CUDA 12.4 runtime libraries required for NVIDIA GPU acceleration',
+      },
+    ],
+  },
+  // ... other variants (Vulkan, CPU) don't need dependencies
+]
+```
+
+## Real Functionality Testing
+
+The library automatically performs real GPU functionality testing during variant selection to catch broken CUDA/GPU acceleration before caching a variant as "working".
+
+### How It Works
+
+**When a model is available:**
+1. BinaryManager downloads variant (e.g., CUDA)
+2. Downloads dependencies if needed (CUDA runtime DLLs)
+3. Runs **real inference test** instead of just `--version`:
+   - **LLM**: Generates 1 token with GPU layers forced (`-ngl 1`)
+   - **Diffusion**: Generates 64x64 image with 1 step
+4. Parses output for GPU errors:
+   - "CUDA error"
+   - "failed to allocate"
+   - "out of memory"
+   - "Vulkan error"
+   - etc.
+5. If test fails: Logs warning, tries next variant
+6. If test succeeds: Caches variant for fast subsequent starts
+
+**When no model is available:**
+- Falls back to basic `--version`/`--help` test
+- Less reliable but ensures binary at least loads
+
+### Why This Matters
+
+**Problem Solved:**
+- CUDA binaries can pass `--version` test even with missing/broken runtime DLLs
+- Binary gets cached as "working" but fails during actual inference
+- System never tries Vulkan fallback
+
+**With Real Functionality Testing:**
+- Detects broken CUDA during first `start()` call
+- Automatically falls back to Vulkan if CUDA is broken
+- Prevents caching non-functional variants
+
+### Testing Manually
+
+If you need to manually test a binary variant with real functionality:
+
+**For llama-server:**
+```bash
+cd /path/to/binaries
+./llama-server -m /path/to/model.gguf -p "Hi" -n 1 --ctx-size 512 -ngl 1
+# Check stderr for "CUDA error" or other GPU errors
+```
+
+**For stable-diffusion.cpp:**
+```bash
+cd /path/to/binaries
+./sd -m /path/to/model.safetensors -p "test" -o test.png --width 64 --height 64 --steps 1
+# Check stderr for "CUDA error" or "Vulkan error"
+```
+
+### Implementation Details
+
+- **Location**: `src/managers/BinaryManager.ts` - `runRealFunctionalityTest()` method
+- **Timeout**: 30 seconds (prevents hanging on broken binaries)
+- **Error Patterns**: See `errorPatterns` array in `runRealFunctionalityTest()`
+- **Automatic**: No configuration needed, happens transparently during `start()`
+
 ## Related Files
 
 - **Binary configuration**: `src/config/defaults.ts`
-- **Download logic**: `src/managers/LlamaServerManager.ts` (ensureBinary method)
+- **Download logic**: `src/managers/BinaryManager.ts` (ensureBinary, downloadDependencies methods)
 - **ZIP extraction**: `src/utils/zip-utils.ts`
-- **Checksum verification**: `src/managers/LlamaServerManager.ts` (downloadAndTestVariant method)
+- **Checksum verification**: `src/managers/BinaryManager.ts` (downloadAndTestVariant method)
+- **CUDA detection**: `src/system/gpu-detect.ts`
 
 ## References
 
 - llama.cpp releases: https://github.com/ggml-org/llama.cpp/releases
+- stable-diffusion.cpp releases: https://github.com/leejet/stable-diffusion.cpp/releases
 - Binary variant docs: See DESIGN.md Phase 1 section
+- CUDA runtime dependencies: Issue 5 in PROGRESS.md

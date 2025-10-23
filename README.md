@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.2.0 (Phase 2 - Image Generation Complete)
+> **Version**: 0.2.0 (Phase 2.6 - Async API & genai-lite Integration)
 > **Status**: Production Ready - LLM & Image Generation
 
 An Electron-specific library for managing local AI model servers and resources. Complements [genai-lite](https://github.com/lacerbi/genai-lite) by handling platform-specific operations required to run AI models locally on desktop systems.
@@ -20,9 +20,12 @@ An Electron-specific library for managing local AI model servers and resources. 
 - ✅ **System capability detection** - Automatic detection of RAM, CPU, GPU, and VRAM
 - ✅ **Model storage** - Organized model management in Electron userData directory
 - ✅ **Model downloads** - Download GGUF models from direct URLs with progress tracking
+- ✅ **GGUF metadata extraction** - Accurate model information (layer count, context length, architecture) extracted before download
 - ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
 - ✅ **Reasoning model support** - Automatic detection and configuration for reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS)
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
+- ✅ **Async image generation API** - HTTP endpoints with polling pattern for non-blocking generation
+- ✅ **Batch generation** - Generate multiple image variations in one request (1-5 images)
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when generating images
 - ✅ **Health monitoring** - Real-time server health checks and status tracking
 - ✅ **Binary management** - Automatic binary download and verification on first run
@@ -68,6 +71,8 @@ async function setupLocalAI() {
       url: 'https://huggingface.co/TheBloke/Llama-2-7B-GGUF/resolve/main/llama-2-7b.Q4_K_M.gguf',
       name: 'Llama 2 7B',
       type: 'llm',
+      // GGUF metadata is automatically extracted before download
+      // Provides: layer count, context length, architecture, etc.
       onProgress: (downloaded, total) => {
         const percent = ((downloaded / total) * 100).toFixed(1);
         console.log(`Download progress: ${percent}%`);
@@ -116,7 +121,7 @@ app.on('before-quit', async () => {
 app.whenReady().then(setupLocalAI).catch(console.error);
 ```
 
-> **Note**: For image generation examples using `diffusionServer` and `ResourceOrchestrator`, see the [Complete Example](#complete-example-llm--image-generation) section below.
+> **Note**: For image generation examples using `diffusionServer` with automatic resource management, see the [Complete Example](#complete-example-llm--image-generation) section below.
 
 ## API Overview
 
@@ -202,6 +207,21 @@ if (modelInfo.supportsReasoning) {
   console.log('✅ Model supports reasoning (automatic flag injection enabled)');
   console.log('llama-server will use: --jinja --reasoning-format deepseek');
 }
+
+// Access accurate model information from GGUF metadata
+if (modelInfo.ggufMetadata) {
+  console.log('Layer count:', modelInfo.ggufMetadata.block_count);
+  console.log('Context length:', modelInfo.ggufMetadata.context_length);
+  console.log('Architecture:', modelInfo.ggufMetadata.architecture);
+}
+
+// Or use convenience methods
+const layerCount = await modelManager.getModelLayerCount('my-model');
+const contextLength = await modelManager.getModelContextLength('my-model');
+console.log(`Model has ${layerCount} layers and ${contextLength} token context`);
+
+// Update metadata for models downloaded before GGUF integration
+await modelManager.updateModelMetadata('my-model');
 
 // Verify model integrity
 const isValid = await modelManager.verifyModel('my-model');
@@ -324,8 +344,14 @@ const result = await diffusionServer.generateImage({
   cfgScale: 7.5,
   seed: 12345,
   sampler: 'euler_a',
-  onProgress: (currentStep, totalSteps) => {
-    console.log(`Progress: ${currentStep}/${totalSteps}`);
+  onProgress: (currentStep, totalSteps, stage, percentage) => {
+    if (stage === 'loading') {
+      console.log(`Loading model... ${Math.round(percentage || 0)}%`);
+    } else if (stage === 'diffusion') {
+      console.log(`Generating (step ${currentStep}/${totalSteps}): ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`Decoding: ${Math.round(percentage || 0)}%`);
+    }
   },
 });
 
@@ -337,58 +363,125 @@ fs.writeFileSync('output.png', result.image);  // Save image buffer
 await diffusionServer.stop();
 ```
 
-### ResourceOrchestrator (Phase 2)
+### HTTP API for Async Generation
 
-Automatically manage resources between LLM and image generation:
+The diffusion server also provides HTTP endpoints for async image generation with a polling pattern:
 
 ```typescript
-import { ResourceOrchestrator } from 'genai-electron';
-import { systemInfo, llamaServer, diffusionServer, modelManager } from 'genai-electron';
-
-// Create orchestrator
-const orchestrator = new ResourceOrchestrator(
-  systemInfo,
-  llamaServer,
-  diffusionServer,
-  modelManager
-);
-
-// Start LLM server
-await llamaServer.start({
-  modelId: 'llama-2-7b',
-  port: 8080,
-  gpuLayers: 35,
-});
+import { diffusionServer } from 'genai-electron';
+import { promises as fs } from 'fs';
 
 // Start diffusion server
 await diffusionServer.start({
   modelId: 'sdxl-turbo',
-  port: 8081,
+  port: 8081
 });
 
-// Generate image with automatic resource management
-// If resources are constrained, the LLM will be automatically:
-// 1. Stopped before generation
-// 2. Reloaded after generation completes
-const result = await orchestrator.orchestrateImageGeneration({
+// Start generation (returns immediately with ID)
+const response = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    prompt: 'A serene mountain landscape',
+    negativePrompt: 'blurry, low quality',
+    width: 1024,
+    height: 1024,
+    steps: 30,
+    count: 3  // Generate 3 variations with auto-incremented seeds
+  })
+});
+
+const { id } = await response.json();
+console.log('Generation started with ID:', id);
+
+// Poll for results
+let result;
+while (true) {
+  const statusResponse = await fetch(`http://localhost:8081/v1/images/generations/${id}`);
+  const data = await statusResponse.json();
+
+  if (data.status === 'complete') {
+    result = data.result;
+    console.log(`✅ Generation complete! Took ${data.result.timeTaken}ms`);
+    break;
+  } else if (data.status === 'error') {
+    throw new Error(data.error.message);
+  }
+
+  // Show progress
+  if (data.progress) {
+    const { stage, percentage, currentImage, totalImages } = data.progress;
+    if (currentImage && totalImages) {
+      console.log(`Image ${currentImage}/${totalImages} - ${stage}: ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`${stage}: ${Math.round(percentage || 0)}%`);
+    }
+  }
+
+  await new Promise(resolve => setTimeout(resolve, 1000));
+}
+
+// Save images
+result.images.forEach((img, i) => {
+  const buffer = Buffer.from(img.image, 'base64');
+  fs.writeFileSync(`output-${i}.png`, buffer);
+  console.log(`Saved image ${i} with seed: ${img.seed}`);
+});
+```
+
+**Benefits of the HTTP API:**
+- Non-blocking: Start generation and continue with other work
+- Batch generation: Create multiple variations (1-5 images) with automatic seed incrementation
+- Progress tracking: Poll for real-time progress updates across all generation stages
+- Client-agnostic: Use from any HTTP client (browser, Postman, curl, etc.)
+
+For complete HTTP API documentation, see [docs/API.md](docs/API.md#http-api-endpoints).
+
+---
+
+### Automatic Resource Management (Phase 2)
+
+Image generation automatically manages system resources. When you call `diffusionServer.generateImage()`, the library automatically:
+- Detects if RAM or VRAM is constrained
+- Temporarily offloads the LLM server if needed
+- Generates the image
+- Restores the LLM server to its previous state
+
+No additional code needed - it just works!
+
+```typescript
+import { diffusionServer, llamaServer } from 'genai-electron';
+
+// Start servers
+await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
+await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081 });
+
+// Generate image - automatic resource management included
+const result = await diffusionServer.generateImage({
   prompt: 'A beautiful sunset over mountains',
   width: 1024,
   height: 1024,
   steps: 30,
-  onProgress: (step, total) => {
-    console.log(`Generation: ${step}/${total}`);
+  onProgress: (step, total, stage, percentage) => {
+    console.log(`Generation (${stage}): ${step}/${total} - ${Math.round(percentage || 0)}%`);
   },
 });
 
-// Check if offload would be needed
-const wouldOffload = await orchestrator.wouldNeedOffload();
-console.log('Would need to offload LLM:', wouldOffload);
+console.log('Image generated in', result.timeTaken, 'ms');
+// LLM server is still running (or automatically restarted if it was offloaded)
+```
 
-// Get saved LLM state (if offloaded)
-const savedState = orchestrator.getSavedState();
-if (savedState) {
-  console.log('LLM was offloaded at:', savedState.savedAt);
-  console.log('Original config:', savedState.config);
+**Advanced**: For programmatic resource checking, you can still access the internal orchestrator:
+
+```typescript
+// Check if resources would require offload (optional)
+import { ResourceOrchestrator } from 'genai-electron';
+import { systemInfo, llamaServer, diffusionServer, modelManager } from 'genai-electron';
+
+const orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, diffusionServer, modelManager);
+const wouldOffload = await orchestrator.wouldNeedOffload();
+if (wouldOffload) {
+  console.log('Note: LLM will be temporarily stopped during image generation');
 }
 ```
 
@@ -396,7 +489,7 @@ if (savedState) {
 
 ```typescript
 import { app } from 'electron';
-import { systemInfo, modelManager, llamaServer, diffusionServer, ResourceOrchestrator } from 'genai-electron';
+import { systemInfo, modelManager, llamaServer, diffusionServer } from 'genai-electron';
 
 async function setupAI() {
   // 1. Detect system capabilities
@@ -421,29 +514,21 @@ async function setupAI() {
   });
   console.log('Diffusion server running');
 
-  // 4. Create orchestrator for automatic resource management
-  const orchestrator = new ResourceOrchestrator(
-    systemInfo,
-    llamaServer,
-    diffusionServer,
-    modelManager
-  );
-
-  // 5. Generate image (LLM will auto-offload if needed)
+  // 4. Generate image (automatic resource management - LLM offloaded if needed)
   console.log('Generating image...');
-  const imageResult = await orchestrator.orchestrateImageGeneration({
+  const imageResult = await diffusionServer.generateImage({
     prompt: 'A peaceful zen garden with cherry blossoms',
     width: 1024,
     height: 1024,
     steps: 30,
-    onProgress: (step, total) => {
-      console.log(`Progress: ${((step / total) * 100).toFixed(1)}%`);
+    onProgress: (step, total, stage, percentage) => {
+      console.log(`Progress (${stage}): ${Math.round(percentage || 0)}%`);
     },
   });
 
   console.log('Image generated in', imageResult.timeTaken, 'ms');
 
-  // 6. Chat with LLM (automatically reloaded if it was offloaded)
+  // 5. Chat with LLM (automatically reloaded if it was offloaded)
   // Use genai-lite here for LLM interactions...
 }
 
@@ -497,6 +582,13 @@ app.whenReady().then(setupAI).catch(console.error);
 - **Image generation**: HTTP wrapper created by genai-electron that spawns stable-diffusion.cpp
 - **Resource management**: ResourceOrchestrator automatically offloads LLM when resources are constrained
 - **Automatic reasoning**: Reasoning-capable models get `--jinja --reasoning-format deepseek` flags automatically
+- **Binary management**: Automatic variant selection with real GPU functionality testing
+  - Downloads appropriate binary on first `start()` call (~50-100MB)
+  - Tests variants in priority order: CUDA → Vulkan → CPU
+  - Runs real GPU inference test (1 token for LLM, 64x64 image for diffusion)
+  - Detects CUDA errors and automatically falls back to Vulkan
+  - Caches working variant for fast subsequent starts
+  - Zero configuration required - works automatically
 
 ## Platform Support
 
@@ -528,7 +620,11 @@ app.whenReady().then(setupAI).catch(console.error);
 - ✅ Automatic LLM offload/reload on resource constraints
 - ✅ Progress tracking for image generation
 - ✅ Binary management with variant testing
-- ✅ Comprehensive testing (50 tests passing)
+- ✅ Real CUDA functionality testing (detects broken GPU before caching)
+- ✅ Async image generation API (HTTP endpoints with polling pattern)
+- ✅ Batch generation support (1-5 images per request)
+- ✅ GenerationRegistry for async state management
+- ✅ Comprehensive testing (273 tests passing, 100% pass rate)
 
 ### Phase 3: Production Core (Next)
 - 🔄 Resume interrupted downloads
@@ -545,11 +641,12 @@ app.whenReady().then(setupAI).catch(console.error);
 
 ## Documentation
 
-- **[API.md](docs/API.md)** - Complete API reference with examples
+- **[API.md](docs/API.md)** - Complete API reference with examples (includes HTTP endpoints for async image generation)
 - **[SETUP.md](docs/SETUP.md)** - Development setup guide
 - **[DESIGN.md](DESIGN.md)** - Complete architecture and design document
 - **[PROGRESS.md](PROGRESS.md)** - Current implementation progress
 - **[docs/dev/phase1/](docs/dev/phase1/)** - Phase 1 detailed planning and progress logs
+- **[docs/dev/phase2/](docs/dev/phase2/)** - Phase 2 detailed planning and progress logs
 
 ## Error Handling
 
@@ -575,7 +672,7 @@ try {
 
 Complete example applications demonstrating genai-electron usage:
 
-- **[electron-control-panel](examples/electron-control-panel/)** - Full-featured Electron app showcasing all library features (coming in Phase 2+)
+- **[electron-control-panel](examples/electron-control-panel/)** - Full-featured Electron app showcasing all library features
 
 ## License
 

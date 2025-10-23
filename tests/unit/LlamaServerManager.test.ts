@@ -38,6 +38,7 @@ const mockSystemInfo = {
   getOptimalConfig: jest.fn(),
   canRunModel: jest.fn(),
   getMemoryInfo: jest.fn(),
+  clearCache: jest.fn(),
 };
 
 const MockSystemInfo = jest.fn(() => mockSystemInfo);

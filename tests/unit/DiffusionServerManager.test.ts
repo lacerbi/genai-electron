@@ -72,6 +72,7 @@ const mockSystemInfo = {
   detect: jest.fn(),
   canRunModel: jest.fn(),
   getMemoryInfo: jest.fn(),
+  clearCache: jest.fn(),
 };
 
 jest.unstable_mockModule('../../src/system/SystemInfo.js', () => ({
@@ -190,7 +191,7 @@ describe('DiffusionServerManager', () => {
     mockLogWrite.mockResolvedValue(undefined);
     mockLogGetRecent.mockResolvedValue([]);
     mockLogClear.mockResolvedValue(undefined);
-    mockEnsureBinary.mockResolvedValue('/test/binaries/stable-diffusion');
+    mockEnsureBinary.mockResolvedValue('/test/binaries/sd');
     mockCreateServer.mockReturnValue(mockHttpServer);
     mockHttpServer.listen.mockImplementation((port: number, callback: () => void) => {
       callback();
@@ -267,8 +268,10 @@ describe('DiffusionServerManager', () => {
       // Verify model validation
       expect(mockModelManager.getModelInfo).toHaveBeenCalledWith('sdxl-turbo');
 
-      // Verify system checks
-      expect(mockSystemInfo.canRunModel).toHaveBeenCalledWith(mockModelInfo);
+      // Verify system checks (diffusion server checks total memory, not available)
+      expect(mockSystemInfo.canRunModel).toHaveBeenCalledWith(mockModelInfo, {
+        checkTotalMemory: true,
+      });
 
       // Verify binary download
       expect(mockEnsureBinary).toHaveBeenCalled();
@@ -427,10 +430,23 @@ describe('DiffusionServerManager', () => {
       // Wait for spawn to be called (after async log write)
       await new Promise((resolve) => setTimeout(resolve, 50));
 
-      // Simulate progress updates from stdout
-      spawnedProcess.stdout.emit('data', 'step 5/30\n');
-      spawnedProcess.stdout.emit('data', 'step 10/30\n');
-      spawnedProcess.stdout.emit('data', 'step 30/30\n');
+      // Simulate realistic progress updates from stdout
+      spawnedProcess.stdout.emit(
+        'data',
+        '[INFO ] stable-diffusion.cpp:2121 - generating image: 1/1 - seed 12345\n'
+      );
+      spawnedProcess.stdout.emit(
+        'data',
+        '  |====================                              | 5/30 - 2.50it/s\n'
+      );
+      spawnedProcess.stdout.emit(
+        'data',
+        '  |========================================          | 10/30 - 2.50it/s\n'
+      );
+      spawnedProcess.stdout.emit(
+        'data',
+        '  |==================================================| 30/30 - 2.50it/s\n'
+      );
 
       // Simulate successful completion
       spawnedProcess.emit('exit', 0, null);
@@ -468,10 +484,10 @@ describe('DiffusionServerManager', () => {
       expect(args).toContain('--sampling-method');
       expect(args).toContain('euler_a');
 
-      // Verify progress callbacks were called
-      expect(progressCallback).toHaveBeenCalledWith(5, 30);
-      expect(progressCallback).toHaveBeenCalledWith(10, 30);
-      expect(progressCallback).toHaveBeenCalledWith(30, 30);
+      // Verify progress callbacks were called with stage information
+      expect(progressCallback).toHaveBeenCalledWith(5, 30, 'diffusion', expect.any(Number));
+      expect(progressCallback).toHaveBeenCalledWith(10, 30, 'diffusion', expect.any(Number));
+      expect(progressCallback).toHaveBeenCalledWith(30, 30, 'diffusion', expect.any(Number));
 
       // Verify temp file was deleted
       expect(mockDeleteFile).toHaveBeenCalled();

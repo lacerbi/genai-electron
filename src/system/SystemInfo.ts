@@ -14,6 +14,10 @@ import { getMemoryInfo, estimateVRAM } from './memory-detect.js';
 import { detectGPU, calculateGPULayers } from './gpu-detect.js';
 import { getPlatform } from '../utils/platform-utils.js';
 import { RECOMMENDED_QUANTIZATIONS } from '../config/defaults.js';
+import {
+  getLayerCountWithFallback,
+  getContextLengthWithFallback,
+} from '../utils/model-metadata-helpers.js';
 
 /**
  * System information singleton
@@ -117,17 +121,28 @@ export class SystemInfo {
    * Check if system can run a specific model
    *
    * @param modelInfo - Model information
+   * @param options - Optional configuration
+   * @param options.checkTotalMemory - If true, checks against total system memory instead of currently available memory.
+   *                                    Use this for servers that load models on-demand (e.g., diffusion server).
+   *                                    Default: false (checks available memory)
    * @returns True if model can run, with reason if false
    *
    * @example
    * ```typescript
+   * // Check if model fits in available memory (default - for servers that load model at startup)
    * const canRun = await systemInfo.canRunModel(modelInfo);
    * if (!canRun.possible) {
    *   console.log(`Cannot run model: ${canRun.reason}`);
    * }
+   *
+   * // Check if model will ever fit in total memory (for servers that load model on-demand)
+   * const canRunEventually = await systemInfo.canRunModel(modelInfo, { checkTotalMemory: true });
    * ```
    */
-  public async canRunModel(modelInfo: ModelInfo): Promise<{
+  public async canRunModel(
+    modelInfo: ModelInfo,
+    options?: { checkTotalMemory?: boolean }
+  ): Promise<{
     possible: boolean;
     reason?: string;
     suggestion?: string;
@@ -135,15 +150,24 @@ export class SystemInfo {
     const capabilities = await this.detect();
     const requiredMemory = modelInfo.size * 1.2; // 20% overhead
 
-    // Check if model fits in RAM
-    const fitsInRAM = capabilities.memory.available >= requiredMemory;
+    // Get fresh memory info (not cached) for accurate availability check
+    const currentMemory = this.getMemoryInfo();
+
+    // Determine which memory metric to check against
+    const checkTotalMemory = options?.checkTotalMemory ?? false;
+    const memoryToCheck = checkTotalMemory ? currentMemory.total : currentMemory.available;
+    const memoryType = checkTotalMemory ? 'total' : 'available';
+
+    // Check if model fits in RAM using real-time memory data
+    const fitsInRAM = memoryToCheck >= requiredMemory;
 
     if (!fitsInRAM) {
       return {
         possible: false,
-        reason: `Insufficient RAM: model requires ${(requiredMemory / 1024 ** 3).toFixed(1)}GB, but only ${(capabilities.memory.available / 1024 ** 3).toFixed(1)}GB available`,
-        suggestion:
-          'Try closing other applications or using a smaller quantization (Q4_K_M instead of Q8_0)',
+        reason: `Insufficient RAM: model requires ${(requiredMemory / 1024 ** 3).toFixed(1)}GB, but only ${(memoryToCheck / 1024 ** 3).toFixed(1)}GB ${memoryType}`,
+        suggestion: checkTotalMemory
+          ? 'This model is too large for your system. Try a smaller model or quantization.'
+          : 'Try closing other applications or using a smaller quantization (Q4_K_M instead of Q8_0)',
       };
     }
 
@@ -174,18 +198,27 @@ export class SystemInfo {
   public async getOptimalConfig(modelInfo: ModelInfo): Promise<Partial<ServerConfig>> {
     const capabilities = await this.detect();
 
+    // Get fresh memory info (not cached) for accurate context size calculation
+    const currentMemory = this.getMemoryInfo();
+
+    // Use GGUF context length if available, otherwise fall back to recommendation
+    const contextLength = getContextLengthWithFallback(modelInfo);
+    const contextSize = Math.min(
+      contextLength,
+      this.recommendContextSize(currentMemory.available, modelInfo.size)
+    );
+
     const config: Partial<ServerConfig> = {
       threads: getRecommendedThreads(capabilities.cpu.cores),
-      contextSize: this.recommendContextSize(capabilities.memory.available, modelInfo.size),
+      contextSize,
       parallelRequests: this.recommendParallelRequests(capabilities.cpu.cores),
     };
 
     // Add GPU layers if GPU is available
     if (capabilities.gpu.available && capabilities.gpu.vram) {
-      // Estimate total layers (rough approximation based on model size)
-      // 7B models: ~32 layers, 13B: ~40 layers, 70B: ~80 layers
-      const estimatedLayers = Math.round(modelInfo.size / (150 * 1024 ** 2));
-      config.gpuLayers = calculateGPULayers(estimatedLayers, capabilities.gpu.vram, modelInfo.size);
+      // Use actual layer count from GGUF metadata (or fallback to estimation)
+      const actualLayers = getLayerCountWithFallback(modelInfo);
+      config.gpuLayers = calculateGPULayers(actualLayers, capabilities.gpu.vram, modelInfo.size);
     } else {
       config.gpuLayers = 0; // CPU-only
     }

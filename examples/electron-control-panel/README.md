@@ -4,23 +4,31 @@
 
 ## Overview
 
-This Electron application showcases genai-electron's Phase 1 capabilities: system detection, model management, and LLM server lifecycle. It serves as both a testing tool during development and a reference implementation for developers building with genai-electron.
+This Electron application showcases genai-electron's Phase 1 & 2 capabilities: system detection, model management, LLM server lifecycle, image generation, and automatic resource orchestration. It serves as both a testing tool during development and a reference implementation for developers building with genai-electron.
 
 **Purpose:** This is a developer/admin tool focused on infrastructure management, not a consumer application. Think "system monitor" rather than "chat app."
 
-## Features (Phase 1)
+## Features
 
 - **System Info Tab** - Hardware detection and capability assessment
   - CPU, RAM, GPU, VRAM detection
   - Status indicators and recommendations
   - Model compatibility checking
+  - Auto-refreshes every 5 seconds and on server start/stop events
 
-- **Model Management Tab** - Download and manage GGUF models
-  - List installed models with metadata
+- **Model Management Tab** - Download and manage models
+  - List installed models with metadata (both LLM and Diffusion)
+  - Model type selector (LLM / Diffusion)
   - Download from HuggingFace or direct URLs
   - Real-time download progress
   - Delete models with confirmation
   - Disk usage statistics
+  - **📊 GGUF Metadata Viewer** - Complete model information modal
+    - Auto-fetches metadata for models without GGUF data
+    - Essential fields: Architecture, Layer Count, Context Length, File Type
+    - Advanced fields (collapsible): All technical metadata fields
+    - Raw JSON viewer with smart truncation (handles 50k+ item arrays!)
+    - Refresh Metadata and Copy to Clipboard buttons
 
 - **LLM Server Tab** - llama-server lifecycle management
   - Start/stop/restart server with visual status
@@ -29,6 +37,36 @@ This Electron application showcases genai-electron's Phase 1 capabilities: syste
   - Real-time log viewer
   - Simple test chat to verify server works
   - Health check monitoring
+
+- **Diffusion Server Tab** (Phase 2) - Image generation server management
+  - Start/stop diffusion server with model selection
+  - Generate images with full parameter control:
+    - Prompt and negative prompt (multiline textareas)
+    - Dimensions (width/height, 256-2048px)
+    - Steps (1-150), CFG Scale (1-20)
+    - 8 sampler options (euler_a, euler, heun, dpm2, dpm++2s_a, dpm++2m, dpm++2mv2, lcm)
+    - Random or fixed seed
+  - Real-time generation progress indicator
+  - Generated image display with metadata (dimensions, time taken, seed)
+  - Busy indicator while generating
+  - Health check monitoring
+
+- **Resource Monitor Tab** (Phase 2) - Real-time resource tracking
+  - System memory usage (total, used, available) with progress bar
+    - Polls every 2 seconds for real-time updates
+  - GPU/VRAM usage (conditional, when GPU available)
+    - Updates on server start/stop events
+  - Server status grid (LLM + Diffusion servers side-by-side)
+  - Resource orchestration status:
+    - Offload detection (warns if VRAM constrained)
+    - Saved LLM state display (shows if LLM was offloaded)
+  - Event log (last 20 events with timestamps)
+    - Tracks server start/stop/crash events
+    - Color-coded by type (info/warning/error)
+    - Clear events button
+  - Debug tools (diagnostic buttons)
+    - Print LLM config, system capabilities, optimal config, resource estimates
+    - Output appears in terminal console
 
 ## Prerequisites
 
@@ -56,6 +94,7 @@ npm run dev
 ```
 
 This will:
+
 1. Build the main process TypeScript
 2. Start Vite dev server for the renderer
 3. Launch Electron with hot reload
@@ -165,6 +204,11 @@ npm run format
 - `ipc-handlers.ts` - IPC handler registration
 - `genai-api.ts` - Wrapper for genai-electron calls
 
+**API Integration:**
+- Uses genai-lite's `LLMService` and `ImageService` for all AI operations
+- genai-electron handles infrastructure (servers, binaries, resources)
+- Demonstrates recommended pattern: genai-lite for API, genai-electron for runtime
+
 ### Renderer Process (`renderer/`)
 
 - `index.tsx` - React entry point
@@ -186,21 +230,27 @@ The app uses Electron's IPC for secure communication between processes:
 
 These example apps have different focuses:
 
-| Aspect | genai-lite chat-demo | genai-electron control-panel |
-|--------|---------------------|------------------------------|
-| **Focus** | API features (templates, providers, reasoning) | Infrastructure (downloads, servers, resources) |
-| **Use case** | Chat interface showcase | Developer/admin control panel |
-| **genai-lite usage** | Heavy (main focus) | Light (testing only) |
-| **genai-electron usage** | None | Heavy (main focus) |
+| Aspect                   | genai-lite chat-demo                           | genai-electron control-panel                   |
+| ------------------------ | ---------------------------------------------- | ---------------------------------------------- |
+| **Focus**                | API features (templates, providers, reasoning) | Infrastructure (downloads, servers, resources) |
+| **Use case**             | Chat interface showcase                        | Developer/admin control panel                  |
+| **genai-lite usage**     | Heavy (main focus)                             | Medium (LLM + Image APIs)                      |
+| **genai-electron usage** | None                                           | Heavy (main focus)                             |
 
 The control-panel's test chat is intentionally minimal—it verifies the server works. For advanced chat features, see genai-lite's chat-demo.
 
-## Future Phases
+## Current Implementation Status
 
-This Phase 1 implementation includes only LLM support. Future phases will add:
+**Phase 1 & 2: Complete** - All core functionality implemented:
 
-- **Phase 2:** Diffusion Server tab, Resource Monitor tab, automatic resource management
-- **Phase 3:** Enhanced download features (pause/resume), event log viewer
+- ✅ LLM server management
+- ✅ Image generation (Diffusion server)
+- ✅ Resource monitoring and orchestration
+- ✅ Event logging
+
+**Future phases** (from main library roadmap):
+
+- **Phase 3:** Enhanced download features (pause/resume)
 - **Phase 4:** Storage configuration, advanced monitoring
 
 See the main [DESIGN.md](../../DESIGN.md) for complete roadmap.

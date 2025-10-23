@@ -55,8 +55,41 @@ export function useSystemInfo() {
     }
   };
 
+  // Fetch system info on mount and poll every 5 seconds
   useEffect(() => {
     fetchSystemInfo();
+
+    const interval = setInterval(() => {
+      fetchSystemInfo();
+    }, 5000); // Poll every 5 seconds
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Listen to server events to trigger immediate refresh
+  useEffect(() => {
+    if (!window.api || !window.api.on) {
+      return;
+    }
+
+    const handleServerEvent = () => {
+      // Refresh system info when server starts/stops (memory changes)
+      fetchSystemInfo();
+    };
+
+    window.api.on('server:started', handleServerEvent);
+    window.api.on('server:stopped', handleServerEvent);
+    window.api.on('diffusion:started', handleServerEvent);
+    window.api.on('diffusion:stopped', handleServerEvent);
+
+    return () => {
+      if (window.api && window.api.off) {
+        window.api.off('server:started', handleServerEvent);
+        window.api.off('server:stopped', handleServerEvent);
+        window.api.off('diffusion:started', handleServerEvent);
+        window.api.off('diffusion:stopped', handleServerEvent);
+      }
+    };
   }, []);
 
   return {

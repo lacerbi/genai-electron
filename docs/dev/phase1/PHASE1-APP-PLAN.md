@@ -541,7 +541,7 @@ function useModels() {
 ```
 renderer/components/
 ├── LlamaServerControl.tsx     # Main component
-├── ServerConfig.tsx          # Configuration form
+├── LlamaServerConfig.tsx          # Configuration form
 ├── TestChat.tsx              # Simple test interface
 └── hooks/
     ├── useServerStatus.ts    # Status polling
@@ -571,7 +571,7 @@ renderer/components/
 **2. Configuration Form**
 ```typescript
 <Card title="Configuration">
-  <ServerConfig
+  <LlamaServerConfig
     models={models}
     config={serverConfig}
     onChange={setServerConfig}
@@ -602,7 +602,7 @@ renderer/components/
 </Card>
 ```
 
-**ServerConfig.tsx:**
+**LlamaServerConfig.tsx:**
 - Model dropdown (list of installed models)
 - Auto-configure checkbox (default checked)
 - Manual fields (disabled when auto-configure is on):
@@ -672,7 +672,7 @@ function useServerStatus() {
     return () => clearInterval(interval);
   }, []);
 
-  const start = async (config: ServerConfig) => {
+  const start = async (config: LlamaServerConfig) => {
     await window.api.server.start(config);
   };
 
@@ -743,7 +743,7 @@ export interface WindowAPI {
     detect: () => Promise<SystemCapabilities>;
     getMemory: () => Promise<MemoryInfo>;
     canRunModel: (modelInfo: ModelInfo) => Promise<{ canRun: boolean; reason?: string }>;
-    getOptimalConfig: (modelInfo: ModelInfo) => Promise<ServerConfig>;
+    getOptimalConfig: (modelInfo: ModelInfo) => Promise<LlamaServerConfig>;
   };
   models: {
     list: (type: 'llm' | 'diffusion') => Promise<ModelInfo[]>;
@@ -753,7 +753,7 @@ export interface WindowAPI {
     verify: (modelId: string) => Promise<boolean>;
   };
   server: {
-    start: (config: ServerConfig) => Promise<void>;
+    start: (config: LlamaServerConfig) => Promise<void>;
     stop: () => Promise<void>;
     restart: () => Promise<void>;
     status: () => Promise<ServerStatus>;
@@ -774,7 +774,7 @@ declare global {
 ```typescript
 export type TabName = 'system' | 'models' | 'server';
 
-export interface ServerConfigForm {
+export interface LlamaServerConfigForm {
   modelId: string;
   port: number;
   contextSize?: number;
@@ -1065,7 +1065,7 @@ These will be added in subsequent phases as the genai-electron library implement
 | Common Components | 6 | StatusIndicator, ProgressBar, ActionButton, LogViewer, Card, Spinner |
 | System Info | 2 | SystemInfo.tsx, useSystemInfo.ts |
 | Models | 4 | ModelManager.tsx, ModelList.tsx, ModelDownloadForm.tsx, useModels.ts |
-| Server | 5 | LlamaServerControl.tsx, ServerConfig.tsx, TestChat.tsx, useServerStatus.ts, useServerLogs.ts |
+| Server | 5 | LlamaServerControl.tsx, LlamaServerConfig.tsx, TestChat.tsx, useServerStatus.ts, useServerLogs.ts |
 | Types | 3 | index.ts, api.ts, ui.ts |
 | Styles | 3 | variables.css, components.css, layout.css |
 | Documentation | 2 | README.md, SCREENSHOTS.md |

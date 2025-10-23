@@ -37,6 +37,13 @@ export interface ServerConfig {
 
   /** Enable flash attention (if supported) */
   flashAttention?: boolean;
+
+  /**
+   * Force binary validation even if cached validation exists
+   * Default: false (use cached validation if available)
+   * Set to true to re-run Phase 1 & Phase 2 tests (e.g., after driver updates)
+   */
+  forceValidation?: boolean;
 }
 
 /**
@@ -95,7 +102,8 @@ export type ServerEvent =
   | 'crashed'
   | 'restarted'
   | 'health-check-ok'
-  | 'health-check-failed';
+  | 'health-check-failed'
+  | 'binary-log';
 
 /**
  * Server event data
@@ -112,4 +120,16 @@ export interface ServerEventData {
 
   /** Event timestamp */
   timestamp: string;
+}
+
+/**
+ * Binary download/testing log event data
+ * Emitted during binary variant testing and download progress
+ */
+export interface BinaryLogEvent {
+  /** Log message */
+  message: string;
+
+  /** Log level */
+  level: 'info' | 'warn' | 'error';
 }

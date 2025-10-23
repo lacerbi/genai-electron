@@ -1,13 +1,17 @@
-import { systemInfo, modelManager, llamaServer } from 'genai-electron';
+import {
+  systemInfo,
+  modelManager,
+  llamaServer,
+  diffusionServer,
+  ResourceOrchestrator,
+} from 'genai-electron';
 import { BrowserWindow } from 'electron';
 
 /**
  * Forward download progress events to renderer
+ * @deprecated This function is a placeholder for future download progress tracking
  */
-export function setupDownloadProgressForwarding(_downloadId: string): void {
-  const mainWindow = BrowserWindow.getAllWindows()[0];
-  if (!mainWindow) return;
-
+export function setupDownloadProgressForwarding(): void {
   // Note: In the actual implementation, genai-electron would need to support
   // progress callbacks. For now, this is a placeholder structure.
   // The actual progress forwarding will be implemented when the download API
@@ -16,25 +20,77 @@ export function setupDownloadProgressForwarding(_downloadId: string): void {
 
 /**
  * Forward server events to renderer
+ *
+ * Note: Gets the window dynamically on each event emission to avoid
+ * timing issues where this function is called before window creation.
  */
 export function setupServerEventForwarding(): void {
-  const mainWindow = BrowserWindow.getAllWindows()[0];
-  if (!mainWindow) return;
-
+  // LLM server events
   llamaServer.on('started', () => {
-    mainWindow.webContents.send('server:started');
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('server:started');
+    }
   });
 
   llamaServer.on('stopped', () => {
-    mainWindow.webContents.send('server:stopped');
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('server:stopped');
+    }
   });
 
   llamaServer.on('crashed', (error: Error) => {
-    mainWindow.webContents.send('server:crashed', {
-      message: error.message,
-      stack: error.stack,
-    });
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('server:crashed', {
+        message: error.message,
+        stack: error.stack,
+      });
+    }
   });
+
+  llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('server:binary-log', data);
+    }
+  });
+
+  // Diffusion server events
+  diffusionServer.on('started', () => {
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('diffusion:started');
+    }
+  });
+
+  diffusionServer.on('stopped', () => {
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('diffusion:stopped');
+    }
+  });
+
+  diffusionServer.on('crashed', (error: Error) => {
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('diffusion:crashed', {
+        message: error.message,
+        stack: error.stack,
+      });
+    }
+  });
+
+  diffusionServer.on(
+    'binary-log',
+    (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
+      const mainWindow = BrowserWindow.getAllWindows()[0];
+      if (mainWindow) {
+        mainWindow.webContents.send('diffusion:binary-log', data);
+      }
+    }
+  );
 }
 
 /**
@@ -42,12 +98,19 @@ export function setupServerEventForwarding(): void {
  */
 export async function cleanupServers(): Promise<void> {
   try {
-    const status = llamaServer.getStatus();
-    if (status === 'running') {
+    // Stop LLM server if running
+    const llamaStatus = llamaServer.getStatus();
+    if (llamaStatus === 'running') {
       await llamaServer.stop();
     }
+
+    // Stop diffusion server if running
+    const diffusionStatus = diffusionServer.getStatus();
+    if (diffusionStatus === 'running') {
+      await diffusionServer.stop();
+    }
   } catch (error) {
-    console.error('Error stopping server during cleanup:', error);
+    console.error('Error stopping servers during cleanup:', error);
   }
 }
 
@@ -89,5 +152,37 @@ export function sendDownloadError(error: Error, modelName: string): void {
   }
 }
 
+/**
+ * Send image generation progress to renderer
+ */
+export function sendImageProgress(
+  currentStep: number,
+  totalSteps: number,
+  stage: 'loading' | 'diffusion' | 'decoding',
+  percentage?: number
+): void {
+  const mainWindow = BrowserWindow.getAllWindows()[0];
+  if (mainWindow) {
+    mainWindow.webContents.send('diffusion:progress', {
+      currentStep,
+      totalSteps,
+      stage,
+      percentage: percentage ?? (totalSteps > 0 ? (currentStep / totalSteps) * 100 : 0),
+    });
+  }
+}
+
+/**
+ * Create ResourceOrchestrator singleton instance
+ */
+let orchestrator: ResourceOrchestrator | null = null;
+
+export function getOrchestrator(): ResourceOrchestrator {
+  if (!orchestrator) {
+    orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, diffusionServer, modelManager);
+  }
+  return orchestrator;
+}
+
 // Export genai-electron instances for direct access
-export { systemInfo, modelManager, llamaServer };
+export { systemInfo, modelManager, llamaServer, diffusionServer };

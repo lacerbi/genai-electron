@@ -36,11 +36,11 @@ jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
 }));
 
 // Mock zip-utils
-const mockExtractLlamaServerBinary = jest.fn();
+const mockExtractBinary = jest.fn();
 const mockCleanupExtraction = jest.fn();
 
 jest.unstable_mockModule('../../src/utils/zip-utils.js', () => ({
-  extractLlamaServerBinary: mockExtractLlamaServerBinary,
+  extractBinary: mockExtractBinary,
   cleanupExtraction: mockCleanupExtraction,
 }));
 
@@ -63,30 +63,131 @@ jest.unstable_mockModule('../../src/config/paths.js', () => ({
 const mockReadFile = jest.fn();
 const mockWriteFile = jest.fn();
 const mockChmod = jest.fn();
+const mockMkdir = jest.fn();
 
 jest.unstable_mockModule('fs', () => ({
   promises: {
     readFile: mockReadFile,
     writeFile: mockWriteFile,
     chmod: mockChmod,
+    mkdir: mockMkdir,
   },
 }));
 
-// Mock child_process with promisified version
-const mockExecFileAsync = jest.fn();
+// Mock child_process with spawn
+// Store spawn behavior configuration for tests to control
+type SpawnBehavior = {
+  stdout?: string;
+  stderr?: string;
+  exitCode?: number;
+  signal?: string | null;
+  shouldError?: boolean;
+  errorMessage?: string;
+  shouldTimeout?: boolean;
+};
+
+let spawnBehavior: SpawnBehavior = {};
+// For tests that need different behavior on each call, use this array
+let spawnBehaviors: SpawnBehavior[] = [];
+let spawnCallIndex = 0;
+
+// Helper API for setting spawn responses (clearer intent for test scenarios)
+const setSpawnResponses = (responses: SpawnBehavior[]) => {
+  spawnBehaviors = responses;
+  spawnCallIndex = 0;
+};
+
+const setSpawnResponse = (response: SpawnBehavior) => {
+  spawnBehavior = response;
+  setSpawnResponses([]);
+  spawnCallIndex = 0;
+};
+
+// Helper function to create spawn implementation
+// This will be reapplied after each jest.resetMocks()
+const createSpawnImplementation = () => {
+  return (command: string, args: string[], options: any) => {
+    // Determine which behavior to use (array takes precedence)
+    const currentBehavior =
+      spawnBehaviors.length > 0
+        ? spawnBehaviors[spawnCallIndex++ % spawnBehaviors.length]
+        : spawnBehavior;
+
+    // Create mock EventEmitter-like object for stdout/stderr
+    const mockStdout = {
+      on: jest.fn((event: string, handler: Function) => {
+        if (event === 'data' && currentBehavior.stdout) {
+          // Use setImmediate for more realistic async behavior
+          setImmediate(() => handler(Buffer.from(currentBehavior.stdout!)));
+        }
+        return mockStdout;
+      }),
+    };
+
+    const mockStderr = {
+      on: jest.fn((event: string, handler: Function) => {
+        if (event === 'data' && currentBehavior.stderr) {
+          // Use setImmediate for more realistic async behavior
+          setImmediate(() => handler(Buffer.from(currentBehavior.stderr!)));
+        }
+        return mockStderr;
+      }),
+    };
+
+    // Create mock child process
+    const mockChild: any = {
+      stdout: mockStdout,
+      stderr: mockStderr,
+      kill: jest.fn(),
+      on: jest.fn((event: string, handler: Function) => {
+        if (event === 'exit' && !currentBehavior.shouldError && !currentBehavior.shouldTimeout) {
+          // Use setImmediate for more realistic async behavior
+          setImmediate(() => {
+            const exitCode = currentBehavior.exitCode ?? 0;
+            const signal = currentBehavior.signal ?? null;
+            handler(exitCode, signal);
+          });
+        } else if (event === 'error' && currentBehavior.shouldError) {
+          // Use setImmediate for more realistic async behavior
+          setImmediate(() => handler(new Error(currentBehavior.errorMessage || 'Spawn error')));
+        }
+        // If shouldTimeout is true, don't emit any events (simulates hanging)
+        return mockChild;
+      }),
+    };
+
+    return mockChild;
+  };
+};
+
+// Create the mock spawn function that will be exported from child_process
+const mockSpawnFn = jest.fn();
 
 jest.unstable_mockModule('child_process', () => ({
-  execFile: jest.fn(), // Original callback version (not used)
+  spawn: mockSpawnFn,
 }));
 
-// Mock util.promisify to return our async mock
-jest.unstable_mockModule('util', () => ({
-  promisify: (fn: any) => mockExecFileAsync,
+// Mock gpu-detect
+const mockDetectGPU = jest.fn();
+jest.unstable_mockModule('../../src/system/gpu-detect.js', () => ({
+  detectGPU: mockDetectGPU,
+}));
+
+// Mock adm-zip
+const mockExtractAllTo = jest.fn();
+class MockAdmZip {
+  extractAllTo = mockExtractAllTo;
+}
+jest.unstable_mockModule('adm-zip', () => ({
+  default: MockAdmZip,
 }));
 
 // Import after mocking
 const { BinaryManager } = await import('../../src/managers/BinaryManager.js');
 const { BinaryError } = await import('../../src/errors/index.js');
+
+// Import spawn to get reference to the mocked function
+const { spawn: mockSpawn } = await import('child_process');
 
 describe('BinaryManager', () => {
   // Sample variant configs for testing
@@ -114,6 +215,9 @@ describe('BinaryManager', () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
+    // Reapply spawn implementation after jest.resetMocks() clears it
+    (mockSpawn as jest.Mock).mockImplementation(createSpawnImplementation());
+
     // Default mock implementations
     mockFileExists.mockResolvedValue(false);
     mockEnsureDirectory.mockResolvedValue(undefined);
@@ -126,14 +230,25 @@ describe('BinaryManager', () => {
     });
     mockDeleteFile.mockResolvedValue(undefined);
     mockCopyDirectory.mockResolvedValue(undefined);
-    mockExtractLlamaServerBinary.mockResolvedValue('/mock/extract/llama-server.exe');
+    mockExtractBinary.mockResolvedValue('/mock/extract/llama-server.exe');
     mockCleanupExtraction.mockResolvedValue(undefined);
     mockGetBinaryPath.mockReturnValue('/mock/binaries/llama/llama-server.exe');
     mockReadFile.mockRejectedValue(new Error('No cache'));
     mockWriteFile.mockResolvedValue(undefined);
     mockChmod.mockResolvedValue(undefined);
+    mockMkdir.mockResolvedValue(undefined);
     mockDownload.mockResolvedValue(undefined);
-    // mockExecFileAsync setup moved to individual tests for better control
+    mockExtractAllTo.mockReturnValue(undefined);
+
+    // Reset spawn behavior for each test (tests will configure as needed)
+    setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+    // Default: Mock CUDA GPU detected (to not filter CUDA variants in most tests)
+    mockDetectGPU.mockResolvedValue({
+      available: true,
+      type: 'nvidia',
+      cuda: true,
+    });
 
     binaryManager = new BinaryManager({
       type: 'llama',
@@ -160,7 +275,7 @@ describe('BinaryManager', () => {
     });
 
     it('should ensure binary directory exists', async () => {
-      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+      // Default spawnBehavior set in beforeEach works for this test
 
       await binaryManager.ensureBinary();
 
@@ -169,20 +284,26 @@ describe('BinaryManager', () => {
 
     it('should return existing binary path if binary works', async () => {
       mockFileExists.mockResolvedValue(true);
-      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+      // Mock no validation cache, so it runs tests
+      mockReadFile.mockRejectedValue(new Error('No validation cache'));
+      mockCalculateChecksum.mockResolvedValue('abc123');
+      // Default spawnBehavior set in beforeEach works for this test
 
       const result = await binaryManager.ensureBinary();
 
       expect(result).toBe('/mock/binaries/llama/llama-server.exe');
       expect(mockDownload).not.toHaveBeenCalled();
-      expect(mockLogger).toHaveBeenCalledWith('Using existing binary', 'info');
+      // With the validation cache implementation, it validates and saves cache
+      expect(mockLogger).toHaveBeenCalledWith('Binary validated successfully', 'info');
     });
 
     it('should re-download if existing binary does not work', async () => {
       mockFileExists.mockResolvedValueOnce(true); // Binary exists
-      mockExecFileAsync
-        .mockRejectedValueOnce(new Error('Execution failed')) // First call (testBinary) fails
-        .mockResolvedValue({ stdout: 'version 1.0', stderr: '' }); // Subsequent calls succeed
+      // First spawn call fails, subsequent ones succeed
+      setSpawnResponses([
+        { exitCode: 1, stderr: 'Execution failed' }, // First call fails
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // Subsequent calls succeed
+      ]);
 
       const result = await binaryManager.ensureBinary();
 
@@ -197,14 +318,10 @@ describe('BinaryManager', () => {
 
     it('should try variants in priority order when no cache exists', async () => {
       // First variant (CUDA) fails testBinary, second (CPU) succeeds
-      let callCount = 0;
-      mockExecFileAsync.mockImplementation(async () => {
-        callCount++;
-        if (callCount === 1) {
-          throw new Error('CUDA not available'); // First call (CUDA) fails
-        }
-        return { stdout: 'version 1.0', stderr: '' }; // Subsequent calls succeed
-      });
+      setSpawnResponses([
+        { exitCode: 1, stderr: 'CUDA not available' }, // First call (CUDA) fails
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // Subsequent calls (CPU) succeed
+      ]);
 
       const result = await binaryManager.ensureBinary();
 
@@ -226,10 +343,7 @@ describe('BinaryManager', () => {
     it('should try cached variant first if cache exists', async () => {
       // Simulate cache pointing to 'cpu' variant
       mockReadFile.mockResolvedValue(JSON.stringify({ variant: 'cpu', platform: 'win32-x64' }));
-      // Ensure testBinary succeeds for all calls
-      mockExecFileAsync.mockImplementation(async () => {
-        return { stdout: 'version 1.0', stderr: '' };
-      });
+      // Default spawn behavior (set in beforeEach) works for this test
 
       await binaryManager.ensureBinary();
 
@@ -254,7 +368,7 @@ describe('BinaryManager', () => {
 
     it('should throw BinaryError if all variants fail', async () => {
       // Make all variants fail testBinary
-      mockExecFileAsync.mockRejectedValue(new Error('No drivers available'));
+      setSpawnResponse({ exitCode: 1, stderr: 'No drivers available' });
 
       // Test the error (only call once to avoid double execution)
       await expect(binaryManager.ensureBinary()).rejects.toThrow(BinaryError);
@@ -354,7 +468,7 @@ describe('BinaryManager', () => {
 
     it('should cleanup on extraction failure', async () => {
       // Make extraction fail for ALL variants
-      mockExtractLlamaServerBinary.mockRejectedValue(new Error('Extraction failed'));
+      mockExtractBinary.mockRejectedValue(new Error('Extraction failed'));
 
       await expect(binaryManager.ensureBinary()).rejects.toThrow(BinaryError);
       await expect(binaryManager.ensureBinary()).rejects.toThrow(
@@ -369,21 +483,26 @@ describe('BinaryManager', () => {
 
   describe('testBinary()', () => {
     it('should return true when binary executes successfully', async () => {
+      // Mock existing binary with no validation cache (will run tests)
       mockFileExists.mockResolvedValue(true);
-      mockExecFileAsync.mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+      mockReadFile.mockRejectedValue(new Error('No validation cache'));
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      // Default spawn behavior (set in beforeEach) works for this test
 
       const result = await binaryManager.ensureBinary();
 
       expect(result).toBe('/mock/binaries/llama/llama-server.exe');
-      expect(mockLogger).toHaveBeenCalledWith('Using existing binary', 'info');
+      expect(mockLogger).toHaveBeenCalledWith('Binary validated successfully', 'info');
     });
 
     it('should return false when binary execution fails', async () => {
       mockFileExists.mockResolvedValue(true);
       // First call fails (existing binary check), subsequent calls succeed (after re-download)
-      mockExecFileAsync
-        .mockRejectedValueOnce(new Error('Missing CUDA drivers'))
-        .mockResolvedValue({ stdout: 'version 1.0', stderr: '' });
+      setSpawnResponses([
+        { exitCode: 1, stderr: 'Missing CUDA drivers' },
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 },
+      ]);
 
       // Should re-download and succeed
       const result = await binaryManager.ensureBinary();
@@ -397,14 +516,10 @@ describe('BinaryManager', () => {
   describe('variant fallback behavior', () => {
     it('should successfully fall back from CUDA to CPU variant', async () => {
       // CUDA variant fails, CPU succeeds
-      let callCount = 0;
-      mockExecFileAsync.mockImplementation(async () => {
-        callCount++;
-        if (callCount === 1) {
-          throw new Error('CUDA drivers not found'); // First call (CUDA) fails
-        }
-        return { stdout: 'version 1.0', stderr: '' }; // Subsequent calls succeed
-      });
+      setSpawnResponses([
+        { exitCode: 1, stderr: 'CUDA drivers not found' }, // First call (CUDA) fails
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // Subsequent calls succeed
+      ]);
 
       const result = await binaryManager.ensureBinary();
 
@@ -422,6 +537,768 @@ describe('BinaryManager', () => {
       expect(mockLogger).toHaveBeenCalledWith(
         expect.stringContaining('Successfully installed cpu variant'),
         'info'
+      );
+    });
+  });
+
+  describe('CUDA GPU detection filtering', () => {
+    it('should skip CUDA variants when no CUDA GPU is detected', async () => {
+      // Mock detectGPU to return no CUDA support
+      mockDetectGPU.mockResolvedValue({
+        available: false,
+      });
+
+      // Default spawn behavior (set in beforeEach) works for this test
+
+      const result = await binaryManager.ensureBinary();
+
+      // Should only try CPU variant (CUDA filtered out)
+      expect(mockDownload).toHaveBeenCalledTimes(1);
+      expect(mockDownload).toHaveBeenCalledWith({
+        url: cpuVariant.url,
+        destination: expect.stringContaining('.cpu.zip'),
+        onProgress: expect.any(Function),
+      });
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping CUDA variants'),
+        'info'
+      );
+      expect(result).toBe('/mock/binaries/llama/llama-server.exe');
+    });
+
+    it('should try CUDA variants when CUDA GPU is detected', async () => {
+      // Mock detectGPU to return CUDA support
+      mockDetectGPU.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        cuda: true,
+        name: 'NVIDIA RTX 4090',
+      });
+
+      // Default spawn behavior (set in beforeEach) works for this test
+
+      const result = await binaryManager.ensureBinary();
+
+      // Should try CUDA variant (not filtered)
+      expect(mockDownload).toHaveBeenCalledWith({
+        url: cudaVariant.url,
+        destination: expect.stringContaining('.cuda.zip'),
+        onProgress: expect.any(Function),
+      });
+      expect(mockLogger).toHaveBeenCalledWith(expect.stringContaining('CUDA GPU detected'), 'info');
+      expect(result).toBe('/mock/binaries/llama/llama-server.exe');
+    });
+
+    it('should skip CUDA variants when non-CUDA GPU is detected', async () => {
+      // Mock detectGPU to return AMD GPU (no CUDA)
+      mockDetectGPU.mockResolvedValue({
+        available: true,
+        type: 'amd',
+        rocm: true,
+        name: 'AMD Radeon RX 7900',
+      });
+
+      // Default spawn behavior (set in beforeEach) works for this test
+
+      await binaryManager.ensureBinary();
+
+      // Should skip CUDA, try CPU
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Skipping CUDA variants'),
+        'info'
+      );
+      expect(mockDownload).toHaveBeenCalledWith({
+        url: cpuVariant.url,
+        destination: expect.stringContaining('.cpu.zip'),
+        onProgress: expect.any(Function),
+      });
+    });
+  });
+
+  describe('dependency downloads', () => {
+    const cudaVariantWithDeps: BinaryVariantConfig = {
+      type: 'cuda',
+      url: 'https://example.com/llama-cuda.zip',
+      checksum: 'abc123cuda',
+      dependencies: [
+        {
+          url: 'https://example.com/cudart.zip',
+          checksum: 'def456cudart',
+          description: 'CUDA runtime libraries',
+        },
+      ],
+    };
+
+    beforeEach(() => {
+      // Don't clear all mocks - just reset specific ones needed for this suite
+      // Clearing all mocks would break spawn behavior setup
+
+      // Mock CUDA GPU detected (default is already set in main beforeEach, but we make it explicit here)
+      mockDetectGPU.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        cuda: true,
+      });
+
+      mockFileExists.mockResolvedValue(false);
+      mockEnsureDirectory.mockResolvedValue(undefined);
+      mockCalculateChecksum.mockImplementation(async (path: string) => {
+        if (path.includes('.dep0.zip')) return 'def456cudart';
+        if (path.includes('.cuda.zip')) return 'abc123cuda';
+        if (path.includes('.cpu.zip')) return 'abc123cpu';
+        return 'abc123';
+      });
+      mockDeleteFile.mockResolvedValue(undefined);
+      mockCopyDirectory.mockResolvedValue(undefined);
+      mockExtractBinary.mockResolvedValue('/mock/extract/llama-server.exe');
+      mockCleanupExtraction.mockResolvedValue(undefined);
+      mockGetBinaryPath.mockReturnValue('/mock/binaries/llama/llama-server.exe');
+      mockReadFile.mockRejectedValue(new Error('No cache'));
+      mockWriteFile.mockResolvedValue(undefined);
+      mockChmod.mockResolvedValue(undefined);
+      mockMkdir.mockResolvedValue(undefined);
+      mockDownload.mockResolvedValue(undefined);
+      // Default spawn behavior (set in beforeEach) works for this test
+      mockExtractAllTo.mockReturnValue(undefined);
+    });
+
+    it('should download dependencies before main binary', async () => {
+      const managerWithDeps = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps],
+        log: mockLogger,
+      });
+
+      await managerWithDeps.ensureBinary();
+
+      // Should download dependency first, then main binary
+      expect(mockDownload).toHaveBeenCalledTimes(2);
+      expect(mockDownload).toHaveBeenNthCalledWith(1, {
+        url: 'https://example.com/cudart.zip',
+        destination: expect.stringContaining('.dep0.zip'),
+        onProgress: expect.any(Function),
+      });
+      expect(mockDownload).toHaveBeenNthCalledWith(2, {
+        url: 'https://example.com/llama-cuda.zip',
+        destination: expect.stringContaining('.cuda.zip'),
+        onProgress: expect.any(Function),
+      });
+    });
+
+    it('should fail variant if dependency checksum is wrong', async () => {
+      // Make dependency checksum fail
+      mockCalculateChecksum.mockImplementation(async (path: string) => {
+        if (path.includes('.dep0.zip')) return 'wrongchecksum';
+        if (path.includes('.cuda.zip')) return 'abc123cuda';
+        if (path.includes('.cpu.zip')) return 'abc123cpu';
+        return 'abc123';
+      });
+
+      const managerWithDeps = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps, cpuVariant],
+        log: mockLogger,
+      });
+
+      // Should fall back to CPU variant
+      await managerWithDeps.ensureBinary();
+
+      // Should cleanup and try next variant
+      expect(mockDeleteFile).toHaveBeenCalledWith(expect.stringContaining('.dep0.zip'));
+      expect(mockCleanupExtraction).toHaveBeenCalled();
+    });
+
+    it('should cleanup dependencies if binary test fails', async () => {
+      // Make binary test fail on first call, succeed on second
+      setSpawnResponses([
+        { exitCode: 1, stderr: 'Missing drivers' },
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 },
+      ]);
+
+      const managerWithDeps = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps, cpuVariant],
+        log: mockLogger,
+      });
+
+      await managerWithDeps.ensureBinary();
+
+      // Should cleanup extraction dir (which contains both binary and dependencies)
+      expect(mockCleanupExtraction).toHaveBeenCalled();
+    });
+  });
+
+  describe('two-phase binary testing', () => {
+    it('should run Phase 1 (basic validation) and Phase 2 (real functionality) when testModelPath is provided', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // Mock fileExists to return true for both binary and llama-run
+      mockFileExists.mockResolvedValue(true);
+
+      // Mock spawn to succeed for both phases
+      setSpawnResponse({ stdout: 'test output', stderr: '', exitCode: 0 });
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await managerWithModel.ensureBinary();
+
+      // Phase 1: Should test llama-server --version
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: Testing binary basic validation...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: ✓ Binary validation passed (--version)',
+        'info'
+      );
+
+      // Phase 2: Should test llama-run with GPU
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: Testing GPU functionality with real inference...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✓ GPU functionality test passed (llama-run)',
+        'info'
+      );
+
+      // Should call spawn for llama-run with GPU testing args (timeout handled internally)
+      expect(mockSpawn).toHaveBeenCalledWith(
+        expect.stringContaining('llama-run'),
+        expect.arrayContaining([
+          '-ngl',
+          '1',
+          testModelPath,
+          'What is 2+2? Just answer with the number.',
+        ]),
+        expect.objectContaining({
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+      );
+    });
+
+    it('should fail variant if Phase 1 (basic validation) fails', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // First variant: Phase 1 fails (first spawn call fails)
+      // Second variant: Phase 1 & 2 succeed (second and third spawn calls succeed)
+      setSpawnResponses([
+        { exitCode: 1, stderr: 'Binary not working' }, // First variant Phase 1 fails
+        { stdout: 'success', stderr: '', exitCode: 0 }, // Second variant Phase 1 succeeds
+        { stdout: 'success', stderr: '', exitCode: 0 }, // Second variant Phase 2 succeeds
+      ]);
+
+      // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
+      mockFileExists.mockImplementation(async (path) => {
+        // Binary doesn't exist initially (trigger download)
+        if (path.includes('llama-server.exe')) {
+          return false;
+        }
+        // llama-run exists (for Phase 2 test)
+        if (path.includes('llama-run')) {
+          return true;
+        }
+        // Test model exists
+        if (path === testModelPath) {
+          return true;
+        }
+        return false;
+      });
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant, cpuVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await managerWithModel.ensureBinary();
+
+      // Should log Phase 1 failure
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Phase 1: ✗ Basic validation failed'),
+        'error'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Binary validation failed, variant will be skipped',
+        'warn'
+      );
+
+      // Should have tried both variants
+      expect(mockDownload).toHaveBeenCalledTimes(2);
+    });
+
+    it('should fail variant if Phase 2 (real functionality) fails due to GPU errors', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
+      mockFileExists.mockImplementation(async (path) => {
+        if (path.includes('llama-server.exe')) {
+          return false;
+        }
+        if (path.includes('llama-run')) {
+          return true;
+        }
+        if (path === testModelPath) {
+          return true;
+        }
+        return false;
+      });
+
+      // Phase 1 succeeds for both, Phase 2 fails for CUDA (GPU error), succeeds for CPU
+      // Sequence: CUDA Phase1, CUDA Phase2 (fail), CPU Phase1, CPU Phase2 (success)
+      setSpawnResponses([
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CUDA Phase 1 success
+        { stdout: '', stderr: 'CUDA error: out of memory', exitCode: 0 }, // CUDA Phase 2 GPU error
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CPU Phase 1 success
+        { stdout: 'success', stderr: '', exitCode: 0 }, // CPU Phase 2 success
+      ]);
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant, cpuVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await managerWithModel.ensureBinary();
+
+      // Should detect GPU error in Phase 2
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Phase 2: ✗ GPU error detected'),
+        'warn'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'GPU functionality test failed, variant will be skipped',
+        'warn'
+      );
+
+      // Should have tried CPU variant as fallback
+      expect(mockDownload).toHaveBeenCalledTimes(2);
+    });
+
+    it('should fail variant if llama-run is not found', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // Mock fileExists: binary exists, but llama-run doesn't
+      mockFileExists.mockImplementation(async (path) => {
+        return !path.includes('llama-run');
+      });
+
+      // Phase 1 succeeds
+      // Default spawn behavior (set in beforeEach) works for this test
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await expect(managerWithModel.ensureBinary()).rejects.toThrow(BinaryError);
+
+      // Should log that llama-run was not found
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✗ llama-run not found in binary directory',
+        'error'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'GPU functionality test failed, variant will be skipped',
+        'warn'
+      );
+    });
+
+    it('should skip Phase 2 when no testModelPath provided', async () => {
+      // No testModelPath provided
+      // Default spawn behavior (set in beforeEach) works for this test
+
+      const managerWithoutModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      await managerWithoutModel.ensureBinary();
+
+      // Should only run Phase 1 (basic validation)
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: Testing binary basic validation...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'No test model provided, skipping Phase 2 (GPU functionality test)',
+        'info'
+      );
+
+      // Should NOT run Phase 2
+      expect(mockLogger).not.toHaveBeenCalledWith(
+        'Phase 2: Testing GPU functionality with real inference...',
+        'info'
+      );
+    });
+
+    it('should run diffusion test with two phases when testModelPath provided', async () => {
+      const testModelPath = '/mock/models/test-diffusion.safetensors';
+
+      // Mock fileExists to return true
+      mockFileExists.mockResolvedValue(true);
+
+      // Mock exec to succeed for both phases
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+
+      const diffusionManager = new BinaryManager({
+        type: 'diffusion',
+        binaryName: 'sd',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await diffusionManager.ensureBinary();
+
+      // Phase 1: Should test sd --help
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: Testing binary basic validation...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 1: ✓ Binary validation passed (--help)',
+        'info'
+      );
+
+      // Phase 2: Should test sd with tiny image generation
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: Testing GPU functionality with real inference...',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✓ GPU functionality test passed (sd)',
+        'info'
+      );
+
+      // Should call sd with tiny image generation args (timeout handled internally)
+      expect(mockSpawn).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.arrayContaining([
+          '-m',
+          testModelPath,
+          '-p',
+          'test',
+          '--width',
+          '64',
+          '--height',
+          '64',
+          '--steps',
+          '1',
+        ]),
+        expect.objectContaining({
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+      );
+    });
+
+    it('should treat timeout in Phase 2 as test failure', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+
+      // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
+      mockFileExists.mockImplementation(async (path) => {
+        if (path.includes('llama-server.exe')) {
+          return false;
+        }
+        if (path.includes('llama-run')) {
+          return true;
+        }
+        if (path === testModelPath) {
+          return true;
+        }
+        return false;
+      });
+
+      // Phase 1 succeeds for both, Phase 2 times out for first variant, succeeds for second
+      // Sequence: CUDA Phase1, CUDA Phase2 (timeout), CPU Phase1, CPU Phase2 (success)
+      setSpawnResponses([
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CUDA Phase 1 success
+        { shouldError: true, errorMessage: 'Timeout' }, // CUDA Phase 2 timeout
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CPU Phase 1 success
+        { stdout: 'success', stderr: '', exitCode: 0 }, // CPU Phase 2 success
+      ]);
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant, cpuVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await managerWithModel.ensureBinary();
+
+      // Should log timeout as Phase 2 failure
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Phase 2: ✗ Real functionality test failed'),
+        'warn'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'GPU functionality test failed, variant will be skipped',
+        'warn'
+      );
+
+      // Should have tried CPU variant
+      expect(mockDownload).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('Validation Cache', () => {
+    it('should skip validation tests if cache exists and checksum matches', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+        phase2Passed: true,
+      };
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile to return validation cache
+      mockReadFile.mockResolvedValue(JSON.stringify(validationCache));
+
+      // Mock checksum to match cache
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should use cached validation
+      expect(result).toBe(binaryPath);
+      expect(mockLogger).toHaveBeenCalledWith('Verifying binary integrity...', 'info');
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Using cached validation result (binary verified)',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(expect.stringContaining('Last validated:'), 'info');
+
+      // Should NOT run tests (spawn not called)
+      expect(mockSpawn).not.toHaveBeenCalled();
+      // Should NOT download again
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it('should re-run validation if checksum does not match cache', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+      };
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile to return validation cache
+      mockReadFile.mockResolvedValue(JSON.stringify(validationCache));
+
+      // Mock checksum to NOT match cache (binary was modified)
+      mockCalculateChecksum.mockResolvedValue('different-checksum');
+
+      // Phase 1 test succeeds
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should detect checksum mismatch
+      expect(mockLogger).toHaveBeenCalledWith('Binary checksum mismatch, re-validating...', 'warn');
+
+      // Should run validation tests
+      expect(mockSpawn).toHaveBeenCalled();
+
+      // Should save new validation cache
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('.validation.json'),
+        expect.stringContaining('different-checksum'),
+        'utf-8'
+      );
+    });
+
+    it('should re-run validation if forceValidation=true', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+      };
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile to return validation cache
+      mockReadFile.mockResolvedValue(JSON.stringify(validationCache));
+
+      // Mock checksum to match cache (binary unchanged)
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      // Phase 1 test succeeds
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(true); // forceValidation=true
+
+      // Should log force validation
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Force validation requested, re-running tests...',
+        'info'
+      );
+
+      // Should run validation tests even though cache is valid
+      expect(mockSpawn).toHaveBeenCalled();
+
+      // Should save new validation cache
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('.validation.json'),
+        expect.any(String),
+        'utf-8'
+      );
+    });
+
+    it('should run validation on first run (no cache)', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+
+      // Binary does NOT exist (first run), but extracted binary exists for testing
+      mockFileExists.mockImplementation(async (path) => {
+        // Binary doesn't exist at final location yet
+        if (path === binaryPath) return false;
+        // Extracted binary exists after download (for testing)
+        if (path.includes('.extract') && path.includes('llama-server.exe')) return true;
+        // For other paths, return true (variant cache file, etc.)
+        return false;
+      });
+
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // No validation cache
+      mockReadFile.mockRejectedValue(new Error('ENOENT'));
+
+      // Mock successful download and extraction
+      const extractedPath = '/mock/extract/llama-server.exe';
+      mockDownload.mockResolvedValue(undefined);
+      mockExtractBinary.mockResolvedValue(extractedPath);
+      mockCalculateChecksum.mockImplementation(async (path) => {
+        if (path.includes('.cuda.zip')) return 'abc123cuda';
+        return 'new-checksum';
+      });
+      mockCopyDirectory.mockResolvedValue(undefined);
+      mockCleanupExtraction.mockResolvedValue(undefined);
+
+      // Phase 1 test succeeds
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should download and test binary
+      expect(mockDownload).toHaveBeenCalled();
+      expect(mockSpawn).toHaveBeenCalled();
+
+      // Should save validation cache after successful validation
+      const validationCacheCalls = (mockWriteFile as jest.Mock).mock.calls.filter((call) =>
+        call[0].includes('.validation.json')
+      );
+      expect(validationCacheCalls.length).toBeGreaterThan(0);
+      expect(validationCacheCalls[0][1]).toContain('new-checksum');
+    });
+
+    it('should fall back to validation if cache is corrupted', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile to return corrupted cache (invalid JSON)
+      mockReadFile.mockResolvedValue('{ invalid json');
+
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      // Phase 1 test succeeds
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should run validation tests (cache corrupted, treated as no cache)
+      expect(mockSpawn).toHaveBeenCalled();
+
+      // Should save new validation cache
+      expect(mockWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('.validation.json'),
+        expect.any(String),
+        'utf-8'
       );
     });
   });

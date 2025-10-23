@@ -1,0 +1,123 @@
+.debug-panel {
+  background-color: var(--background-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 20px;
+  margin-top: 20px;
+}
+
+.debug-header {
+  margin-bottom: 15px;
+}
+
+.debug-header h3 {
+  margin: 0 0 5px 0;
+  color: var(--text-primary);
+  font-size: 16px;
+}
+
+.debug-subtitle {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.debug-buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 15px;
+}
+
+.debug-button {
+  padding: 10px 16px;
+  background-color: var(--button-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: all 0.2s;
+}
+
+.debug-button:hover:not(:disabled) {
+  background-color: var(--button-hover);
+  border-color: var(--primary-color);
+}
+
+.debug-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.debug-note {
+  padding: 12px;
+  background-color: var(--background-tertiary);
+  border-left: 3px solid var(--info-color);
+  border-radius: 4px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.debug-note strong {
+  color: var(--text-primary);
+}
+
+.debug-note code {
+  background-color: var(--background-primary);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+}
+
+.debug-output {
+  margin-top: 15px;
+  background-color: var(--background-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.debug-output-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 15px;
+  background-color: var(--background-tertiary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.debug-output-header h4 {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.debug-output-header .clear-button {
+  padding: 4px 12px;
+  background-color: var(--button-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.debug-output-header .clear-button:hover {
+  background-color: var(--button-hover);
+}
+
+.debug-output-content {
+  margin: 0;
+  padding: 15px;
+  font-family: 'Courier New', 'Monaco', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  overflow-x: auto;
+  white-space: pre;
+  max-height: 400px;
+  overflow-y: auto;
+}

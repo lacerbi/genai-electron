@@ -1,9 +1,13 @@
 # genai-electron API Reference
 
-> **Version**: 0.2.0 (Phase 2 Complete)
+> **Version**: 0.2.0 (Phase 2.6 Complete - Async API & genai-lite Integration)
 > **Status**: Production Ready
 
-Complete API reference for genai-electron Phase 1 (LLM Support) and Phase 2 (Image Generation).
+Complete API reference for genai-electron covering:
+- **Phase 1**: LLM Support (SystemInfo, ModelManager, LlamaServerManager)
+- **Phase 2**: Image Generation (DiffusionServerManager, ResourceOrchestrator)
+- **Phase 2.5**: Async Image Generation API (GenerationRegistry, HTTP endpoints)
+- **Phase 2.6**: genai-lite Integration & Best Practices
 
 ---
 
@@ -17,11 +21,13 @@ Complete API reference for genai-electron Phase 1 (LLM Support) and Phase 2 (Ima
 ### Phase 2: Image Generation
 4. [DiffusionServerManager](#diffusionservermanager)
 5. [ResourceOrchestrator](#resourceorchestrator)
+6. [GenerationRegistry](#generationregistry)
+7. [HTTP API Endpoints](#http-api-endpoints)
 
 ### Reference
-6. [Types and Interfaces](#types-and-interfaces)
-7. [Error Classes](#error-classes)
-8. [Utilities](#utilities)
+8. [Types and Interfaces](#types-and-interfaces)
+9. [Error Classes](#error-classes)
+10. [Utilities](#utilities)
 
 ---
 
@@ -74,6 +80,10 @@ console.log('GPU Layers:', capabilities.recommendations.gpuLayers);
 
 **Caching**: Results are cached for 60 seconds. Subsequent calls within this window return cached data without re-detecting hardware.
 
+**Automatic Cache Clearing**: The cache is automatically cleared when servers start or stop (via `LlamaServerManager` and `DiffusionServerManager`). This ensures that subsequent memory checks reflect the actual available RAM after models are loaded or unloaded.
+
+**Memory Checks Use Real-Time Data**: The `canRunModel()` and `getOptimalConfig()` methods use real-time `getMemoryInfo()` for memory availability checks, ensuring accurate resource validation even when the capabilities cache is active. Static hardware info (CPU cores, GPU specs) is taken from the cache.
+
 ---
 
 #### `getMemoryInfo(): MemoryInfo`
@@ -96,16 +106,22 @@ console.log('Memory usage:', usagePercent.toFixed(1), '%');
 
 ---
 
-#### `canRunModel(modelInfo: ModelInfo): Promise<{ possible: boolean; reason?: string; suggestion?: string }>`
+#### `canRunModel(modelInfo: ModelInfo, options?: { checkTotalMemory?: boolean }): Promise<{ possible: boolean; reason?: string; suggestion?: string }>`
 
-Checks if a specific model can run on the current system based on available resources.
+Checks if a specific model can run on the current system based on available or total memory.
 
 **Parameters**:
 - `modelInfo: ModelInfo` - Model information to check
+- `options?: { checkTotalMemory?: boolean }` - Optional configuration
+  - `checkTotalMemory` - If `true`, checks against total system memory instead of currently available memory. Use this for servers that load models on-demand (e.g., diffusion server). Default: `false` (checks available memory)
 
 **Returns**: `Promise<{ possible: boolean; reason?: string; suggestion?: string }>` - Whether model can run, reason if not, and optional suggestion
 
-**Example**:
+**When to Use Each Mode**:
+- **Default (available memory)**: For servers that load the model at startup (e.g., LLM server). Ensures there's enough RAM right now.
+- **Total memory mode**: For servers that load models on-demand (e.g., diffusion server). Validates the model will eventually fit, allowing ResourceOrchestrator to free up memory when needed.
+
+**Example (Default - Check Available Memory)**:
 ```typescript
 const modelInfo = await modelManager.getModelInfo('llama-2-7b');
 const check = await systemInfo.canRunModel(modelInfo);
@@ -118,9 +134,22 @@ if (check.possible) {
   if (check.suggestion) {
     console.log('💡 Suggestion:', check.suggestion);
   }
-  // Example reasons:
-  // - "Insufficient RAM: Model requires 8GB but only 4GB available"
-  // - "Model file not found or corrupt"
+  // Example: "Insufficient RAM: Model requires 8GB but only 4GB available"
+}
+```
+
+**Example (Total Memory - For On-Demand Loading)**:
+```typescript
+const modelInfo = await modelManager.getModelInfo('sdxl-turbo');
+const check = await systemInfo.canRunModel(modelInfo, { checkTotalMemory: true });
+
+if (check.possible) {
+  console.log('✅ Model will fit in system memory');
+  // Server can start - ResourceOrchestrator will free memory when needed
+  await diffusionServer.start({ modelId: modelInfo.id, port: 8081 });
+} else {
+  console.log('❌ Model too large for system:', check.reason);
+  // Example: "Insufficient RAM: Model requires 8GB but only 4GB total"
 }
 ```
 
@@ -284,6 +313,16 @@ try {
 }
 ```
 
+**GGUF Metadata Extraction**:
+
+GGUF metadata is automatically extracted from the model file **before** downloading:
+- ✅ **Pre-download validation** - Confirms file is a valid GGUF
+- ✅ **Accurate information** - Layer count, context length, architecture
+- ✅ **No guessing** - Real values from model file
+- ✅ **Fast failure** - Fails immediately if not a valid GGUF (saves bandwidth)
+
+The metadata is stored with the model and accessible via `model.ggufMetadata`.
+
 ---
 
 #### `deleteModel(id: string): Promise<void>`
@@ -410,6 +449,210 @@ try {
 
 ---
 
+#### `isDownloading(): boolean`
+
+Check if a download is currently in progress.
+
+**Returns**: `boolean` - `true` if a download is in progress, `false` otherwise
+
+**Example**:
+```typescript
+// Start download
+modelManager.downloadModel({
+  source: 'url',
+  url: 'https://example.com/model.gguf',
+  name: 'My Model',
+  type: 'llm'
+}).catch(console.error);
+
+// Check download status
+if (modelManager.isDownloading()) {
+  console.log('Download in progress...');
+} else {
+  console.log('No active download');
+}
+```
+
+**Use Case**:
+- Prevent starting multiple simultaneous downloads
+- Display download status in UI
+- Implement download queue management
+
+---
+
+#### `updateModelMetadata(id: string, options?: { source?: MetadataFetchStrategy }): Promise<ModelInfo>`
+
+Updates GGUF metadata for an existing model without re-downloading.
+
+Useful for models downloaded before GGUF integration or to refresh metadata.
+
+**Parameters**:
+- `id: string` - Model ID
+- `options?: { source?: MetadataFetchStrategy }` - Optional configuration
+  - `source?: MetadataFetchStrategy` - Where to fetch metadata from (default: `'local-remote'`)
+    - `'local-remote'` - Try local first, fallback to remote if local fails (default)
+    - `'local-only'` - Read from local file only (fastest, offline-capable)
+    - `'remote-only'` - Fetch from remote URL only (requires network)
+    - `'remote-local'` - Try remote first, fallback to local if remote fails
+
+**Returns**: `Promise<ModelInfo>` - Updated model information with GGUF metadata
+
+**Example (Default - Local + Remote Fallback)**:
+```typescript
+// Update metadata from local file first, fallback to remote if needed (default)
+const updated = await modelManager.updateModelMetadata('llama-2-7b');
+
+console.log('Updated model information:');
+console.log('Layer count:', updated.ggufMetadata?.block_count);
+console.log('Context length:', updated.ggufMetadata?.context_length);
+console.log('Architecture:', updated.ggufMetadata?.architecture);
+```
+
+**Example (Remote Only - Force Fresh from Source)**:
+```typescript
+// Force fetch from original URL (useful if local file suspected corrupted)
+const fresh = await modelManager.updateModelMetadata('llama-2-7b', {
+  source: 'remote-only'
+});
+
+console.log('Fresh metadata from source:', fresh.ggufMetadata?.block_count);
+```
+
+**Example (Local + Remote Fallback - Resilient)**:
+```typescript
+// Try local first (fast), fallback to remote if local fails
+const resilient = await modelManager.updateModelMetadata('llama-2-7b', {
+  source: 'local-remote'
+});
+
+console.log('Metadata (resilient fetch):', resilient.ggufMetadata);
+```
+
+**Example (Remote + Local Fallback)**:
+```typescript
+// Try remote first (authoritative), fallback to local if network fails
+const authoritative = await modelManager.updateModelMetadata('llama-2-7b', {
+  source: 'remote-local'
+});
+
+console.log('Metadata (authoritative fetch):', authoritative.ggufMetadata);
+```
+
+**Strategy Use Cases**:
+
+| Strategy | Speed | Offline | Use When |
+|----------|-------|---------|----------|
+| `local-remote` (default) | Fast | ✅ Partial | Want speed + resilience (recommended) |
+| `local-only` | Fastest | ✅ Yes | Certain local file is good |
+| `remote-only` | Slowest | ❌ No | Verify against source, suspect local corruption |
+| `remote-local` | Slow | ✅ Partial | Want authoritative + offline fallback |
+
+**Throws**:
+- `ModelNotFoundError` if model doesn't exist
+- `DownloadError` if metadata fetch fails (strategy-dependent):
+  - `local-only`: Throws if local file unreadable
+  - `remote-only`: Throws if no URL or network fails
+  - `local-remote`: Throws only if both fail
+  - `remote-local`: Throws only if both fail
+
+---
+
+#### `getModelLayerCount(id: string): Promise<number>`
+
+Gets the actual layer count for a model.
+
+Uses GGUF metadata if available, falls back to estimation for older models.
+
+**Parameters**:
+- `id: string` - Model ID
+
+**Returns**: `Promise<number>` - Layer count (actual or estimated)
+
+**Example**:
+```typescript
+const layers = await modelManager.getModelLayerCount('llama-2-7b');
+console.log(`Model has ${layers} layers`);
+
+// Use for GPU offloading calculations
+const gpuLayers = 24; // Want to offload 24 layers to GPU
+const gpuRatio = gpuLayers / layers;
+console.log(`Offloading ${(gpuRatio * 100).toFixed(1)}% to GPU`);
+
+// Check if offloading request is valid
+if (gpuLayers > layers) {
+  console.warn(`Cannot offload ${gpuLayers} layers - model only has ${layers}`);
+}
+```
+
+**Throws**: `ModelNotFoundError` if model doesn't exist
+
+---
+
+#### `getModelContextLength(id: string): Promise<number>`
+
+Gets the actual context length for a model.
+
+Uses GGUF metadata if available, falls back to default for older models.
+
+**Parameters**:
+- `id: string` - Model ID
+
+**Returns**: `Promise<number>` - Context length in tokens
+
+**Example**:
+```typescript
+const contextLen = await modelManager.getModelContextLength('llama-2-7b');
+console.log(`Context window: ${contextLen} tokens`);
+
+// Use for appropriate context size configuration
+const config = {
+  modelId: 'llama-2-7b',
+  contextSize: Math.min(contextLen, 8192), // Don't exceed model's capacity
+  port: 8080
+};
+
+await llamaServer.start(config);
+console.log(`Started with context size: ${config.contextSize}`);
+```
+
+**Throws**: `ModelNotFoundError` if model doesn't exist
+
+---
+
+#### `getModelArchitecture(id: string): Promise<string>`
+
+Gets the architecture type for a model.
+
+Uses GGUF metadata if available, falls back to 'llama' for LLM models.
+
+**Parameters**:
+- `id: string` - Model ID
+
+**Returns**: `Promise<string>` - Architecture type (e.g., 'llama', 'mamba', 'gpt2')
+
+**Example**:
+```typescript
+const arch = await modelManager.getModelArchitecture('llama-2-7b');
+console.log(`Architecture: ${arch}`);
+
+// Verify architecture matches expected type
+if (arch !== 'llama') {
+  console.warn('⚠️  This model may not work with llama-server');
+  console.warn(`Expected: llama, Got: ${arch}`);
+} else {
+  console.log('✅ Model architecture verified');
+}
+
+// Different architectures may require different server configurations
+const serverConfig = arch === 'mamba'
+  ? { /* Mamba-specific config */ }
+  : { /* Llama-specific config */ };
+```
+
+**Throws**: `ModelNotFoundError` if model doesn't exist
+
+---
+
 ## LlamaServerManager
 
 The `LlamaServerManager` class manages the llama-server process lifecycle.
@@ -440,6 +683,7 @@ Starts the llama-server process with the specified configuration. Downloads bina
 - `gpuLayers?: number` - Optional - Layers to offload to GPU (auto-detected if not specified)
 - `parallelRequests?: number` - Optional - Concurrent request slots (default: 4)
 - `flashAttention?: boolean` - Optional - Enable flash attention (default: false)
+- `forceValidation?: boolean` - Optional - Force re-validation of binary even if cached (default: false, see [Binary Validation Caching](#binary-validation-caching))
 
 **Returns**: `Promise<ServerInfo>` - Server information
 
@@ -486,9 +730,42 @@ await llamaServer.start({
 - `ServerError` - Server failed to start
 - `PortInUseError` - Port already in use
 - `InsufficientResourcesError` - Not enough RAM/VRAM
-- `BinaryError` - Binary download or execution failed
+- `BinaryError` - Binary download or execution failed (all variants failed)
 
-**Note**: First run will download llama-server binary (~50-100MB) for your platform.
+**Binary Download and Variant Testing**:
+
+On first call to `start()`, the library automatically:
+1. **Downloads** appropriate binary if not present (~50-100MB)
+2. **Tests variants** in priority order: CUDA → Vulkan → CPU
+3. **Runs real functionality test**:
+   - Generates 1 token with GPU layers enabled (`-ngl 1`)
+   - Verifies CUDA actually works (not just that binary loads)
+   - Parses output for GPU errors ("CUDA error", "failed to allocate", etc.)
+4. **Falls back automatically** if test fails:
+   - Example: Broken CUDA → tries Vulkan → CPU
+   - Logs warnings but continues with working variant
+5. **Caches working variant and validation results** for fast subsequent starts
+
+**Note**: Real functionality testing only runs if model is downloaded. If model doesn't exist yet, falls back to basic `--version` test. This means optimal variant selection happens automatically when you call `start()` with a valid model.
+
+**Binary Validation Caching**:
+
+After the first successful validation, subsequent calls to `start()` skip the expensive validation tests (Phase 1 & Phase 2) and only verify binary integrity via checksum (~0.5s instead of 2-10s):
+
+- ✅ **First start**: Downloads binary → Runs Phase 1 & 2 tests → Saves validation cache
+- ✅ **Subsequent starts**: Verifies checksum → Uses cached validation (fast startup)
+- ✅ **Modified binary**: Checksum mismatch → Re-runs full validation
+- ✅ **Force validation**: Use `forceValidation: true` to re-run tests (e.g., after driver updates)
+
+**Example (Force Validation)**:
+```typescript
+// After updating GPU drivers
+await llamaServer.start({
+  modelId: 'llama-2-7b',
+  port: 8080,
+  forceValidation: true  // Re-run Phase 1 & 2 tests
+});
+```
 
 ---
 
@@ -514,28 +791,6 @@ console.log('Status:', status.status); // 'stopped'
 2. Waits up to 10 seconds for process to exit
 3. Sends SIGKILL if still running (force kill)
 4. Cleans up resources
-
----
-
-#### `restart(): Promise<ServerInfo>`
-
-Restarts the server with the same configuration.
-
-**Returns**: `Promise<ServerInfo>` - Server information after restart
-
-**Example**:
-```typescript
-console.log('Restarting server...');
-const info = await llamaServer.restart();
-console.log('Server restarted on port', info.port);
-console.log('PID:', info.pid);
-```
-
-**Equivalent to**:
-```typescript
-await llamaServer.stop();
-await llamaServer.start(previousConfig);
-```
 
 ---
 
@@ -586,6 +841,30 @@ console.log('Model ID:', info.modelId);
 if (info.startedAt) {
   const uptime = Date.now() - new Date(info.startedAt).getTime();
   console.log('Uptime:', Math.floor(uptime / 1000), 'seconds');
+}
+```
+
+---
+
+#### `getHealthStatus(): Promise<HealthStatus>`
+
+Gets detailed health status of the server.
+
+**Returns**: `Promise<HealthStatus>` - Health status: `'ok'`, `'loading'`, `'error'`, or `'unknown'`
+
+**Example**:
+```typescript
+const healthStatus = await llamaServer.getHealthStatus();
+console.log('Health status:', healthStatus);
+
+if (healthStatus === 'ok') {
+  console.log('✅ Server is fully operational');
+} else if (healthStatus === 'loading') {
+  console.log('⏳ Server is still loading the model');
+} else if (healthStatus === 'error') {
+  console.error('❌ Server has encountered an error');
+} else {
+  console.log('❓ Server health status is unknown');
 }
 ```
 
@@ -703,6 +982,16 @@ llamaServer.on('crashed', (error: Error) => {
 });
 ```
 
+#### `'binary-log'`
+
+Emitted during binary download and variant testing.
+
+```typescript
+llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
+  console.log(`[${data.level.toUpperCase()}] ${data.message}`);
+});
+```
+
 **Example (Complete Event Handling)**:
 ```typescript
 llamaServer.on('started', () => {
@@ -721,8 +1010,13 @@ llamaServer.on('crashed', (error) => {
   console.log('Attempting restart in 5 seconds...');
   setTimeout(async () => {
     try {
-      await llamaServer.restart();
-      console.log('✅ Server restarted successfully');
+      // Restart by stopping and starting again
+      const previousConfig = llamaServer.getConfig();
+      if (previousConfig) {
+        await llamaServer.stop();
+        await llamaServer.start(previousConfig);
+        console.log('✅ Server restarted successfully');
+      }
     } catch (restartError) {
       console.error('❌ Failed to restart:', restartError);
     }
@@ -739,7 +1033,7 @@ await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
 
 The `DiffusionServerManager` class manages the diffusion HTTP wrapper server for local image generation using stable-diffusion.cpp.
 
-**Architecture Note**: Unlike llama-server (which is a native HTTP server), stable-diffusion.cpp is a one-shot executable. DiffusionServerManager creates an HTTP wrapper server that spawns stable-diffusion.cpp on-demand for each image generation request.
+**Architecture Note**: Unlike llama-server (which is a native HTTP server), stable-diffusion.cpp is a one-shot executable. DiffusionServerManager creates an HTTP wrapper server that spawns stable-diffusion.cpp on-demand for each image generation request. Resource orchestration (automatic LLM offload/reload) works for both the Node.js API and HTTP endpoints.
 
 ### Import
 
@@ -765,6 +1059,7 @@ Starts the diffusion HTTP wrapper server. Downloads binary automatically on firs
 - `threads?: number` - Optional - CPU threads (auto-detected if not specified)
 - `gpuLayers?: number` - Optional - Layers to offload to GPU (auto-detected if not specified, 0 = CPU-only)
 - `vramBudget?: number` - Optional - VRAM budget in MB ⚠️ **Phase 3**: This option is planned but not yet implemented. Currently ignored.
+- `forceValidation?: boolean` - Optional - Force re-validation of binary even if cached (default: false)
 
 **Returns**: `Promise<DiffusionServerInfo>` - Server information
 
@@ -797,9 +1092,23 @@ console.log('Diffusion server started with custom settings');
 - `ServerError` - Server failed to start
 - `PortInUseError` - Port already in use
 - `InsufficientResourcesError` - Not enough RAM/VRAM
-- `BinaryError` - Binary download or execution failed
+- `BinaryError` - Binary download or execution failed (all variants failed)
 
-**Note**: First run will download stable-diffusion.cpp binary (~50-100MB) for your platform.
+**Binary Download and Variant Testing**:
+
+On first call to `start()`, the library automatically:
+1. **Downloads** appropriate binary if not present (~50-100MB)
+2. **Tests variants** in priority order: CUDA → Vulkan → CPU
+3. **Runs real functionality test**:
+   - Generates tiny 64x64 image with 1 diffusion step
+   - Verifies CUDA/GPU acceleration actually works
+   - Parses output for GPU errors ("CUDA error", "Vulkan error", etc.)
+4. **Falls back automatically** if test fails:
+   - Example: Broken CUDA → tries Vulkan → CPU
+   - Logs warnings but continues with working variant
+5. **Caches working variant** for fast subsequent starts
+
+**Note**: Real functionality testing only runs if model is downloaded. If model doesn't exist yet, falls back to basic `--help` test. This means optimal variant selection happens automatically when you call `start()` with a valid model.
 
 ---
 
@@ -831,6 +1140,13 @@ console.log('Status:', status.status); // 'stopped'
 
 Generates an image by spawning stable-diffusion.cpp executable.
 
+**Automatic Resource Management**: When using the singleton `diffusionServer`, this method automatically manages system resources. If RAM or VRAM is constrained while both the LLM and diffusion servers are running:
+1. Temporarily stops the LLM server (saves configuration)
+2. Generates the image
+3. Automatically restarts the LLM server with the same configuration
+
+This happens transparently without any additional code. The orchestration uses a 75% resource availability threshold to determine if offloading is needed.
+
 **Parameters**:
 - `config: ImageGenerationConfig` - Image generation configuration
 
@@ -841,11 +1157,12 @@ Generates an image by spawning stable-diffusion.cpp executable.
 - `height?: number` - Optional - Image height in pixels (default: 512)
 - `steps?: number` - Optional - Number of inference steps (default: 20, more = better quality but slower)
 - `cfgScale?: number` - Optional - Guidance scale (default: 7.5, higher = closer to prompt)
-- `seed?: number` - Optional - Random seed for reproducibility (-1 = random)
+- `seed?: number` - Optional - Random seed for reproducibility (undefined or negative = random, actual seed returned in result)
 - `sampler?: ImageSampler` - Optional - Sampler algorithm (default: 'euler_a')
-- `onProgress?: (currentStep: number, totalSteps: number) => void` - Optional - Progress callback
+- `count?: number` - Optional - Number of images to generate (1-5, default: 1). Seeds are automatically incremented for each image.
+- `onProgress?: (currentStep: number, totalSteps: number, stage: ImageGenerationStage, percentage?: number) => void` - Optional - Progress callback with stage information
 
-**Returns**: `Promise<ImageGenerationResult>` - Generated image data
+**Returns**: `Promise<ImageGenerationResult>` - Generated image data (single image). For batch generation (count > 1), use the HTTP API which returns multiple images.
 
 **Example (Basic)**:
 ```typescript
@@ -875,9 +1192,14 @@ const result = await diffusionServer.generateImage({
   cfgScale: 8.0,
   seed: 42,  // For reproducibility
   sampler: 'dpm++2m',
-  onProgress: (currentStep, totalSteps) => {
-    const percent = ((currentStep / totalSteps) * 100).toFixed(1);
-    console.log(`Generating: ${currentStep}/${totalSteps} (${percent}%)`);
+  onProgress: (currentStep, totalSteps, stage, percentage) => {
+    if (stage === 'loading') {
+      console.log(`Loading model... ${Math.round(percentage || 0)}%`);
+    } else if (stage === 'diffusion') {
+      console.log(`Generating (step ${currentStep}/${totalSteps}): ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`Decoding: ${Math.round(percentage || 0)}%`);
+    }
   }
 });
 
@@ -886,10 +1208,38 @@ console.log('Format:', result.format); // 'png'
 await fs.writeFile('cyberpunk-city.png', result.image);
 ```
 
+**Example (Batch Generation via HTTP API)**:
+```typescript
+// Note: Batch generation (count > 1) is only available via HTTP API
+// The Node.js API (generateImage) returns a single ImageGenerationResult
+
+// Use HTTP endpoints for batch generation:
+const response = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    prompt: 'A serene mountain landscape',
+    width: 1024,
+    height: 1024,
+    steps: 30,
+    count: 3  // Generate 3 variations
+  })
+});
+
+const { id } = await response.json();
+
+// Poll for results (see HTTP API Endpoints section for complete polling example)
+// Result will contain an array of 3 images with automatically incremented seeds
+```
+
 **Throws**:
 - `ServerError` - Server not running, already generating an image, or generation failed
 
-**Note**: Only one image can be generated at a time. If called while busy, throws `ServerError`. Model validation occurs during `start()`.
+**Important Notes**:
+- Only one generation can run at a time. If called while busy, throws `ServerError`.
+- Model validation occurs during `start()`.
+- **Automatic Resource Orchestration**: The singleton `diffusionServer` is initialized with `llamaServer`, enabling automatic LLM offload/reload when resources are constrained. This happens transparently - you don't need to manually use `ResourceOrchestrator`.
+- **Batch Orchestration Limitation**: When generating multiple images (count > 1 via HTTP API), automatic orchestration is bypassed. This is planned for Phase 3.
 
 ---
 
@@ -1040,6 +1390,16 @@ diffusionServer.on('crashed', (error: Error) => {
 });
 ```
 
+#### `'binary-log'`
+
+Emitted during binary download and variant testing.
+
+```typescript
+diffusionServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
+  console.log(`[${data.level.toUpperCase()}] ${data.message}`);
+});
+```
+
 **Example (Complete Event Handling)**:
 ```typescript
 diffusionServer.on('started', (info) => {
@@ -1077,6 +1437,8 @@ await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081 });
 ## ResourceOrchestrator
 
 The `ResourceOrchestrator` class provides automatic resource management between LLM and image generation servers. When system resources are constrained (limited RAM or VRAM), it automatically offloads the LLM server before generating images, then reloads it afterward.
+
+**Note**: When using the singleton `diffusionServer`, resource orchestration happens automatically inside `generateImage()`. The ResourceOrchestrator is used internally and you typically don't need to interact with it directly. This class is primarily for advanced use cases where you need custom orchestrator instances or want to check resource status programmatically.
 
 ### Import
 
@@ -1166,8 +1528,14 @@ const result = await orchestrator.orchestrateImageGeneration({
   width: 1024,
   height: 1024,
   steps: 50,
-  onProgress: (currentStep, totalSteps) => {
-    console.log(`Progress: ${currentStep}/${totalSteps}`);
+  onProgress: (currentStep, totalSteps, stage, percentage) => {
+    if (stage === 'loading') {
+      console.log(`Loading: ${Math.round(percentage || 0)}%`);
+    } else if (stage === 'diffusion') {
+      console.log(`Step ${currentStep}/${totalSteps}: ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`Decoding: ${Math.round(percentage || 0)}%`);
+    }
   }
 });
 
@@ -1311,6 +1679,688 @@ The `ResourceOrchestrator` automatically estimates resource usage and determines
 
 ---
 
+## GenerationRegistry
+
+The `GenerationRegistry` class manages in-memory state for async image generation operations. It provides create/read/update/delete operations and automatic cleanup of old results.
+
+**Note**: This class is primarily for internal use by `DiffusionServerManager`. It's exported for advanced use cases where you need custom generation tracking or want to build your own HTTP API.
+
+### Import
+
+```typescript
+import { GenerationRegistry } from 'genai-electron';
+```
+
+### Constructor
+
+```typescript
+new GenerationRegistry(config?: GenerationRegistryConfig)
+```
+
+**GenerationRegistryConfig Options**:
+- `maxResultAgeMs?: number` - Maximum age (in ms) for completed generations before cleanup (default: 5 minutes / 300000ms)
+- `cleanupIntervalMs?: number` - Interval (in ms) between cleanup runs (default: 1 minute / 60000ms)
+
+**Example**:
+```typescript
+import { GenerationRegistry } from 'genai-electron';
+
+// Create registry with custom TTL
+const registry = new GenerationRegistry({
+  maxResultAgeMs: 10 * 60 * 1000,  // 10 minutes
+  cleanupIntervalMs: 2 * 60 * 1000  // 2 minutes
+});
+```
+
+---
+
+### Methods
+
+#### `create(config: ImageGenerationConfig): string`
+
+Create a new generation entry with 'pending' status.
+
+**Parameters**:
+- `config: ImageGenerationConfig` - Image generation configuration
+
+**Returns**: `string` - Unique generation ID
+
+**Example**:
+```typescript
+const id = registry.create({
+  prompt: 'A serene mountain landscape',
+  width: 1024,
+  height: 1024,
+  steps: 30
+});
+
+console.log('Generation ID:', id); // e.g., "abc123def456"
+```
+
+---
+
+#### `get(id: string): GenerationState | null`
+
+Get a generation by ID.
+
+**Parameters**:
+- `id: string` - Generation ID
+
+**Returns**: `GenerationState | null` - Generation state or null if not found
+
+**Example**:
+```typescript
+const state = registry.get('abc123def456');
+
+if (state) {
+  console.log('Status:', state.status);
+  console.log('Created:', new Date(state.createdAt));
+
+  if (state.status === 'in_progress' && state.progress) {
+    console.log('Progress:', state.progress.percentage, '%');
+  }
+
+  if (state.status === 'complete' && state.result) {
+    console.log('Images:', state.result.images.length);
+  }
+}
+```
+
+---
+
+#### `update(id: string, updates: Partial<GenerationState>): void`
+
+Update a generation's state. Automatically updates `updatedAt` timestamp.
+
+**Parameters**:
+- `id: string` - Generation ID
+- `updates: Partial<GenerationState>` - Partial state updates
+
+**Example**:
+```typescript
+// Update to in_progress
+registry.update('abc123', {
+  status: 'in_progress',
+  progress: {
+    currentStep: 5,
+    totalSteps: 30,
+    stage: 'diffusion',
+    percentage: 25
+  }
+});
+
+// Update to complete
+registry.update('abc123', {
+  status: 'complete',
+  result: {
+    images: [{
+      image: base64String,
+      seed: 42,
+      width: 1024,
+      height: 1024
+    }],
+    format: 'png',
+    timeTaken: 15000
+  }
+});
+
+// Update to error
+registry.update('abc123', {
+  status: 'error',
+  error: {
+    message: 'Generation failed',
+    code: 'BACKEND_ERROR'
+  }
+});
+```
+
+---
+
+#### `delete(id: string): void`
+
+Delete a generation from the registry.
+
+**Parameters**:
+- `id: string` - Generation ID
+
+**Example**:
+```typescript
+registry.delete('abc123');
+```
+
+---
+
+#### `getAllIds(): string[]`
+
+Get all generation IDs currently in the registry.
+
+**Returns**: `string[]` - Array of generation IDs
+
+**Example**:
+```typescript
+const ids = registry.getAllIds();
+console.log('Active generations:', ids.length);
+ids.forEach(id => {
+  const state = registry.get(id);
+  console.log(`${id}: ${state?.status}`);
+});
+```
+
+---
+
+#### `size(): number`
+
+Get count of stored generations.
+
+**Returns**: `number` - Number of generations in registry
+
+**Example**:
+```typescript
+console.log('Registry size:', registry.size());
+```
+
+---
+
+#### `cleanup(maxAgeMs: number): number`
+
+Clean up old completed or errored generations older than specified age.
+
+**Parameters**:
+- `maxAgeMs: number` - Maximum age in milliseconds for terminal states
+
+**Returns**: `number` - Number of generations cleaned up
+
+**Example**:
+```typescript
+// Manual cleanup - remove results older than 5 minutes
+const cleaned = registry.cleanup(5 * 60 * 1000);
+console.log('Cleaned up', cleaned, 'old generations');
+```
+
+**Note**: Automatic cleanup runs at intervals specified in constructor. Only terminal states (complete/error) are cleaned up; pending and in_progress generations are never auto-removed.
+
+---
+
+#### `clear(): void`
+
+Clear all generations from the registry. Useful for testing or manual reset.
+
+**Example**:
+```typescript
+registry.clear();
+console.log('Registry cleared, size:', registry.size()); // 0
+```
+
+---
+
+#### `destroy(): void`
+
+Stop the automatic cleanup interval. Call this when you're done with the registry.
+
+**Example**:
+```typescript
+// When shutting down
+registry.destroy();
+```
+
+---
+
+### Complete Example: Custom Generation Tracking
+
+```typescript
+import { GenerationRegistry } from 'genai-electron';
+import type { ImageGenerationConfig } from 'genai-electron';
+
+// Create registry with 10 minute TTL
+const registry = new GenerationRegistry({
+  maxResultAgeMs: 10 * 60 * 1000,
+  cleanupIntervalMs: 2 * 60 * 1000
+});
+
+// Simulate async generation workflow
+async function handleGenerationRequest(config: ImageGenerationConfig): Promise<string> {
+  // Create entry
+  const id = registry.create(config);
+
+  // Start async work (don't await)
+  generateImageAsync(id, config).catch(error => {
+    registry.update(id, {
+      status: 'error',
+      error: {
+        message: error.message,
+        code: 'BACKEND_ERROR'
+      }
+    });
+  });
+
+  // Return ID immediately
+  return id;
+}
+
+async function generateImageAsync(id: string, config: ImageGenerationConfig) {
+  // Update to in_progress
+  registry.update(id, { status: 'in_progress' });
+
+  // Simulate generation with progress updates
+  for (let step = 1; step <= 30; step++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    registry.update(id, {
+      progress: {
+        currentStep: step,
+        totalSteps: 30,
+        stage: 'diffusion',
+        percentage: (step / 30) * 100
+      }
+    });
+  }
+
+  // Complete
+  registry.update(id, {
+    status: 'complete',
+    result: {
+      images: [{
+        image: 'base64_image_data_here',
+        seed: config.seed || 42,
+        width: config.width || 512,
+        height: config.height || 512
+      }],
+      format: 'png',
+      timeTaken: 3000
+    }
+  });
+}
+
+// Usage
+const id = await handleGenerationRequest({
+  prompt: 'A beautiful sunset',
+  width: 1024,
+  height: 1024
+});
+
+// Poll for result
+const checkStatus = async () => {
+  const state = registry.get(id);
+  if (!state) {
+    console.log('Not found');
+    return;
+  }
+
+  console.log('Status:', state.status);
+
+  if (state.status === 'complete') {
+    console.log('✅ Complete!');
+    console.log('Images:', state.result?.images.length);
+  } else if (state.status === 'in_progress') {
+    console.log('⏳ In progress:', state.progress?.percentage, '%');
+  }
+};
+
+// Cleanup when done
+process.on('exit', () => {
+  registry.destroy();
+});
+```
+
+---
+
+## HTTP API Endpoints
+
+The `DiffusionServerManager` creates an HTTP server with RESTful endpoints for async image generation. These endpoints implement a polling pattern where you POST to start generation, then GET to poll for status and results.
+
+**Base URL**: `http://localhost:{port}` (default port: 8081)
+
+**Architecture Note**: The HTTP server is created automatically when you call `diffusionServer.start()`. It runs alongside the internal generation logic and provides the same automatic resource orchestration as the Node.js API.
+
+---
+
+### POST /v1/images/generations
+
+Start an async image generation. Returns immediately with a generation ID.
+
+**Request Body** (JSON):
+```typescript
+{
+  prompt: string;              // Required - text description
+  negativePrompt?: string;     // What to avoid
+  width?: number;              // Image width (default: 512)
+  height?: number;             // Image height (default: 512)
+  steps?: number;              // Inference steps (default: 20)
+  cfgScale?: number;           // Guidance scale (default: 7.5)
+  seed?: number;               // Random seed (undefined/negative = random)
+  sampler?: ImageSampler;      // Sampler algorithm (default: 'euler_a')
+  count?: number;              // Number of images (1-5, default: 1)
+}
+```
+
+**Response** (201 Created):
+```typescript
+{
+  id: string;           // Unique generation ID (use for polling)
+  status: 'pending';    // Initial status
+  createdAt: number;    // Unix timestamp
+}
+```
+
+**Error Responses**:
+- `400 Bad Request` - Invalid request (missing prompt, invalid count)
+- `503 Service Unavailable` - Server is busy with another generation
+
+**Example**:
+```typescript
+// Start generation
+const response = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    prompt: 'A serene mountain landscape at sunset',
+    negativePrompt: 'blurry, low quality',
+    width: 1024,
+    height: 1024,
+    steps: 30,
+    cfgScale: 7.5,
+    sampler: 'dpm++2m'
+  })
+});
+
+const { id, status, createdAt } = await response.json();
+console.log('Generation started:', id);
+```
+
+---
+
+### GET /v1/images/generations/:id
+
+Poll generation status and retrieve results when complete.
+
+**URL Parameters**:
+- `id` - Generation ID from POST response
+
+**Response Formats**:
+
+**Pending** (200 OK):
+```typescript
+{
+  id: string;
+  status: 'pending';
+  createdAt: number;
+  updatedAt: number;
+}
+```
+
+**In Progress** (200 OK):
+```typescript
+{
+  id: string;
+  status: 'in_progress';
+  createdAt: number;
+  updatedAt: number;
+  progress: {
+    currentStep: number;      // Current step in stage
+    totalSteps: number;       // Total steps in stage
+    stage: 'loading' | 'diffusion' | 'decoding';
+    percentage?: number;      // Overall progress (0-100)
+    currentImage?: number;    // Current image (1-indexed, batch only)
+    totalImages?: number;     // Total images (batch only)
+  };
+}
+```
+
+**Complete** (200 OK):
+```typescript
+{
+  id: string;
+  status: 'complete';
+  createdAt: number;
+  updatedAt: number;
+  result: {
+    images: Array<{
+      image: string;    // Base64-encoded PNG
+      seed: number;     // Seed used
+      width: number;    // Image width
+      height: number;   // Image height
+    }>;
+    format: 'png';
+    timeTaken: number;  // Total time in milliseconds
+  };
+}
+```
+
+**Error** (200 OK):
+```typescript
+{
+  id: string;
+  status: 'error';
+  createdAt: number;
+  updatedAt: number;
+  error: {
+    message: string;
+    code: 'SERVER_BUSY' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'BACKEND_ERROR' | 'IO_ERROR';
+  };
+}
+```
+
+**Error Response** (404 Not Found):
+```typescript
+{
+  error: {
+    message: 'Generation not found';
+    code: 'NOT_FOUND';
+  };
+}
+```
+
+**Example (Polling Loop)**:
+```typescript
+async function pollUntilComplete(id: string): Promise<any> {
+  while (true) {
+    const response = await fetch(`http://localhost:8081/v1/images/generations/${id}`);
+    const data = await response.json();
+
+    console.log('Status:', data.status);
+
+    if (data.status === 'in_progress' && data.progress) {
+      console.log(`Progress: ${data.progress.percentage?.toFixed(1)}%`);
+      console.log(`Stage: ${data.progress.stage}`);
+    }
+
+    if (data.status === 'complete') {
+      console.log('✅ Generation complete!');
+      console.log(`Generated ${data.result.images.length} images in ${data.result.timeTaken}ms`);
+      return data.result;
+    }
+
+    if (data.status === 'error') {
+      console.error('❌ Generation failed:', data.error.message);
+      throw new Error(data.error.message);
+    }
+
+    // Poll every second
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
+// Use it
+const result = await pollUntilComplete(generationId);
+
+// Save images
+result.images.forEach((img, i) => {
+  const buffer = Buffer.from(img.image, 'base64');
+  fs.writeFileSync(`output-${i}.png`, buffer);
+  console.log(`Saved with seed: ${img.seed}`);
+});
+```
+
+---
+
+### GET /health
+
+Check if the diffusion server is running and available.
+
+**Response** (200 OK):
+```typescript
+{
+  status: 'ok';
+  busy: boolean;  // Whether currently generating an image
+}
+```
+
+**Example**:
+```typescript
+const response = await fetch('http://localhost:8081/health');
+const { status, busy } = await response.json();
+
+if (status === 'ok' && !busy) {
+  console.log('✅ Server is ready for generation');
+} else if (busy) {
+  console.log('⏳ Server is busy - wait before submitting');
+}
+```
+
+---
+
+### Complete Workflow Example
+
+```typescript
+async function generateImageViaHTTP() {
+  const baseURL = 'http://localhost:8081';
+
+  // 1. Check server health
+  const healthResponse = await fetch(`${baseURL}/health`);
+  const { status, busy } = await healthResponse.json();
+
+  if (status !== 'ok') {
+    throw new Error('Diffusion server is not running');
+  }
+
+  if (busy) {
+    console.log('Server is busy, waiting...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+
+  // 2. Start generation
+  const startResponse = await fetch(`${baseURL}/v1/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt: 'A futuristic city at night, cyberpunk style',
+      negativePrompt: 'blurry, low quality, oversaturated',
+      width: 1024,
+      height: 1024,
+      steps: 30,
+      cfgScale: 7.5,
+      sampler: 'dpm++2m',
+      count: 2  // Generate 2 variations
+    })
+  });
+
+  if (!startResponse.ok) {
+    const error = await startResponse.json();
+    throw new Error(error.error?.message || 'Failed to start generation');
+  }
+
+  const { id } = await startResponse.json();
+  console.log('Generation started:', id);
+
+  // 3. Poll for completion
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    const pollResponse = await fetch(`${baseURL}/v1/images/generations/${id}`);
+    const data = await pollResponse.json();
+
+    if (data.status === 'in_progress' && data.progress) {
+      const { stage, percentage, currentImage, totalImages } = data.progress;
+      if (currentImage && totalImages) {
+        console.log(`Image ${currentImage}/${totalImages}: ${stage} - ${percentage?.toFixed(1)}%`);
+      } else {
+        console.log(`${stage}: ${percentage?.toFixed(1)}%`);
+      }
+    }
+
+    if (data.status === 'complete') {
+      console.log('✅ Generation complete!');
+      console.log(`Time taken: ${(data.result.timeTaken / 1000).toFixed(1)}s`);
+
+      // Save images
+      data.result.images.forEach((img, i) => {
+        const buffer = Buffer.from(img.image, 'base64');
+        fs.writeFileSync(`cyberpunk-${i}.png`, buffer);
+        console.log(`Saved image ${i} (seed: ${img.seed})`);
+      });
+
+      return data.result;
+    }
+
+    if (data.status === 'error') {
+      throw new Error(`Generation failed: ${data.error.message} (${data.error.code})`);
+    }
+  }
+}
+
+// Run it
+try {
+  await generateImageViaHTTP();
+} catch (error) {
+  console.error('Failed:', error.message);
+}
+```
+
+---
+
+### Error Codes Reference
+
+| Code | Description | Typical Cause |
+|------|-------------|---------------|
+| `SERVER_BUSY` | Server is already processing another generation | Multiple concurrent requests |
+| `NOT_FOUND` | Generation ID not found | Invalid ID or result already expired (TTL) |
+| `INVALID_REQUEST` | Invalid request parameters | Missing prompt, invalid count (not 1-5), etc. |
+| `BACKEND_ERROR` | Backend processing failed | Model loading error, CUDA error, etc. |
+| `IO_ERROR` | File I/O error | Failed to write temporary files, disk full |
+
+---
+
+### Resource Orchestration (HTTP Endpoints)
+
+The HTTP endpoints inherit the same automatic resource orchestration as the Node.js API:
+- If resources are constrained, LLM is automatically offloaded before generation
+- After generation completes, LLM is automatically reloaded
+- This happens transparently for all HTTP requests
+- No additional configuration needed
+
+**Note**: Batch generation (count > 1) currently bypasses orchestration and runs without offload. This is planned for Phase 3.
+
+---
+
+### Migration from Phase 2.0 Synchronous API
+
+**Breaking Change**: Phase 2.5 introduced an async polling API. If you were using the previous synchronous HTTP endpoint:
+
+**Old (Phase 2.0 - synchronous)**:
+```typescript
+// POST /v1/images/generations - blocks until complete
+const response = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  body: JSON.stringify(config)
+});
+const result = await response.json(); // Waits for entire generation
+```
+
+**New (Phase 2.5+ - async)**:
+```typescript
+// POST /v1/images/generations - returns immediately
+const startResponse = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  body: JSON.stringify(config)
+});
+const { id } = await startResponse.json(); // Get ID immediately
+
+// Poll GET /v1/images/generations/:id for result
+// (see polling examples above)
+```
+
+---
+
 ## Types and Interfaces
 
 ### SystemCapabilities
@@ -1324,6 +2374,7 @@ interface SystemCapabilities {
   gpu: GPUInfo;
   platform: NodeJS.Platform;
   recommendations: SystemRecommendations;
+  detectedAt: string;  // ISO 8601 timestamp of when capabilities were detected
 }
 ```
 
@@ -1386,6 +2437,7 @@ interface ModelInfo {
   source: ModelSource;        // Download source info
   checksum?: string;          // SHA256 checksum (if provided)
   supportsReasoning?: boolean; // Whether model supports reasoning (auto-detected)
+  ggufMetadata?: GGUFMetadata; // GGUF metadata (extracted during download)
 }
 ```
 
@@ -1399,6 +2451,33 @@ Supported model families:
 - **GPT-OSS**: OpenAI's open-source reasoning model
 
 See [Reasoning Model Detection](#reasoning-model-detection) for details.
+
+**GGUF Metadata:**
+
+The `ggufMetadata` field contains accurate model information extracted from the GGUF file during download:
+- `block_count` - Actual number of layers (no estimation!)
+- `context_length` - Maximum sequence length the model supports
+- `architecture` - Model architecture ('llama', 'mamba', 'gpt2', etc.)
+- `attention_head_count` - Number of attention heads
+- `embedding_length` - Embedding dimension
+- Plus 10+ additional fields and complete raw metadata
+
+**Example**:
+```typescript
+const model = await modelManager.getModelInfo('llama-2-7b');
+if (model.ggufMetadata) {
+  console.log('✅ Accurate metadata available');
+  console.log('Layers:', model.ggufMetadata.block_count);
+  console.log('Context:', model.ggufMetadata.context_length);
+  console.log('Architecture:', model.ggufMetadata.architecture);
+} else {
+  console.log('⚠️  Using estimated values (model downloaded before GGUF integration)');
+  // Update metadata: await modelManager.updateModelMetadata('llama-2-7b');
+}
+```
+
+For models downloaded before GGUF integration, this field may be `undefined`.
+Use `modelManager.updateModelMetadata(id)` to add metadata without re-downloading.
 
 ### ModelType
 
@@ -1416,6 +2495,70 @@ interface ModelSource {
   file?: string;            // HuggingFace file (if applicable)
 }
 ```
+
+### GGUFMetadata
+
+Complete metadata extracted from GGUF model files.
+
+```typescript
+interface GGUFMetadata {
+  version?: number;              // GGUF format version
+  tensor_count?: number;         // Number of tensors (converted from BigInt for JSON serialization)
+  kv_count?: number;             // Number of metadata key-value pairs (converted from BigInt)
+  architecture?: string;         // Model architecture (e.g., "llama", "gemma3", "qwen3")
+  general_name?: string;         // Model name from GGUF
+  file_type?: number;            // Quantization type
+  block_count?: number;          // Number of layers (ACTUAL, not estimated!)
+  context_length?: number;       // Maximum sequence length
+  attention_head_count?: number; // Number of attention heads
+  embedding_length?: number;     // Embedding dimension
+  feed_forward_length?: number;  // Feed-forward layer size
+  vocab_size?: number;           // Vocabulary size
+  rope_dimension_count?: number; // RoPE dimension count
+  rope_freq_base?: number;       // RoPE frequency base
+  attention_layer_norm_rms_epsilon?: number; // RMS normalization epsilon
+  raw?: Record<string, unknown>; // Complete raw metadata (JSON-serializable)
+}
+```
+
+**Key Fields:**
+- `block_count` - Use for GPU offloading calculations (actual layer count)
+- `context_length` - Use for context size configuration (model's max capacity)
+- `architecture` - Use for compatibility verification
+
+**Example:**
+```typescript
+const model = await modelManager.getModelInfo('llama-2-7b');
+if (model.ggufMetadata) {
+  console.log('✅ Accurate metadata available');
+  console.log('Layers:', model.ggufMetadata.block_count);
+  console.log('Context:', model.ggufMetadata.context_length);
+  console.log('Architecture:', model.ggufMetadata.architecture);
+
+  // Use for precise GPU offloading
+  const totalLayers = model.ggufMetadata.block_count || 32;
+  const gpuLayers = Math.min(24, totalLayers);
+  console.log(`Offloading ${gpuLayers}/${totalLayers} layers to GPU`);
+} else {
+  console.log('⚠️  Using estimated values (model downloaded before GGUF integration)');
+  // Update metadata: await modelManager.updateModelMetadata('llama-2-7b');
+}
+```
+
+**Architecture Support:**
+
+The library uses generic architecture field extraction with `getArchField()`, supporting ANY model architecture dynamically:
+- **Llama family**: llama, llama2, llama3
+- **Gemma family**: gemma, gemma2, gemma3
+- **Qwen family**: qwen, qwen2, qwen3
+- **Other**: mistral, phi, mamba, gpt2, gpt-neox, falcon, and any future architectures
+
+Different architectures have their metadata in architecture-prefixed fields:
+- **llama**: `llama.block_count`, `llama.context_length`, `llama.attention.head_count`
+- **gemma3**: `gemma3.block_count`, `gemma3.context_length`, `gemma3.attention.head_count`
+- **qwen3**: `qwen3.block_count`, `qwen3.context_length`, `qwen3.attention.head_count`
+
+The library automatically extracts the correct fields using the `general.architecture` value.
 
 ### ServerStatus
 
@@ -1470,9 +2613,15 @@ interface ImageGenerationConfig {
   height?: number;                   // Image height in pixels (default: 512)
   steps?: number;                    // Inference steps (default: 20)
   cfgScale?: number;                 // Guidance scale (default: 7.5)
-  seed?: number;                     // Random seed (-1 = random)
+  seed?: number;                     // Random seed (undefined or negative = random, actual seed returned)
   sampler?: ImageSampler;            // Sampler algorithm (default: 'euler_a')
-  onProgress?: (currentStep: number, totalSteps: number) => void; // Progress callback
+  count?: number;                    // Number of images to generate (1-5, default: 1)
+  onProgress?: (
+    currentStep: number,
+    totalSteps: number,
+    stage: 'loading' | 'diffusion' | 'decoding',
+    percentage?: number
+  ) => void; // Progress callback with stage information
 }
 ```
 
@@ -1507,6 +2656,85 @@ type ImageSampler =
   | 'lcm';         // LCM (very fast, fewer steps)
 ```
 
+#### ImageGenerationStage
+
+Stage of image generation process.
+
+```typescript
+type ImageGenerationStage =
+  | 'loading'     // Model tensors being loaded into memory
+  | 'diffusion'   // Denoising steps (main generation process)
+  | 'decoding';   // VAE decoding latents to final image
+```
+
+#### ImageGenerationProgress
+
+Progress information emitted during image generation.
+
+```typescript
+interface ImageGenerationProgress {
+  currentStep: number;              // Current step within the stage
+  totalSteps: number;               // Total steps in the stage
+  stage: ImageGenerationStage;      // Current stage
+  percentage?: number;              // Overall progress percentage (0-100)
+  currentImage?: number;            // Current image being generated (1-indexed, for batch generation)
+  totalImages?: number;             // Total images in batch (for batch generation)
+}
+```
+
+### Progress Tracking
+
+Image generation progress tracking provides detailed stage information:
+
+**Stages:**
+
+1. **Loading** (~20% of time): Model tensors loading into memory
+   - Reports: tensor count (e.g., 1500/2641)
+   - UI suggestion: "Loading model..."
+
+2. **Diffusion** (~30-50% of time): Denoising steps
+   - Reports: actual step count (e.g., 2/4, 15/30)
+   - UI suggestion: "Generating (step X/Y)"
+
+3. **Decoding** (~30-50% of time): VAE decoding
+   - Reports: estimated progress
+   - UI suggestion: "Decoding..."
+
+**Self-Calibrating Estimates:**
+
+The system automatically calibrates time estimates based on actual hardware performance:
+- First generation uses reasonable defaults
+- Subsequent generations adapt to image size and step count
+- Provides accurate overall percentage across all stages
+
+**Example Progress Display:**
+
+```typescript
+const result = await diffusionServer.generateImage({
+  prompt: 'A serene mountain landscape',
+  width: 1024,
+  height: 1024,
+  steps: 30,
+  onProgress: (current, total, stage, percentage) => {
+    if (stage === 'loading') {
+      console.log(`Loading model... ${Math.round(percentage || 0)}%`);
+    } else if (stage === 'diffusion') {
+      console.log(`Generating (step ${current}/${total}): ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`Decoding: ${Math.round(percentage || 0)}%`);
+    }
+  }
+});
+
+// Output:
+// Loading model... 12%
+// Generating (step 1/30): 25%
+// Generating (step 15/30): 55%
+// Generating (step 30/30): 75%
+// Decoding: 88%
+// Decoding: 100%
+```
+
 #### DiffusionServerConfig
 
 Configuration for starting the diffusion server.
@@ -1537,6 +2765,57 @@ interface DiffusionServerInfo {
   busy?: boolean;            // Whether currently generating an image
 }
 ```
+
+#### GenerationStatus
+
+Status of an async image generation (for HTTP API).
+
+```typescript
+type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error';
+```
+
+**Status Flow**:
+- `pending` → Initial state after POST request
+- `in_progress` → Generation is running
+- `complete` → Generation finished successfully
+- `error` → Generation failed
+
+#### GenerationState
+
+Complete state information for an async image generation (for HTTP API).
+
+```typescript
+interface GenerationState {
+  id: string;                      // Unique generation ID
+  status: GenerationStatus;        // Current status
+  createdAt: number;               // Unix timestamp (ms)
+  updatedAt: number;               // Unix timestamp (ms)
+  config: ImageGenerationConfig;   // Original request configuration
+
+  // Present when status is 'in_progress'
+  progress?: ImageGenerationProgress;
+
+  // Present when status is 'complete'
+  result?: {
+    images: Array<{
+      image: string;      // Base64-encoded PNG
+      seed: number;       // Seed used
+      width: number;      // Image width
+      height: number;     // Image height
+    }>;
+    format: 'png';
+    timeTaken: number;    // Total time in milliseconds
+  };
+
+  // Present when status is 'error'
+  error?: {
+    message: string;
+    code: string;         // Error code (SERVER_BUSY, NOT_FOUND, etc.)
+  };
+}
+```
+
+**Usage**: This type represents the complete state stored in `GenerationRegistry` and returned by the HTTP GET endpoint.
 
 ---
 
@@ -1795,6 +3074,110 @@ if (response.object === 'chat.completion') {
 }
 ```
 
+### ID Generation
+
+Generate unique IDs for async operations (used internally by `GenerationRegistry` for the HTTP API).
+
+```typescript
+import { generateId } from 'genai-electron';
+
+// Generate a unique ID
+const id = generateId();
+console.log('Generated ID:', id); // e.g., "gen_1729612345678_x7k2p9q4m"
+
+// Use for custom tracking
+const taskId = generateId();
+console.log('Task ID:', taskId);
+```
+
+**Returns**: `string` - Unique ID in format `gen_{timestamp}_{random}` where timestamp is milliseconds since epoch and random is a 9-character alphanumeric string
+
+**Use cases:**
+- Custom async operation tracking
+- Request/response correlation
+- Unique file naming
+- Session identifiers
+
+**Note**: This utility is primarily for advanced use cases. The `DiffusionServerManager` HTTP API uses this internally via `GenerationRegistry`.
+
+---
+
+### GGUF Metadata Extraction
+
+**Generic Architecture Support**
+
+The GGUF parser uses a generic helper function that works with ANY model architecture dynamically.
+
+```typescript
+import { getArchField } from 'genai-electron';
+
+// Get metadata-specific field for any architecture
+const metadata = {
+  'general.architecture': 'gemma3',
+  'gemma3.block_count': 48,
+  'gemma3.context_length': 131072
+};
+
+const blockCount = getArchField(metadata, 'block_count');
+console.log('Block count:', blockCount); // 48
+
+const contextLen = getArchField(metadata, 'context_length');
+console.log('Context length:', contextLen); // 131072
+```
+
+**How it works:**
+- Reads `general.architecture` from metadata (e.g., "gemma3", "qwen3", "llama")
+- Dynamically constructs field path: `${architecture}.${fieldPath}`
+- Returns the value or `undefined` if not found
+
+**Supported architectures:**
+- **Llama family**: llama, llama2, llama3
+- **Gemma family**: gemma, gemma2, gemma3
+- **Qwen family**: qwen, qwen2, qwen3
+- **Other**: mistral, phi, mamba, gpt2, gpt-neox, falcon, and more
+- **Future-proof**: Any new architecture works automatically!
+
+**Extracted fields:**
+```typescript
+getArchField(metadata, 'block_count')                        // Layer count
+getArchField(metadata, 'context_length')                     // Context window
+getArchField(metadata, 'attention.head_count')               // Attention heads
+getArchField(metadata, 'embedding_length')                   // Embedding dim
+getArchField(metadata, 'feed_forward_length')                // FF layer size
+getArchField(metadata, 'vocab_size')                         // Vocabulary size
+getArchField(metadata, 'rope.dimension_count')               // RoPE dimensions
+getArchField(metadata, 'rope.freq_base')                     // RoPE frequency base
+getArchField(metadata, 'attention.layer_norm_rms_epsilon')   // RMS epsilon
+```
+
+**Example with different architectures:**
+
+```typescript
+// Gemma3 model
+const gemma = {
+  'general.architecture': 'gemma3',
+  'gemma3.block_count': 48,
+  'gemma3.context_length': 131072
+};
+console.log(getArchField(gemma, 'block_count')); // 48
+
+// Qwen3 model
+const qwen = {
+  'general.architecture': 'qwen3',
+  'qwen3.block_count': 64,
+  'qwen3.context_length': 32768
+};
+console.log(getArchField(qwen, 'block_count')); // 64
+
+// Llama model
+const llama = {
+  'general.architecture': 'llama',
+  'llama.block_count': 32,
+  'llama.context_length': 4096
+};
+console.log(getArchField(llama, 'block_count')); // 32
+```
+
 ---
 
 ## Complete Example: LLM + Image Generation
@@ -1925,9 +3308,15 @@ async function main() {
       width: 1024,
       height: 1024,
       steps: 30,
-      onProgress: (currentStep, totalSteps) => {
-        const percent = ((currentStep / totalSteps) * 100).toFixed(1);
-        process.stdout.write(`\rImage Generation: ${percent}% (${currentStep}/${totalSteps})`);
+      onProgress: (currentStep, totalSteps, stage, percentage) => {
+        const pct = Math.round(percentage || 0);
+        if (stage === 'loading') {
+          process.stdout.write(`\rLoading model: ${pct}%`);
+        } else if (stage === 'diffusion') {
+          process.stdout.write(`\rGenerating (step ${currentStep}/${totalSteps}): ${pct}%`);
+        } else {
+          process.stdout.write(`\rDecoding: ${pct}%`);
+        }
       }
     });
 

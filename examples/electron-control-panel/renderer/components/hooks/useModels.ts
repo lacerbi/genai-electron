@@ -31,7 +31,7 @@ interface DownloadProgress {
   modelName: string;
 }
 
-export function useModels() {
+export function useModels(type: 'llm' | 'diffusion' = 'llm') {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
@@ -48,7 +48,7 @@ export function useModels() {
     }
 
     try {
-      const data = await window.api.models.list('llm');
+      const data = await window.api.models.list(type);
       setModels(data as ModelInfo[]);
       setError(null);
     } catch (err) {
@@ -56,7 +56,7 @@ export function useModels() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [type]);
 
   // Fetch models on mount
   useEffect(() => {

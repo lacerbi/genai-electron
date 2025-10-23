@@ -82,6 +82,68 @@ jest.unstable_mockModule('../../src/config/reasoning-models.js', () => ({
   detectReasoningSupport: jest.fn().mockReturnValue(false),
 }));
 
+// Mock GGUF parser - use plain async functions for ESM compatibility
+jest.unstable_mockModule('../../src/utils/gguf-parser.js', () => ({
+  fetchGGUFMetadata: async () => ({
+    metadata: {
+      version: 3,
+      tensor_count: 291n, // BigInt - matches real GGUF format
+      kv_count: 19n, // BigInt - matches real GGUF format
+      'general.architecture': 'llama',
+      'general.name': 'Test Model',
+      'general.file_type': 10,
+      'llama.block_count': 32,
+      'llama.context_length': 4096,
+      'llama.attention.head_count': 32,
+      'llama.embedding_length': 4096,
+      'llama.feed_forward_length': 11008,
+      'llama.vocab_size': 32000,
+      'llama.rope.dimension_count': 128,
+      'llama.rope.freq_base': 10000,
+      'llama.attention.layer_norm_rms_epsilon': 1e-5,
+    },
+    tensorInfos: [],
+  }),
+  fetchLocalGGUFMetadata: async () => ({
+    metadata: {
+      version: 3,
+      tensor_count: 291n, // BigInt - matches real GGUF format
+      kv_count: 19n, // BigInt - matches real GGUF format
+      'general.architecture': 'llama',
+      'general.name': 'Test Model',
+      'general.file_type': 10,
+      'llama.block_count': 32,
+      'llama.context_length': 4096,
+      'llama.attention.head_count': 32,
+      'llama.embedding_length': 4096,
+      'llama.feed_forward_length': 11008,
+      'llama.vocab_size': 32000,
+      'llama.rope.dimension_count': 128,
+      'llama.rope.freq_base': 10000,
+      'llama.attention.layer_norm_rms_epsilon': 1e-5,
+    },
+    tensorInfos: [],
+  }),
+  getArchField: (metadata: Record<string, unknown>, fieldPath: string) => {
+    const arch = metadata['general.architecture'];
+    if (arch && typeof arch === 'string') {
+      return metadata[`${arch}.${fieldPath}`];
+    }
+    return undefined;
+  },
+}));
+
+// Mock model metadata helpers - use plain functions for ESM compatibility
+jest.unstable_mockModule('../../src/utils/model-metadata-helpers.js', () => ({
+  getLayerCountWithFallback: () => 32,
+  getContextLengthWithFallback: () => 4096,
+  getArchitectureWithFallback: () => 'llama',
+  getAttentionHeadCountWithFallback: () => 32,
+  getEmbeddingLengthWithFallback: () => 4096,
+  hasGGUFMetadata: () => true,
+  getMetadataCompleteness: () => 100,
+}));
+
 // Import after mocking
 const { ModelManager } = await import('../../src/managers/ModelManager.js');
 
@@ -367,6 +429,155 @@ describe('ModelManager', () => {
     it('should cancel ongoing download', () => {
       expect(() => modelManager.cancelDownload()).not.toThrow();
       expect(mockCancel).toHaveBeenCalled();
+    });
+  });
+
+  describe('updateModelMetadata()', () => {
+    beforeEach(() => {
+      // Reset mocks before each test
+      mockStorageManager.listModelFiles.mockReset();
+      mockStorageManager.loadModelMetadata.mockReset();
+      mockStorageManager.saveModelMetadata.mockReset();
+    });
+
+    describe('local-only strategy (default)', () => {
+      it('should fetch metadata from local file with default options', async () => {
+        // Setup: Model exists in storage
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model');
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(result.ggufMetadata?.context_length).toBe(4096);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+      it('should fetch metadata from local file with explicit local-only option', async () => {
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', {
+          source: 'local-only',
+        });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+    });
+
+    describe('remote-only strategy', () => {
+      it('should fetch metadata from remote URL only', async () => {
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', {
+          source: 'remote-only',
+        });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+      it('should throw error if no remote URL available', async () => {
+        const modelWithoutURL = {
+          ...mockModelInfo,
+          source: {
+            ...mockModelInfo.source,
+            url: '', // No URL
+          },
+        };
+
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(modelWithoutURL);
+
+        await expect(
+          modelManager.updateModelMetadata('test-model', { source: 'remote-only' })
+        ).rejects.toThrow(/No source URL available/);
+      });
+    });
+
+    describe('local-remote strategy', () => {
+      it('should fetch from local and skip remote on success', async () => {
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', {
+          source: 'local-remote',
+        });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+    });
+
+    describe('remote-local strategy', () => {
+      it('should fetch from remote and skip local on success', async () => {
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(mockModelInfo);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', {
+          source: 'remote-local',
+        });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+      it('should use local-only if no remote URL available', async () => {
+        const modelWithoutURL = {
+          ...mockModelInfo,
+          source: {
+            ...mockModelInfo.source,
+            url: '', // No URL
+          },
+        };
+
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(modelWithoutURL);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model', {
+          source: 'remote-local',
+        });
+
+        expect(result).toBeDefined();
+        expect(result.ggufMetadata?.block_count).toBe(32);
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+    });
+
+    it('should throw error for model that does not exist', async () => {
+      mockStorageManager.listModelFiles.mockResolvedValue([]);
+
+      await expect(modelManager.updateModelMetadata('nonexistent')).rejects.toThrow(
+        'Model not found'
+      );
     });
   });
 

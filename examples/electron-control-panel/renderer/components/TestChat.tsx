@@ -8,7 +8,7 @@ interface TestChatProps {
   port?: number;
 }
 
-const TestChat: React.FC<TestChatProps> = ({ serverRunning, port = 8080 }) => {
+const TestChat: React.FC<TestChatProps> = ({ serverRunning }) => {
   const [message, setMessage] = useState('');
   const [response, setResponse] = useState('');
   const [reasoning, setReasoning] = useState<string | null>(null);

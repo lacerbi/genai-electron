@@ -20,6 +20,8 @@ export type {
   DownloadConfig,
   DownloadProgress,
   DownloadProgressCallback,
+  GGUFMetadata,
+  MetadataFetchStrategy,
 } from './models.js';
 
 // Server types
@@ -31,6 +33,7 @@ export type {
   LlamaServerConfig,
   ServerEvent,
   ServerEventData,
+  BinaryLogEvent,
 } from './servers.js';
 
 // Image generation types
@@ -38,8 +41,12 @@ export type {
   ImageSampler,
   ImageGenerationConfig,
   ImageGenerationResult,
+  ImageGenerationProgress,
+  ImageGenerationStage,
   DiffusionServerConfig,
   DiffusionServerInfo,
+  GenerationStatus,
+  GenerationState,
 } from './images.js';
 
 /**

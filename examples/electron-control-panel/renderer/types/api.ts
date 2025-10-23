@@ -4,7 +4,7 @@ export interface WindowAPI {
     detect: () => Promise<SystemCapabilities>;
     getMemory: () => Promise<MemoryInfo>;
     canRunModel: (modelInfo: ModelInfo) => Promise<{ canRun: boolean; reason?: string }>;
-    getOptimalConfig: (modelInfo: ModelInfo) => Promise<ServerConfig>;
+    getOptimalConfig: (modelInfo: ModelInfo) => Promise<LlamaServerConfig>;
   };
   models: {
     list: (type: 'llm' | 'diffusion') => Promise<ModelInfo[]>;
@@ -13,14 +13,37 @@ export interface WindowAPI {
     getInfo: (modelId: string) => Promise<ModelInfo>;
     verify: (modelId: string) => Promise<boolean>;
     getStorageInfo: () => Promise<StorageInfo>;
+    updateMetadata: (modelId: string) => Promise<ModelInfo>;
   };
   server: {
-    start: (config: ServerConfig) => Promise<void>;
+    start: (config: LlamaServerConfig) => Promise<void>;
     stop: () => Promise<void>;
     restart: () => Promise<void>;
     status: () => Promise<ServerStatus>;
     health: () => Promise<boolean>;
     logs: (limit: number) => Promise<LogEntry[]>;
+    clearLogs: () => Promise<void>;
+    testMessage: (message: string, settings?: unknown) => Promise<unknown>;
+  };
+  diffusion: {
+    start: (config: {
+      modelId: string;
+      port?: number;
+      threads?: number;
+      gpuLayers?: number;
+    }) => Promise<void>;
+    stop: () => Promise<void>;
+    status: () => Promise<DiffusionServerInfo>;
+    health: () => Promise<boolean>;
+    logs: (limit: number) => Promise<LogEntry[]>;
+    clearLogs: () => Promise<void>;
+    generateImage: (config: ImageGenerationConfig, port?: number) => Promise<ImageGenerationResult>;
+  };
+  resources: {
+    wouldNeedOffload: () => Promise<boolean>;
+    getSavedState: () => Promise<SavedLLMState | null>;
+    clearSavedState: () => Promise<void>;
+    getUsage: () => Promise<ResourceUsage>;
   };
   on: (channel: string, callback: (...args: unknown[]) => void) => void;
   off: (channel: string) => void;
@@ -61,6 +84,25 @@ export interface MemoryInfo {
 }
 
 // Model Types
+export interface GGUFMetadata {
+  version?: number;
+  tensor_count?: number;
+  kv_count?: number;
+  architecture?: string;
+  general_name?: string;
+  file_type?: number;
+  block_count?: number;
+  context_length?: number;
+  attention_head_count?: number;
+  embedding_length?: number;
+  feed_forward_length?: number;
+  vocab_size?: number;
+  rope_dimension_count?: number;
+  rope_freq_base?: number;
+  attention_layer_norm_rms_epsilon?: number;
+  raw?: Record<string, unknown>;
+}
+
 export interface ModelInfo {
   id: string;
   name: string;
@@ -73,6 +115,7 @@ export interface ModelInfo {
     file?: string;
     url?: string;
   };
+  ggufMetadata?: GGUFMetadata;
 }
 
 export interface DownloadConfig {
@@ -93,7 +136,7 @@ export interface StorageInfo {
 }
 
 // Server Types
-export interface ServerConfig {
+export interface LlamaServerConfig {
   modelId: string;
   port?: number;
   contextSize?: number;
@@ -118,6 +161,90 @@ export interface LogEntry {
   level: string;
   message: string;
   timestamp: string;
+}
+
+// Binary Download/Testing Log Event
+export interface BinaryLogEvent {
+  message: string;
+  level: 'info' | 'warn' | 'error';
+}
+
+// ========================================
+// Phase 2: Image Generation Types
+// ========================================
+
+export type ImageSampler =
+  | 'euler_a'
+  | 'euler'
+  | 'heun'
+  | 'dpm2'
+  | 'dpm++2s_a'
+  | 'dpm++2m'
+  | 'dpm++2mv2'
+  | 'lcm';
+
+export interface ImageGenerationConfig {
+  prompt: string;
+  negativePrompt?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  cfgScale?: number;
+  seed?: number;
+  sampler?: ImageSampler;
+}
+
+export interface ImageGenerationResult {
+  imageDataUrl: string; // data:image/png;base64,...
+  timeTaken: number;
+  seed: number;
+  width: number;
+  height: number;
+}
+
+export type ImageGenerationStage = 'loading' | 'diffusion' | 'decoding';
+
+export interface ImageGenerationProgress {
+  currentStep: number;
+  totalSteps: number;
+  stage: ImageGenerationStage;
+  percentage?: number;
+}
+
+export interface DiffusionServerInfo {
+  status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
+  health: 'unknown' | 'healthy' | 'unhealthy';
+  modelId: string;
+  port: number;
+  pid?: number;
+  startedAt?: string;
+  error?: string;
+  busy?: boolean;
+}
+
+export interface SavedLLMState {
+  config: LlamaServerConfig;
+  wasRunning: boolean;
+  savedAt: string; // ISO timestamp (Date serialized from main process)
+}
+
+export interface ResourceUsage {
+  memory: {
+    total: number;
+    available: number;
+    used: number;
+  };
+  llamaServer: {
+    status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
+    pid?: number;
+    port: number;
+  };
+  diffusionServer: {
+    status: 'running' | 'stopped' | 'starting' | 'stopping' | 'crashed' | 'error';
+    pid?: number;
+    port: number;
+    busy?: boolean;
+  };
 }
 
 // Global window extension

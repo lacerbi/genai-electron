@@ -26,6 +26,17 @@
   --accent-red: #f44336;
   --accent-red-hover: #d32f2f;
 
+  /* Phase 2: Additional Colors */
+  --warning-bg: rgba(241, 196, 15, 0.1);
+  --warning-border: #f1c40f;
+  --warning-text: #f1c40f;
+  --info-bg: rgba(52, 152, 219, 0.1);
+  --info-border: #3498db;
+  --info-text: #3498db;
+  --error-bg: rgba(231, 76, 60, 0.1);
+  --error-border: #e74c3c;
+  --error-text: #e74c3c;
+
   /* Spacing */
   --spacing-xs: 4px;
   --spacing-sm: 8px;
@@ -202,6 +213,16 @@ code {
   padding: var(--spacing-xl);
 }
 
+/* Tab Panel - Individual tab content containers */
+.tab-panel {
+  width: 100%;
+  height: 100%;
+}
+
+.tab-panel--hidden {
+  display: none;
+}
+
 /* ========================================
    Scrollbar Styling (Webkit)
    ======================================== */
@@ -250,4 +271,56 @@ textarea:focus-visible {
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border-width: 0;
+}
+
+/* ========================================
+   Phase 2: Base Form Elements
+   ======================================== */
+
+textarea {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+input[type='number'],
+input[type='text'],
+input[type='url'],
+select {
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
+
+/* ========================================
+   Phase 2: Message Boxes
+   ======================================== */
+
+.info-box {
+  padding: 12px;
+  background: var(--info-bg);
+  border-left: 4px solid var(--info-border);
+  border-radius: 4px;
+  color: var(--info-text);
+  margin: 10px 0;
+  font-size: 14px;
+}
+
+.warning-box {
+  padding: 12px;
+  background: var(--warning-bg);
+  border-left: 4px solid var(--warning-border);
+  border-radius: 4px;
+  color: var(--warning-text);
+  margin: 10px 0;
+  font-size: 14px;
+}
+
+.error-box {
+  padding: 12px;
+  background: var(--error-bg);
+  border-left: 4px solid var(--error-border);
+  border-radius: 4px;
+  color: var(--error-text);
+  margin: 10px 0;
+  font-size: 14px;
 }

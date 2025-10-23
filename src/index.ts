@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.1.0
+ * @version 0.2.0
  * @license MIT
  *
  * @example
@@ -137,7 +137,12 @@ export const llamaServer = new LlamaServerManager();
  * Diffusion server manager singleton (Phase 2)
  *
  * Manages diffusion HTTP wrapper server for stable-diffusion.cpp,
- * including image generation, binary downloads, and resource management.
+ * including image generation, binary downloads, and automatic resource orchestration.
+ *
+ * When generateImage() is called, the server automatically manages resources:
+ * - If resources are constrained, temporarily offloads the LLM server
+ * - Generates the image
+ * - Restores the LLM server to its previous state
  *
  * @example
  * ```typescript
@@ -149,7 +154,7 @@ export const llamaServer = new LlamaServerManager();
  *   port: 8081
  * });
  *
- * // Generate image
+ * // Generate image (automatic resource management)
  * const result = await diffusionServer.generateImage({
  *   prompt: 'A serene mountain landscape at sunset',
  *   width: 1024,
@@ -165,7 +170,11 @@ export const llamaServer = new LlamaServerManager();
  * await diffusionServer.stop();
  * ```
  */
-export const diffusionServer = new DiffusionServerManager();
+export const diffusionServer = new DiffusionServerManager(
+  undefined, // modelManager (uses default singleton)
+  undefined, // systemInfo (uses default singleton)
+  llamaServer // llamaServer (enables automatic resource orchestration)
+);
 
 // ============================================================================
 // Classes (For advanced usage or custom instances)
@@ -176,6 +185,7 @@ export { ModelManager } from './managers/ModelManager.js';
 export { LlamaServerManager } from './managers/LlamaServerManager.js';
 export { DiffusionServerManager } from './managers/DiffusionServerManager.js';
 export { ResourceOrchestrator } from './managers/ResourceOrchestrator.js';
+export { GenerationRegistry } from './managers/GenerationRegistry.js';
 export { ServerManager } from './managers/ServerManager.js';
 export { StorageManager } from './managers/StorageManager.js';
 export { ProcessManager } from './process/ProcessManager.js';
@@ -192,6 +202,8 @@ export { getMemoryInfo, estimateVRAM } from './system/memory-detect.js';
 export { detectGPU } from './system/gpu-detect.js';
 export { getHuggingFaceURL, parseHuggingFaceURL } from './download/huggingface.js';
 export { calculateSHA256, verifyChecksum } from './download/checksum.js';
+export { generateId } from './utils/generation-id.js';
+export { fetchGGUFMetadata, fetchLocalGGUFMetadata, getArchField } from './utils/gguf-parser.js';
 export {
   getPlatform,
   getArchitecture,
@@ -238,6 +250,8 @@ export type {
   DownloadConfig,
   DownloadProgress,
   DownloadProgressCallback,
+  GGUFMetadata,
+  MetadataFetchStrategy,
   // Server types
   ServerStatus,
   HealthStatus,
@@ -248,10 +262,14 @@ export type {
   ServerEventData,
   // Image generation types (Phase 2)
   ImageSampler,
+  ImageGenerationStage,
+  ImageGenerationProgress,
   ImageGenerationConfig,
   ImageGenerationResult,
   DiffusionServerConfig,
   DiffusionServerInfo,
+  GenerationStatus,
+  GenerationState,
   // Utility types
   Optional,
   RequiredKeys,

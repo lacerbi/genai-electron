@@ -2,8 +2,10 @@ import React, { useState } from 'react';
 import SystemInfo from './components/SystemInfo';
 import ModelManager from './components/ModelManager';
 import LlamaServerControl from './components/LlamaServerControl';
+import DiffusionServerControl from './components/DiffusionServerControl';
+import ResourceMonitor from './components/ResourceMonitor';
 
-type TabName = 'system' | 'models' | 'server';
+type TabName = 'system' | 'models' | 'server' | 'diffusion' | 'resources';
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabName>('system');
@@ -36,13 +38,37 @@ const App: React.FC = () => {
         >
           LLM Server
         </button>
+        <button
+          className={`tab-button ${activeTab === 'diffusion' ? 'active' : ''}`}
+          onClick={() => setActiveTab('diffusion')}
+        >
+          Diffusion Server
+        </button>
+        <button
+          className={`tab-button ${activeTab === 'resources' ? 'active' : ''}`}
+          onClick={() => setActiveTab('resources')}
+        >
+          Resource Monitor
+        </button>
       </nav>
 
       {/* Tab Content */}
       <main className="tab-content">
-        {activeTab === 'system' && <SystemInfo />}
-        {activeTab === 'models' && <ModelManager />}
-        {activeTab === 'server' && <LlamaServerControl />}
+        <div className={`tab-panel ${activeTab !== 'system' ? 'tab-panel--hidden' : ''}`}>
+          <SystemInfo />
+        </div>
+        <div className={`tab-panel ${activeTab !== 'models' ? 'tab-panel--hidden' : ''}`}>
+          <ModelManager />
+        </div>
+        <div className={`tab-panel ${activeTab !== 'server' ? 'tab-panel--hidden' : ''}`}>
+          <LlamaServerControl />
+        </div>
+        <div className={`tab-panel ${activeTab !== 'diffusion' ? 'tab-panel--hidden' : ''}`}>
+          <DiffusionServerControl />
+        </div>
+        <div className={`tab-panel ${activeTab !== 'resources' ? 'tab-panel--hidden' : ''}`}>
+          <ResourceMonitor />
+        </div>
       </main>
     </div>
   );

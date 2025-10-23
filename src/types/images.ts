@@ -19,6 +19,34 @@ export type ImageSampler =
   | 'lcm';
 
 /**
+ * Image generation progress stage
+ */
+export type ImageGenerationStage = 'loading' | 'diffusion' | 'decoding';
+
+/**
+ * Image generation progress information
+ */
+export interface ImageGenerationProgress {
+  /** Current step within the stage */
+  currentStep: number;
+
+  /** Total steps in the stage */
+  totalSteps: number;
+
+  /** Current stage of generation */
+  stage: ImageGenerationStage;
+
+  /** Overall progress percentage (0-100) */
+  percentage?: number;
+
+  /** Current image being generated (1-indexed, for batch generation) */
+  currentImage?: number;
+
+  /** Total images in batch (for batch generation) */
+  totalImages?: number;
+}
+
+/**
  * Image generation request configuration
  */
 export interface ImageGenerationConfig {
@@ -40,14 +68,22 @@ export interface ImageGenerationConfig {
   /** Guidance scale (default: 7.5, higher = closer to prompt) */
   cfgScale?: number;
 
-  /** Random seed for reproducibility (-1 = random) */
+  /** Random seed for reproducibility (undefined or negative = random, actual seed returned in result) */
   seed?: number;
 
   /** Sampler algorithm (default: 'euler_a') */
   sampler?: ImageSampler;
 
-  /** Progress callback (currentStep, totalSteps) */
-  onProgress?: (currentStep: number, totalSteps: number) => void;
+  /** Number of images to generate (default: 1, recommended max: 5) */
+  count?: number;
+
+  /** Progress callback with stage information */
+  onProgress?: (
+    currentStep: number,
+    totalSteps: number,
+    stage: ImageGenerationStage,
+    percentage?: number
+  ) => void;
 }
 
 /**
@@ -89,6 +125,13 @@ export interface DiffusionServerConfig {
 
   /** VRAM budget in MB (optional, stable-diffusion.cpp will try to fit within this) */
   vramBudget?: number;
+
+  /**
+   * Force binary validation even if cached validation exists
+   * Default: false (use cached validation if available)
+   * Set to true to re-run Phase 1 & Phase 2 tests (e.g., after driver updates)
+   */
+  forceValidation?: boolean;
 }
 
 /**
@@ -118,4 +161,59 @@ export interface DiffusionServerInfo {
 
   /** Whether currently generating an image */
   busy?: boolean;
+}
+
+/**
+ * Generation status for async API
+ */
+export type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error';
+
+/**
+ * Generation state for async API registry
+ */
+export interface GenerationState {
+  /** Unique generation ID */
+  id: string;
+
+  /** Current status */
+  status: GenerationStatus;
+
+  /** Timestamp when generation was created */
+  createdAt: number;
+
+  /** Timestamp when generation was last updated */
+  updatedAt: number;
+
+  /** Original request configuration */
+  config: ImageGenerationConfig;
+
+  /** Progress information (when status is 'in_progress') */
+  progress?: ImageGenerationProgress;
+
+  /** Final result (when status is 'complete') */
+  result?: {
+    /** Array of generated images */
+    images: {
+      /** Base64-encoded PNG image data */
+      image: string;
+      /** Seed used for generation */
+      seed: number;
+      /** Image width */
+      width: number;
+      /** Image height */
+      height: number;
+    }[];
+    /** Image format (always 'png') */
+    format: 'png';
+    /** Total time taken in milliseconds */
+    timeTaken: number;
+  };
+
+  /** Error details (when status is 'error') */
+  error?: {
+    /** Error message */
+    message: string;
+    /** Error code */
+    code: string;
+  };
 }
