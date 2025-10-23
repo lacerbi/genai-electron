@@ -7,9 +7,9 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors (library + example app)
-- **Tests:** ✅ 273/273 passing (100% pass rate)
+- **Tests:** ✅ 287/287 passing (100% pass rate)
 - **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `feat/phase2-app` (Phase 2.6 complete - genai-lite Integration + Orchestration Fix)
+- **Branch:** `feat/extraction` (Library Extraction Phase 1 - Part 1 complete)
 - **Last Updated:** 2025-10-23
 
 **Test Suite Breakdown:**
@@ -17,6 +17,7 @@
 - Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator)
 - Phase 2.5 Tests: 27 tests (GenerationRegistry, async API)
 - Infrastructure: 58 tests (BinaryManager, health-check, validation cache)
+- Phase 3 Prep Tests: 14 tests (structured-logs API - getStructuredLogs())
 
 ---
 
@@ -99,6 +100,78 @@
 - Clean separation: genai-lite for unified API layer, genai-electron for runtime infrastructure
 - All AI operations (LLM + image generation) now go through genai-lite
 - Reduced API surface by removing redundant code paths
+
+### Phase 3 Prep: Library Extraction Phase 1 - Part 1 🔄 (2025-10-23)
+
+**Goal:** Extract reusable patterns from electron-control-panel into genai-electron library (following LIBRARY-EXTRACTION-PLAN.md)
+
+**Completed Tasks:**
+
+1. ✅ **Type Consolidation**
+   - Exported `SavedLLMState` type from `ResourceOrchestrator.ts` (was internal interface)
+   - Added `SavedLLMState` to `src/index.ts` exports
+   - Updated `examples/electron-control-panel/renderer/types/api.ts` to import types from genai-electron library
+   - App now uses library types instead of duplicates (eliminates type drift)
+   - Clear separation: Library types vs app-specific adaptations documented
+
+2. ✅ **Structured Logs API**
+   - Added `getStructuredLogs(limit?: number): Promise<LogEntry[]>` method to `ServerManager` base class
+   - Automatically inherited by `LlamaServerManager` and `DiffusionServerManager`
+   - Parses raw log strings into structured `LogEntry` objects (timestamp, level, message)
+   - Fallback handling for malformed log entries
+   - Updated example app IPC handlers (`server:logs`, `diffusion:logs`) to use new API
+   - Removed manual `LogManager.parseEntry()` calls from app code (now handled by library)
+   - Removed unused `LogManager` import from `ipc-handlers.ts`
+
+3. ✅ **Unit Tests**
+   - Created comprehensive test suite: `tests/unit/structured-logs.test.ts`
+   - Tests for both `LlamaServerManager` and `DiffusionServerManager`
+   - Tests for `LogManager.parseEntry()` static method
+   - Coverage: Well-formed logs, malformed logs with fallback, limit parameter, error handling
+   - Total: 14 test cases covering all scenarios
+
+**Build Status:**
+- ✅ Library builds successfully (0 TypeScript errors)
+- ✅ All 287 tests pass (273 existing + 14 new)
+- ✅ New test suite loads and runs successfully
+
+**Test Mocking Requirements (Resolved):**
+
+The test required comprehensive mocking due to complex dependencies:
+- ✅ Added `deleteFile` and `moveFile` to file-utils mock
+- ✅ Added `getTempPath` to paths mock (for DiffusionServerManager)
+- ✅ Mocked electron paths, ProcessManager, LogManager, SystemInfo, ModelManager
+- ✅ All ESM mocking patterns work correctly with Jest 30
+
+**Next Steps:**
+
+1. **Verify example app** (pending user action):
+   - `cd examples/electron-control-panel && npm run build`
+   - Launch app and test log viewers in both LLM and Diffusion tabs
+   - Verify structured logs display correctly with new `getStructuredLogs()` API
+
+2. **Complete remaining extraction items** (future):
+   - Lifecycle Helper (start/stop wrapper with event forwarding)
+   - Error Normalization Helper (formatErrorForUI utility)
+   - Additional items from LIBRARY-EXTRACTION-PLAN.md
+
+3. **Consider next phase**:
+   - Continue with remaining "Move now" items from extraction plan
+   - Or pause for review and merge into main branch
+
+**Files Modified:**
+- `src/managers/ResourceOrchestrator.ts` - Exported SavedLLMState interface
+- `src/managers/ServerManager.ts` - Added getStructuredLogs() method
+- `src/index.ts` - Added SavedLLMState type export
+- `examples/electron-control-panel/renderer/types/api.ts` - Import library types
+- `examples/electron-control-panel/main/ipc-handlers.ts` - Use getStructuredLogs() API
+- `tests/unit/structured-logs.test.ts` - New comprehensive test suite (18 tests)
+
+**Impact:**
+- No breaking changes to existing APIs
+- Example app benefits from library-provided structured logs
+- Type safety improved (library is source of truth)
+- Reduced code duplication between library and app
 
 ---
 
@@ -240,14 +313,44 @@ Key design decisions that inform future development:
 
 ## Current Focus
 
-**Phase 2.6 is complete, tested, and production-ready.**
+**Phase 3 Prep: Library Extraction Phase 1 - Part 1 ✅ COMPLETE**
 
-**Current Status:**
-1. ✅ Testing & validation complete
-2. 🔄 Documentation review in progress
-3. 📋 Phase 3 planning preparation
-4. 🎯 Ready for merge and release when approved
+**Completed Tasks:**
+1. ✅ Type Consolidation (SavedLLMState exported, app using library types)
+2. ✅ Structured Logs API (getStructuredLogs() added to ServerManager)
+3. ✅ Unit tests (14 test cases, all passing)
+4. ✅ Test mocks fixed (deleteFile, moveFile, getTempPath added)
+5. ✅ Full test suite passing (287/287 tests)
 
-**Next:** Review documentation completeness, then prepare for Phase 3.
+**Summary:**
+- **No breaking changes** - All changes are additive
+- **Library builds clean** - 0 TypeScript errors
+- **All tests pass** - 287/287 (100% pass rate) across 14 suites
+- **Example app updated** - Uses library APIs instead of manual parsing
+- **Type safety improved** - Library is source of truth for types
 
-For detailed historical information about Phase 2 app development (Issues 1-11, GGUF integration, debugging process), see `docs/dev/phase2/PHASE2-APP-PROGRESS.md`.
+**Remaining Work for User:**
+1. **Manual smoke test** - Verify log viewers in electron-control-panel app
+   - Build: `cd examples/electron-control-panel && npm run build`
+   - Launch: `npm run dev`
+   - Test LLM and Diffusion server log viewers
+   - Confirm structured logs display correctly
+
+2. **Decision point** - Next steps:
+   - Continue with remaining "Move now" items (Lifecycle Helper, Error Normalizer)
+   - Or pause, commit changes, and prepare for PR/merge
+
+**Files Modified (6 total):**
+- Library: 3 files (ResourceOrchestrator, ServerManager, index.ts)
+- Example app: 2 files (types/api.ts, ipc-handlers.ts)
+- Tests: 1 file (structured-logs.test.ts - new)
+
+**Impact:**
+- Reduced duplication between library and app
+- Better developer experience (structured logs out-of-the-box)
+- Foundation for future extraction items
+- No migration needed (backward compatible)
+
+For detailed historical information:
+- Phase 2 app development: `docs/dev/phase2/PHASE2-APP-PROGRESS.md`
+- Library extraction plan: `LIBRARY-EXTRACTION-PLAN.md` (root directory)

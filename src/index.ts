@@ -185,6 +185,7 @@ export { ModelManager } from './managers/ModelManager.js';
 export { LlamaServerManager } from './managers/LlamaServerManager.js';
 export { DiffusionServerManager } from './managers/DiffusionServerManager.js';
 export { ResourceOrchestrator } from './managers/ResourceOrchestrator.js';
+export type { SavedLLMState } from './managers/ResourceOrchestrator.js';
 export { GenerationRegistry } from './managers/GenerationRegistry.js';
 export { ServerManager } from './managers/ServerManager.js';
 export { StorageManager } from './managers/StorageManager.js';

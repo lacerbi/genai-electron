@@ -17,7 +17,7 @@ import {
   BinaryError,
   InsufficientResourcesError,
 } from '../errors/index.js';
-import { LogManager } from '../process/log-manager.js';
+import { LogManager, type LogEntry } from '../process/log-manager.js';
 import { BinaryManager } from './BinaryManager.js';
 import { PATHS } from '../config/paths.js';
 import { getPlatformKey } from '../utils/platform-utils.js';
@@ -257,6 +257,51 @@ export abstract class ServerManager extends EventEmitter {
 
     try {
       return await this.logManager.getRecent(lines);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get recent server logs as structured LogEntry objects
+   *
+   * Parses raw log strings into structured objects with timestamp, level, and message.
+   * If a log line cannot be parsed, a fallback entry is created with the current timestamp.
+   *
+   * @param lines - Number of lines to retrieve (default: 100)
+   * @returns Array of parsed log entries
+   *
+   * @example
+   * ```typescript
+   * const logs = await llamaServer.getStructuredLogs(50);
+   * logs.forEach(entry => {
+   *   console.log(`[${entry.level}] ${entry.message}`);
+   * });
+   * ```
+   */
+  async getStructuredLogs(lines = 100): Promise<LogEntry[]> {
+    if (!this.logManager) {
+      return [];
+    }
+
+    try {
+      const logStrings = await this.logManager.getRecent(lines);
+
+      // Parse log strings into LogEntry objects
+      return logStrings.map((logLine) => {
+        const parsed = LogManager.parseEntry(logLine);
+
+        // If parsing fails, create a fallback entry
+        if (!parsed) {
+          return {
+            timestamp: new Date().toISOString(),
+            level: 'info',
+            message: logLine,
+          };
+        }
+
+        return parsed;
+      });
     } catch {
       return [];
     }
