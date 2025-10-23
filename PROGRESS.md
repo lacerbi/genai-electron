@@ -379,9 +379,47 @@ Key design decisions that inform future development:
 - Foundation for future extractions
 
 **Next Steps:**
-- Review and update documentation (README.md, genai-electron-docs/) with new utilities
 - Consider Phase 3 proper (download resume/cancel, HuggingFace Hub, etc.)
+
+---
+
+## Documentation Restructuring ✅ COMPLETE (2025-10-24)
+
+**Goal:** Transform documentation from large scattered files into a portable, modular `genai-electron-docs/` folder.
+
+**Completed Phases:**
+
+**Phase 1:** Created 11 modular documentation files in `genai-electron-docs/`
+- index.md, installation-and-setup.md, system-detection.md, model-management.md
+- llm-server.md, image-generation.md, resource-orchestration.md
+- integration-guide.md, typescript-reference.md, troubleshooting.md, example-control-panel.md
+
+**Phase 2:** Content trimming and verification
+- Removed bloat and verbose prose from all files
+- Verified all technical details against codebase
+
+**Phase 3:** Cross-file consistency and verification
+- Verified all examples work, all links valid, all APIs documented
+- Added missing utility types to typescript-reference.md
+- Total: 14,998 words (12.3% reduction from baseline)
+
+**Phase 4:** Finalization
+- Added missing utilities documentation (GGUF parsers, generateId, platform/file utils)
+- Deleted docs/API.md (3,690 lines) - all essential content preserved
+- Updated table of contents in modified files
+- Net project reduction: ~10,755 words
+
+**Result:**
+- ✅ 11 modular, self-contained documentation files
+- ✅ All APIs, types, examples, and utilities documented
+- ✅ No broken links, consistent terminology
+- ✅ Production-ready documentation structure
+
+For detailed planning: `docs/dev/2025-10-23-documentation-restructure-plan.md`
+
+---
 
 For detailed historical information:
 - Phase 2 app development: `docs/dev/phase2/PHASE2-APP-PROGRESS.md`
-- Library extraction plan: `LIBRARY-EXTRACTION-PLAN.md` (root directory)
+- Library extraction plan: `docs/dev/2025-10-23-library-extraction-plan.md`
+- Documentation restructure: `docs/dev/2025-10-23-documentation-restructure-plan.md`
