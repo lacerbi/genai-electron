@@ -1,6 +1,6 @@
 # genai-electron Development Setup
 
-> **Version**: 0.2.0 (Phase 2.6 Complete)
+> **Version**: 0.3.0 (Phase 2.6 Complete)
 > **Last Updated**: 2025-10-23
 
 Complete guide for setting up the genai-electron development environment.
@@ -647,7 +647,7 @@ Before submitting PR:
 ### Documentation
 
 - [README.md](../README.md) - Project overview and quick start
-- [API.md](API.md) - Complete API reference
+- [genai-electron-docs/](../genai-electron-docs/) - Complete documentation (11 modular files)
 - [DESIGN.md](../DESIGN.md) - Architecture and design decisions
 - [PROGRESS.md](../PROGRESS.md) - Implementation progress (Phase 2.6 complete)
 - [ESM-TESTING-GUIDE.md](dev/ESM-TESTING-GUIDE.md) - ESM testing patterns and best practices
@@ -680,7 +680,7 @@ Now that your development environment is set up:
 3. **Try the example app**: `cd examples/electron-control-panel && npm install && npm run dev`
    - Full-featured control panel demonstrating all library features
    - Shows integration with genai-lite for LLM and image generation
-4. **Read the API docs**: [API.md](API.md) for complete API reference with examples
+4. **Read the documentation**: [genai-electron-docs/index.md](../genai-electron-docs/index.md) for complete API reference with examples
 5. **Check the roadmap**: [DESIGN.md](../DESIGN.md) for Phase 3+ planned features
 
 Happy coding! 🚀

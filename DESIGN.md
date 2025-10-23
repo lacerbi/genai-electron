@@ -1453,10 +1453,20 @@ genai-electron/
 │       └── full-workflow.test.ts
 │
 ├── docs/                           # Documentation
-│   ├── API.md                      # API reference
-│   ├── SETUP.md                    # Setup guide
-│   ├── TROUBLESHOOTING.md          # Common issues
-│   └── EXAMPLES.md                 # Example usage
+│   └── SETUP.md                    # Development setup guide
+│
+├── genai-electron-docs/            # User documentation (11 modular files)
+│   ├── index.md                    # Documentation entry point
+│   ├── installation-and-setup.md   # Setup and requirements
+│   ├── system-detection.md         # SystemInfo API
+│   ├── model-management.md         # ModelManager API
+│   ├── llm-server.md              # LlamaServerManager API
+│   ├── image-generation.md        # DiffusionServerManager API
+│   ├── resource-orchestration.md  # ResourceOrchestrator
+│   ├── integration-guide.md       # Electron patterns
+│   ├── typescript-reference.md    # Type definitions
+│   ├── troubleshooting.md         # Common issues
+│   └── example-control-panel.md   # Reference implementation
 │
 ├── package.json                    # Package configuration
 ├── tsconfig.json                   # TypeScript configuration
@@ -1659,17 +1669,20 @@ Standard TypeScript/testing toolchain (exact versions TBD):
 
 **Target Audience**: Developers evaluating the library
 
-### 2. API.md
+### 2. genai-electron-docs/
 
 **Content**:
-- Complete API reference
-- TypeScript signatures
-- Parameter descriptions
-- Return types
-- Error types
-- Code examples for each method
+- Modular documentation (11 self-contained files)
+- index.md: Navigation hub and quick starts
+- API references for each manager (SystemInfo, ModelManager, LlamaServerManager, DiffusionServerManager, ResourceOrchestrator)
+- TypeScript reference with all type definitions
+- Integration guide with Electron patterns
+- Troubleshooting guide with error codes
+- Example app documentation
 
 **Target Audience**: Developers integrating the library
+
+**Note**: Replaces monolithic API.md with organized, navigable structure (Phase 1-4 documentation restructuring complete)
 
 ### 3. SETUP.md
 

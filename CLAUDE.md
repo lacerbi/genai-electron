@@ -169,7 +169,7 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 **Phase 1 (Complete)**: LLM support
 - SystemInfo, ModelManager, LlamaServerManager operational
 - Binary management with variant testing (CUDA/Vulkan/CPU fallback)
-- Documentation complete (README, API.md, SETUP.md)
+- Documentation complete (README, genai-electron-docs/, SETUP.md)
 
 **Phase 2 (Complete)**: Image generation & async API
 - DiffusionServerManager (HTTP wrapper for stable-diffusion.cpp)
@@ -190,10 +190,22 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 - **DESIGN.md**: Complete architecture, all 5 phases, technical decisions
 - **DESIGN-EXAMPLE-APP.md**: Detailed design for electron-control-panel example app
 - **PROGRESS.md**: Current status (concise summary)
+- **PLAN.md**: Documentation restructuring plan (Phases 1-4 complete)
 - **docs/dev/phase1/**: Archived Phase 1 detailed planning and logs
 - **docs/dev/phase2/PHASE2-PROGRESS.md**: Complete Phase 2 development history
 - **docs/dev/ESM-TESTING-GUIDE.md**: ESM mocking patterns and testing best practices
-- **docs/API.md**: Complete API reference with examples (Phase 1 & 2)
+- **genai-electron-docs/**: Self-contained documentation (11 modular files)
+  - **index.md**: Documentation entry point with navigation
+  - **installation-and-setup.md**: Setup, requirements, GPU drivers
+  - **system-detection.md**: SystemInfo API and capabilities
+  - **model-management.md**: ModelManager API and GGUF metadata
+  - **llm-server.md**: LlamaServerManager API and binary management
+  - **image-generation.md**: DiffusionServerManager API and async generation
+  - **resource-orchestration.md**: ResourceOrchestrator for memory management
+  - **integration-guide.md**: Electron patterns and error handling
+  - **typescript-reference.md**: Complete type definitions (39 types)
+  - **troubleshooting.md**: Common issues, error codes, FAQ
+  - **example-control-panel.md**: Reference implementation patterns
 - **docs/SETUP.md**: Development environment setup for all platforms
 - **examples/electron-control-panel/**: Full integration example (Phase 2.6)
   - Uses genai-lite (LLMService + ImageService) + genai-electron (server management)
