@@ -29,17 +29,7 @@ The `ModelManager` class handles model downloading, storage, and management for 
 
 ## Overview
 
-`ModelManager` provides organized model storage in Electron's `userData` directory with support for:
-- GGUF model downloads from direct URLs or HuggingFace
-- Automatic GGUF metadata extraction (layer count, context length, architecture)
-- Model verification via SHA256 checksums
-- Progress tracking for downloads
-- Reasoning model detection (Qwen3, DeepSeek-R1, GPT-OSS)
-- Download cancellation and status checking
-
-**Storage Location**: `app.getPath('userData')/models/`
-- LLM models: `models/llm/`
-- Diffusion models: `models/diffusion/`
+`ModelManager` handles model downloads, storage, and metadata extraction in Electron's `userData` directory. Downloads GGUF models from direct URLs or HuggingFace with automatic metadata extraction (layer count, context length, architecture) before download. Supports checksum verification, progress tracking, and automatic reasoning model detection.
 
 ---
 
@@ -61,7 +51,6 @@ const customModelManager = ModelManager.getInstance();
 
 Lists all installed models, optionally filtered by type.
 
-**Signature**:
 ```typescript
 listModels(type?: ModelType): Promise<ModelInfo[]>
 ```
@@ -73,11 +62,9 @@ listModels(type?: ModelType): Promise<ModelInfo[]>
 
 **Example**:
 ```typescript
-// List all models
 const allModels = await modelManager.listModels();
 console.log('Total models:', allModels.length);
 
-// List only LLM models
 const llmModels = await modelManager.listModels('llm');
 console.log('LLM models:', llmModels.length);
 
@@ -97,52 +84,13 @@ llmModels.forEach(model => {
 
 Downloads a model from a URL or HuggingFace repository.
 
-**Signature**:
 ```typescript
 downloadModel(config: DownloadConfig): Promise<ModelInfo>
 ```
 
-**DownloadConfig Options**:
+**DownloadConfig**: Supports direct URLs (`source: 'url'`, `url`) or HuggingFace (`source: 'huggingface'`, `repo`, `file`). Both require `name`, `type` ('llm' | 'diffusion'). Optional: `checksum` (SHA256), `onProgress` callback.
 
-**Direct URL**:
-- `source: 'url'`
-- `url: string` - Direct download URL
-- `name: string` - Display name for the model
-- `type: ModelType` - `'llm'` or `'diffusion'`
-- `checksum?: string` - Optional SHA256 checksum (format: `'sha256:...'`)
-- `onProgress?: (downloaded: number, total: number) => void` - Progress callback
-
-**HuggingFace**:
-- `source: 'huggingface'`
-- `repo: string` - Repository path (e.g., `'TheBloke/Llama-2-7B-GGUF'`)
-- `file: string` - File name (e.g., `'llama-2-7b.Q4_K_M.gguf'`)
-- `name: string` - Display name
-- `type: ModelType` - Model type
-- `checksum?: string` - Optional checksum
-- `onProgress?: (downloaded: number, total: number) => void` - Progress callback
-
-**Returns**: `Promise<ModelInfo>` - Information about the downloaded model
-
-**Example (Direct URL)**:
-```typescript
-const model = await modelManager.downloadModel({
-  source: 'url',
-  url: 'https://example.com/my-model.gguf',
-  name: 'My Custom Model',
-  type: 'llm',
-  checksum: 'sha256:abc123...', // Recommended for integrity verification
-  onProgress: (downloaded, total) => {
-    const percent = ((downloaded / total) * 100).toFixed(1);
-    console.log(`Downloading: ${percent}% (${downloaded}/${total} bytes)`);
-  }
-});
-
-console.log('Download complete!');
-console.log('Model ID:', model.id);
-console.log('Model path:', model.path);
-```
-
-**Example (HuggingFace)**:
+**Example**:
 ```typescript
 const model = await modelManager.downloadModel({
   source: 'huggingface',
@@ -151,24 +99,12 @@ const model = await modelManager.downloadModel({
   name: 'Llama 2 7B Q4',
   type: 'llm',
   onProgress: (downloaded, total) => {
-    const mb = (downloaded / 1024 / 1024).toFixed(1);
-    const totalMb = (total / 1024 / 1024).toFixed(1);
-    console.log(`Progress: ${mb}MB / ${totalMb}MB`);
+    console.log(`${((downloaded / total) * 100).toFixed(1)}%`);
   }
 });
-
-console.log('Successfully downloaded:', model.name);
 ```
 
-**GGUF Metadata Extraction**:
-
-GGUF metadata is automatically extracted from the model file **before** downloading:
-- ✅ **Pre-download validation** - Confirms file is a valid GGUF
-- ✅ **Accurate information** - Layer count, context length, architecture
-- ✅ **No guessing** - Real values from model file
-- ✅ **Fast failure** - Fails immediately if not a valid GGUF (saves bandwidth)
-
-The metadata is stored with the model and accessible via `model.ggufMetadata`.
+**Note**: GGUF metadata is automatically extracted before downloading to validate the file.
 
 ---
 
@@ -176,7 +112,6 @@ The metadata is stored with the model and accessible via `model.ggufMetadata`.
 
 Gets detailed information about a specific model.
 
-**Signature**:
 ```typescript
 getModelInfo(id: string): Promise<ModelInfo>
 ```
@@ -214,7 +149,6 @@ if (info.checksum) {
 
 Deletes a model and its metadata.
 
-**Signature**:
 ```typescript
 deleteModel(id: string): Promise<void>
 ```
@@ -226,17 +160,11 @@ deleteModel(id: string): Promise<void>
 
 **Example**:
 ```typescript
-// List models first
 const models = await modelManager.listModels();
-console.log('Available models:');
-models.forEach((m, i) => console.log(`${i + 1}. ${m.name} (${m.id})`));
-
-// Delete a specific model
 const modelToDelete = models[0];
 await modelManager.deleteModel(modelToDelete.id);
 console.log(`Deleted: ${modelToDelete.name}`);
 
-// Verify deletion
 const updated = await modelManager.listModels();
 console.log('Remaining models:', updated.length);
 ```
@@ -249,7 +177,6 @@ console.log('Remaining models:', updated.length);
 
 Verifies model file integrity using stored checksum.
 
-**Signature**:
 ```typescript
 verifyModel(id: string): Promise<boolean>
 ```
@@ -283,14 +210,12 @@ if (isValid) {
 
 Cancels any ongoing download operation.
 
-**Signature**:
 ```typescript
 cancelDownload(): void
 ```
 
 **Example**:
 ```typescript
-// Start download
 const downloadPromise = modelManager.downloadModel({
   source: 'url',
   url: 'https://example.com/large-model.gguf',
@@ -301,9 +226,7 @@ const downloadPromise = modelManager.downloadModel({
   }
 });
 
-// Cancel after 5 seconds
 setTimeout(() => {
-  console.log('Cancelling download...');
   modelManager.cancelDownload();
 }, 5000);
 
@@ -322,7 +245,6 @@ try {
 
 Check if a download is currently in progress.
 
-**Signature**:
 ```typescript
 isDownloading(): boolean
 ```
@@ -331,7 +253,6 @@ isDownloading(): boolean
 
 **Example**:
 ```typescript
-// Start download
 modelManager.downloadModel({
   source: 'url',
   url: 'https://example.com/model.gguf',
@@ -339,7 +260,6 @@ modelManager.downloadModel({
   type: 'llm'
 }).catch(console.error);
 
-// Check download status
 if (modelManager.isDownloading()) {
   console.log('Download in progress...');
 } else {
@@ -358,41 +278,25 @@ if (modelManager.isDownloading()) {
 
 ### Automatic Extraction
 
-GGUF metadata is automatically extracted during model download, providing accurate model information:
-
-**What's included**:
-- `block_count` - Actual number of layers (no estimation!)
-- `context_length` - Maximum sequence length the model supports
-- `architecture` - Model architecture ('llama', 'mamba', 'gpt2', etc.)
-- `attention_head_count` - Number of attention heads
-- `embedding_length` - Embedding dimension
-- Plus 10+ additional fields and complete raw metadata
+GGUF metadata is automatically extracted before downloading, providing accurate model information (block_count, context_length, architecture, attention_head_count, embedding_length, and more). For models downloaded before GGUF integration, `ggufMetadata` field may be `undefined`. Use `updateModelMetadata(id)` to add metadata without re-downloading.
 
 **Example**:
 ```typescript
 const model = await modelManager.getModelInfo('llama-2-7b');
 if (model.ggufMetadata) {
-  console.log('✅ Accurate metadata available');
   console.log('Layers:', model.ggufMetadata.block_count);
   console.log('Context:', model.ggufMetadata.context_length);
-  console.log('Architecture:', model.ggufMetadata.architecture);
 } else {
-  console.log('⚠️  Using estimated values (model downloaded before GGUF integration)');
-  // Update metadata: await modelManager.updateModelMetadata('llama-2-7b');
+  await modelManager.updateModelMetadata('llama-2-7b');
 }
 ```
-
-For models downloaded before GGUF integration, this field may be `undefined`. Use `modelManager.updateModelMetadata(id)` to add metadata without re-downloading.
 
 ---
 
 ### updateModelMetadata()
 
-Updates GGUF metadata for an existing model without re-downloading.
+Updates GGUF metadata for an existing model without re-downloading. Useful for models downloaded before GGUF integration or to refresh metadata.
 
-Useful for models downloaded before GGUF integration or to refresh metadata.
-
-**Signature**:
 ```typescript
 updateModelMetadata(
   id: string,
@@ -411,35 +315,16 @@ updateModelMetadata(
 
 **Returns**: `Promise<ModelInfo>` - Updated model information with GGUF metadata
 
-**Example (Default - Local + Remote Fallback)**:
+**Example**:
 ```typescript
-// Update metadata from local file first, fallback to remote if needed (default)
 const updated = await modelManager.updateModelMetadata('llama-2-7b');
+console.log('Layers:', updated.ggufMetadata?.block_count);
+console.log('Context:', updated.ggufMetadata?.context_length);
 
-console.log('Updated model information:');
-console.log('Layer count:', updated.ggufMetadata?.block_count);
-console.log('Context length:', updated.ggufMetadata?.context_length);
-console.log('Architecture:', updated.ggufMetadata?.architecture);
-```
-
-**Example (Remote Only - Force Fresh from Source)**:
-```typescript
-// Force fetch from original URL (useful if local file suspected corrupted)
 const fresh = await modelManager.updateModelMetadata('llama-2-7b', {
   source: 'remote-only'
 });
-
-console.log('Fresh metadata from source:', fresh.ggufMetadata?.block_count);
 ```
-
-**Strategy Use Cases**:
-
-| Strategy | Speed | Offline | Use When |
-|----------|-------|---------|----------|
-| `local-remote` (default) | Fast | ✅ Partial | Want speed + resilience (recommended) |
-| `local-only` | Fastest | ✅ Yes | Certain local file is good |
-| `remote-only` | Slowest | ❌ No | Verify against source, suspect local corruption |
-| `remote-local` | Slow | ✅ Partial | Want authoritative + offline fallback |
 
 **Throws**:
 - `ModelNotFoundError` if model doesn't exist
@@ -453,7 +338,6 @@ console.log('Fresh metadata from source:', fresh.ggufMetadata?.block_count);
 
 Gets the actual layer count for a model. Uses GGUF metadata if available, falls back to estimation for older models.
 
-**Signature**:
 ```typescript
 getModelLayerCount(id: string): Promise<number>
 ```
@@ -463,12 +347,10 @@ getModelLayerCount(id: string): Promise<number>
 const layers = await modelManager.getModelLayerCount('llama-2-7b');
 console.log(`Model has ${layers} layers`);
 
-// Use for GPU offloading calculations
-const gpuLayers = 24; // Want to offload 24 layers to GPU
+const gpuLayers = 24;
 const gpuRatio = gpuLayers / layers;
 console.log(`Offloading ${(gpuRatio * 100).toFixed(1)}% to GPU`);
 
-// Check if offloading request is valid
 if (gpuLayers > layers) {
   console.warn(`Cannot offload ${gpuLayers} layers - model only has ${layers}`);
 }
@@ -478,7 +360,6 @@ if (gpuLayers > layers) {
 
 Gets the actual context length for a model. Uses GGUF metadata if available, falls back to default for older models.
 
-**Signature**:
 ```typescript
 getModelContextLength(id: string): Promise<number>
 ```
@@ -488,22 +369,19 @@ getModelContextLength(id: string): Promise<number>
 const contextLen = await modelManager.getModelContextLength('llama-2-7b');
 console.log(`Context window: ${contextLen} tokens`);
 
-// Use for appropriate context size configuration
 const config = {
   modelId: 'llama-2-7b',
-  contextSize: Math.min(contextLen, 8192), // Don't exceed model's capacity
+  contextSize: Math.min(contextLen, 8192),
   port: 8080
 };
 
 await llamaServer.start(config);
-console.log(`Started with context size: ${config.contextSize}`);
 ```
 
 #### getModelArchitecture()
 
 Gets the architecture type for a model. Uses GGUF metadata if available, falls back to 'llama' for LLM models.
 
-**Signature**:
 ```typescript
 getModelArchitecture(id: string): Promise<string>
 ```
@@ -513,21 +391,12 @@ getModelArchitecture(id: string): Promise<string>
 const arch = await modelManager.getModelArchitecture('llama-2-7b');
 console.log(`Architecture: ${arch}`);
 
-// Verify architecture matches expected type
 if (arch !== 'llama') {
-  console.warn('⚠️  This model may not work with llama-server');
-  console.warn(`Expected: llama, Got: ${arch}`);
-} else {
-  console.log('✅ Model architecture verified');
+  console.warn(`⚠️  This model may not work with llama-server (got: ${arch})`);
 }
 ```
 
-**Supported Architectures**:
-The library uses generic architecture field extraction, supporting ANY model architecture dynamically:
-- **Llama family**: llama, llama2, llama3
-- **Gemma family**: gemma, gemma2, gemma3
-- **Qwen family**: qwen, qwen2, qwen3
-- **Other**: mistral, phi, mamba, gpt2, gpt-neox, falcon, and any future architectures
+**Supported Architectures**: Uses generic extraction supporting any GGUF architecture (llama, gemma, qwen, mistral, phi, mamba, gpt2, etc.).
 
 ---
 
@@ -540,34 +409,14 @@ genai-electron automatically detects and configures reasoning-capable models tha
 - **DeepSeek-R1**: All variants including distilled models
 - **GPT-OSS**: OpenAI's open-source reasoning model
 
-**Detection Function**:
 ```typescript
-import { detectReasoningSupport, REASONING_MODEL_PATTERNS } from 'genai-electron';
+import { detectReasoningSupport } from 'genai-electron';
 
-// Check if a model supports reasoning based on filename
 const supportsReasoning = detectReasoningSupport('Qwen3-8B-Instruct-Q4_K_M.gguf');
-console.log('Supports reasoning:', supportsReasoning); // true
-
-// View known patterns
-console.log('Known patterns:', REASONING_MODEL_PATTERNS);
-// ['qwen3', 'deepseek-r1', 'gpt-oss']
+console.log('Supports reasoning:', supportsReasoning);
 ```
 
-**How it works**:
-1. ModelManager detects reasoning support from GGUF filename during download
-2. Stores `supportsReasoning: true` in model metadata
-3. LlamaServerManager automatically adds `--jinja --reasoning-format deepseek` flags when starting the server
-4. Use with genai-lite to access reasoning traces via the `reasoning` field in responses
-
-**Example**:
-```typescript
-const modelInfo = await modelManager.getModelInfo('qwen3-8b');
-
-if (modelInfo.supportsReasoning) {
-  console.log('✅ Model supports reasoning (automatic flag injection enabled)');
-  console.log('llama-server will use: --jinja --reasoning-format deepseek');
-}
-```
+**How it works**: ModelManager detects reasoning support from filename during download, stores `supportsReasoning: true` in metadata, and LlamaServerManager automatically adds `--jinja --reasoning-format deepseek` flags when starting the server.
 
 ---
 
@@ -577,25 +426,18 @@ if (modelInfo.supportsReasoning) {
 try {
   await modelManager.downloadModel(config);
 } catch (error) {
-  if (error instanceof DownloadError) {
+  if (error instanceof ModelNotFoundError) {
+    console.error('Model not found:', error.message);
+  } else if (error instanceof DownloadError) {
     console.error('Download failed:', error.message);
-    // Network error, server error, etc.
   } else if (error instanceof InsufficientResourcesError) {
     console.error('Not enough disk space:', error.message);
     console.log('Suggestion:', error.details.suggestion);
   } else if (error instanceof ChecksumError) {
     console.error('File corrupted:', error.message);
-  } else if (error instanceof ModelNotFoundError) {
-    console.error('Model not found:', error.message);
   }
 }
 ```
-
-**Error Types**:
-- `ModelNotFoundError` - Model doesn't exist
-- `DownloadError` - Network or server error during download
-- `InsufficientResourcesError` - Not enough disk space
-- `ChecksumError` - Checksum verification failed (file corrupted)
 
 ---
 
@@ -606,51 +448,31 @@ try {
 ```typescript
 import { modelManager, systemInfo } from 'genai-electron';
 
-async function downloadModelSafely() {
-  // 1. Check system capabilities
-  const capabilities = await systemInfo.detect();
-  console.log('Recommended max model size:', capabilities.recommendations.maxModelSize);
-
-  // 2. Download model with progress tracking
-  try {
-    const model = await modelManager.downloadModel({
-      source: 'huggingface',
-      repo: 'TheBloke/Llama-2-7B-GGUF',
-      file: 'llama-2-7b.Q4_K_M.gguf',
-      name: 'Llama 2 7B Q4',
-      type: 'llm',
-      onProgress: (downloaded, total) => {
-        const percent = ((downloaded / total) * 100).toFixed(1);
-        const downloadedMB = (downloaded / 1024 / 1024).toFixed(1);
-        const totalMB = (total / 1024 / 1024).toFixed(1);
-        console.log(`Progress: ${percent}% (${downloadedMB}MB / ${totalMB}MB)`);
-      }
-    });
-
-    console.log('✅ Download complete!');
-    console.log('Model ID:', model.id);
-    console.log('Supports reasoning:', model.supportsReasoning);
-
-    // 3. Check GGUF metadata
-    if (model.ggufMetadata) {
-      console.log('GGUF Metadata:');
-      console.log('  Layers:', model.ggufMetadata.block_count);
-      console.log('  Context:', model.ggufMetadata.context_length);
-      console.log('  Architecture:', model.ggufMetadata.architecture);
+try {
+  const model = await modelManager.downloadModel({
+    source: 'huggingface',
+    repo: 'TheBloke/Llama-2-7B-GGUF',
+    file: 'llama-2-7b.Q4_K_M.gguf',
+    name: 'Llama 2 7B Q4',
+    type: 'llm',
+    onProgress: (downloaded, total) => {
+      console.log(`${((downloaded / total) * 100).toFixed(1)}%`);
     }
+  });
 
-    // 4. Verify model can run
-    const canRun = await systemInfo.canRunModel(model);
-    if (!canRun.possible) {
-      console.warn('⚠️  Model may not run:', canRun.reason);
-    }
+  console.log('Layers:', model.ggufMetadata?.block_count);
+  console.log('Context:', model.ggufMetadata?.context_length);
+  console.log('Supports reasoning:', model.supportsReasoning);
 
-  } catch (error) {
-    if (error instanceof InsufficientResourcesError) {
-      console.error('Not enough disk space');
-    } else if (error instanceof DownloadError) {
-      console.error('Download failed:', error.message);
-    }
+  const canRun = await systemInfo.canRunModel(model);
+  if (!canRun.possible) {
+    console.warn('Model may not run:', canRun.reason);
+  }
+} catch (error) {
+  if (error instanceof InsufficientResourcesError) {
+    console.error('Not enough disk space');
+  } else if (error instanceof DownloadError) {
+    console.error('Download failed:', error.message);
   }
 }
 ```
@@ -660,6 +482,4 @@ async function downloadModelSafely() {
 ## What's Next?
 
 - **[LLM Server](llm-server.md)** - Use downloaded models to run LLMs
-- **[Image Generation](image-generation.md)** - Use diffusion models for image generation
-- **[System Detection](system-detection.md)** - Check if models are compatible with your system
-- **[TypeScript Reference](typescript-reference.md)** - ModelInfo, DownloadConfig, and related types
+- **[System Detection](system-detection.md)** - Check model compatibility with your system

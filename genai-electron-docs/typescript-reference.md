@@ -12,6 +12,9 @@ Complete type definitions for genai-electron. The library is TypeScript-first wi
 - [Logging Types](#logging-types)
 - [Resource Types](#resource-types)
 - [UI Types](#ui-types)
+- [Low-Level Types](#low-level-types)
+- [Utility Types](#utility-types)
+- [Import Examples](#import-examples)
 
 ---
 
@@ -26,9 +29,9 @@ interface SystemCapabilities {
   cpu: CPUInfo;
   memory: MemoryInfo;
   gpu: GPUInfo;
-  platform: NodeJS.Platform;           // 'darwin', 'win32', 'linux'
+  platform: NodeJS.Platform;
   recommendations: SystemRecommendations;
-  detectedAt: string;                  // ISO 8601 timestamp
+  detectedAt: string;
 }
 ```
 
@@ -36,8 +39,8 @@ interface SystemCapabilities {
 
 ```typescript
 interface CPUInfo {
-  cores: number;           // Number of CPU cores
-  model: string;           // CPU model name
+  cores: number;
+  model: string;
   architecture: string;    // 'x64', 'arm64', etc.
 }
 ```
@@ -46,9 +49,9 @@ interface CPUInfo {
 
 ```typescript
 interface MemoryInfo {
-  total: number;      // Total RAM in bytes
-  available: number;  // Available RAM in bytes
-  used: number;       // Used RAM in bytes
+  total: number;
+  available: number;
+  used: number;
 }
 ```
 
@@ -56,14 +59,15 @@ interface MemoryInfo {
 
 ```typescript
 interface GPUInfo {
-  available: boolean;                  // Whether GPU is detected
+  available: boolean;
   type?: 'nvidia' | 'amd' | 'apple' | 'intel';
-  name?: string;                       // GPU model name
-  vram?: number;                       // VRAM in bytes
-  cuda?: boolean;                      // NVIDIA CUDA support
-  metal?: boolean;                     // Apple Metal support
-  rocm?: boolean;                      // AMD ROCm support
-  vulkan?: boolean;                    // Vulkan support
+  name?: string;
+  vram?: number;                       // Total VRAM in bytes
+  vramAvailable?: number;              // Available VRAM in bytes
+  cuda?: boolean;
+  metal?: boolean;
+  rocm?: boolean;
+  vulkan?: boolean;
 }
 ```
 
@@ -71,10 +75,11 @@ interface GPUInfo {
 
 ```typescript
 interface SystemRecommendations {
-  maxModelSize: string;                      // e.g., '7B', '13B'
-  recommendedQuantization: readonly string[];  // e.g., ['Q4_K_M', 'Q5_K_M']
-  threads: number;                           // Recommended thread count
-  gpuLayers?: number;                        // Recommended GPU layers (if GPU available)
+  maxModelSize: string;
+  recommendedQuantization: readonly string[];
+  threads: number;
+  gpuLayers?: number;
+  gpuAcceleration: boolean;
 }
 ```
 
@@ -86,28 +91,18 @@ interface SystemRecommendations {
 
 ```typescript
 interface ModelInfo {
-  id: string;                  // Unique model identifier
-  name: string;                // Display name
-  type: ModelType;             // 'llm' or 'diffusion'
-  size: number;                // File size in bytes
-  path: string;                // Absolute path to model file
-  downloadedAt: string;        // ISO 8601 timestamp
-  source: ModelSource;         // Download source info
-  checksum?: string;           // SHA256 checksum (if provided)
-  supportsReasoning?: boolean; // Reasoning model detection (Qwen3, DeepSeek-R1, GPT-OSS)
-  ggufMetadata?: GGUFMetadata; // GGUF metadata (extracted during download)
+  id: string;
+  name: string;
+  type: ModelType;
+  size: number;
+  path: string;
+  downloadedAt: string;
+  source: ModelSource;
+  checksum?: string;
+  supportsReasoning?: boolean;
+  ggufMetadata?: GGUFMetadata;
 }
 ```
-
-**Reasoning Support:**
-- Automatically detected based on GGUF filename patterns
-- When `true`, llama-server started with `--jinja --reasoning-format deepseek`
-- Supported families: Qwen3, DeepSeek-R1, GPT-OSS
-
-**GGUF Metadata:**
-- Extracted during download (validates before downloading)
-- Provides actual layer count, context length, architecture
-- Use `updateModelMetadata()` for models downloaded before GGUF integration
 
 ### ModelType
 
@@ -120,9 +115,9 @@ type ModelType = 'llm' | 'diffusion';
 ```typescript
 interface ModelSource {
   type: 'huggingface' | 'url';
-  url: string;              // Direct download URL
-  repo?: string;            // HuggingFace repo (if applicable)
-  file?: string;            // HuggingFace file (if applicable)
+  url: string;
+  repo?: string;
+  file?: string;
 }
 ```
 
@@ -132,62 +127,67 @@ Complete metadata extracted from GGUF model files.
 
 ```typescript
 interface GGUFMetadata {
-  version?: number;              // GGUF format version
-  tensor_count?: number;         // Number of tensors (from BigInt)
-  kv_count?: number;             // Number of metadata key-value pairs (from BigInt)
-  architecture?: string;         // Model architecture (e.g., "llama", "gemma3", "qwen3")
-  general_name?: string;         // Model name from GGUF
-  file_type?: number;            // Quantization type
-  block_count?: number;          // Number of layers (ACTUAL, not estimated!)
-  context_length?: number;       // Maximum sequence length
-  attention_head_count?: number; // Number of attention heads
-  embedding_length?: number;     // Embedding dimension
-  feed_forward_length?: number;  // Feed-forward layer size
-  vocab_size?: number;           // Vocabulary size
-  rope_dimension_count?: number; // RoPE dimension count
-  rope_freq_base?: number;       // RoPE frequency base
-  attention_layer_norm_rms_epsilon?: number; // RMS normalization epsilon
-  raw?: Record<string, unknown>; // Complete raw metadata (JSON-serializable)
+  version?: number;
+  tensor_count?: number;
+  kv_count?: number;
+  architecture?: string;
+  general_name?: string;
+  file_type?: number;
+  block_count?: number;
+  context_length?: number;
+  attention_head_count?: number;
+  embedding_length?: number;
+  feed_forward_length?: number;
+  vocab_size?: number;
+  rope_dimension_count?: number;
+  rope_freq_base?: number;
+  attention_layer_norm_rms_epsilon?: number;
+  raw?: Record<string, unknown>;
 }
 ```
 
-**Key Fields:**
-- `block_count` - Use for GPU offloading calculations (actual layer count)
-- `context_length` - Use for context size configuration (model's max capacity)
-- `architecture` - Use for compatibility verification
-
-**Architecture Support:**
-The library uses generic field extraction with `getArchField()`, supporting ANY architecture dynamically:
-- **Llama family:** llama, llama2, llama3
-- **Gemma family:** gemma, gemma2, gemma3
-- **Qwen family:** qwen, qwen2, qwen3
-- **Other:** mistral, phi, mamba, gpt2, gpt-neox, falcon, and any future architectures
-
-Different architectures have metadata in architecture-prefixed fields:
-- **llama:** `llama.block_count`, `llama.context_length`
-- **gemma3:** `gemma3.block_count`, `gemma3.context_length`
-- **qwen3:** `qwen3.block_count`, `qwen3.context_length`
-
 ### MetadataFetchStrategy
-
-Strategy for fetching GGUF metadata when updating existing models.
 
 ```typescript
 type MetadataFetchStrategy =
-  | 'local-remote'  // Try local first, fallback to remote (default)
-  | 'local-only'    // Read from local file only (fastest, offline-capable)
-  | 'remote-only'   // Fetch from remote URL only (requires network)
-  | 'remote-local'; // Try remote first, fallback to local
+  | 'local-remote'
+  | 'local-only'
+  | 'remote-only'
+  | 'remote-local';
 ```
 
-**Use Cases:**
+### DownloadProgress
 
-| Strategy | Speed | Offline | Use When |
-|----------|-------|---------|----------|
-| `local-remote` (default) | Fast | ✅ Partial | Want speed + resilience (recommended) |
-| `local-only` | Fastest | ✅ Yes | Certain local file is good |
-| `remote-only` | Slowest | ❌ No | Verify against source, suspect corruption |
-| `remote-local` | Slow | ✅ Partial | Want authoritative + offline fallback |
+```typescript
+interface DownloadProgress {
+  downloaded: number;
+  total: number;
+  percentage: number;
+  speed: number;
+  estimatedTimeRemaining?: number;
+}
+```
+
+### DownloadProgressCallback
+
+```typescript
+type DownloadProgressCallback = (downloaded: number, total: number) => void;
+```
+
+### DownloadConfig
+
+```typescript
+interface DownloadConfig {
+  source: 'huggingface' | 'url';
+  url?: string;
+  repo?: string;
+  file?: string;
+  name: string;
+  type: ModelType;
+  checksum?: string;
+  onProgress?: DownloadProgressCallback;
+}
+```
 
 ---
 
@@ -209,12 +209,13 @@ type HealthStatus = 'ok' | 'loading' | 'error' | 'unknown';
 
 ```typescript
 interface ServerInfo {
-  status: ServerStatus;    // Current server state
-  health: HealthStatus;    // Health check result
-  pid?: number;            // Process ID (if running)
-  port: number;            // Server port
-  modelId: string;         // Loaded model ID
-  startedAt?: string;      // ISO 8601 timestamp (if running)
+  status: ServerStatus;
+  health: HealthStatus;
+  pid?: number;
+  port: number;
+  modelId: string;
+  startedAt?: string;
+  error?: string;
 }
 ```
 
@@ -222,14 +223,14 @@ interface ServerInfo {
 
 ```typescript
 interface ServerConfig {
-  modelId: string;            // Model to load
-  port: number;               // Port to listen on
-  threads?: number;           // CPU threads
-  contextSize?: number;       // Context window size
-  gpuLayers?: number;         // GPU layers to offload
-  parallelRequests?: number;  // Concurrent request slots
-  flashAttention?: boolean;   // Enable flash attention
-  forceValidation?: boolean;  // Force re-validation of binary
+  modelId: string;
+  port: number;
+  threads?: number;
+  contextSize?: number;
+  gpuLayers?: number;
+  parallelRequests?: number;
+  flashAttention?: boolean;
+  forceValidation?: boolean;
 }
 ```
 
@@ -245,8 +246,8 @@ interface DiffusionServerInfo {
   port: number;
   modelId: string;
   startedAt?: string;
-  error?: string;          // Last error message (if crashed)
-  busy?: boolean;          // Whether currently generating an image
+  error?: string;
+  busy?: boolean;
 }
 ```
 
@@ -254,12 +255,68 @@ interface DiffusionServerInfo {
 
 ```typescript
 interface DiffusionServerConfig {
-  modelId: string;        // Diffusion model ID to load
-  port?: number;          // Port to listen on (default: 8081)
-  threads?: number;       // CPU threads (auto-detected if not specified)
-  gpuLayers?: number;     // GPU layers to offload (auto-detected if not specified)
-  vramBudget?: number;    // VRAM budget in MB (Phase 3 - not yet implemented)
-  forceValidation?: boolean; // Force re-validation of binary
+  modelId: string;
+  port?: number;
+  threads?: number;
+  gpuLayers?: number;
+  vramBudget?: number;
+  forceValidation?: boolean;
+}
+```
+
+### LlamaServerConfig
+
+Extends `ServerConfig` with llama.cpp-specific options.
+
+```typescript
+interface LlamaServerConfig extends ServerConfig {
+  modelAlias?: string;
+  continuousBatching?: boolean;
+  batchSize?: number;
+  useMmap?: boolean;
+  useMlock?: boolean;
+}
+```
+
+### ServerEvent
+
+```typescript
+type ServerEvent =
+  | 'started'
+  | 'stopped'
+  | 'crashed'
+  | 'restarted'
+  | 'health-check-ok'
+  | 'health-check-failed'
+  | 'binary-log';
+```
+
+### ServerEventData
+
+```typescript
+interface ServerEventData {
+  event: ServerEvent;
+  serverInfo: ServerInfo;
+  error?: Error;
+  timestamp: string;
+}
+```
+
+### BinaryLogEvent
+
+```typescript
+interface BinaryLogEvent {
+  message: string;
+  level: 'info' | 'warn' | 'error';
+}
+```
+
+### HealthCheckResponse
+
+```typescript
+interface HealthCheckResponse {
+  status: HealthStatus;
+  [key: string]: unknown;
 }
 ```
 
@@ -269,90 +326,74 @@ interface DiffusionServerConfig {
 
 ### ImageGenerationConfig
 
-Configuration for image generation requests.
-
 ```typescript
 interface ImageGenerationConfig {
-  prompt: string;                    // Text prompt describing the image
-  negativePrompt?: string;           // What to avoid in the image
-  width?: number;                    // Image width in pixels (default: 512)
-  height?: number;                   // Image height in pixels (default: 512)
-  steps?: number;                    // Inference steps (default: 20)
-  cfgScale?: number;                 // Guidance scale (default: 7.5)
-  seed?: number;                     // Random seed (undefined or negative = random)
-  sampler?: ImageSampler;            // Sampler algorithm (default: 'euler_a')
-  count?: number;                    // Number of images to generate (1-5, default: 1)
+  prompt: string;
+  negativePrompt?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  cfgScale?: number;
+  seed?: number;
+  sampler?: ImageSampler;
+  count?: number;
   onProgress?: (
     currentStep: number,
     totalSteps: number,
     stage: ImageGenerationStage,
     percentage?: number
-  ) => void;                          // Progress callback with stage information
+  ) => void;
 }
 ```
 
 ### ImageGenerationResult
 
-Result of image generation (Node.js API).
-
 ```typescript
 interface ImageGenerationResult {
-  image: Buffer;         // Generated image data (PNG format)
-  format: 'png';         // Image format (always 'png')
-  timeTaken: number;     // Generation time in milliseconds
-  seed: number;          // Seed used (for reproducibility)
-  width: number;         // Image width
-  height: number;        // Image height
+  image: Buffer;
+  format: 'png';
+  timeTaken: number;
+  seed: number;
+  width: number;
+  height: number;
 }
 ```
 
 ### ImageSampler
 
-Available sampler algorithms for image generation.
-
 ```typescript
 type ImageSampler =
-  | 'euler_a'      // Euler Ancestral (default, good quality/speed balance)
-  | 'euler'        // Euler
-  | 'heun'         // Heun (better quality, slower)
-  | 'dpm2'         // DPM 2
-  | 'dpm++2s_a'    // DPM++ 2S Ancestral
-  | 'dpm++2m'      // DPM++ 2M (good quality)
-  | 'dpm++2mv2'    // DPM++ 2M v2
-  | 'lcm';         // LCM (very fast, fewer steps)
+  | 'euler_a'
+  | 'euler'
+  | 'heun'
+  | 'dpm2'
+  | 'dpm++2s_a'
+  | 'dpm++2m'
+  | 'dpm++2mv2'
+  | 'lcm';
 ```
 
 ### ImageGenerationStage
 
-Stage of image generation process.
-
 ```typescript
 type ImageGenerationStage =
-  | 'loading'     // Model tensors being loaded into memory (~20% of time)
-  | 'diffusion'   // Denoising steps (main generation process, ~30-50% of time)
-  | 'decoding';   // VAE decoding latents to final image (~30-50% of time)
+  | 'loading'
+  | 'diffusion'
+  | 'decoding';
 ```
 
 ### ImageGenerationProgress
 
-Progress information emitted during image generation.
-
 ```typescript
 interface ImageGenerationProgress {
-  currentStep: number;              // Current step within the stage
-  totalSteps: number;               // Total steps in the stage
-  stage: ImageGenerationStage;      // Current stage
-  percentage?: number;              // Overall progress percentage (0-100)
-  currentImage?: number;            // Current image being generated (1-indexed, for batch)
-  totalImages?: number;             // Total images in batch (for batch generation)
+  currentStep: number;
+  totalSteps: number;
+  stage: ImageGenerationStage;
+  percentage?: number;
+  currentImage?: number;
+  totalImages?: number;
 }
 ```
-
-**Progress Calculation:**
-- System self-calibrates time estimates based on hardware performance
-- First generation uses reasonable defaults
-- Subsequent generations adapt to image size and step count
-- Provides accurate overall percentage across all stages
 
 ---
 
@@ -362,61 +403,45 @@ Types for HTTP API async image generation (polling pattern).
 
 ### GenerationStatus
 
-Status of an async image generation.
-
 ```typescript
 type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error';
 ```
 
-**Status Flow:**
-- `pending` → Initial state after POST request
-- `in_progress` → Generation is running
-- `complete` → Generation finished successfully
-- `error` → Generation failed
-
 ### GenerationState
-
-Complete state information for an async image generation.
 
 ```typescript
 interface GenerationState {
-  id: string;                      // Unique generation ID
-  status: GenerationStatus;        // Current status
-  createdAt: number;               // Unix timestamp (ms)
-  updatedAt: number;               // Unix timestamp (ms)
-  config: ImageGenerationConfig;   // Original request configuration
-
-  // Present when status is 'in_progress'
+  id: string;
+  status: GenerationStatus;
+  createdAt: number;
+  updatedAt: number;
+  config: ImageGenerationConfig;
   progress?: ImageGenerationProgress;
-
-  // Present when status is 'complete'
   result?: {
     images: Array<{
-      image: string;      // Base64-encoded PNG
-      seed: number;       // Seed used
-      width: number;      // Image width
-      height: number;     // Image height
+      image: string;
+      seed: number;
+      width: number;
+      height: number;
     }>;
     format: 'png';
-    timeTaken: number;    // Total time in milliseconds
+    timeTaken: number;
   };
-
-  // Present when status is 'error'
   error?: {
     message: string;
-    code: string;         // Error code (SERVER_BUSY, NOT_FOUND, etc.)
+    code: string;
   };
 }
 ```
 
 ### GenerationRegistryConfig
 
-Configuration for GenerationRegistry (advanced usage).
+**Note:** Internal type, not exported from main package. For advanced usage with custom `GenerationRegistry` instances.
 
 ```typescript
 interface GenerationRegistryConfig {
-  maxResultAgeMs?: number;      // Max age (ms) before cleanup (default: 5 minutes)
-  cleanupIntervalMs?: number;   // Interval (ms) between cleanup runs (default: 1 minute)
+  maxResultAgeMs?: number;
+  cleanupIntervalMs?: number;
 }
 ```
 
@@ -430,37 +455,18 @@ interface GenerationRegistryConfig {
 
 ### LogEntry
 
-Structured log entry with parsed components.
-
 ```typescript
 interface LogEntry {
-  timestamp: string;  // ISO 8601 timestamp
-  level: LogLevel;    // Log level
-  message: string;    // Log message content
+  timestamp: string;
+  level: LogLevel;
+  message: string;
 }
-```
-
-**Usage:** Returned by `getStructuredLogs()` method on server managers.
-
-**Example:**
-```typescript
-const logs = await llamaServer.getStructuredLogs(50);
-
-// Filter by level
-const errors = logs.filter(e => e.level === 'error');
-
-// Format for display
-logs.forEach(entry => {
-  console.log(`[${entry.timestamp}] ${entry.level}: ${entry.message}`);
-});
 ```
 
 ### LogLevel
 
-Supported log levels.
-
 ```typescript
-type LogLevel = 'info' | 'warn' | 'error' | 'debug';
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 ```
 
 ---
@@ -469,19 +475,13 @@ type LogLevel = 'info' | 'warn' | 'error' | 'debug';
 
 ### SavedLLMState
 
-State information saved during LLM server offload operations.
-
 ```typescript
 interface SavedLLMState {
-  config: ServerConfig;   // Server configuration at time of offload
-  wasRunning: boolean;    // Whether server was running before offload
-  savedAt: Date;          // When the state was saved
+  config: ServerConfig;
+  wasRunning: boolean;
+  savedAt: Date;
 }
 ```
-
-**Usage:** Used by `ResourceOrchestrator` to restore LLM server after resource-intensive operations (like image generation).
-
-**Access:** `orchestrator.getSavedState()` returns `SavedLLMState | undefined`
 
 ---
 
@@ -489,40 +489,68 @@ interface SavedLLMState {
 
 ### UIErrorFormat
 
-Formatted error for UI display with consistent structure.
-
 ```typescript
 interface UIErrorFormat {
-  code: string;           // Error code for programmatic handling
-  title: string;          // Short, human-readable title
-  message: string;        // Detailed error message
-  remediation?: string;   // Optional suggested remediation steps
+  code: string;
+  title: string;
+  message: string;
+  remediation?: string;
 }
 ```
 
-**Usage:** Returned by `formatErrorForUI(error)` utility function.
+---
 
-**Example:**
+## Low-Level Types
+
+Types for advanced usage with low-level process management.
+
+### SpawnOptions
+
 ```typescript
-import { formatErrorForUI } from 'genai-electron';
-
-try {
-  await operation();
-} catch (error) {
-  const formatted = formatErrorForUI(error);
-
-  // Display in UI
-  showError({
-    title: formatted.title,
-    message: formatted.message,
-    remediation: formatted.remediation
-  });
-
-  // Or programmatic handling
-  if (formatted.code === 'INSUFFICIENT_RESOURCES') {
-    handleDiskSpaceIssue();
-  }
+interface SpawnOptions {
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  onStdout?: (data: string) => void;
+  onStderr?: (data: string) => void;
+  onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
+```
+
+### SpawnResult
+
+```typescript
+interface SpawnResult {
+  process: ChildProcess;
+  pid: number;
+}
+```
+
+---
+
+## Utility Types
+
+TypeScript utility types for advanced usage.
+
+```typescript
+type Optional<T> = {
+  [K in keyof T]?: T[K];
+};
+
+type RequiredKeys<T> = {
+  [K in keyof T]-?: {} extends Pick<T, K> ? never : K;
+}[keyof T];
+
+type OptionalKeys<T> = {
+  [K in keyof T]-?: {} extends Pick<T, K> ? K : never;
+}[keyof T];
+
+type JSONValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JSONValue[]
+  | { [key: string]: JSONValue };
 ```
 
 ---

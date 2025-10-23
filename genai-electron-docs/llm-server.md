@@ -25,19 +25,13 @@ The `LlamaServerManager` class manages the llama-server process lifecycle for ru
 - [Binary Management](#binary-management)
 - [Reasoning Model Support](#reasoning-model-support)
 - [Error Handling](#error-handling)
-- [Examples](#examples)
+- [Complete Example](#complete-example)
 
 ---
 
 ## Overview
 
-`LlamaServerManager` provides complete lifecycle management for llama-server processes:
-- Automatic binary download and variant testing (CUDA → Vulkan → CPU)
-- Auto-configuration based on system capabilities
-- Health monitoring with exponential backoff
-- Structured log parsing
-- Event-driven lifecycle notifications
-- Automatic reasoning model flag injection
+LlamaServerManager manages llama-server processes with automatic binary download (CUDA→Vulkan→CPU variant testing), auto-configuration, health monitoring, and reasoning model flag injection.
 
 **Architecture**: Uses native llama-server (HTTP server from llama.cpp), spawned as a child process and managed by genai-electron.
 
@@ -73,41 +67,23 @@ start(config: LlamaServerConfig): Promise<ServerInfo>
 
 **Returns**: `Promise<ServerInfo>` - Server information after successful start
 
-**Example (Auto-configuration)**:
+**Example**:
 ```typescript
+// Auto-configuration (recommended)
 await llamaServer.start({
   modelId: 'llama-2-7b',
   port: 8080
-  // threads, gpuLayers, contextSize auto-detected
 });
 
-console.log('Server started with optimal settings');
-```
-
-**Example (Custom configuration)**:
-```typescript
+// Custom configuration
 await llamaServer.start({
   modelId: 'llama-2-7b',
   port: 8080,
-  threads: 8,              // Use 8 CPU threads
-  gpuLayers: 35,           // Offload 35 layers to GPU
-  contextSize: 8192,       // 8K context window
-  parallelRequests: 8,     // Handle 8 concurrent requests
-  flashAttention: true     // Enable flash attention
-});
-
-console.log('Server started with custom settings');
-```
-
-**Example (Using SystemInfo for optimal config)**:
-```typescript
-const modelInfo = await modelManager.getModelInfo('llama-2-7b');
-const optimalConfig = await systemInfo.getOptimalConfig(modelInfo);
-
-await llamaServer.start({
-  modelId: modelInfo.id,
-  port: 8080,
-  ...optimalConfig
+  threads: 8,
+  gpuLayers: 35,
+  contextSize: 8192,
+  parallelRequests: 8,
+  flashAttention: true
 });
 ```
 
@@ -118,40 +94,9 @@ await llamaServer.start({
 - `InsufficientResourcesError` - Not enough RAM/VRAM
 - `BinaryError` - Binary download or execution failed (all variants failed)
 
-**Binary Download and Variant Testing**:
+**Note**: See [Binary Management](#binary-management) for details on automatic download, variant testing, and validation caching.
 
-On first call to `start()`, the library automatically:
-1. **Downloads** appropriate binary if not present (~50-100MB)
-2. **Tests variants** in priority order: CUDA → Vulkan → CPU
-3. **Runs real functionality test**:
-   - Generates 1 token with GPU layers enabled (`-ngl 1`)
-   - Verifies CUDA actually works (not just that binary loads)
-   - Parses output for GPU errors ("CUDA error", "failed to allocate", etc.)
-4. **Falls back automatically** if test fails:
-   - Example: Broken CUDA → tries Vulkan → CPU
-   - Logs warnings but continues with working variant
-5. **Caches working variant and validation results** for fast subsequent starts
-
-**Note**: Real functionality testing only runs if model is downloaded. If model doesn't exist yet, falls back to basic `--version` test. This means optimal variant selection happens automatically when you call `start()` with a valid model.
-
-**Binary Validation Caching**:
-
-After the first successful validation, subsequent calls to `start()` skip the expensive validation tests (Phase 1 & Phase 2) and only verify binary integrity via checksum (~0.5s instead of 2-10s):
-
-- ✅ **First start**: Downloads binary → Runs Phase 1 & 2 tests → Saves validation cache
-- ✅ **Subsequent starts**: Verifies checksum → Uses cached validation (fast startup)
-- ✅ **Modified binary**: Checksum mismatch → Re-runs full validation
-- ✅ **Force validation**: Use `forceValidation: true` to re-run tests (e.g., after driver updates)
-
-**Example (Force Validation)**:
-```typescript
-// After updating GPU drivers
-await llamaServer.start({
-  modelId: 'llama-2-7b',
-  port: 8080,
-  forceValidation: true  // Re-run Phase 1 & 2 tests
-});
-```
+**Health Check Behavior**: After spawning llama-server, `start()` waits for the health endpoint to respond with 'ok' status. Uses exponential backoff: starts at 100ms intervals, multiplies by 1.5 after each attempt, caps at 2s intervals. Default timeout is 60 seconds.
 
 ---
 
@@ -168,13 +113,9 @@ stop(): Promise<void>
 
 **Example**:
 ```typescript
-console.log('Stopping server...');
 await llamaServer.stop();
-console.log('Server stopped');
-
-// Verify status
 const status = llamaServer.getStatus();
-console.log('Status:', status); // 'stopped'
+console.log('Status:', status);
 ```
 
 **Behavior**:
@@ -187,7 +128,7 @@ console.log('Status:', status); // 'stopped'
 
 ### restart()
 
-Convenience method to restart the server. Stops the server and starts it again with the same configuration.
+Convenience method to restart the server with the same configuration.
 
 **Signature**:
 ```typescript
@@ -198,9 +139,7 @@ restart(): Promise<ServerInfo>
 
 **Example**:
 ```typescript
-// Restart server (useful after config changes or crashes)
 await llamaServer.restart();
-console.log('Server restarted with same configuration');
 ```
 
 ---
@@ -218,22 +157,11 @@ interface LlamaServerConfig {
   gpuLayers?: number;         // Optional - Layers to offload to GPU (auto-detected if not specified)
   parallelRequests?: number;  // Optional - Concurrent request slots (default: 4)
   flashAttention?: boolean;   // Optional - Enable flash attention (default: false)
-  forceValidation?: boolean;  // Optional - Force re-validation of binary even if cached (default: false)
+  forceValidation?: boolean;  // Optional - Force re-validation of binary (default: false)
 }
 ```
 
-**Auto-Configuration**:
-When `threads` and `gpuLayers` are not specified, the library:
-1. Detects system capabilities via `systemInfo.detect()`
-2. Gets model information (layer count) from GGUF metadata
-3. Calculates optimal settings based on available resources
-4. Applies configuration automatically
-
-**Manual Configuration**:
-Specify exact values to override auto-configuration. Useful for:
-- Testing different configurations
-- Resource-constrained systems
-- Custom performance tuning
+When `threads` and `gpuLayers` are not specified, the library auto-configures based on system capabilities and model metadata.
 
 ---
 
@@ -250,22 +178,13 @@ getStatus(): ServerStatus
 
 **Returns**: `ServerStatus` - Current server state
 
-**Possible Values**:
-- `'stopped'` - Server is not running
-- `'starting'` - Server is starting up
-- `'running'` - Server is running
-- `'stopping'` - Server is shutting down
-- `'crashed'` - Server has crashed unexpectedly
+**Possible Values**: `'stopped'`, `'starting'`, `'running'`, `'stopping'`, `'crashed'`
 
 **Example**:
 ```typescript
 const status = llamaServer.getStatus();
-console.log('Server Status:', status);
-
 if (status === 'running') {
   console.log('✅ Server is running');
-} else if (status === 'crashed') {
-  console.error('❌ Server has crashed');
 }
 ```
 
@@ -285,21 +204,10 @@ getInfo(): ServerInfo
 **Example**:
 ```typescript
 const info = llamaServer.getInfo();
-
-console.log('Server Status:', info.status);
+console.log('Status:', info.status);
 console.log('Health:', info.health);
-
-if (info.pid) {
-  console.log('Process ID:', info.pid);
-}
-
+console.log('PID:', info.pid);
 console.log('Port:', info.port);
-console.log('Model ID:', info.modelId);
-
-if (info.startedAt) {
-  const uptime = Date.now() - new Date(info.startedAt).getTime();
-  console.log('Uptime:', Math.floor(uptime / 1000), 'seconds');
-}
 ```
 
 ---
@@ -318,36 +226,12 @@ isHealthy(): Promise<boolean>
 **Example**:
 ```typescript
 const healthy = await llamaServer.isHealthy();
-
 if (healthy) {
-  console.log('✅ Server is healthy and ready to accept requests');
-} else {
-  console.log('❌ Server is not responding');
-  const info = llamaServer.getInfo();
-  console.log('Status:', info.status);
-  console.log('Health:', info.health);
+  console.log('✅ Server is healthy');
 }
 ```
 
-**Use Case**:
-```typescript
-// Wait for server to be ready
-await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
-
-// Poll until healthy
-let retries = 0;
-while (!(await llamaServer.isHealthy()) && retries < 10) {
-  console.log('Waiting for server to be ready...');
-  await new Promise(resolve => setTimeout(resolve, 1000));
-  retries++;
-}
-
-if (await llamaServer.isHealthy()) {
-  console.log('Server is ready!');
-} else {
-  console.error('Server failed to become healthy');
-}
-```
+**Health Endpoint**: The library checks `http://localhost:{port}/health` which returns a JSON response with `status` field ('ok', 'loading', 'error', or 'unknown').
 
 ---
 
@@ -362,25 +246,15 @@ getHealthStatus(): Promise<HealthStatus>
 
 **Returns**: `Promise<HealthStatus>` - Health status
 
-**Possible Values**:
-- `'ok'` - Server is fully operational
-- `'loading'` - Server is still loading the model
-- `'error'` - Server has encountered an error
-- `'unknown'` - Server health status is unknown
+**Possible Values**: `'ok'`, `'loading'`, `'error'`, `'unknown'`
 
 **Example**:
 ```typescript
 const healthStatus = await llamaServer.getHealthStatus();
-console.log('Health status:', healthStatus);
-
 if (healthStatus === 'ok') {
   console.log('✅ Server is fully operational');
 } else if (healthStatus === 'loading') {
   console.log('⏳ Server is still loading the model');
-} else if (healthStatus === 'error') {
-  console.error('❌ Server has encountered an error');
-} else {
-  console.log('❓ Server health status is unknown');
 }
 ```
 
@@ -404,18 +278,10 @@ getLogs(lines?: number): Promise<string[]>
 
 **Example**:
 ```typescript
-// Get last 100 lines (default)
 const logs = await llamaServer.getLogs();
-console.log('Recent logs:');
 logs.forEach(line => console.log(line));
 
-// Get last 50 lines
-const recentLogs = await llamaServer.getLogs(50);
-console.log(`Last ${recentLogs.length} lines`);
-
-// Get all logs
-const allLogs = await llamaServer.getLogs(Infinity);
-console.log(`Total log entries: ${allLogs.length}`);
+const recent = await llamaServer.getLogs(50);
 ```
 
 ---
@@ -424,7 +290,7 @@ console.log(`Total log entries: ${allLogs.length}`);
 
 Gets recent server logs as structured objects with parsed timestamps, levels, and messages.
 
-This method parses raw log strings into structured `LogEntry` objects, making it easier to filter, format, and display logs in your application. Use this instead of `getLogs()` when you need programmatic access to log components.
+Use this instead of `getLogs()` when you need programmatic access to log components for filtering or formatting.
 
 **Signature**:
 ```typescript
@@ -447,31 +313,23 @@ interface LogEntry {
 
 **Example**:
 ```typescript
-// Get last 50 logs as structured objects
 const logs = await llamaServer.getStructuredLogs(50);
 
 // Filter by log level
 const errors = logs.filter(entry => entry.level === 'error');
-console.log(`Found ${errors.length} errors`);
 
 // Format for display
 logs.forEach(entry => {
   const time = new Date(entry.timestamp).toLocaleTimeString();
   console.log(`[${time}] ${entry.level.toUpperCase()}: ${entry.message}`);
 });
-
-// Search for specific messages
-const modelLogs = logs.filter(entry => entry.message.includes('model'));
-console.log('Model-related logs:', modelLogs);
 ```
 
-**Fallback Handling**:
-If a log line cannot be parsed (malformed format), a fallback entry is created with:
-- `timestamp`: Current time
-- `level`: 'info'
-- `message`: The original unparsed line
+**Comparison**:
+- **`getLogs()`**: Returns raw strings - Use when you want unprocessed log lines
+- **`getStructuredLogs()`**: Returns parsed objects - Use when you need to filter, search, or format logs
 
-This ensures all logs are accessible even if formatting is inconsistent.
+**Fallback Handling**: If a log line cannot be parsed (malformed format), a fallback entry is created with current time, 'info' level, and the original unparsed line. This ensures all logs are accessible even if formatting is inconsistent.
 
 ---
 
@@ -506,7 +364,6 @@ Emitted when server crashes unexpectedly.
 ```typescript
 llamaServer.on('crashed', (error: Error) => {
   console.error('Server crashed:', error.message);
-  // Auto-restart in Phase 4
 });
 ```
 
@@ -520,39 +377,15 @@ llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 
 });
 ```
 
-### Complete Event Handling Example
-
+**Example**:
 ```typescript
-llamaServer.on('started', () => {
-  console.log('✅ Server started successfully');
-});
-
-llamaServer.on('stopped', () => {
-  console.log('🛑 Server stopped');
-});
-
+llamaServer.on('started', () => console.log('✅ Server started'));
+llamaServer.on('stopped', () => console.log('🛑 Server stopped'));
 llamaServer.on('crashed', (error) => {
   console.error('💥 Server crashed:', error.message);
-  console.error('Stack:', error.stack);
-
-  // Could implement custom restart logic
-  console.log('Attempting restart in 5 seconds...');
-  setTimeout(async () => {
-    try {
-      // Restart by stopping and starting again
-      const previousConfig = llamaServer.getConfig();
-      if (previousConfig) {
-        await llamaServer.stop();
-        await llamaServer.start(previousConfig);
-        console.log('✅ Server restarted successfully');
-      }
-    } catch (restartError) {
-      console.error('❌ Failed to restart:', restartError);
-    }
-  }, 5000);
+  // Implement custom restart logic if needed
 });
 
-// Start server
 await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
 ```
 
@@ -564,26 +397,33 @@ genai-electron automatically downloads and manages llama-server binaries:
 
 **First Start**:
 1. Downloads appropriate binary for your platform (~50-100MB)
-2. Tests GPU variants in priority order:
-   - CUDA (NVIDIA)
-   - Vulkan (cross-platform)
-   - CPU (fallback)
-3. Runs real functionality test (generates 1 token with GPU)
-4. Falls back to next variant if test fails
-5. Caches working variant
+2. Tests GPU variants in priority order: CUDA (NVIDIA) → Vulkan (cross-platform) → CPU (fallback)
+3. Runs real functionality test: generates 1 token with GPU layers enabled (`-ngl 1`)
+4. Verifies CUDA actually works (parses output for GPU errors: "CUDA error", "failed to allocate", etc.)
+5. Falls back to next variant if test fails
+6. Caches working variant and validation results
+
+**Note**: Real functionality testing only runs if model is downloaded. If model doesn't exist yet, falls back to basic `--version` test. This means optimal variant selection happens automatically when you call `start()` with a valid model.
 
 **Subsequent Starts**:
 1. Verifies binary checksum (fast, ~0.5s)
 2. Uses cached validation results
 3. Skips expensive Phase 1 & 2 tests
 
-**Force Validation**:
-After GPU driver updates, force re-validation:
+**Binary Validation Caching**:
+
+After the first successful validation, subsequent starts skip validation tests and only verify binary integrity via checksum (~0.5s instead of 2-10s):
+- **First start**: Downloads binary → Runs Phase 1 & 2 tests → Saves validation cache
+- **Subsequent starts**: Verifies checksum → Uses cached validation (fast startup)
+- **Modified binary**: Checksum mismatch → Re-runs full validation
+- **Force validation**: Use `forceValidation: true` to re-run tests
+
+**Force Validation Example** (after GPU driver updates):
 ```typescript
 await llamaServer.start({
   modelId: 'llama-2-7b',
   port: 8080,
-  forceValidation: true  // Re-run all tests
+  forceValidation: true
 });
 ```
 
@@ -593,10 +433,20 @@ await llamaServer.start({
 
 ## Reasoning Model Support
 
-genai-electron automatically detects reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS) and injects the required flags:
+genai-electron automatically detects reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS) and injects the required flags.
 
-**Automatic Flag Injection**:
-When starting a server with a reasoning model, llama-server is launched with:
+**Manual Detection** (advanced):
+```typescript
+import { detectReasoningSupport, REASONING_MODEL_PATTERNS } from 'genai-electron';
+
+const supportsReasoning = detectReasoningSupport('Qwen3-8B-Instruct-Q4_K_M.gguf');
+console.log('Supports reasoning:', supportsReasoning); // true
+
+console.log('Known patterns:', REASONING_MODEL_PATTERNS);
+// ['qwen3', 'deepseek-r1', 'gpt-oss']
+```
+
+**Automatic Flag Injection**: When starting a server with a reasoning model, llama-server is launched with:
 ```bash
 --jinja --reasoning-format deepseek
 ```
@@ -616,7 +466,7 @@ await modelManager.downloadModel({
 
 // Check if model supports reasoning
 const modelInfo = await modelManager.getModelInfo('qwen3-8b');
-console.log('Supports reasoning:', modelInfo.supportsReasoning); // true
+console.log('Supports reasoning:', modelInfo.supportsReasoning);
 
 // Start server - flags automatically added
 await llamaServer.start({
@@ -651,26 +501,18 @@ try {
 } catch (error) {
   if (error instanceof ModelNotFoundError) {
     console.error('Model not found:', error.message);
-  } else if (error instanceof ServerError) {
-    console.error('Server failed to start:', error.message);
-  } else if (error instanceof PortInUseError) {
-    console.error('Port already in use:', error.message);
-    console.log('Try using a different port or stop the conflicting service');
   } else if (error instanceof InsufficientResourcesError) {
     console.error('Not enough RAM/VRAM:', error.message);
     console.log('Suggestion:', error.details.suggestion);
-  } else if (error instanceof BinaryError) {
-    console.error('Binary execution failed:', error.message);
-    console.log('All GPU variants failed, check binary-log events for details');
+  } else if (error instanceof ServerError) {
+    console.error('Server failed to start:', error.message);
   }
 }
 ```
 
 ---
 
-## Examples
-
-### Complete LLM Server Workflow
+## Complete Example
 
 ```typescript
 import { app } from 'electron';
@@ -678,7 +520,6 @@ import { LLMService } from 'genai-lite';
 import { systemInfo, modelManager, llamaServer, attachAppLifecycle } from 'genai-electron';
 
 async function setupLLMServer() {
-  // 1. Detect system capabilities
   const capabilities = await systemInfo.detect();
   console.log('System:', {
     cpu: `${capabilities.cpu.cores} cores`,
@@ -686,40 +527,28 @@ async function setupLLMServer() {
     gpu: capabilities.gpu.available ? capabilities.gpu.name : 'none'
   });
 
-  // 2. List available models
   const models = await modelManager.listModels('llm');
   if (models.length === 0) {
     console.log('No models installed. Download one first.');
     return;
   }
 
-  const firstModel = models[0];
-  console.log(`Using model: ${firstModel.name}`);
-
-  // 3. Start server with auto-configuration
   await llamaServer.start({
-    modelId: firstModel.id,
+    modelId: models[0].id,
     port: 8080
   });
 
-  console.log('Server started on port 8080');
-
-  // 4. Wait for server to be ready
   let retries = 0;
   while (!(await llamaServer.isHealthy()) && retries < 10) {
-    console.log('Waiting for server to load model...');
     await new Promise(resolve => setTimeout(resolve, 1000));
     retries++;
   }
 
   if (await llamaServer.isHealthy()) {
-    console.log('✅ Server is ready!');
-
-    // 5. Use with genai-lite
     const llmService = new LLMService(async () => 'not-needed');
     const response = await llmService.sendMessage({
       providerId: 'llamacpp',
-      modelId: firstModel.id,
+      modelId: models[0].id,
       messages: [
         { role: 'system', content: 'You are a helpful assistant.' },
         { role: 'user', content: 'Hello!' }
@@ -729,14 +558,10 @@ async function setupLLMServer() {
     if (response.object === 'chat.completion') {
       console.log('Response:', response.choices[0].message.content);
     }
-  } else {
-    console.error('❌ Server failed to become healthy');
   }
 }
 
 app.whenReady().then(setupLLMServer).catch(console.error);
-
-// Automatic cleanup on app quit
 attachAppLifecycle(app, { llamaServer });
 ```
 

@@ -11,6 +11,7 @@ The `SystemInfo` class provides system capability detection and intelligent conf
 - [Methods](#methods)
   - [detect()](#detect)
   - [getMemoryInfo()](#getmemoryinfo)
+  - [getGPUInfo()](#getgpuinfo)
   - [canRunModel()](#canrunmodel)
   - [getOptimalConfig()](#getoptimalconfig)
 - [Caching Behavior](#caching-behavior)
@@ -92,6 +93,8 @@ console.log('GPU Layers:', capabilities.recommendations.gpuLayers);
 
 **Caching**: Results are cached for 60 seconds. Subsequent calls within this window return cached data without re-detecting hardware.
 
+**Force Refresh**: Pass `forceRefresh: true` to bypass cache and re-detect hardware: `await systemInfo.detect(true)`.
+
 **Automatic Cache Clearing**: The cache is automatically cleared when servers start or stop (via `LlamaServerManager` and `DiffusionServerManager`). This ensures that subsequent memory checks reflect the actual available RAM after models are loaded or unloaded.
 
 ---
@@ -123,6 +126,36 @@ console.log('Memory usage:', usagePercent.toFixed(1), '%');
 
 ---
 
+### getGPUInfo()
+
+Gets current GPU information (not cached, real-time).
+
+**Signature**:
+```typescript
+getGPUInfo(): Promise<GPUInfo>
+```
+
+**Returns**: `Promise<GPUInfo>` - Current GPU state
+
+**Example**:
+```typescript
+const gpu = await systemInfo.getGPUInfo();
+
+if (gpu.available) {
+  console.log('GPU Type:', gpu.type);
+  console.log('GPU Name:', gpu.name);
+  console.log('VRAM:', (gpu.vram / 1024 ** 3).toFixed(1), 'GB');
+
+  if (gpu.vramAvailable !== undefined) {
+    console.log('Available VRAM:', (gpu.vramAvailable / 1024 ** 3).toFixed(1), 'GB');
+  }
+}
+```
+
+**Use Case**: Real-time VRAM monitoring during active workloads like image generation. Unlike `detect()`, this method always queries the system for current GPU state, ensuring fresh VRAM availability data.
+
+---
+
 ### canRunModel()
 
 Checks if a specific model can run on the current system based on available or total memory.
@@ -141,6 +174,8 @@ canRunModel(
   - `checkTotalMemory` - If `true`, checks against total system memory instead of currently available memory. Use this for servers that load models on-demand (e.g., diffusion server). Default: `false` (checks available memory)
 
 **Returns**: `Promise<{ possible: boolean; reason?: string; suggestion?: string }>` - Whether model can run, reason if not, and optional suggestion
+
+**Memory Calculation**: Adds 20% overhead to model size for runtime requirements (model size × 1.2).
 
 **When to Use Each Mode**:
 - **Default (available memory)**: For servers that load the model at startup (e.g., LLM server). Ensures there's enough RAM right now.
@@ -218,6 +253,7 @@ await llamaServer.start({
 - **threads**: Based on CPU core count (typically cores - 1 or cores / 2)
 - **gpuLayers**: Maximum layers that fit in VRAM (if GPU available), or 0 for CPU-only
 - **contextSize**: Appropriate context window based on model and available memory
+  - **Calculation**: Subtracts model size + 2GB OS overhead from available RAM, then selects context size based on remaining memory (8GB→8K, 4GB→4K, 2GB→2K, else 1K)
 - **parallelRequests**: Concurrent request slots based on available resources
 - **flashAttention**: Whether flash attention should be enabled
 
@@ -240,6 +276,8 @@ await llamaServer.start({
 
 **Memory Checks Use Real-Time Data**:
 The `canRunModel()` and `getOptimalConfig()` methods use real-time `getMemoryInfo()` for memory availability checks, ensuring accurate resource validation even when the capabilities cache is active. Static hardware info (CPU cores, GPU specs) is taken from the cache.
+
+**Manual Cache Clearing**: For testing or when hardware changes (e.g., GPU driver updates), use `systemInfo.clearCache()` to force fresh detection on the next `detect()` call.
 
 ---
 
@@ -336,54 +374,22 @@ The `canRunModel()` and `getOptimalConfig()` methods use real-time `getMemoryInf
 ### Complete System Check
 
 ```typescript
-import { systemInfo, modelManager } from 'genai-electron';
+import { systemInfo } from 'genai-electron';
 
 async function checkSystem() {
-  // Detect full capabilities
   const capabilities = await systemInfo.detect();
 
-  console.log('=== System Information ===');
-  console.log(`CPU: ${capabilities.cpu.cores} cores (${capabilities.cpu.model})`);
-  console.log(`RAM: ${(capabilities.memory.total / 1024 ** 3).toFixed(1)}GB total, ${(capabilities.memory.available / 1024 ** 3).toFixed(1)}GB available`);
+  console.log('System:', {
+    cpu: `${capabilities.cpu.cores} cores (${capabilities.cpu.model})`,
+    ram: `${(capabilities.memory.total / 1024 ** 3).toFixed(1)}GB total`,
+    gpu: capabilities.gpu.available ? `${capabilities.gpu.name} (${(capabilities.gpu.vram / 1024 ** 3).toFixed(1)}GB VRAM)` : 'CPU-only'
+  });
 
-  if (capabilities.gpu.available) {
-    console.log(`GPU: ${capabilities.gpu.name} (${capabilities.gpu.type})`);
-    console.log(`VRAM: ${(capabilities.gpu.vram / 1024 ** 3).toFixed(1)}GB`);
-  } else {
-    console.log('GPU: None detected (CPU-only mode)');
-  }
-
-  console.log('\n=== Recommendations ===');
-  console.log(`Max Model Size: ${capabilities.recommendations.maxModelSize}`);
-  console.log(`Recommended Quantization: ${capabilities.recommendations.recommendedQuantization.join(', ')}`);
-  console.log(`Threads: ${capabilities.recommendations.threads}`);
-  if (capabilities.recommendations.gpuLayers) {
-    console.log(`GPU Layers: ${capabilities.recommendations.gpuLayers}`);
-  }
-}
-```
-
-### Check If Model Can Run
-
-```typescript
-import { systemInfo, modelManager } from 'genai-electron';
-
-async function checkModelCompatibility(modelId: string) {
-  const modelInfo = await modelManager.getModelInfo(modelId);
-  const check = await systemInfo.canRunModel(modelInfo);
-
-  if (check.possible) {
-    console.log(`✅ ${modelInfo.name} can run on this system`);
-
-    // Get optimal config
-    const config = await systemInfo.getOptimalConfig(modelInfo);
-    console.log('Recommended configuration:', config);
-  } else {
-    console.log(`❌ ${modelInfo.name} cannot run: ${check.reason}`);
-    if (check.suggestion) {
-      console.log(`💡 ${check.suggestion}`);
-    }
-  }
+  console.log('Recommendations:', {
+    maxModelSize: capabilities.recommendations.maxModelSize,
+    quantization: capabilities.recommendations.recommendedQuantization.join(', '),
+    threads: capabilities.recommendations.threads
+  });
 }
 ```
 
@@ -392,18 +398,13 @@ async function checkModelCompatibility(modelId: string) {
 ```typescript
 import { systemInfo } from 'genai-electron';
 
-function monitorMemory() {
-  setInterval(() => {
-    const memory = systemInfo.getMemoryInfo();
-    const usedPercent = (memory.used / memory.total) * 100;
+setInterval(() => {
+  const memory = systemInfo.getMemoryInfo();
+  const usedPercent = (memory.used / memory.total) * 100;
 
-    console.log(`Memory: ${usedPercent.toFixed(1)}% used (${(memory.available / 1024 ** 3).toFixed(1)}GB available)`);
-
-    if (usedPercent > 90) {
-      console.warn('⚠️  High memory usage!');
-    }
-  }, 5000); // Check every 5 seconds
-}
+  console.log(`Memory: ${usedPercent.toFixed(1)}% used`);
+  if (usedPercent > 90) console.warn('⚠️  High memory usage!');
+}, 5000);
 ```
 
 ---

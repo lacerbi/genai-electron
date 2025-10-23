@@ -93,8 +93,10 @@ app.whenReady().then(() => {
 1. Registers `before-quit` event listener
 2. Prevents default quit to allow cleanup
 3. Stops all running servers gracefully (checks status first)
-4. Logs cleanup progress to console
-5. Exits app with code 0 after cleanup
+4. Only stops servers that are currently running
+5. Errors during cleanup are logged but don't prevent app quit
+6. Logs cleanup progress to console
+7. Exits app with code 0 after cleanup
 
 ---
 
@@ -267,61 +269,13 @@ function setupIPCHandlers(llmService: LLMService) {
 
 ## Best Practices
 
-### System Detection on Startup
-
-Always detect capabilities on startup to show users their system status:
-
-```typescript
-app.whenReady().then(async () => {
-  const capabilities = await systemInfo.detect();
-
-  // Log to console
-  console.log('System Info:');
-  console.log('  CPU:', capabilities.cpu.cores, 'cores');
-  console.log('  RAM:', (capabilities.memory.total / 1024 ** 3).toFixed(1), 'GB');
-  console.log('  GPU:', capabilities.gpu.available ? capabilities.gpu.name : 'none');
-
-  // Send to renderer for UI display
-  mainWindow.webContents.send('system-info', capabilities);
-});
-```
-
-### Auto-Configuration vs Manual
-
-Prefer auto-configuration for better user experience:
-
-```typescript
-// ✅ Good: Auto-configuration
-await llamaServer.start({
-  modelId: 'llama-2-7b',
-  port: 8080
-  // threads, gpuLayers, contextSize auto-detected
-});
-
-// ⚠️ Advanced: Manual configuration (for power users)
-await llamaServer.start({
-  modelId: 'llama-2-7b',
-  port: 8080,
-  threads: 8,
-  gpuLayers: 35,
-  contextSize: 8192
-});
-```
-
 ### Event-Driven UI Updates
 
-Use server events for reactive UI updates:
+Use server events to send status updates to renderer:
 
 ```typescript
-import { llamaServer } from 'genai-electron';
-
-// Register event listeners
 llamaServer.on('started', () => {
   mainWindow.webContents.send('server-status', { status: 'running' });
-});
-
-llamaServer.on('stopped', () => {
-  mainWindow.webContents.send('server-status', { status: 'stopped' });
 });
 
 llamaServer.on('crashed', (error) => {
@@ -329,37 +283,30 @@ llamaServer.on('crashed', (error) => {
 });
 ```
 
-### Health Monitoring Pattern
+### Download Progress Streaming
 
-Periodically check server health for UI status indicators:
+Stream progress updates via IPC:
 
 ```typescript
-import { llamaServer } from 'genai-electron';
-
-// Check health every 5 seconds
-setInterval(async () => {
-  const healthy = await llamaServer.isHealthy();
-  mainWindow.webContents.send('server-health', { healthy });
-}, 5000);
-
-// Or trigger on server start/stop events
-llamaServer.on('started', async () => {
-  const healthy = await llamaServer.isHealthy();
-  mainWindow.webContents.send('server-health', { healthy });
+ipcMain.handle('model:download', async (_event, config) => {
+  await modelManager.downloadModel({
+    ...config,
+    onProgress: (downloaded, total) => {
+      mainWindow.webContents.send('download-progress', {
+        percentage: (downloaded / total) * 100
+      });
+    }
+  });
 });
 ```
 
-### Log Streaming to Renderer
+### Structured Log Parsing
 
-Use structured logs for better UI display:
+Use `getStructuredLogs()` for filtering and formatting in UI:
 
 ```typescript
-import { llamaServer } from 'genai-electron';
-
 ipcMain.handle('server:getLogs', async () => {
   const logs = await llamaServer.getStructuredLogs(100);
-
-  // Filter and format for UI
   return logs.map(entry => ({
     timestamp: new Date(entry.timestamp).toLocaleTimeString(),
     level: entry.level,
@@ -368,87 +315,50 @@ ipcMain.handle('server:getLogs', async () => {
 });
 ```
 
-### Model Download Progress
-
-Stream download progress to renderer via IPC:
-
-```typescript
-import { modelManager } from 'genai-electron';
-
-ipcMain.handle('model:download', async (_event, config) => {
-  await modelManager.downloadModel({
-    ...config,
-    onProgress: (downloaded, total) => {
-      const percentage = (downloaded / total) * 100;
-
-      // Send progress to renderer
-      mainWindow.webContents.send('download-progress', {
-        modelId: config.name,
-        downloaded,
-        total,
-        percentage
-      });
-    }
-  });
-
-  return { success: true };
-});
-```
-
 ---
 
-## Common Patterns
+## Common Pitfalls
 
-### Resource Monitoring (Real-Time)
+### ES Modules + Electron
 
-```typescript
-// Periodic memory checks
-setInterval(async () => {
-  const memory = systemInfo.getMemoryInfo();
-  const usage = (memory.used / memory.total) * 100;
+**Issue**: Electron apps with `"type": "module"` in package.json must use `.cjs` extension for main and preload scripts.
 
-  mainWindow.webContents.send('memory-usage', {
-    total: memory.total,
-    used: memory.used,
-    available: memory.available,
-    percentage: usage
-  });
-}, 2000);
-```
+**Symptom**: "Unable to load preload script" or "exports is not defined" errors, `window.api` undefined in renderer.
 
-### Server Lifecycle via IPC
+**Solution**:
 
 ```typescript
-ipcMain.handle('server:start', async (_event, config) => {
-  try {
-    await llamaServer.start(config);
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: formatErrorForUI(error) };
+// vite.main.config.ts
+export default {
+  build: {
+    rollupOptions: {
+      output: {
+        format: 'cjs',
+        entryFileNames: () => 'main.cjs'
+      }
+    }
   }
-});
+};
 
-ipcMain.handle('server:stop', async () => {
-  try {
-    await llamaServer.stop();
-    return { success: true };
-  } catch (error) {
-    return { success: false, error: formatErrorForUI(error) };
-  }
-});
+// vite.preload.config.ts - same pattern
 
-ipcMain.handle('server:getStatus', () => {
-  return llamaServer.getInfo();
-});
+// Update package.json
+{
+  "main": ".vite/build/main.cjs"
+}
+
+// Update preload path in main process
+const preloadPath = join(__dirname, 'preload.cjs');
 ```
+
+**Why**: Node.js treats `.js` files as ES modules when `"type": "module"` is set, but Electron requires CommonJS for main and preload scripts. Without `.cjs` extension, the ES module main process can't properly load CommonJS preload scripts.
+
+See `examples/electron-control-panel/` for complete working example.
 
 ---
 
 ## See Also
 
-- [Installation and Setup](installation-and-setup.md) - Initial setup
-- [System Detection](system-detection.md) - SystemInfo API
 - [LLM Server](llm-server.md) - LlamaServerManager API
 - [Image Generation](image-generation.md) - DiffusionServerManager API
 - [Example Control Panel](example-control-panel.md) - Reference implementation
-- [Troubleshooting](troubleshooting.md) - Common issues
