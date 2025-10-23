@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **genai-electron** is an Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). It handles platform-specific operations like model downloads, binary management, server lifecycle, and resource orchestration. This library complements **genai-lite** (the API abstraction layer) by managing the runtime infrastructure.
 
-**Current Status**: Phase 2 Complete (LLM + Image Generation). Production-ready with 221/221 tests passing.
+**Current Status**: Phase 2.6 Complete (LLM + Image Generation + Async API). Production-ready with 273/273 tests passing.
 
 ## Essential Commands
 
@@ -120,17 +120,18 @@ src/
 
 ## Testing Approach
 
-**Current Status** (Phase 2 Complete):
+**Current Status** (Phase 2.6 Complete):
 - Jest 30 + ts-jest with ESM experimental support
-- 221/221 tests passing (100% pass rate)
-- 12 test suites covering all Phase 1 & 2 functionality
+- 273/273 tests passing (100% pass rate)
+- 13 test suites covering all Phase 1, 2, 2.5 functionality
 - Clean test exit (no memory leaks, no warnings)
-- Fast execution (~1.4 seconds for full suite)
+- Fast execution (~4 seconds for full suite)
 
 **Test Coverage**:
-- Phase 1: 130 tests (errors, utils, core managers)
+- Phase 1: 138 tests (errors, utils, core managers)
 - Phase 2: 50 tests (DiffusionServerManager, ResourceOrchestrator)
-- Infrastructure: 41 tests (BinaryManager, health-check)
+- Phase 2.5: 27 tests (GenerationRegistry, async API)
+- Infrastructure: 58 tests (BinaryManager, health-check, validation cache)
 
 **Test Structure**:
 ```
@@ -155,11 +156,17 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 - Binary management with variant testing (CUDA/Vulkan/CPU fallback)
 - Documentation complete (README, API.md, SETUP.md)
 
-**Phase 2 (Complete)**: Image generation
+**Phase 2 (Complete)**: Image generation & async API
 - DiffusionServerManager (HTTP wrapper for stable-diffusion.cpp)
 - ResourceOrchestrator (automatic LLM offload/reload when VRAM constrained)
 - Cross-platform CI/CD with automated testing
 - electron-control-panel example app available
+
+**Phase 2.5 (Complete)**: Async image generation API
+- GenerationRegistry (in-memory state with TTL cleanup)
+- HTTP endpoints (POST for start, GET for polling)
+- Batch generation support (1-5 images with auto-seed increment)
+- Breaking change from synchronous to async polling pattern
 
 **Future Phases**: See DESIGN.md for complete roadmap (Phase 3: Production Core, Phase 4: Production Polish)
 

@@ -203,6 +203,7 @@ export { detectGPU } from './system/gpu-detect.js';
 export { getHuggingFaceURL, parseHuggingFaceURL } from './download/huggingface.js';
 export { calculateSHA256, verifyChecksum } from './download/checksum.js';
 export { generateId } from './utils/generation-id.js';
+export { fetchGGUFMetadata, fetchLocalGGUFMetadata, getArchField } from './utils/gguf-parser.js';
 export {
   getPlatform,
   getArchitecture,

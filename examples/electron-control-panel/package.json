@@ -24,7 +24,7 @@
   "license": "MIT",
   "dependencies": {
     "genai-electron": "file:../..",
-    "genai-lite": "^0.5.0",
+    "genai-lite": "^0.5.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },

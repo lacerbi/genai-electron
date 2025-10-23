@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.2.0 (Phase 2 - Image Generation Complete)
+> **Version**: 0.2.0 (Phase 2.6 - Async API & genai-lite Integration)
 > **Status**: Production Ready - LLM & Image Generation
 
 An Electron-specific library for managing local AI model servers and resources. Complements [genai-lite](https://github.com/lacerbi/genai-lite) by handling platform-specific operations required to run AI models locally on desktop systems.
@@ -24,6 +24,8 @@ An Electron-specific library for managing local AI model servers and resources. 
 - ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
 - ✅ **Reasoning model support** - Automatic detection and configuration for reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS)
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
+- ✅ **Async image generation API** - HTTP endpoints with polling pattern for non-blocking generation
+- ✅ **Batch generation** - Generate multiple image variations in one request (1-5 images)
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when generating images
 - ✅ **Health monitoring** - Real-time server health checks and status tracking
 - ✅ **Binary management** - Automatic binary download and verification on first run
@@ -342,8 +344,14 @@ const result = await diffusionServer.generateImage({
   cfgScale: 7.5,
   seed: 12345,
   sampler: 'euler_a',
-  onProgress: (currentStep, totalSteps) => {
-    console.log(`Progress: ${currentStep}/${totalSteps}`);
+  onProgress: (currentStep, totalSteps, stage, percentage) => {
+    if (stage === 'loading') {
+      console.log(`Loading model... ${Math.round(percentage || 0)}%`);
+    } else if (stage === 'diffusion') {
+      console.log(`Generating (step ${currentStep}/${totalSteps}): ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`Decoding: ${Math.round(percentage || 0)}%`);
+    }
   },
 });
 
@@ -354,6 +362,82 @@ fs.writeFileSync('output.png', result.image);  // Save image buffer
 // Stop server
 await diffusionServer.stop();
 ```
+
+### HTTP API for Async Generation
+
+The diffusion server also provides HTTP endpoints for async image generation with a polling pattern:
+
+```typescript
+import { diffusionServer } from 'genai-electron';
+import { promises as fs } from 'fs';
+
+// Start diffusion server
+await diffusionServer.start({
+  modelId: 'sdxl-turbo',
+  port: 8081
+});
+
+// Start generation (returns immediately with ID)
+const response = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    prompt: 'A serene mountain landscape',
+    negativePrompt: 'blurry, low quality',
+    width: 1024,
+    height: 1024,
+    steps: 30,
+    count: 3  // Generate 3 variations with auto-incremented seeds
+  })
+});
+
+const { id } = await response.json();
+console.log('Generation started with ID:', id);
+
+// Poll for results
+let result;
+while (true) {
+  const statusResponse = await fetch(`http://localhost:8081/v1/images/generations/${id}`);
+  const data = await statusResponse.json();
+
+  if (data.status === 'complete') {
+    result = data.result;
+    console.log(`✅ Generation complete! Took ${data.result.timeTaken}ms`);
+    break;
+  } else if (data.status === 'error') {
+    throw new Error(data.error.message);
+  }
+
+  // Show progress
+  if (data.progress) {
+    const { stage, percentage, currentImage, totalImages } = data.progress;
+    if (currentImage && totalImages) {
+      console.log(`Image ${currentImage}/${totalImages} - ${stage}: ${Math.round(percentage || 0)}%`);
+    } else {
+      console.log(`${stage}: ${Math.round(percentage || 0)}%`);
+    }
+  }
+
+  await new Promise(resolve => setTimeout(resolve, 1000));
+}
+
+// Save images
+result.images.forEach((img, i) => {
+  const buffer = Buffer.from(img.image, 'base64');
+  fs.writeFileSync(`output-${i}.png`, buffer);
+  console.log(`Saved image ${i} with seed: ${img.seed}`);
+});
+```
+
+**Benefits of the HTTP API:**
+- Non-blocking: Start generation and continue with other work
+- Batch generation: Create multiple variations (1-5 images) with automatic seed incrementation
+- Progress tracking: Poll for real-time progress updates across all generation stages
+- Client-agnostic: Use from any HTTP client (browser, Postman, curl, etc.)
+
+For complete HTTP API documentation, see [docs/API.md](docs/API.md#http-api-endpoints).
+
+---
 
 ### Automatic Resource Management (Phase 2)
 
@@ -378,8 +462,8 @@ const result = await diffusionServer.generateImage({
   width: 1024,
   height: 1024,
   steps: 30,
-  onProgress: (step, total) => {
-    console.log(`Generation: ${step}/${total}`);
+  onProgress: (step, total, stage, percentage) => {
+    console.log(`Generation (${stage}): ${step}/${total} - ${Math.round(percentage || 0)}%`);
   },
 });
 
@@ -437,8 +521,8 @@ async function setupAI() {
     width: 1024,
     height: 1024,
     steps: 30,
-    onProgress: (step, total) => {
-      console.log(`Progress: ${((step / total) * 100).toFixed(1)}%`);
+    onProgress: (step, total, stage, percentage) => {
+      console.log(`Progress (${stage}): ${Math.round(percentage || 0)}%`);
     },
   });
 
@@ -537,7 +621,10 @@ app.whenReady().then(setupAI).catch(console.error);
 - ✅ Progress tracking for image generation
 - ✅ Binary management with variant testing
 - ✅ Real CUDA functionality testing (detects broken GPU before caching)
-- ✅ Comprehensive testing (231 tests passing, 100% pass rate)
+- ✅ Async image generation API (HTTP endpoints with polling pattern)
+- ✅ Batch generation support (1-5 images per request)
+- ✅ GenerationRegistry for async state management
+- ✅ Comprehensive testing (273 tests passing, 100% pass rate)
 
 ### Phase 3: Production Core (Next)
 - 🔄 Resume interrupted downloads
@@ -554,11 +641,12 @@ app.whenReady().then(setupAI).catch(console.error);
 
 ## Documentation
 
-- **[API.md](docs/API.md)** - Complete API reference with examples
+- **[API.md](docs/API.md)** - Complete API reference with examples (includes HTTP endpoints for async image generation)
 - **[SETUP.md](docs/SETUP.md)** - Development setup guide
 - **[DESIGN.md](DESIGN.md)** - Complete architecture and design document
 - **[PROGRESS.md](PROGRESS.md)** - Current implementation progress
 - **[docs/dev/phase1/](docs/dev/phase1/)** - Phase 1 detailed planning and progress logs
+- **[docs/dev/phase2/](docs/dev/phase2/)** - Phase 2 detailed planning and progress logs
 
 ## Error Handling
 

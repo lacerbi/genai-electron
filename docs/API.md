@@ -1,9 +1,13 @@
 # genai-electron API Reference
 
-> **Version**: 0.2.0 (Phase 2 Complete)
+> **Version**: 0.2.0 (Phase 2.6 Complete - Async API & genai-lite Integration)
 > **Status**: Production Ready
 
-Complete API reference for genai-electron Phase 1 (LLM Support) and Phase 2 (Image Generation).
+Complete API reference for genai-electron covering:
+- **Phase 1**: LLM Support (SystemInfo, ModelManager, LlamaServerManager)
+- **Phase 2**: Image Generation (DiffusionServerManager, ResourceOrchestrator)
+- **Phase 2.5**: Async Image Generation API (GenerationRegistry, HTTP endpoints)
+- **Phase 2.6**: genai-lite Integration & Best Practices
 
 ---
 
@@ -17,11 +21,13 @@ Complete API reference for genai-electron Phase 1 (LLM Support) and Phase 2 (Ima
 ### Phase 2: Image Generation
 4. [DiffusionServerManager](#diffusionservermanager)
 5. [ResourceOrchestrator](#resourceorchestrator)
+6. [GenerationRegistry](#generationregistry)
+7. [HTTP API Endpoints](#http-api-endpoints)
 
 ### Reference
-6. [Types and Interfaces](#types-and-interfaces)
-7. [Error Classes](#error-classes)
-8. [Utilities](#utilities)
+8. [Types and Interfaces](#types-and-interfaces)
+9. [Error Classes](#error-classes)
+10. [Utilities](#utilities)
 
 ---
 
@@ -1115,9 +1121,10 @@ This happens transparently without any additional code. The orchestration uses a
 - `cfgScale?: number` - Optional - Guidance scale (default: 7.5, higher = closer to prompt)
 - `seed?: number` - Optional - Random seed for reproducibility (undefined or negative = random, actual seed returned in result)
 - `sampler?: ImageSampler` - Optional - Sampler algorithm (default: 'euler_a')
-- `onProgress?: (currentStep: number, totalSteps: number) => void` - Optional - Progress callback
+- `count?: number` - Optional - Number of images to generate (1-5, default: 1). Seeds are automatically incremented for each image.
+- `onProgress?: (currentStep: number, totalSteps: number, stage: ImageGenerationStage, percentage?: number) => void` - Optional - Progress callback with stage information
 
-**Returns**: `Promise<ImageGenerationResult>` - Generated image data
+**Returns**: `Promise<ImageGenerationResult>` - Generated image data (single image). For batch generation (count > 1), use the HTTP API which returns multiple images.
 
 **Example (Basic)**:
 ```typescript
@@ -1163,10 +1170,38 @@ console.log('Format:', result.format); // 'png'
 await fs.writeFile('cyberpunk-city.png', result.image);
 ```
 
+**Example (Batch Generation via HTTP API)**:
+```typescript
+// Note: Batch generation (count > 1) is only available via HTTP API
+// The Node.js API (generateImage) returns a single ImageGenerationResult
+
+// Use HTTP endpoints for batch generation:
+const response = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    prompt: 'A serene mountain landscape',
+    width: 1024,
+    height: 1024,
+    steps: 30,
+    count: 3  // Generate 3 variations
+  })
+});
+
+const { id } = await response.json();
+
+// Poll for results (see HTTP API Endpoints section for complete polling example)
+// Result will contain an array of 3 images with automatically incremented seeds
+```
+
 **Throws**:
 - `ServerError` - Server not running, already generating an image, or generation failed
 
-**Note**: Only one image can be generated at a time. If called while busy, throws `ServerError`. Model validation occurs during `start()`.
+**Important Notes**:
+- Only one generation can run at a time. If called while busy, throws `ServerError`.
+- Model validation occurs during `start()`.
+- **Automatic Resource Orchestration**: The singleton `diffusionServer` is initialized with `llamaServer`, enabling automatic LLM offload/reload when resources are constrained. This happens transparently - you don't need to manually use `ResourceOrchestrator`.
+- **Batch Orchestration Limitation**: When generating multiple images (count > 1 via HTTP API), automatic orchestration is bypassed. This is planned for Phase 3.
 
 ---
 
@@ -1606,6 +1641,688 @@ The `ResourceOrchestrator` automatically estimates resource usage and determines
 
 ---
 
+## GenerationRegistry
+
+The `GenerationRegistry` class manages in-memory state for async image generation operations. It provides create/read/update/delete operations and automatic cleanup of old results.
+
+**Note**: This class is primarily for internal use by `DiffusionServerManager`. It's exported for advanced use cases where you need custom generation tracking or want to build your own HTTP API.
+
+### Import
+
+```typescript
+import { GenerationRegistry } from 'genai-electron';
+```
+
+### Constructor
+
+```typescript
+new GenerationRegistry(config?: GenerationRegistryConfig)
+```
+
+**GenerationRegistryConfig Options**:
+- `maxResultAgeMs?: number` - Maximum age (in ms) for completed generations before cleanup (default: 5 minutes / 300000ms)
+- `cleanupIntervalMs?: number` - Interval (in ms) between cleanup runs (default: 1 minute / 60000ms)
+
+**Example**:
+```typescript
+import { GenerationRegistry } from 'genai-electron';
+
+// Create registry with custom TTL
+const registry = new GenerationRegistry({
+  maxResultAgeMs: 10 * 60 * 1000,  // 10 minutes
+  cleanupIntervalMs: 2 * 60 * 1000  // 2 minutes
+});
+```
+
+---
+
+### Methods
+
+#### `create(config: ImageGenerationConfig): string`
+
+Create a new generation entry with 'pending' status.
+
+**Parameters**:
+- `config: ImageGenerationConfig` - Image generation configuration
+
+**Returns**: `string` - Unique generation ID
+
+**Example**:
+```typescript
+const id = registry.create({
+  prompt: 'A serene mountain landscape',
+  width: 1024,
+  height: 1024,
+  steps: 30
+});
+
+console.log('Generation ID:', id); // e.g., "abc123def456"
+```
+
+---
+
+#### `get(id: string): GenerationState | null`
+
+Get a generation by ID.
+
+**Parameters**:
+- `id: string` - Generation ID
+
+**Returns**: `GenerationState | null` - Generation state or null if not found
+
+**Example**:
+```typescript
+const state = registry.get('abc123def456');
+
+if (state) {
+  console.log('Status:', state.status);
+  console.log('Created:', new Date(state.createdAt));
+
+  if (state.status === 'in_progress' && state.progress) {
+    console.log('Progress:', state.progress.percentage, '%');
+  }
+
+  if (state.status === 'complete' && state.result) {
+    console.log('Images:', state.result.images.length);
+  }
+}
+```
+
+---
+
+#### `update(id: string, updates: Partial<GenerationState>): void`
+
+Update a generation's state. Automatically updates `updatedAt` timestamp.
+
+**Parameters**:
+- `id: string` - Generation ID
+- `updates: Partial<GenerationState>` - Partial state updates
+
+**Example**:
+```typescript
+// Update to in_progress
+registry.update('abc123', {
+  status: 'in_progress',
+  progress: {
+    currentStep: 5,
+    totalSteps: 30,
+    stage: 'diffusion',
+    percentage: 25
+  }
+});
+
+// Update to complete
+registry.update('abc123', {
+  status: 'complete',
+  result: {
+    images: [{
+      image: base64String,
+      seed: 42,
+      width: 1024,
+      height: 1024
+    }],
+    format: 'png',
+    timeTaken: 15000
+  }
+});
+
+// Update to error
+registry.update('abc123', {
+  status: 'error',
+  error: {
+    message: 'Generation failed',
+    code: 'BACKEND_ERROR'
+  }
+});
+```
+
+---
+
+#### `delete(id: string): void`
+
+Delete a generation from the registry.
+
+**Parameters**:
+- `id: string` - Generation ID
+
+**Example**:
+```typescript
+registry.delete('abc123');
+```
+
+---
+
+#### `getAllIds(): string[]`
+
+Get all generation IDs currently in the registry.
+
+**Returns**: `string[]` - Array of generation IDs
+
+**Example**:
+```typescript
+const ids = registry.getAllIds();
+console.log('Active generations:', ids.length);
+ids.forEach(id => {
+  const state = registry.get(id);
+  console.log(`${id}: ${state?.status}`);
+});
+```
+
+---
+
+#### `size(): number`
+
+Get count of stored generations.
+
+**Returns**: `number` - Number of generations in registry
+
+**Example**:
+```typescript
+console.log('Registry size:', registry.size());
+```
+
+---
+
+#### `cleanup(maxAgeMs: number): number`
+
+Clean up old completed or errored generations older than specified age.
+
+**Parameters**:
+- `maxAgeMs: number` - Maximum age in milliseconds for terminal states
+
+**Returns**: `number` - Number of generations cleaned up
+
+**Example**:
+```typescript
+// Manual cleanup - remove results older than 5 minutes
+const cleaned = registry.cleanup(5 * 60 * 1000);
+console.log('Cleaned up', cleaned, 'old generations');
+```
+
+**Note**: Automatic cleanup runs at intervals specified in constructor. Only terminal states (complete/error) are cleaned up; pending and in_progress generations are never auto-removed.
+
+---
+
+#### `clear(): void`
+
+Clear all generations from the registry. Useful for testing or manual reset.
+
+**Example**:
+```typescript
+registry.clear();
+console.log('Registry cleared, size:', registry.size()); // 0
+```
+
+---
+
+#### `destroy(): void`
+
+Stop the automatic cleanup interval. Call this when you're done with the registry.
+
+**Example**:
+```typescript
+// When shutting down
+registry.destroy();
+```
+
+---
+
+### Complete Example: Custom Generation Tracking
+
+```typescript
+import { GenerationRegistry } from 'genai-electron';
+import type { ImageGenerationConfig } from 'genai-electron';
+
+// Create registry with 10 minute TTL
+const registry = new GenerationRegistry({
+  maxResultAgeMs: 10 * 60 * 1000,
+  cleanupIntervalMs: 2 * 60 * 1000
+});
+
+// Simulate async generation workflow
+async function handleGenerationRequest(config: ImageGenerationConfig): Promise<string> {
+  // Create entry
+  const id = registry.create(config);
+
+  // Start async work (don't await)
+  generateImageAsync(id, config).catch(error => {
+    registry.update(id, {
+      status: 'error',
+      error: {
+        message: error.message,
+        code: 'BACKEND_ERROR'
+      }
+    });
+  });
+
+  // Return ID immediately
+  return id;
+}
+
+async function generateImageAsync(id: string, config: ImageGenerationConfig) {
+  // Update to in_progress
+  registry.update(id, { status: 'in_progress' });
+
+  // Simulate generation with progress updates
+  for (let step = 1; step <= 30; step++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    registry.update(id, {
+      progress: {
+        currentStep: step,
+        totalSteps: 30,
+        stage: 'diffusion',
+        percentage: (step / 30) * 100
+      }
+    });
+  }
+
+  // Complete
+  registry.update(id, {
+    status: 'complete',
+    result: {
+      images: [{
+        image: 'base64_image_data_here',
+        seed: config.seed || 42,
+        width: config.width || 512,
+        height: config.height || 512
+      }],
+      format: 'png',
+      timeTaken: 3000
+    }
+  });
+}
+
+// Usage
+const id = await handleGenerationRequest({
+  prompt: 'A beautiful sunset',
+  width: 1024,
+  height: 1024
+});
+
+// Poll for result
+const checkStatus = async () => {
+  const state = registry.get(id);
+  if (!state) {
+    console.log('Not found');
+    return;
+  }
+
+  console.log('Status:', state.status);
+
+  if (state.status === 'complete') {
+    console.log('✅ Complete!');
+    console.log('Images:', state.result?.images.length);
+  } else if (state.status === 'in_progress') {
+    console.log('⏳ In progress:', state.progress?.percentage, '%');
+  }
+};
+
+// Cleanup when done
+process.on('exit', () => {
+  registry.destroy();
+});
+```
+
+---
+
+## HTTP API Endpoints
+
+The `DiffusionServerManager` creates an HTTP server with RESTful endpoints for async image generation. These endpoints implement a polling pattern where you POST to start generation, then GET to poll for status and results.
+
+**Base URL**: `http://localhost:{port}` (default port: 8081)
+
+**Architecture Note**: The HTTP server is created automatically when you call `diffusionServer.start()`. It runs alongside the internal generation logic and provides the same automatic resource orchestration as the Node.js API.
+
+---
+
+### POST /v1/images/generations
+
+Start an async image generation. Returns immediately with a generation ID.
+
+**Request Body** (JSON):
+```typescript
+{
+  prompt: string;              // Required - text description
+  negativePrompt?: string;     // What to avoid
+  width?: number;              // Image width (default: 512)
+  height?: number;             // Image height (default: 512)
+  steps?: number;              // Inference steps (default: 20)
+  cfgScale?: number;           // Guidance scale (default: 7.5)
+  seed?: number;               // Random seed (undefined/negative = random)
+  sampler?: ImageSampler;      // Sampler algorithm (default: 'euler_a')
+  count?: number;              // Number of images (1-5, default: 1)
+}
+```
+
+**Response** (201 Created):
+```typescript
+{
+  id: string;           // Unique generation ID (use for polling)
+  status: 'pending';    // Initial status
+  createdAt: number;    // Unix timestamp
+}
+```
+
+**Error Responses**:
+- `400 Bad Request` - Invalid request (missing prompt, invalid count)
+- `503 Service Unavailable` - Server is busy with another generation
+
+**Example**:
+```typescript
+// Start generation
+const response = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    prompt: 'A serene mountain landscape at sunset',
+    negativePrompt: 'blurry, low quality',
+    width: 1024,
+    height: 1024,
+    steps: 30,
+    cfgScale: 7.5,
+    sampler: 'dpm++2m'
+  })
+});
+
+const { id, status, createdAt } = await response.json();
+console.log('Generation started:', id);
+```
+
+---
+
+### GET /v1/images/generations/:id
+
+Poll generation status and retrieve results when complete.
+
+**URL Parameters**:
+- `id` - Generation ID from POST response
+
+**Response Formats**:
+
+**Pending** (200 OK):
+```typescript
+{
+  id: string;
+  status: 'pending';
+  createdAt: number;
+  updatedAt: number;
+}
+```
+
+**In Progress** (200 OK):
+```typescript
+{
+  id: string;
+  status: 'in_progress';
+  createdAt: number;
+  updatedAt: number;
+  progress: {
+    currentStep: number;      // Current step in stage
+    totalSteps: number;       // Total steps in stage
+    stage: 'loading' | 'diffusion' | 'decoding';
+    percentage?: number;      // Overall progress (0-100)
+    currentImage?: number;    // Current image (1-indexed, batch only)
+    totalImages?: number;     // Total images (batch only)
+  };
+}
+```
+
+**Complete** (200 OK):
+```typescript
+{
+  id: string;
+  status: 'complete';
+  createdAt: number;
+  updatedAt: number;
+  result: {
+    images: Array<{
+      image: string;    // Base64-encoded PNG
+      seed: number;     // Seed used
+      width: number;    // Image width
+      height: number;   // Image height
+    }>;
+    format: 'png';
+    timeTaken: number;  // Total time in milliseconds
+  };
+}
+```
+
+**Error** (200 OK):
+```typescript
+{
+  id: string;
+  status: 'error';
+  createdAt: number;
+  updatedAt: number;
+  error: {
+    message: string;
+    code: 'SERVER_BUSY' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'BACKEND_ERROR' | 'IO_ERROR';
+  };
+}
+```
+
+**Error Response** (404 Not Found):
+```typescript
+{
+  error: {
+    message: 'Generation not found';
+    code: 'NOT_FOUND';
+  };
+}
+```
+
+**Example (Polling Loop)**:
+```typescript
+async function pollUntilComplete(id: string): Promise<any> {
+  while (true) {
+    const response = await fetch(`http://localhost:8081/v1/images/generations/${id}`);
+    const data = await response.json();
+
+    console.log('Status:', data.status);
+
+    if (data.status === 'in_progress' && data.progress) {
+      console.log(`Progress: ${data.progress.percentage?.toFixed(1)}%`);
+      console.log(`Stage: ${data.progress.stage}`);
+    }
+
+    if (data.status === 'complete') {
+      console.log('✅ Generation complete!');
+      console.log(`Generated ${data.result.images.length} images in ${data.result.timeTaken}ms`);
+      return data.result;
+    }
+
+    if (data.status === 'error') {
+      console.error('❌ Generation failed:', data.error.message);
+      throw new Error(data.error.message);
+    }
+
+    // Poll every second
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
+// Use it
+const result = await pollUntilComplete(generationId);
+
+// Save images
+result.images.forEach((img, i) => {
+  const buffer = Buffer.from(img.image, 'base64');
+  fs.writeFileSync(`output-${i}.png`, buffer);
+  console.log(`Saved with seed: ${img.seed}`);
+});
+```
+
+---
+
+### GET /health
+
+Check if the diffusion server is running and available.
+
+**Response** (200 OK):
+```typescript
+{
+  status: 'ok';
+  busy: boolean;  // Whether currently generating an image
+}
+```
+
+**Example**:
+```typescript
+const response = await fetch('http://localhost:8081/health');
+const { status, busy } = await response.json();
+
+if (status === 'ok' && !busy) {
+  console.log('✅ Server is ready for generation');
+} else if (busy) {
+  console.log('⏳ Server is busy - wait before submitting');
+}
+```
+
+---
+
+### Complete Workflow Example
+
+```typescript
+async function generateImageViaHTTP() {
+  const baseURL = 'http://localhost:8081';
+
+  // 1. Check server health
+  const healthResponse = await fetch(`${baseURL}/health`);
+  const { status, busy } = await healthResponse.json();
+
+  if (status !== 'ok') {
+    throw new Error('Diffusion server is not running');
+  }
+
+  if (busy) {
+    console.log('Server is busy, waiting...');
+    await new Promise(resolve => setTimeout(resolve, 2000));
+  }
+
+  // 2. Start generation
+  const startResponse = await fetch(`${baseURL}/v1/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt: 'A futuristic city at night, cyberpunk style',
+      negativePrompt: 'blurry, low quality, oversaturated',
+      width: 1024,
+      height: 1024,
+      steps: 30,
+      cfgScale: 7.5,
+      sampler: 'dpm++2m',
+      count: 2  // Generate 2 variations
+    })
+  });
+
+  if (!startResponse.ok) {
+    const error = await startResponse.json();
+    throw new Error(error.error?.message || 'Failed to start generation');
+  }
+
+  const { id } = await startResponse.json();
+  console.log('Generation started:', id);
+
+  // 3. Poll for completion
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    const pollResponse = await fetch(`${baseURL}/v1/images/generations/${id}`);
+    const data = await pollResponse.json();
+
+    if (data.status === 'in_progress' && data.progress) {
+      const { stage, percentage, currentImage, totalImages } = data.progress;
+      if (currentImage && totalImages) {
+        console.log(`Image ${currentImage}/${totalImages}: ${stage} - ${percentage?.toFixed(1)}%`);
+      } else {
+        console.log(`${stage}: ${percentage?.toFixed(1)}%`);
+      }
+    }
+
+    if (data.status === 'complete') {
+      console.log('✅ Generation complete!');
+      console.log(`Time taken: ${(data.result.timeTaken / 1000).toFixed(1)}s`);
+
+      // Save images
+      data.result.images.forEach((img, i) => {
+        const buffer = Buffer.from(img.image, 'base64');
+        fs.writeFileSync(`cyberpunk-${i}.png`, buffer);
+        console.log(`Saved image ${i} (seed: ${img.seed})`);
+      });
+
+      return data.result;
+    }
+
+    if (data.status === 'error') {
+      throw new Error(`Generation failed: ${data.error.message} (${data.error.code})`);
+    }
+  }
+}
+
+// Run it
+try {
+  await generateImageViaHTTP();
+} catch (error) {
+  console.error('Failed:', error.message);
+}
+```
+
+---
+
+### Error Codes Reference
+
+| Code | Description | Typical Cause |
+|------|-------------|---------------|
+| `SERVER_BUSY` | Server is already processing another generation | Multiple concurrent requests |
+| `NOT_FOUND` | Generation ID not found | Invalid ID or result already expired (TTL) |
+| `INVALID_REQUEST` | Invalid request parameters | Missing prompt, invalid count (not 1-5), etc. |
+| `BACKEND_ERROR` | Backend processing failed | Model loading error, CUDA error, etc. |
+| `IO_ERROR` | File I/O error | Failed to write temporary files, disk full |
+
+---
+
+### Resource Orchestration (HTTP Endpoints)
+
+The HTTP endpoints inherit the same automatic resource orchestration as the Node.js API:
+- If resources are constrained, LLM is automatically offloaded before generation
+- After generation completes, LLM is automatically reloaded
+- This happens transparently for all HTTP requests
+- No additional configuration needed
+
+**Note**: Batch generation (count > 1) currently bypasses orchestration and runs without offload. This is planned for Phase 3.
+
+---
+
+### Migration from Phase 2.0 Synchronous API
+
+**Breaking Change**: Phase 2.5 introduced an async polling API. If you were using the previous synchronous HTTP endpoint:
+
+**Old (Phase 2.0 - synchronous)**:
+```typescript
+// POST /v1/images/generations - blocks until complete
+const response = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  body: JSON.stringify(config)
+});
+const result = await response.json(); // Waits for entire generation
+```
+
+**New (Phase 2.5+ - async)**:
+```typescript
+// POST /v1/images/generations - returns immediately
+const startResponse = await fetch('http://localhost:8081/v1/images/generations', {
+  method: 'POST',
+  body: JSON.stringify(config)
+});
+const { id } = await startResponse.json(); // Get ID immediately
+
+// Poll GET /v1/images/generations/:id for result
+// (see polling examples above)
+```
+
+---
+
 ## Types and Interfaces
 
 ### SystemCapabilities
@@ -1859,6 +2576,7 @@ interface ImageGenerationConfig {
   cfgScale?: number;                 // Guidance scale (default: 7.5)
   seed?: number;                     // Random seed (undefined or negative = random, actual seed returned)
   sampler?: ImageSampler;            // Sampler algorithm (default: 'euler_a')
+  count?: number;                    // Number of images to generate (1-5, default: 1)
   onProgress?: (
     currentStep: number,
     totalSteps: number,
@@ -1920,6 +2638,8 @@ interface ImageGenerationProgress {
   totalSteps: number;               // Total steps in the stage
   stage: ImageGenerationStage;      // Current stage
   percentage?: number;              // Overall progress percentage (0-100)
+  currentImage?: number;            // Current image being generated (1-indexed, for batch generation)
+  totalImages?: number;             // Total images in batch (for batch generation)
 }
 ```
 
@@ -2006,6 +2726,57 @@ interface DiffusionServerInfo {
   busy?: boolean;            // Whether currently generating an image
 }
 ```
+
+#### GenerationStatus
+
+Status of an async image generation (for HTTP API).
+
+```typescript
+type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error';
+```
+
+**Status Flow**:
+- `pending` → Initial state after POST request
+- `in_progress` → Generation is running
+- `complete` → Generation finished successfully
+- `error` → Generation failed
+
+#### GenerationState
+
+Complete state information for an async image generation (for HTTP API).
+
+```typescript
+interface GenerationState {
+  id: string;                      // Unique generation ID
+  status: GenerationStatus;        // Current status
+  createdAt: number;               // Unix timestamp (ms)
+  updatedAt: number;               // Unix timestamp (ms)
+  config: ImageGenerationConfig;   // Original request configuration
+
+  // Present when status is 'in_progress'
+  progress?: ImageGenerationProgress;
+
+  // Present when status is 'complete'
+  result?: {
+    images: Array<{
+      image: string;      // Base64-encoded PNG
+      seed: number;       // Seed used
+      width: number;      // Image width
+      height: number;     // Image height
+    }>;
+    format: 'png';
+    timeTaken: number;    // Total time in milliseconds
+  };
+
+  // Present when status is 'error'
+  error?: {
+    message: string;
+    code: string;         // Error code (SERVER_BUSY, NOT_FOUND, etc.)
+  };
+}
+```
+
+**Usage**: This type represents the complete state stored in `GenerationRegistry` and returned by the HTTP GET endpoint.
 
 ---
 
@@ -2263,6 +3034,34 @@ if (response.object === 'chat.completion') {
   console.log('Reasoning:', response.choices[0].reasoning); // Model's thinking process
 }
 ```
+
+### ID Generation
+
+Generate unique IDs for async operations (used internally by `GenerationRegistry` for the HTTP API).
+
+```typescript
+import { generateId } from 'genai-electron';
+
+// Generate a unique ID
+const id = generateId();
+console.log('Generated ID:', id); // e.g., "a3f9d2b8e1c4"
+
+// Use for custom tracking
+const taskId = generateId();
+console.log('Task ID:', taskId);
+```
+
+**Returns**: `string` - Random alphanumeric ID (12 characters)
+
+**Use cases:**
+- Custom async operation tracking
+- Request/response correlation
+- Unique file naming
+- Session identifiers
+
+**Note**: This utility is primarily for advanced use cases. The `DiffusionServerManager` HTTP API uses this internally via `GenerationRegistry`.
+
+---
 
 ### GGUF Metadata Extraction
 
