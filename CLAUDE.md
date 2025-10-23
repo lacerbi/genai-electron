@@ -46,19 +46,21 @@ Each manager is independent but can coordinate:
 - **SystemInfo**: Hardware detection, capability assessment, config recommendations
 - **ModelManager**: Model downloads, storage, metadata, checksums
 - **LlamaServerManager**: Binary downloads, process spawning, health monitoring, lifecycle management
+- **DiffusionServerManager**: Image generation server, HTTP wrapper for stable-diffusion.cpp (Phase 2)
 
 ### Module Organization
 
 ```
 src/
-├── managers/       # Core singleton managers (SystemInfo, ModelManager, LlamaServerManager, StorageManager)
-├── system/         # Platform-specific hardware detection (CPU, GPU, memory)
+├── managers/       # Core managers (ModelManager, LlamaServerManager, DiffusionServerManager,
+│                   #   ResourceOrchestrator, GenerationRegistry, StorageManager, ServerManager)
+├── system/         # Platform-specific hardware detection (SystemInfo, CPU, GPU, memory)
 ├── process/        # Process lifecycle (spawn, health checks, logs)
 ├── download/       # Download utilities (streaming, checksums, HuggingFace URLs)
 ├── config/         # Paths, defaults, binary versions
 ├── types/          # TypeScript definitions
 ├── errors/         # Custom error classes (all extend GenaiElectronError)
-└── utils/          # Platform and file utilities
+└── utils/          # Platform and file utilities (GGUF parser, generation-id, file-utils)
 ```
 
 ### Key Architectural Decisions
@@ -89,6 +91,12 @@ src/
 - Emits: 'started', 'stopped', 'crashed'
 - Enables reactive UI updates in control panel apps
 
+**6. genai-lite Integration Pattern** (Phase 2.6)
+- genai-electron manages infrastructure: start/stop servers, health monitoring, resource orchestration
+- genai-lite provides unified API: LLMService, ImageService with provider abstraction
+- Example: `examples/electron-control-panel/` uses both (main/ for server management, renderer/ for UI)
+- Communication: genai-electron → HTTP servers ← genai-lite
+
 ### Critical Implementation Details
 
 **Electron Integration**
@@ -117,6 +125,13 @@ src/
 - All errors extend `GenaiElectronError` with `code` and `details` properties
 - Specialized errors: ModelNotFoundError, DownloadError, InsufficientResourcesError, ServerError, PortInUseError, ChecksumError, BinaryError, FileSystemError
 - Errors include actionable suggestions in details
+
+**Key Exports** (Phase 2+)
+- **Classes**: ResourceOrchestrator, GenerationRegistry, DiffusionServerManager, ServerManager
+- **GGUF Utilities**: `fetchGGUFMetadata()`, `fetchLocalGGUFMetadata()`, `getArchField()` - Extract metadata from GGUF files
+- **Reasoning Detection**: `detectReasoningSupport()`, `REASONING_MODEL_PATTERNS` - Identify reasoning-capable models
+- **Generation ID**: `generateId()` - Used internally by async image generation API
+- **Complete list**: See `src/index.ts` for all exported utilities, types, and classes
 
 ## Testing Approach
 
@@ -180,6 +195,9 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 - **docs/dev/ESM-TESTING-GUIDE.md**: ESM mocking patterns and testing best practices
 - **docs/API.md**: Complete API reference with examples (Phase 1 & 2)
 - **docs/SETUP.md**: Development environment setup for all platforms
+- **examples/electron-control-panel/**: Full integration example (Phase 2.6)
+  - Uses genai-lite (LLMService + ImageService) + genai-electron (server management)
+  - Structure: `main/` (server management), `renderer/` (UI components)
 
 ## Critical: Electron + ES Modules Gotcha
 
@@ -214,7 +232,7 @@ This is documented in the electron-control-panel example for reference.
 1. **Run `npm run build`** - Must compile with 0 TypeScript errors
 2. **Run `npm run lint`** - Must pass with 0 errors (warnings OK if intentional)
 3. **Run `npm run format`** - Auto-format all files with Prettier
-4. **Run `npm test`** - All tests must pass (221/221)
+4. **Run `npm test`** - All tests must pass (273/273)
 5. **Commit `package-lock.json`** - Never add lockfiles to .gitignore (needed for CI)
 
 **Note**: CI will fail if any of these checks fail. Run them locally before pushing.
@@ -259,7 +277,38 @@ This is documented in the electron-control-panel example for reference.
 
 ## Related Projects
 
-**genai-lite**: Lightweight API abstraction layer for AI providers (cloud and local)
+**genai-lite** (v0.5.1): Lightweight API abstraction layer for AI providers (cloud and local)
 - genai-electron starts servers, genai-lite talks to those servers
 - Clean separation: runtime management vs API abstraction
-- Located at: (separate repository - see docs/GENAI-LITE-README.md for reference)
+- Repository: https://github.com/lacerbi/genai-lite
+
+## genai-lite Documentation Reference
+
+**IMPORTANT**: When implementing features that integrate with genai-lite (LLMService, ImageService), **read the relevant documentation first** to ensure correct API usage.
+
+**Documentation Location**: `.ath_materials/genai-lite-docs/` (v0.5.1 reference docs)
+
+**Key Documentation Files**:
+- **`index.md`** - Overview, installation, quick starts (LLM and image generation)
+- **`llm-service.md`** - LLMService API for text generation and chat
+- **`image-service.md`** - ImageService API for image generation (cloud and local)
+- **`llamacpp-integration.md`** - llama.cpp setup, configuration, and advanced features
+- **`core-concepts.md`** - API key management, presets, settings hierarchy, error handling
+- **`prompting-utilities.md`** - Template engine, token counting, content parsing
+- **`providers-and-models.md`** - Supported providers and model configurations
+- **`typescript-reference.md`** - Type definitions and interfaces
+- **`troubleshooting.md`** - Common issues and solutions
+- **`example-chat-demo.md`** - Reference implementation for chat applications
+- **`example-image-demo.md`** - Reference implementation for image generation
+
+**When to Consult genai-lite Docs**:
+- Implementing LLM chat features → Read `llm-service.md` and `llamacpp-integration.md`
+- Implementing image generation → Read `image-service.md`
+- Working with templates or prompts → Read `prompting-utilities.md`
+- Debugging API integration → Read `core-concepts.md` and `troubleshooting.md`
+- Understanding example app patterns → Read `example-chat-demo.md` or `example-image-demo.md`
+
+**Integration Pattern** (Phase 2.6):
+- genai-electron manages infrastructure: `llamaServer.start()`, `diffusionServer.start()`
+- genai-lite provides unified API: `LLMService.sendMessage()`, `ImageService.generateImage()`
+- See `examples/electron-control-panel/` for complete integration example
