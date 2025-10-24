@@ -96,7 +96,7 @@ npm run dev
 This will:
 
 1. Build the main process TypeScript
-2. Start Vite dev server for the renderer
+2. Start Vite dev server for the renderer (available at `http://localhost:3100`)
 3. Launch Electron with hot reload
 
 ## Building for Production
@@ -182,7 +182,8 @@ npm run make
 
 ### Port already in use
 
-- **Default port 8080:** Another application may be using it
+- **Port 3100 (UI):** Another application may be using this port for the dev server
+- **Port 8080 (llama-server):** Another application may be using this port
 - **Solution:** Stop the conflicting application or change the port in manual configuration mode
 
 ## Development
