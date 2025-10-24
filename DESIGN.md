@@ -745,7 +745,7 @@ async function advancedSetup() {
     ...optimalConfig,
     // Override specific settings
     contextSize: 8192,
-    parallelRequests: 8,
+    parallelRequests: 1,  // Default for single-user apps (use 8+ for multi-user servers)
     flashAttention: true
   });
 
