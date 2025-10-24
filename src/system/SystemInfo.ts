@@ -300,18 +300,24 @@ export class SystemInfo {
 
   /**
    * Recommend context size based on available memory
+   *
+   * IMPORTANT: This is a placeholder implementation that uses llama.cpp's default (4096).
+   * The previous RAM-based calculation was overly conservative and didn't consider VRAM.
+   *
+   * TODO: Implement proper VRAM-aware context size calculation:
+   * - For GPU inference, calculate based on available VRAM (not RAM)
+   * - Consider KV cache size: approximately 1-2MB per token depending on model architecture
+   * - Account for model layers already loaded in VRAM
+   * - Leave adequate VRAM buffer for inference operations
+   * - For CPU-only inference, consider RAM but with better estimates
+   *
+   * For now, we use llama.cpp's default which provides good balance for most use cases.
+   * Users can override via the `contextSize` parameter in ServerConfig if needed.
    */
-  private recommendContextSize(availableRAM: number, modelSize: number): number {
-    const ramGB = availableRAM / 1024 ** 3;
-    const modelGB = modelSize / 1024 ** 3;
-
-    // Leave enough RAM for OS and model
-    const remainingRAM = ramGB - modelGB - 2; // 2GB buffer
-
-    if (remainingRAM >= 8) return 8192;
-    if (remainingRAM >= 4) return 4096;
-    if (remainingRAM >= 2) return 2048;
-    return 1024;
+  private recommendContextSize(_availableRAM: number, _modelSize: number): number {
+    // Use llama.cpp's default context size
+    // This provides good performance for most models without being overly conservative
+    return 4096;
   }
 
   /**

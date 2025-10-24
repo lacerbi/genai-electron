@@ -166,6 +166,9 @@ When `threads` and `gpuLayers` are not specified, the library auto-configures ba
 **About `parallelRequests`:**
 The KV cache is shared across all parallel request slots. With N slots and contextSize C, each slot gets approximately C/N tokens. For single-user Electron apps (interactive chat, writing assistance), use `parallelRequests: 1` (default) to avoid wasting context capacity. Only increase this for multi-user server deployments with concurrent requests.
 
+**About Default Context Size:**
+Currently defaults to 4096. We plan to introduce VRAM-aware dynamic context calculation as default.
+
 ---
 
 ## Status and Health
