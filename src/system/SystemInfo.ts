@@ -324,10 +324,10 @@ export class SystemInfo {
    * Multi-user server deployments should explicitly set parallelRequests based on expected
    * concurrent load rather than relying on this auto-configuration.
    *
-   * @param cpuCores - Number of CPU cores (currently unused)
+   * @param _cpuCores - Number of CPU cores (unused, kept for interface consistency)
    * @returns Recommended number of parallel request slots (always 1 for single-user apps)
    */
-  private recommendParallelRequests(cpuCores: number): number {
+  private recommendParallelRequests(_cpuCores: number): number {
     // Always return 1 for single-user Electron apps
     // The previous CPU-based logic (8 for 16+ cores) was designed for multi-user servers
     // and caused issues where KV cache was split across slots, limiting per-request tokens
