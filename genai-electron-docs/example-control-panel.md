@@ -574,7 +574,7 @@ const preloadPath = join(__dirname, 'preload.cjs'); // Not 'preload.js'!
 ```bash
 cd examples/electron-control-panel
 npm install
-npm run dev  # Development mode with hot reload
+npm run dev  # Development mode with hot reload (UI on http://localhost:3100)
 ```
 
 **Production**: `npm run build && npm run package`

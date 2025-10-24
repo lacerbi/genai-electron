@@ -1,6 +1,6 @@
 {
   "name": "electron-control-panel",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "Developer control panel for genai-electron - demonstrates runtime management capabilities",
   "main": ".vite/build/main.cjs",
   "type": "module",

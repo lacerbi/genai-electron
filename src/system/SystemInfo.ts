@@ -300,27 +300,43 @@ export class SystemInfo {
 
   /**
    * Recommend context size based on available memory
+   *
+   * IMPORTANT: This is a placeholder implementation that uses llama.cpp's default (4096).
+   * The previous RAM-based calculation was overly conservative and didn't consider VRAM.
+   *
+   * TODO: Implement proper VRAM-aware context size calculation:
+   * - For GPU inference, calculate based on available VRAM (not RAM)
+   * - Consider KV cache size: approximately 1-2MB per token depending on model architecture
+   * - Account for model layers already loaded in VRAM
+   * - Leave adequate VRAM buffer for inference operations
+   * - For CPU-only inference, consider RAM but with better estimates
+   *
+   * For now, we use llama.cpp's default which provides good balance for most use cases.
+   * Users can override via the `contextSize` parameter in ServerConfig if needed.
    */
-  private recommendContextSize(availableRAM: number, modelSize: number): number {
-    const ramGB = availableRAM / 1024 ** 3;
-    const modelGB = modelSize / 1024 ** 3;
-
-    // Leave enough RAM for OS and model
-    const remainingRAM = ramGB - modelGB - 2; // 2GB buffer
-
-    if (remainingRAM >= 8) return 8192;
-    if (remainingRAM >= 4) return 4096;
-    if (remainingRAM >= 2) return 2048;
-    return 1024;
+  private recommendContextSize(_availableRAM: number, _modelSize: number): number {
+    // Use llama.cpp's default context size
+    // This provides good performance for most models without being overly conservative
+    return 4096;
   }
 
   /**
-   * Recommend parallel request slots based on CPU cores
+   * Recommend parallel request slots
+   *
+   * Returns 1 for single-user Electron apps. The KV cache is shared across all parallel
+   * slots, so with N slots, each slot gets approximately contextSize/N tokens. For single-user
+   * interactive use (chat, writing assistance, etc.), parallel requests waste context capacity.
+   *
+   * Multi-user server deployments should explicitly set parallelRequests based on expected
+   * concurrent load rather than relying on this auto-configuration.
+   *
+   * @param _cpuCores - Number of CPU cores (unused, kept for interface consistency)
+   * @returns Recommended number of parallel request slots (always 1 for single-user apps)
    */
-  private recommendParallelRequests(cpuCores: number): number {
-    if (cpuCores >= 16) return 8;
-    if (cpuCores >= 8) return 4;
-    if (cpuCores >= 4) return 2;
+  private recommendParallelRequests(_cpuCores: number): number {
+    // Always return 1 for single-user Electron apps
+    // The previous CPU-based logic (8 for 16+ cores) was designed for multi-user servers
+    // and caused issues where KV cache was split across slots, limiting per-request tokens
     return 1;
   }
 

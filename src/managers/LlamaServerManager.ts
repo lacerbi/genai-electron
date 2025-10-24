@@ -386,6 +386,10 @@ export class LlamaServerManager extends ServerManager {
       args.push('-c', String(config.contextSize));
     }
 
+    // Max predict tokens (-1 = unlimited, respect per-request max_tokens from API)
+    // Without this flag, llama-server caps at contextSize/4 by default
+    args.push('-n', '-1');
+
     // GPU layers
     if (config.gpuLayers !== undefined && config.gpuLayers > 0) {
       args.push('-ngl', String(config.gpuLayers));

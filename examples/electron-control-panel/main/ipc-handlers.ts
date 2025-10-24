@@ -201,11 +201,19 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('server:testMessage', async (_event, message: string, settings?: unknown) => {
     try {
+      // DEBUG: Log incoming settings
+      console.log('[DEBUG] Test message settings:', JSON.stringify(settings, null, 2));
+
       // Create LLMService instance (llama.cpp doesn't need real API keys)
       const llmService = new LLMService(async () => 'not-needed');
 
       // Get server info to determine the port
       const serverInfo = llamaServer.getInfo();
+      console.log('[DEBUG] Server info:', {
+        status: serverInfo.status,
+        port: serverInfo.port,
+        modelId: serverInfo.modelId,
+      });
 
       if (serverInfo.status !== 'running' || !serverInfo.port) {
         throw new Error('Server is not running');
@@ -223,6 +231,18 @@ export function registerIpcHandlers(): void {
         ],
         settings: settings || {},
       });
+
+      // DEBUG: Log response details
+      console.log('[DEBUG] Response object type:', response.object);
+      if (response.object === 'chat.completion') {
+        console.log('[DEBUG] Response usage:', response.usage);
+        console.log('[DEBUG] Finish reason:', response.choices[0]?.finish_reason);
+        console.log(
+          '[DEBUG] Response length:',
+          response.choices[0]?.message?.content?.length,
+          'chars'
+        );
+      }
 
       return response;
     } catch (error) {
