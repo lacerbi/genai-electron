@@ -82,7 +82,7 @@ await llamaServer.start({
   threads: 8,
   gpuLayers: 35,
   contextSize: 8192,
-  parallelRequests: 8,
+  parallelRequests: 1,  // Use 1 for single-user apps (default, see note below)
   flashAttention: true
 });
 ```
@@ -155,13 +155,16 @@ interface LlamaServerConfig {
   threads?: number;           // Optional - CPU threads (auto-detected if not specified)
   contextSize?: number;       // Optional - Context window size (default: 4096)
   gpuLayers?: number;         // Optional - Layers to offload to GPU (auto-detected if not specified)
-  parallelRequests?: number;  // Optional - Concurrent request slots (default: 4)
+  parallelRequests?: number;  // Optional - Concurrent request slots (default: 1)
   flashAttention?: boolean;   // Optional - Enable flash attention (default: false)
   forceValidation?: boolean;  // Optional - Force re-validation of binary (default: false)
 }
 ```
 
 When `threads` and `gpuLayers` are not specified, the library auto-configures based on system capabilities and model metadata.
+
+**About `parallelRequests`:**
+The KV cache is shared across all parallel request slots. With N slots and contextSize C, each slot gets approximately C/N tokens. For single-user Electron apps (interactive chat, writing assistance), use `parallelRequests: 1` (default) to avoid wasting context capacity. Only increase this for multi-user server deployments with concurrent requests.
 
 ---
 

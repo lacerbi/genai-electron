@@ -315,12 +315,22 @@ export class SystemInfo {
   }
 
   /**
-   * Recommend parallel request slots based on CPU cores
+   * Recommend parallel request slots
+   *
+   * Returns 1 for single-user Electron apps. The KV cache is shared across all parallel
+   * slots, so with N slots, each slot gets approximately contextSize/N tokens. For single-user
+   * interactive use (chat, writing assistance, etc.), parallel requests waste context capacity.
+   *
+   * Multi-user server deployments should explicitly set parallelRequests based on expected
+   * concurrent load rather than relying on this auto-configuration.
+   *
+   * @param cpuCores - Number of CPU cores (currently unused)
+   * @returns Recommended number of parallel request slots (always 1 for single-user apps)
    */
   private recommendParallelRequests(cpuCores: number): number {
-    if (cpuCores >= 16) return 8;
-    if (cpuCores >= 8) return 4;
-    if (cpuCores >= 4) return 2;
+    // Always return 1 for single-user Electron apps
+    // The previous CPU-based logic (8 for 16+ cores) was designed for multi-user servers
+    // and caused issues where KV cache was split across slots, limiting per-request tokens
     return 1;
   }
 

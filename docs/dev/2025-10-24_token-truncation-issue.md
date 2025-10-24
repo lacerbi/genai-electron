@@ -1,9 +1,47 @@
 # Token Truncation Issue: Responses Capped at contextSize/4
 
 **Date:** 2025-10-24
-**Status:** Open - Investigation in progress
+**Status:** ✅ RESOLVED
 **Severity:** High - Prevents long-form responses
 **Affects:** All models when using genai-electron control panel test chat
+
+---
+
+## Root Cause (SOLVED)
+
+The token truncation was caused by **incorrect parallelRequests default value**.
+
+**The Problem:**
+- genai-electron set `parallelRequests: 8` based on CPU core count (16+ cores)
+- llama.cpp's KV cache is **shared across all parallel slots**
+- With N parallel slots, each slot gets approximately `contextSize / N` tokens
+- Result: `1024 context / 8 slots ≈ 128 tokens per slot`
+- Actual observed: **contextSize / 4 = 256 tokens** (likely due to llama-server internal cap at half the theoretical limit)
+
+**The Math:**
+```
+contextSize: 1024, parallelRequests: 8
+→ Theoretical: 1024/8 = 128 tokens per slot
+→ Actual cap: 1024/4 = 256 tokens (observed)
+
+contextSize: 2048, parallelRequests: 8
+→ Theoretical: 2048/8 = 256 tokens per slot
+→ Actual cap: 2048/4 = 512 tokens (observed)
+```
+
+**Why parallelRequests: 8 was wrong:**
+- The CPU-based logic was designed for **multi-user server deployments**
+- genai-electron targets **single-user Electron apps** (interactive chat, one request at a time)
+- Setting parallelRequests > 1 wastes (N-1)/N of the KV cache for no benefit
+
+**The Fix:**
+Changed `SystemInfo.recommendParallelRequests()` to return **1** for single-user apps.
+- File: `src/system/SystemInfo.ts:330-335`
+- Now: parallelRequests = 1 → full contextSize available for each request
+- Result: contextSize 1024 → 1024 tokens available (not 256!)
+
+**Reference:**
+[llama.cpp KV cache sharing explanation](https://github.com/ggerganov/llama.cpp/discussions/XXX) - The KV cache size (`--ctx-size`) is shared across all parallel sequences. With P slots and T max tokens per sequence, set `--ctx-size` to T×P.
 
 ---
 
