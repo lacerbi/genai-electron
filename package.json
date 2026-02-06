@@ -67,6 +67,7 @@
   ],
   "dependencies": {
     "@huggingface/gguf": "^0.3.2",
-    "adm-zip": "^0.5.16"
+    "adm-zip": "^0.5.16",
+    "tar": "^7.5.7"
   }
 }

@@ -2,6 +2,10 @@
 
 This guide explains how to update genai-electron to use a new llama.cpp release.
 
+## Archive Format Change (b7956+)
+
+Starting with llama.cpp **b7956**, macOS and Linux binaries use **`.tar.gz`** format instead of `.zip`. Windows binaries remain `.zip`. The codebase handles both formats automatically via `src/utils/archive-utils.ts`.
+
 ## When to Update
 
 Check for new llama.cpp releases at: https://github.com/ggml-org/llama.cpp/releases
@@ -35,13 +39,13 @@ Example WebFetch prompt:
 ```
 URL: https://github.com/ggml-org/llama.cpp/releases
 Prompt: Look for release bXXXX. Extract ALL SHA256 checksums for these files:
-- llama-bXXXX-bin-macos-arm64.zip
-- llama-bXXXX-bin-macos-x64.zip
-- llama-bXXXX-bin-win-cuda-12.4-x64.zip
+- llama-bXXXX-bin-macos-arm64.tar.gz (macOS/Linux use .tar.gz since b7956)
+- llama-bXXXX-bin-macos-x64.tar.gz
+- llama-bXXXX-bin-win-cuda-12.4-x64.zip (Windows still uses .zip)
 - llama-bXXXX-bin-win-vulkan-x64.zip
 - llama-bXXXX-bin-win-cpu-x64.zip
-- llama-bXXXX-bin-ubuntu-x64.zip
-- llama-bXXXX-bin-ubuntu-vulkan-x64.zip
+- llama-bXXXX-bin-ubuntu-x64.tar.gz
+- llama-bXXXX-bin-ubuntu-vulkan-x64.tar.gz
 
 List them in format: filename | sha256:FULL_HASH
 ```
@@ -83,13 +87,13 @@ const fs = require('fs');
 const html = fs.readFileSync('release.html', 'utf-8');
 
 const files = [
-  'llama-b6784-bin-macos-arm64.zip',
-  'llama-b6784-bin-macos-x64.zip',
-  'llama-b6784-bin-win-cuda-12.4-x64.zip',
-  'llama-b6784-bin-win-vulkan-x64.zip',
-  'llama-b6784-bin-win-cpu-x64.zip',
-  'llama-b6784-bin-ubuntu-x64.zip',
-  'llama-b6784-bin-ubuntu-vulkan-x64.zip',
+  'llama-b7956-bin-macos-arm64.tar.gz',  // macOS/Linux use .tar.gz since b7956
+  'llama-b7956-bin-macos-x64.tar.gz',
+  'llama-b7956-bin-win-cuda-12.4-x64.zip',  // Windows still uses .zip
+  'llama-b7956-bin-win-vulkan-x64.zip',
+  'llama-b7956-bin-win-cpu-x64.zip',
+  'llama-b7956-bin-ubuntu-x64.tar.gz',
+  'llama-b7956-bin-ubuntu-vulkan-x64.tar.gz',
 ];
 
 files.forEach(filename => {
@@ -471,7 +475,7 @@ cd /path/to/binaries
 
 - **Binary configuration**: `src/config/defaults.ts`
 - **Download logic**: `src/managers/BinaryManager.ts` (ensureBinary, downloadDependencies methods)
-- **ZIP extraction**: `src/utils/zip-utils.ts`
+- **Archive extraction**: `src/utils/archive-utils.ts` (supports both .zip and .tar.gz)
 - **Checksum verification**: `src/managers/BinaryManager.ts` (downloadAndTestVariant method)
 - **CUDA detection**: `src/system/gpu-detect.ts`
 
