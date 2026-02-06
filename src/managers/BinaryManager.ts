@@ -599,11 +599,42 @@ export class BinaryManager {
     }
   }
 
+  /** GPU error patterns to check in server/process output */
+  private static readonly GPU_ERROR_PATTERNS = [
+    'cuda error',
+    'cuda_error',
+    'failed to allocate',
+    'vkcreatedevice failed',
+    'vulkan error',
+    'gpu error',
+    'out of memory',
+    'llama_model_load: error',
+    'failed to load model',
+    'error: invalid argument',
+  ];
+
+  /**
+   * Check output string for GPU/CUDA error patterns
+   *
+   * @param output - Combined stdout+stderr output (will be lowercased)
+   * @returns The matched error pattern, or null if none found
+   * @private
+   */
+  private checkForGpuErrors(output: string): string | null {
+    const lower = output.toLowerCase();
+    for (const pattern of BinaryManager.GPU_ERROR_PATTERNS) {
+      if (lower.includes(pattern)) {
+        return pattern;
+      }
+    }
+    return null;
+  }
+
   /**
    * Run Phase 2: Real functionality test to verify GPU/CUDA actually works
    *
    * Tests actual inference capability to catch GPU/CUDA errors.
-   * - For llama: Uses llama-cli for one-shot inference
+   * - For llama: Starts llama-server, sends a completion request, then kills it
    * - For diffusion: Uses sd for tiny image generation
    *
    * @param binaryPath - Path to primary binary (llama-server or sd)
@@ -614,103 +645,190 @@ export class BinaryManager {
   private async runRealFunctionalityTest(binaryPath: string, modelPath: string): Promise<boolean> {
     const { type } = this.config;
 
+    if (type === 'llama') {
+      return this.runLlamaServerTest(binaryPath, modelPath);
+    }
+    return this.runDiffusionTest(binaryPath, modelPath);
+  }
+
+  /**
+   * Run Phase 2 for llama: start llama-server, send completion, kill
+   *
+   * Starts llama-server on an ephemeral port with GPU layers enabled,
+   * waits for it to become healthy, sends a test completion request
+   * to exercise the full GPU inference path, then kills the server.
+   *
+   * @param binaryPath - Path to llama-server binary
+   * @param modelPath - Path to test model
+   * @returns True if GPU inference test succeeds
+   * @private
+   */
+  private async runLlamaServerTest(binaryPath: string, modelPath: string): Promise<boolean> {
+    const testPort = 49152 + Math.floor(Math.random() * 16000);
+    const timeout = 15000;
+    let child: ReturnType<typeof spawn> | null = null;
+    let stderr = '';
+
+    try {
+      this.log('Phase 2: Testing GPU functionality with llama-server...', 'info');
+
+      // Start llama-server with minimal config
+      const testArgs = [
+        '-m',
+        modelPath,
+        '--port',
+        String(testPort),
+        '-ngl',
+        '1', // Force at least 1 GPU layer
+        '-c',
+        '512', // Minimal context for fast startup
+      ];
+
+      child = spawn(binaryPath, testArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+
+      // Collect stderr for GPU error detection
+      child.stderr?.on('data', (data: Buffer) => {
+        stderr += data.toString('utf8');
+      });
+
+      // Wait for server to become healthy
+      const startTime = Date.now();
+      let healthy = false;
+
+      while (Date.now() - startTime < timeout) {
+        // Check stderr for GPU errors while waiting
+        const gpuError = this.checkForGpuErrors(stderr);
+        if (gpuError) {
+          this.log(`Phase 2: ✗ GPU error detected during startup: ${gpuError}`, 'warn');
+          return false;
+        }
+
+        try {
+          const controller = new AbortController();
+          const fetchTimer = setTimeout(() => controller.abort(), 2000);
+          const response = await fetch(`http://localhost:${testPort}/health`, {
+            signal: controller.signal,
+          });
+          clearTimeout(fetchTimer);
+
+          if (response.ok) {
+            const data = (await response.json()) as { status?: string };
+            if (data.status === 'ok') {
+              healthy = true;
+              break;
+            }
+          }
+        } catch {
+          // Server not ready yet
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+
+      if (!healthy) {
+        this.log('Phase 2: ✗ llama-server did not become healthy within timeout', 'warn');
+        if (stderr) {
+          this.log(`Phase 2 stderr output:\n${stderr.slice(0, 500)}`, 'warn');
+        }
+        return false;
+      }
+
+      // Send a test completion request to exercise GPU inference
+      const controller = new AbortController();
+      const fetchTimer = setTimeout(() => controller.abort(), 5000);
+      const completionResponse = await fetch(`http://localhost:${testPort}/completion`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: '2+2=', n_predict: 4 }),
+        signal: controller.signal,
+      });
+      clearTimeout(fetchTimer);
+
+      if (!completionResponse.ok) {
+        this.log(
+          `Phase 2: ✗ Completion request failed with status ${completionResponse.status}`,
+          'warn'
+        );
+        return false;
+      }
+
+      // Check stderr one final time for GPU errors during inference
+      const gpuError = this.checkForGpuErrors(stderr);
+      if (gpuError) {
+        this.log(`Phase 2: ✗ GPU error detected during inference: ${gpuError}`, 'warn');
+        return false;
+      }
+
+      this.log('Phase 2: ✓ GPU functionality test passed (llama-server)', 'info');
+      return true;
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+
+      if (stderr) {
+        this.log(`Phase 2 output before failure:\nstderr: ${stderr.slice(0, 500)}`, 'warn');
+      }
+
+      const gpuError = this.checkForGpuErrors(stderr);
+      if (gpuError) {
+        this.log(`Phase 2: ✗ GPU error detected in output: ${gpuError}`, 'warn');
+        return false;
+      }
+
+      this.log(`Phase 2: ✗ Real functionality test failed: ${errorMsg}`, 'warn');
+      return false;
+    } finally {
+      // Always kill the test server
+      if (child && !child.killed) {
+        child.kill('SIGTERM');
+      }
+    }
+  }
+
+  /**
+   * Run Phase 2 for diffusion: one-shot tiny image generation
+   *
+   * @param binaryPath - Path to sd binary
+   * @param modelPath - Path to test model
+   * @returns True if test succeeds
+   * @private
+   */
+  private async runDiffusionTest(binaryPath: string, modelPath: string): Promise<boolean> {
     try {
       this.log('Phase 2: Testing GPU functionality with real inference...', 'info');
 
-      let testBinaryPath: string;
-      let testArgs: string[];
-      let timeout: number;
-
-      if (type === 'llama') {
-        // For llama, use llama-cli for one-shot inference testing
-        // llama-cli supports -m, -p, -ngl flags for GPU validation
-        const binaryDir = path.dirname(binaryPath);
-        const llamaCliName = process.platform === 'win32' ? 'llama-cli.exe' : 'llama-cli';
-        testBinaryPath = path.join(binaryDir, llamaCliName);
-
-        // Check if llama-cli exists
-        if (!(await fileExists(testBinaryPath))) {
-          this.log('Phase 2: ✗ llama-cli not found in binary directory', 'error');
-          return false;
-        }
-
-        // Test llama-cli with simple math question
-        // --no-conversation disables conversation mode so it exits after generation
-        // -ngl 1 forces at least 1 GPU layer (tests CUDA/GPU)
-        // -n 16 limits output to 16 tokens for fast completion
-        testArgs = [
-          '-m',
-          modelPath,
-          '--no-conversation', // One-shot mode (exit after generation)
-          '-ngl',
-          '1', // Force GPU usage (1+ GPU layers)
-          '-n',
-          '16', // Limit output tokens
-          '-p',
-          'What is 2+2? Just answer with the number.', // Deterministic prompt
-        ];
-        timeout = 15000; // 15 seconds for simple math
-      } else {
-        // For diffusion, use sd directly (it's already one-shot)
-        testBinaryPath = binaryPath;
-
-        // Test diffusion with tiny 64x64 image, 1 step
-        const tempOutput = path.join(PATHS.binaries[type], '.test-output.png');
-        testArgs = [
-          '-m',
-          modelPath,
-          '-p',
-          'test',
-          '-o',
-          tempOutput,
-          '--width',
-          '64',
-          '--height',
-          '64',
-          '--steps',
-          '1',
-        ];
-        timeout = 15000; // 15 seconds for tiny image
-      }
-
-      // Run the test using spawn (properly supports stdio configuration)
-      const { stdout, stderr } = await this.spawnWithTimeout(testBinaryPath, testArgs, timeout);
-
-      // Check for GPU/CUDA error messages in output
-      const output = `${stdout} ${stderr}`.toLowerCase();
-      const errorPatterns = [
-        'cuda error',
-        'cuda_error',
-        'failed to allocate',
-        'vkcreatedevice failed',
-        'vulkan error',
-        'gpu error',
-        'out of memory',
-        'llama_model_load: error',
-        'failed to load model',
-        'error: invalid argument',
+      const tempOutput = path.join(PATHS.binaries[this.config.type], '.test-output.png');
+      const testArgs = [
+        '-m',
+        modelPath,
+        '-p',
+        'test',
+        '-o',
+        tempOutput,
+        '--width',
+        '64',
+        '--height',
+        '64',
+        '--steps',
+        '1',
       ];
 
-      for (const pattern of errorPatterns) {
-        if (output.includes(pattern)) {
-          this.log(`Phase 2: ✗ GPU error detected: ${pattern}`, 'warn');
-          return false;
-        }
+      const { stdout, stderr } = await this.spawnWithTimeout(binaryPath, testArgs, 15000);
+
+      const gpuError = this.checkForGpuErrors(`${stdout} ${stderr}`);
+      if (gpuError) {
+        this.log(`Phase 2: ✗ GPU error detected: ${gpuError}`, 'warn');
+        return false;
       }
 
-      // Test passed - GPU inference worked
-      const testBinaryName = type === 'llama' ? 'llama-cli' : 'sd';
-      this.log(`Phase 2: ✓ GPU functionality test passed (${testBinaryName})`, 'info');
+      this.log('Phase 2: ✓ GPU functionality test passed (sd)', 'info');
       return true;
     } catch (error) {
-      // Test failed - could be timeout, crash, or other issue
       const errorMsg = error instanceof Error ? error.message : String(error);
-
-      // Extract stdout/stderr from error (child_process includes partial output even on failure)
       const stdout = (error as any).stdout || '';
       const stderr = (error as any).stderr || '';
 
-      // Log partial output for debugging visibility
       if (stdout || stderr) {
         this.log(
           `Phase 2 output before failure:\nstdout: ${stdout.slice(0, 500)}\nstderr: ${stderr.slice(0, 500)}`,
@@ -718,26 +836,10 @@ export class BinaryManager {
         );
       }
 
-      // Still check for GPU errors in partial output
-      const output = `${stdout} ${stderr}`.toLowerCase();
-      const errorPatterns = [
-        'cuda error',
-        'cuda_error',
-        'failed to allocate',
-        'vkcreatedevice failed',
-        'vulkan error',
-        'gpu error',
-        'out of memory',
-        'llama_model_load: error',
-        'failed to load model',
-        'error: invalid argument',
-      ];
-
-      for (const pattern of errorPatterns) {
-        if (output.includes(pattern)) {
-          this.log(`Phase 2: ✗ GPU error detected in output: ${pattern}`, 'warn');
-          return false;
-        }
+      const gpuError = this.checkForGpuErrors(`${stdout} ${stderr}`);
+      if (gpuError) {
+        this.log(`Phase 2: ✗ GPU error detected in output: ${gpuError}`, 'warn');
+        return false;
       }
 
       this.log(`Phase 2: ✗ Real functionality test failed: ${errorMsg}`, 'warn');

@@ -142,7 +142,10 @@ const createSpawnImplementation = () => {
     const mockChild: any = {
       stdout: mockStdout,
       stderr: mockStderr,
-      kill: jest.fn(),
+      killed: false,
+      kill: jest.fn(() => {
+        mockChild.killed = true;
+      }),
       on: jest.fn((event: string, handler: Function) => {
         if (event === 'exit' && !currentBehavior.shouldError && !currentBehavior.shouldTimeout) {
           // Use setImmediate for more realistic async behavior
@@ -775,11 +778,26 @@ describe('BinaryManager', () => {
     it('should run Phase 1 (basic validation) and Phase 2 (real functionality) when testModelPath is provided', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock fileExists to return true for both binary and llama-cli
+      // Mock fileExists to return true
       mockFileExists.mockResolvedValue(true);
 
-      // Mock spawn to succeed for both phases
-      setSpawnResponse({ stdout: 'test output', stderr: '', exitCode: 0 });
+      // Phase 1: --version exits normally; Phase 2: server stays alive (no exit)
+      setSpawnResponses([
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // Phase 1
+        { shouldTimeout: true }, // Phase 2: server process stays running
+      ]);
+
+      // Mock fetch: health returns ok, completion returns success
+      const mockFetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = typeof input === 'string' ? input : (input as Request).url;
+        if (url.includes('/health')) {
+          return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+        }
+        if (url.includes('/completion')) {
+          return new Response(JSON.stringify({ content: '4' }), { status: 200 });
+        }
+        return new Response('', { status: 404 });
+      });
 
       const managerWithModel = new BinaryManager({
         type: 'llama',
@@ -802,62 +820,68 @@ describe('BinaryManager', () => {
         'info'
       );
 
-      // Phase 2: Should test llama-cli with GPU
+      // Phase 2: Should start llama-server and test via HTTP
       expect(mockLogger).toHaveBeenCalledWith(
-        'Phase 2: Testing GPU functionality with real inference...',
+        'Phase 2: Testing GPU functionality with llama-server...',
         'info'
       );
       expect(mockLogger).toHaveBeenCalledWith(
-        'Phase 2: ✓ GPU functionality test passed (llama-cli)',
+        'Phase 2: ✓ GPU functionality test passed (llama-server)',
         'info'
       );
 
-      // Should call spawn for llama-cli with GPU testing args (timeout handled internally)
+      // Should spawn llama-server with model and GPU args
       expect(mockSpawn).toHaveBeenCalledWith(
-        expect.stringContaining('llama-cli'),
+        expect.anything(),
         expect.arrayContaining([
           '-m',
           testModelPath,
-          '--no-conversation',
+          '--port',
+          expect.any(String),
           '-ngl',
           '1',
-          '-n',
-          '16',
-          '-p',
-          'What is 2+2? Just answer with the number.',
+          '-c',
+          '512',
         ]),
         expect.objectContaining({
           stdio: ['ignore', 'pipe', 'pipe'],
         })
       );
+
+      // Should have called fetch for health and completion
+      expect(mockFetch).toHaveBeenCalled();
+
+      mockFetch.mockRestore();
     });
 
     it('should fail variant if Phase 1 (basic validation) fails', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // First variant: Phase 1 fails (first spawn call fails)
-      // Second variant: Phase 1 & 2 succeed (second and third spawn calls succeed)
+      // First variant: Phase 1 fails
+      // Second variant: Phase 1 succeeds, Phase 2 server stays running
       setSpawnResponses([
         { exitCode: 1, stderr: 'Binary not working' }, // First variant Phase 1 fails
-        { stdout: 'success', stderr: '', exitCode: 0 }, // Second variant Phase 1 succeeds
-        { stdout: 'success', stderr: '', exitCode: 0 }, // Second variant Phase 2 succeeds
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // Second variant Phase 1 succeeds
+        { shouldTimeout: true }, // Second variant Phase 2 server
       ]);
 
-      // Mock fileExists: binary doesn't exist (trigger download), llama-cli exists for Phase 2
-      mockFileExists.mockImplementation(async (path) => {
-        // Binary doesn't exist initially (trigger download)
-        if (path.includes('llama-server.exe')) {
-          return false;
-        }
-        // llama-cli exists (for Phase 2 test)
-        if (path.includes('llama-cli')) {
-          return true;
-        }
-        // Test model exists
-        if (path === testModelPath) {
-          return true;
-        }
+      // Mock fileExists: binary doesn't exist (trigger download), test model exists
+      mockFileExists.mockImplementation(async (filePath) => {
+        if (filePath.includes('llama-server.exe')) return false;
+        if (filePath === testModelPath) return true;
         return false;
+      });
+
+      // Mock fetch for Phase 2 of second variant
+      const mockFetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = typeof input === 'string' ? input : (input as Request).url;
+        if (url.includes('/health')) {
+          return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+        }
+        if (url.includes('/completion')) {
+          return new Response(JSON.stringify({ content: '4' }), { status: 200 });
+        }
+        return new Response('', { status: 404 });
       });
 
       const managerWithModel = new BinaryManager({
@@ -883,33 +907,48 @@ describe('BinaryManager', () => {
 
       // Should have tried both variants
       expect(mockDownload).toHaveBeenCalledTimes(2);
+
+      mockFetch.mockRestore();
     });
 
     it('should fail variant if Phase 2 (real functionality) fails due to GPU errors', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock fileExists: binary doesn't exist (trigger download), llama-cli exists for Phase 2
-      mockFileExists.mockImplementation(async (path) => {
-        if (path.includes('llama-server.exe')) {
-          return false;
-        }
-        if (path.includes('llama-cli')) {
-          return true;
-        }
-        if (path === testModelPath) {
-          return true;
-        }
+      // Mock fileExists: binary doesn't exist (trigger download), test model exists
+      mockFileExists.mockImplementation(async (filePath) => {
+        if (filePath.includes('llama-server.exe')) return false;
+        if (filePath === testModelPath) return true;
         return false;
       });
 
-      // Phase 1 succeeds for both, Phase 2 fails for CUDA (GPU error), succeeds for CPU
-      // Sequence: CUDA Phase1, CUDA Phase2 (fail), CPU Phase1, CPU Phase2 (success)
+      // CUDA: Phase 1 succeeds, Phase 2 server emits GPU error in stderr
+      // CPU: Phase 1 succeeds, Phase 2 server succeeds
       setSpawnResponses([
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CUDA Phase 1 success
-        { stdout: '', stderr: 'CUDA error: out of memory', exitCode: 0 }, // CUDA Phase 2 GPU error
+        { shouldTimeout: true, stderr: 'CUDA error: out of memory' }, // CUDA Phase 2 GPU error in stderr
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CPU Phase 1 success
-        { stdout: 'success', stderr: '', exitCode: 0 }, // CPU Phase 2 success
+        { shouldTimeout: true }, // CPU Phase 2 server
       ]);
+
+      // Health must fail initially so the poll loop iterates, giving setImmediate
+      // time to populate stderr with the GPU error before health succeeds
+      let healthCallCount = 0;
+      const mockFetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = typeof input === 'string' ? input : (input as Request).url;
+        if (url.includes('/health')) {
+          healthCallCount++;
+          // First 2 calls fail (CUDA variant — gives time for stderr GPU error)
+          // Later calls succeed (CPU variant)
+          if (healthCallCount <= 2) {
+            throw new Error('Connection refused');
+          }
+          return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+        }
+        if (url.includes('/completion')) {
+          return new Response(JSON.stringify({ content: '4' }), { status: 200 });
+        }
+        return new Response('', { status: 404 });
+      });
 
       const managerWithModel = new BinaryManager({
         type: 'llama',
@@ -934,39 +973,8 @@ describe('BinaryManager', () => {
 
       // Should have tried CPU variant as fallback
       expect(mockDownload).toHaveBeenCalledTimes(2);
-    });
 
-    it('should fail variant if llama-cli is not found', async () => {
-      const testModelPath = '/mock/models/test-model.gguf';
-
-      // Mock fileExists: binary exists, but llama-cli doesn't
-      mockFileExists.mockImplementation(async (path) => {
-        return !path.includes('llama-cli');
-      });
-
-      // Phase 1 succeeds
-      // Default spawn behavior (set in beforeEach) works for this test
-
-      const managerWithModel = new BinaryManager({
-        type: 'llama',
-        binaryName: 'llama-server',
-        platformKey: 'win32-x64',
-        variants: [cudaVariant],
-        testModelPath,
-        log: mockLogger,
-      });
-
-      await expect(managerWithModel.ensureBinary()).rejects.toThrow(BinaryError);
-
-      // Should log that llama-cli was not found
-      expect(mockLogger).toHaveBeenCalledWith(
-        'Phase 2: ✗ llama-cli not found in binary directory',
-        'error'
-      );
-      expect(mockLogger).toHaveBeenCalledWith(
-        'GPU functionality test failed, variant will be skipped',
-        'warn'
-      );
+      mockFetch.mockRestore();
     });
 
     it('should skip Phase 2 when no testModelPath provided', async () => {
@@ -1061,31 +1069,41 @@ describe('BinaryManager', () => {
       );
     });
 
-    it('should treat timeout in Phase 2 as test failure', async () => {
+    it('should fail variant if completion request fails during Phase 2', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock fileExists: binary doesn't exist (trigger download), llama-cli exists for Phase 2
-      mockFileExists.mockImplementation(async (path) => {
-        if (path.includes('llama-server.exe')) {
-          return false;
-        }
-        if (path.includes('llama-cli')) {
-          return true;
-        }
-        if (path === testModelPath) {
-          return true;
-        }
+      // Mock fileExists: binary doesn't exist (trigger download), test model exists
+      mockFileExists.mockImplementation(async (filePath) => {
+        if (filePath.includes('llama-server.exe')) return false;
+        if (filePath === testModelPath) return true;
         return false;
       });
 
-      // Phase 1 succeeds for both, Phase 2 times out for first variant, succeeds for second
-      // Sequence: CUDA Phase1, CUDA Phase2 (timeout), CPU Phase1, CPU Phase2 (success)
+      // CUDA: Phase 1 succeeds, Phase 2 server starts (health ok but completion fails)
+      // CPU: Phase 1 succeeds, Phase 2 server starts (everything succeeds)
       setSpawnResponses([
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CUDA Phase 1 success
-        { shouldError: true, errorMessage: 'Timeout' }, // CUDA Phase 2 timeout
+        { shouldTimeout: true }, // CUDA Phase 2 server
         { stdout: 'version 1.0', stderr: '', exitCode: 0 }, // CPU Phase 1 success
-        { stdout: 'success', stderr: '', exitCode: 0 }, // CPU Phase 2 success
+        { shouldTimeout: true }, // CPU Phase 2 server
       ]);
+
+      // First completion call fails (CUDA variant), second succeeds (CPU variant)
+      let completionCallCount = 0;
+      const mockFetch = jest.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+        const url = typeof input === 'string' ? input : (input as Request).url;
+        if (url.includes('/health')) {
+          return new Response(JSON.stringify({ status: 'ok' }), { status: 200 });
+        }
+        if (url.includes('/completion')) {
+          completionCallCount++;
+          if (completionCallCount <= 1) {
+            return new Response('Internal Server Error', { status: 500 });
+          }
+          return new Response(JSON.stringify({ content: '4' }), { status: 200 });
+        }
+        return new Response('', { status: 404 });
+      });
 
       const managerWithModel = new BinaryManager({
         type: 'llama',
@@ -1098,9 +1116,9 @@ describe('BinaryManager', () => {
 
       await managerWithModel.ensureBinary();
 
-      // Should log timeout as Phase 2 failure
+      // Should log completion failure
       expect(mockLogger).toHaveBeenCalledWith(
-        expect.stringContaining('Phase 2: ✗ Real functionality test failed'),
+        expect.stringContaining('Phase 2: ✗ Completion request failed with status 500'),
         'warn'
       );
       expect(mockLogger).toHaveBeenCalledWith(
@@ -1110,6 +1128,8 @@ describe('BinaryManager', () => {
 
       // Should have tried CPU variant
       expect(mockDownload).toHaveBeenCalledTimes(2);
+
+      mockFetch.mockRestore();
     });
   });
 
