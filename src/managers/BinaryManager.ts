@@ -18,9 +18,13 @@ import {
   deleteFile,
   copyDirectory,
 } from '../utils/file-utils.js';
-import { extractBinary, cleanupExtraction } from '../utils/zip-utils.js';
+import {
+  extractBinary,
+  extractArchive,
+  cleanupExtraction,
+  getArchiveExtension,
+} from '../utils/archive-utils.js';
 import { detectGPU } from '../system/gpu-detect.js';
-import AdmZip from 'adm-zip';
 import path from 'path';
 import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
@@ -40,6 +44,8 @@ interface ValidationCache {
   phase1Passed: boolean;
   /** Whether Phase 2 (real functionality test) passed (if model was available) */
   phase2Passed?: boolean;
+  /** Binary version tag (e.g., 'b7956') — added for cache invalidation on upgrades */
+  version?: string;
 }
 
 /**
@@ -62,6 +68,8 @@ export interface BinaryManagerConfig {
    * If not provided, falls back to basic --version/--help test.
    */
   testModelPath?: string;
+  /** Expected binary version from BINARY_VERSIONS — used for cache invalidation */
+  version?: string;
 }
 
 /**
@@ -206,51 +214,67 @@ export class BinaryManager {
     const binaryPath = getBinaryPath(type, binaryName);
     const variantCachePath = path.join(PATHS.binaries[type], '.variant.json');
 
-    // Check if binary already exists
+    // Check if binary already exists and handle version changes
     if (await fileExists(binaryPath)) {
       // Load validation cache
       const validationCache = await this.loadValidationCache();
 
-      if (validationCache && !forceValidation) {
-        // Calculate current checksum to verify binary hasn't been modified
-        this.log('Verifying binary integrity...', 'info');
-        const currentChecksum = await calculateChecksum(binaryPath);
+      // Check if configured version has changed since last validation
+      if (
+        validationCache &&
+        !forceValidation &&
+        this.config.version &&
+        validationCache.version !== this.config.version
+      ) {
+        this.log(
+          `Binary version changed (${validationCache.version || 'unknown'} → ${this.config.version}), re-downloading...`,
+          'info'
+        );
+        await deleteFile(binaryPath).catch(() => void 0);
+        // Skip validation — fall through to download section below
+      } else {
+        if (validationCache && !forceValidation) {
+          // Calculate current checksum to verify binary hasn't been modified
+          this.log('Verifying binary integrity...', 'info');
+          const currentChecksum = await calculateChecksum(binaryPath);
 
-        if (currentChecksum === validationCache.checksum) {
-          // Cache is valid - skip validation tests
-          this.log('Using cached validation result (binary verified)', 'info');
-          this.log(
-            `Last validated: ${new Date(validationCache.validatedAt).toLocaleString()}`,
-            'info'
-          );
+          if (currentChecksum === validationCache.checksum) {
+            // Cache is valid - skip validation tests
+            this.log('Using cached validation result (binary verified)', 'info');
+            this.log(
+              `Last validated: ${new Date(validationCache.validatedAt).toLocaleString()}`,
+              'info'
+            );
+            return binaryPath;
+          } else {
+            // Checksum mismatch - binary was modified
+            this.log('Binary checksum mismatch, re-validating...', 'warn');
+          }
+        } else if (forceValidation) {
+          this.log('Force validation requested, re-running tests...', 'info');
+        }
+
+        // Run validation tests (cache invalid, missing, or forced)
+        const works = await this.testBinary(binaryPath);
+        if (works) {
+          // Save validation cache
+          const checksum = await calculateChecksum(binaryPath);
+          const variantType = validationCache?.variant || 'unknown';
+          await this.saveValidationCache({
+            variant: variantType,
+            checksum,
+            validatedAt: new Date().toISOString(),
+            phase1Passed: true,
+            phase2Passed: this.config.testModelPath ? true : undefined,
+            version: this.config.version,
+          });
+
+          this.log('Binary validated successfully', 'info');
           return binaryPath;
         } else {
-          // Checksum mismatch - binary was modified
-          this.log('Binary checksum mismatch, re-validating...', 'warn');
+          this.log('Existing binary not working, re-downloading...', 'warn');
+          await deleteFile(binaryPath).catch(() => void 0);
         }
-      } else if (forceValidation) {
-        this.log('Force validation requested, re-running tests...', 'info');
-      }
-
-      // Run validation tests (cache invalid, missing, or forced)
-      const works = await this.testBinary(binaryPath);
-      if (works) {
-        // Save validation cache
-        const checksum = await calculateChecksum(binaryPath);
-        const variantType = validationCache?.variant || 'unknown';
-        await this.saveValidationCache({
-          variant: variantType,
-          checksum,
-          validatedAt: new Date().toISOString(),
-          phase1Passed: true,
-          phase2Passed: this.config.testModelPath ? true : undefined,
-        });
-
-        this.log('Binary validated successfully', 'info');
-        return binaryPath;
-      } else {
-        this.log('Existing binary not working, re-downloading...', 'warn');
-        await deleteFile(binaryPath).catch(() => void 0);
       }
     }
 
@@ -298,6 +322,7 @@ export class BinaryManager {
             validatedAt: new Date().toISOString(),
             phase1Passed: true,
             phase2Passed: this.config.testModelPath ? true : undefined,
+            version: this.config.version,
           });
 
           this.log(`Successfully installed ${variant.type} variant`, 'info');
@@ -343,13 +368,14 @@ export class BinaryManager {
       this.log(`Downloading ${depName}...`, 'info');
 
       const downloader = new Downloader();
-      const depZipPath = path.join(PATHS.binaries[type], `.dep${i}.zip`);
+      const depExt = getArchiveExtension(dep.url);
+      const depArchivePath = path.join(PATHS.binaries[type], `.dep${i}${depExt}`);
 
       try {
         // Download dependency
         await downloader.download({
           url: dep.url,
-          destination: depZipPath,
+          destination: depArchivePath,
           onProgress: (downloaded, total) => {
             const percent = ((downloaded / total) * 100).toFixed(1);
             this.log(`Downloading ${depName}: ${percent}%`, 'info');
@@ -357,7 +383,7 @@ export class BinaryManager {
         });
 
         // Verify checksum
-        const actualChecksum = await calculateChecksum(depZipPath);
+        const actualChecksum = await calculateChecksum(depArchivePath);
         if (actualChecksum !== dep.checksum) {
           throw new BinaryError('Dependency checksum verification failed', {
             dependency: dep.url,
@@ -369,18 +395,15 @@ export class BinaryManager {
 
         // Extract dependency to same directory as main binary
         // This ensures DLLs are in the same directory as the executable
-        // Use AdmZip directly to extract all files (not searching for specific binary)
-        await fs.mkdir(extractDir, { recursive: true });
-        const zip = new AdmZip(depZipPath);
-        zip.extractAllTo(extractDir, true);
+        await extractArchive(depArchivePath, extractDir);
 
         // Cleanup dependency ZIP
-        await deleteFile(depZipPath).catch(() => void 0);
+        await deleteFile(depArchivePath).catch(() => void 0);
 
         this.log(`${depName} extracted successfully`, 'info');
       } catch (error) {
         // Cleanup on error
-        await deleteFile(depZipPath).catch(() => void 0);
+        await deleteFile(depArchivePath).catch(() => void 0);
         throw error;
       }
     }
@@ -400,7 +423,8 @@ export class BinaryManager {
   ): Promise<boolean> {
     const { type } = this.config;
     const downloader = new Downloader();
-    const zipPath = `${finalBinaryPath}.${variant.type}.zip`;
+    const archiveExt = getArchiveExtension(variant.url);
+    const archivePath = `${finalBinaryPath}.${variant.type}${archiveExt}`;
     const extractDir = `${finalBinaryPath}.${variant.type}.extract`;
 
     try {
@@ -410,10 +434,10 @@ export class BinaryManager {
         await this.downloadDependencies(variant.dependencies, extractDir);
       }
 
-      // Download main binary ZIP
+      // Download main binary archive
       await downloader.download({
         url: variant.url,
-        destination: zipPath,
+        destination: archivePath,
         onProgress: (downloaded, total) => {
           const percent = ((downloaded / total) * 100).toFixed(1);
           this.log(`Downloading ${variant.type} binary: ${percent}%`, 'info');
@@ -421,7 +445,7 @@ export class BinaryManager {
       });
 
       // Verify checksum
-      const actualChecksum = await calculateChecksum(zipPath);
+      const actualChecksum = await calculateChecksum(archivePath);
       if (actualChecksum !== variant.checksum) {
         throw new BinaryError('Binary checksum verification failed', {
           expected: variant.checksum,
@@ -436,8 +460,8 @@ export class BinaryManager {
           ? ['llama-server.exe', 'llama-server', 'llama-cli.exe', 'llama-cli']
           : ['sd.exe', 'sd'];
 
-      // Extract main binary ZIP to same directory as dependencies
-      const extractedBinaryPath = await extractBinary(zipPath, extractDir, binaryNamesToSearch);
+      // Extract main binary archive to same directory as dependencies
+      const extractedBinaryPath = await extractBinary(archivePath, extractDir, binaryNamesToSearch);
 
       // Test if binary works (has required drivers, etc.)
       const works = await this.testBinary(extractedBinaryPath);
@@ -453,20 +477,20 @@ export class BinaryManager {
         }
 
         // Cleanup
-        await deleteFile(zipPath).catch(() => void 0);
+        await deleteFile(archivePath).catch(() => void 0);
         await cleanupExtraction(extractDir).catch(() => void 0);
 
         return true;
       } else {
         // Binary doesn't work (missing drivers, etc.)
         // Cleanup everything including dependencies and return false to try next variant
-        await deleteFile(zipPath).catch(() => void 0);
+        await deleteFile(archivePath).catch(() => void 0);
         await cleanupExtraction(extractDir).catch(() => void 0);
         return false;
       }
     } catch (error) {
       // Cleanup everything on error (including dependencies)
-      await deleteFile(zipPath).catch(() => void 0);
+      await deleteFile(archivePath).catch(() => void 0);
       await cleanupExtraction(extractDir).catch(() => void 0);
       throw error;
     }

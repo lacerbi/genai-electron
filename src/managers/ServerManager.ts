@@ -458,6 +458,7 @@ export abstract class ServerManager extends EventEmitter {
       platformKey,
       variants: variants || [],
       testModelPath,
+      version: binaryConfig.version,
       log: (message, level = 'info') => {
         // Write to log file
         this.logManager?.write(message, level).catch(() => void 0);

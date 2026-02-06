@@ -35,13 +35,17 @@ jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
   copyDirectory: mockCopyDirectory,
 }));
 
-// Mock zip-utils
+// Mock archive-utils
 const mockExtractBinary = jest.fn();
+const mockExtractArchive = jest.fn();
 const mockCleanupExtraction = jest.fn();
+const mockGetArchiveExtension = jest.fn();
 
-jest.unstable_mockModule('../../src/utils/zip-utils.js', () => ({
+jest.unstable_mockModule('../../src/utils/archive-utils.js', () => ({
   extractBinary: mockExtractBinary,
+  extractArchive: mockExtractArchive,
   cleanupExtraction: mockCleanupExtraction,
+  getArchiveExtension: mockGetArchiveExtension,
 }));
 
 // Mock paths config
@@ -173,15 +177,6 @@ jest.unstable_mockModule('../../src/system/gpu-detect.js', () => ({
   detectGPU: mockDetectGPU,
 }));
 
-// Mock adm-zip
-const mockExtractAllTo = jest.fn();
-class MockAdmZip {
-  extractAllTo = mockExtractAllTo;
-}
-jest.unstable_mockModule('adm-zip', () => ({
-  default: MockAdmZip,
-}));
-
 // Import after mocking
 const { BinaryManager } = await import('../../src/managers/BinaryManager.js');
 const { BinaryError } = await import('../../src/errors/index.js');
@@ -231,14 +226,15 @@ describe('BinaryManager', () => {
     mockDeleteFile.mockResolvedValue(undefined);
     mockCopyDirectory.mockResolvedValue(undefined);
     mockExtractBinary.mockResolvedValue('/mock/extract/llama-server.exe');
+    mockExtractArchive.mockResolvedValue(undefined);
     mockCleanupExtraction.mockResolvedValue(undefined);
+    mockGetArchiveExtension.mockReturnValue('.zip');
     mockGetBinaryPath.mockReturnValue('/mock/binaries/llama/llama-server.exe');
     mockReadFile.mockRejectedValue(new Error('No cache'));
     mockWriteFile.mockResolvedValue(undefined);
     mockChmod.mockResolvedValue(undefined);
     mockMkdir.mockResolvedValue(undefined);
     mockDownload.mockResolvedValue(undefined);
-    mockExtractAllTo.mockReturnValue(undefined);
 
     // Reset spawn behavior for each test (tests will configure as needed)
     setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
@@ -651,15 +647,15 @@ describe('BinaryManager', () => {
       mockDeleteFile.mockResolvedValue(undefined);
       mockCopyDirectory.mockResolvedValue(undefined);
       mockExtractBinary.mockResolvedValue('/mock/extract/llama-server.exe');
+      mockExtractArchive.mockResolvedValue(undefined);
       mockCleanupExtraction.mockResolvedValue(undefined);
+      mockGetArchiveExtension.mockReturnValue('.zip');
       mockGetBinaryPath.mockReturnValue('/mock/binaries/llama/llama-server.exe');
       mockReadFile.mockRejectedValue(new Error('No cache'));
       mockWriteFile.mockResolvedValue(undefined);
       mockChmod.mockResolvedValue(undefined);
       mockMkdir.mockResolvedValue(undefined);
       mockDownload.mockResolvedValue(undefined);
-      // Default spawn behavior (set in beforeEach) works for this test
-      mockExtractAllTo.mockReturnValue(undefined);
     });
 
     it('should download dependencies before main binary', async () => {
@@ -731,6 +727,47 @@ describe('BinaryManager', () => {
 
       // Should cleanup extraction dir (which contains both binary and dependencies)
       expect(mockCleanupExtraction).toHaveBeenCalled();
+    });
+  });
+
+  describe('tar.gz archive support', () => {
+    it('should use .tar.gz extension for tar.gz variant URLs', async () => {
+      const tarGzVariant: BinaryVariantConfig = {
+        type: 'metal',
+        url: 'https://example.com/llama-server-macos-arm64.tar.gz',
+        checksum: 'abc123metal',
+      };
+
+      // Mock getArchiveExtension to return .tar.gz for this URL
+      mockGetArchiveExtension.mockImplementation((url: string) => {
+        if (url.endsWith('.tar.gz')) return '.tar.gz';
+        return '.zip';
+      });
+
+      mockCalculateChecksum.mockImplementation(async (path: string) => {
+        if (path.includes('.metal.tar.gz')) return 'abc123metal';
+        return 'abc123';
+      });
+
+      const metalManager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'darwin-arm64',
+        variants: [tarGzVariant],
+        log: mockLogger,
+      });
+
+      await metalManager.ensureBinary();
+
+      // Should call getArchiveExtension with the variant URL
+      expect(mockGetArchiveExtension).toHaveBeenCalledWith(tarGzVariant.url);
+
+      // Should use .tar.gz extension for download destination
+      expect(mockDownload).toHaveBeenCalledWith({
+        url: tarGzVariant.url,
+        destination: expect.stringContaining('.metal.tar.gz'),
+        onProgress: expect.any(Function),
+      });
     });
   });
 
@@ -1264,6 +1301,147 @@ describe('BinaryManager', () => {
       );
       expect(validationCacheCalls.length).toBeGreaterThan(0);
       expect(validationCacheCalls[0][1]).toContain('new-checksum');
+    });
+
+    it('should re-download when configured version changes', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+        version: 'b6784',
+      };
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile: first call returns validation cache, second call fails (no variant cache)
+      mockReadFile
+        .mockResolvedValueOnce(JSON.stringify(validationCache))
+        .mockRejectedValue(new Error('No cache'));
+
+      mockCalculateChecksum.mockImplementation(async (path: string) => {
+        if (path.includes('.cuda.zip')) return 'abc123cuda';
+        return 'new-checksum';
+      });
+
+      // Spawn succeeds for downloaded binary
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        version: 'b7956',
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should detect version mismatch and re-download
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Binary version changed (b6784 → b7956)'),
+        'info'
+      );
+      // Should delete old binary
+      expect(mockDeleteFile).toHaveBeenCalledWith(binaryPath);
+      // Should download new binary
+      expect(mockDownload).toHaveBeenCalled();
+      expect(result).toBe(binaryPath);
+    });
+
+    it('should re-download when old cache has no version field', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+        // No version field — simulating pre-upgrade cache
+      };
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile: first call returns validation cache, second call fails (no variant cache)
+      mockReadFile
+        .mockResolvedValueOnce(JSON.stringify(validationCache))
+        .mockRejectedValue(new Error('No cache'));
+
+      mockCalculateChecksum.mockImplementation(async (path: string) => {
+        if (path.includes('.cuda.zip')) return 'abc123cuda';
+        return 'new-checksum';
+      });
+
+      // Spawn succeeds for downloaded binary
+      setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        version: 'b7956',
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should detect undefined !== 'b7956' as mismatch
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Binary version changed (unknown → b7956)'),
+        'info'
+      );
+      // Should delete old binary and re-download
+      expect(mockDeleteFile).toHaveBeenCalledWith(binaryPath);
+      expect(mockDownload).toHaveBeenCalled();
+      expect(result).toBe(binaryPath);
+    });
+
+    it('should use cached validation when version matches', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+        version: 'b7956',
+      };
+
+      // Binary exists
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+
+      // Mock readFile to return validation cache with matching version
+      mockReadFile.mockResolvedValue(JSON.stringify(validationCache));
+
+      // Mock checksum to match cache
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        version: 'b7956',
+        log: mockLogger,
+      });
+
+      const result = await manager.ensureBinary(false);
+
+      // Should use cached result
+      expect(result).toBe(binaryPath);
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Using cached validation result (binary verified)',
+        'info'
+      );
+      // Should NOT spawn or download
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockDownload).not.toHaveBeenCalled();
     });
 
     it('should fall back to validation if cache is corrupted', async () => {
