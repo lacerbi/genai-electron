@@ -818,6 +818,7 @@ describe('BinaryManager', () => {
         expect.arrayContaining([
           '-m',
           testModelPath,
+          '--no-conversation',
           '-ngl',
           '1',
           '-n',

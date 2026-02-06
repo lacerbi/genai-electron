@@ -635,11 +635,13 @@ export class BinaryManager {
         }
 
         // Test llama-cli with simple math question
+        // --no-conversation disables conversation mode so it exits after generation
         // -ngl 1 forces at least 1 GPU layer (tests CUDA/GPU)
         // -n 16 limits output to 16 tokens for fast completion
         testArgs = [
           '-m',
           modelPath,
+          '--no-conversation', // One-shot mode (exit after generation)
           '-ngl',
           '1', // Force GPU usage (1+ GPU layers)
           '-n',
