@@ -775,7 +775,7 @@ describe('BinaryManager', () => {
     it('should run Phase 1 (basic validation) and Phase 2 (real functionality) when testModelPath is provided', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock fileExists to return true for both binary and llama-run
+      // Mock fileExists to return true for both binary and llama-cli
       mockFileExists.mockResolvedValue(true);
 
       // Mock spawn to succeed for both phases
@@ -802,23 +802,27 @@ describe('BinaryManager', () => {
         'info'
       );
 
-      // Phase 2: Should test llama-run with GPU
+      // Phase 2: Should test llama-cli with GPU
       expect(mockLogger).toHaveBeenCalledWith(
         'Phase 2: Testing GPU functionality with real inference...',
         'info'
       );
       expect(mockLogger).toHaveBeenCalledWith(
-        'Phase 2: ✓ GPU functionality test passed (llama-run)',
+        'Phase 2: ✓ GPU functionality test passed (llama-cli)',
         'info'
       );
 
-      // Should call spawn for llama-run with GPU testing args (timeout handled internally)
+      // Should call spawn for llama-cli with GPU testing args (timeout handled internally)
       expect(mockSpawn).toHaveBeenCalledWith(
-        expect.stringContaining('llama-run'),
+        expect.stringContaining('llama-cli'),
         expect.arrayContaining([
+          '-m',
+          testModelPath,
           '-ngl',
           '1',
-          testModelPath,
+          '-n',
+          '16',
+          '-p',
           'What is 2+2? Just answer with the number.',
         ]),
         expect.objectContaining({
@@ -838,14 +842,14 @@ describe('BinaryManager', () => {
         { stdout: 'success', stderr: '', exitCode: 0 }, // Second variant Phase 2 succeeds
       ]);
 
-      // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
+      // Mock fileExists: binary doesn't exist (trigger download), llama-cli exists for Phase 2
       mockFileExists.mockImplementation(async (path) => {
         // Binary doesn't exist initially (trigger download)
         if (path.includes('llama-server.exe')) {
           return false;
         }
-        // llama-run exists (for Phase 2 test)
-        if (path.includes('llama-run')) {
+        // llama-cli exists (for Phase 2 test)
+        if (path.includes('llama-cli')) {
           return true;
         }
         // Test model exists
@@ -883,12 +887,12 @@ describe('BinaryManager', () => {
     it('should fail variant if Phase 2 (real functionality) fails due to GPU errors', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
+      // Mock fileExists: binary doesn't exist (trigger download), llama-cli exists for Phase 2
       mockFileExists.mockImplementation(async (path) => {
         if (path.includes('llama-server.exe')) {
           return false;
         }
-        if (path.includes('llama-run')) {
+        if (path.includes('llama-cli')) {
           return true;
         }
         if (path === testModelPath) {
@@ -931,12 +935,12 @@ describe('BinaryManager', () => {
       expect(mockDownload).toHaveBeenCalledTimes(2);
     });
 
-    it('should fail variant if llama-run is not found', async () => {
+    it('should fail variant if llama-cli is not found', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock fileExists: binary exists, but llama-run doesn't
+      // Mock fileExists: binary exists, but llama-cli doesn't
       mockFileExists.mockImplementation(async (path) => {
-        return !path.includes('llama-run');
+        return !path.includes('llama-cli');
       });
 
       // Phase 1 succeeds
@@ -953,9 +957,9 @@ describe('BinaryManager', () => {
 
       await expect(managerWithModel.ensureBinary()).rejects.toThrow(BinaryError);
 
-      // Should log that llama-run was not found
+      // Should log that llama-cli was not found
       expect(mockLogger).toHaveBeenCalledWith(
-        'Phase 2: ✗ llama-run not found in binary directory',
+        'Phase 2: ✗ llama-cli not found in binary directory',
         'error'
       );
       expect(mockLogger).toHaveBeenCalledWith(
@@ -1059,12 +1063,12 @@ describe('BinaryManager', () => {
     it('should treat timeout in Phase 2 as test failure', async () => {
       const testModelPath = '/mock/models/test-model.gguf';
 
-      // Mock fileExists: binary doesn't exist (trigger download), llama-run exists for Phase 2
+      // Mock fileExists: binary doesn't exist (trigger download), llama-cli exists for Phase 2
       mockFileExists.mockImplementation(async (path) => {
         if (path.includes('llama-server.exe')) {
           return false;
         }
-        if (path.includes('llama-run')) {
+        if (path.includes('llama-cli')) {
           return true;
         }
         if (path === testModelPath) {

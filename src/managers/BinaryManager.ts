@@ -603,7 +603,7 @@ export class BinaryManager {
    * Run Phase 2: Real functionality test to verify GPU/CUDA actually works
    *
    * Tests actual inference capability to catch GPU/CUDA errors.
-   * - For llama: Uses llama-run for one-shot inference
+   * - For llama: Uses llama-cli for one-shot inference
    * - For diffusion: Uses sd for tiny image generation
    *
    * @param binaryPath - Path to primary binary (llama-server or sd)
@@ -622,25 +622,29 @@ export class BinaryManager {
       let timeout: number;
 
       if (type === 'llama') {
-        // For llama, we need to use llama-run (not llama-server)
-        // llama-run is designed for one-shot inference and supports -p flag
+        // For llama, use llama-cli for one-shot inference testing
+        // llama-cli supports -m, -p, -ngl flags for GPU validation
         const binaryDir = path.dirname(binaryPath);
-        const llamaRunName = process.platform === 'win32' ? 'llama-run.exe' : 'llama-run';
-        testBinaryPath = path.join(binaryDir, llamaRunName);
+        const llamaCliName = process.platform === 'win32' ? 'llama-cli.exe' : 'llama-cli';
+        testBinaryPath = path.join(binaryDir, llamaCliName);
 
-        // Check if llama-run exists
+        // Check if llama-cli exists
         if (!(await fileExists(testBinaryPath))) {
-          this.log('Phase 2: ✗ llama-run not found in binary directory', 'error');
+          this.log('Phase 2: ✗ llama-cli not found in binary directory', 'error');
           return false;
         }
 
-        // Test llama-run with simple math question
+        // Test llama-cli with simple math question
         // -ngl 1 forces at least 1 GPU layer (tests CUDA/GPU)
-        // Note: -n is an alias for -ngl (GPU layers), not token count
+        // -n 16 limits output to 16 tokens for fast completion
         testArgs = [
+          '-m',
+          modelPath,
           '-ngl',
           '1', // Force GPU usage (1+ GPU layers)
-          modelPath,
+          '-n',
+          '16', // Limit output tokens
+          '-p',
           'What is 2+2? Just answer with the number.', // Deterministic prompt
         ];
         timeout = 15000; // 15 seconds for simple math
@@ -693,7 +697,7 @@ export class BinaryManager {
       }
 
       // Test passed - GPU inference worked
-      const testBinaryName = type === 'llama' ? 'llama-run' : 'sd';
+      const testBinaryName = type === 'llama' ? 'llama-cli' : 'sd';
       this.log(`Phase 2: ✓ GPU functionality test passed (${testBinaryName})`, 'info');
       return true;
     } catch (error) {
