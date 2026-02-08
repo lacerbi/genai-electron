@@ -169,14 +169,28 @@ export class SystemInfo {
    */
   public async canRunModel(
     modelInfo: ModelInfo,
-    options?: { checkTotalMemory?: boolean }
+    options?: {
+      checkTotalMemory?: boolean;
+      gpuLayers?: number;
+      totalLayers?: number;
+    }
   ): Promise<{
     possible: boolean;
     reason?: string;
     suggestion?: string;
   }> {
     const capabilities = await this.detect();
-    const requiredMemory = modelInfo.size * 1.2; // 20% overhead
+
+    // When GPU layers are specified, only the CPU portion needs to fit in RAM
+    const gpuLayers = options?.gpuLayers;
+    let requiredMemory: number;
+    if (gpuLayers && gpuLayers > 0) {
+      const totalLayers = options?.totalLayers ?? getLayerCountWithFallback(modelInfo);
+      const cpuRatio = Math.max(0, 1 - gpuLayers / totalLayers);
+      requiredMemory = modelInfo.size * cpuRatio * 1.2;
+    } else {
+      requiredMemory = modelInfo.size * 1.2; // 20% overhead
+    }
 
     // Get fresh memory info (not cached) for accurate availability check
     const currentMemory = this.getMemoryInfo();

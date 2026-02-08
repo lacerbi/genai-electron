@@ -72,6 +72,7 @@ const mockSystemInfo = {
   detect: jest.fn(),
   canRunModel: jest.fn(),
   getMemoryInfo: jest.fn(),
+  getGPUInfo: jest.fn(),
   clearCache: jest.fn(),
 };
 
@@ -224,6 +225,11 @@ describe('DiffusionServerManager', () => {
       total: 16 * 1024 ** 3,
       available: 10 * 1024 ** 3,
       used: 6 * 1024 ** 3,
+    });
+    mockSystemInfo.getGPUInfo.mockResolvedValue({
+      available: true,
+      type: 'nvidia',
+      vram: 8 * 1024 ** 3,
     });
     mockIsServerResponding.mockResolvedValue(false); // Port is available
 
@@ -549,6 +555,72 @@ describe('DiffusionServerManager', () => {
       await expect(resultPromise).rejects.toThrow('exited with code 1');
     });
 
+    it('should include stderr in error details on crash', async () => {
+      const resultPromise = diffusionServer.generateImage(imageConfig);
+
+      // Wait for spawn to be called
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Emit stderr before crash
+      spawnedProcess.stderr.emit('data', Buffer.from('CUDA error: out of memory\n'));
+      spawnedProcess.stderr.emit('data', Buffer.from('Failed to allocate tensor\n'));
+      spawnedProcess.emit('exit', 1, null);
+
+      try {
+        await resultPromise;
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error.message).toContain('exited with code 1');
+        expect(error.details).toBeDefined();
+        expect(error.details.exitCode).toBe(1);
+        expect(error.details.stderr).toContain('CUDA error: out of memory');
+        expect(error.details.stderr).toContain('Failed to allocate tensor');
+      }
+    });
+
+    it('should cap stderr at 20 lines in error details', async () => {
+      const resultPromise = diffusionServer.generateImage(imageConfig);
+
+      // Wait for spawn to be called
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Emit 30 lines of stderr
+      for (let i = 0; i < 30; i++) {
+        spawnedProcess.stderr.emit('data', Buffer.from(`stderr line ${i}\n`));
+      }
+      spawnedProcess.emit('exit', 1, null);
+
+      try {
+        await resultPromise;
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error.details.stderr).toBeDefined();
+        const lines = error.details.stderr.split('\n');
+        expect(lines).toHaveLength(20);
+        // Should contain the last 20 lines (10-29), not the first
+        expect(lines[0]).toBe('stderr line 10');
+        expect(lines[19]).toBe('stderr line 29');
+      }
+    });
+
+    it('should not include stderr field when no stderr output', async () => {
+      const resultPromise = diffusionServer.generateImage(imageConfig);
+
+      // Wait for spawn to be called
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Exit with error but no stderr
+      spawnedProcess.emit('exit', 1, null);
+
+      try {
+        await resultPromise;
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error.details.exitCode).toBe(1);
+        expect(error.details.stderr).toBeUndefined();
+      }
+    });
+
     it('should throw ServerError if image file cannot be read', async () => {
       mockReadFile.mockRejectedValue(new Error('File not found'));
 
@@ -856,6 +928,193 @@ describe('DiffusionServerManager', () => {
       expect(info.port).toBe(8081);
       expect(info.modelId).toBe('sdxl-turbo');
       expect((info as any).busy).toBe(false);
+    });
+  });
+
+  describe('VRAM optimization auto-detection', () => {
+    // Small model (2.9 GB) for headroom tests
+    const smallModelInfo: ModelInfo = {
+      ...mockModelInfo,
+      size: 2.9 * 1024 ** 3, // 2.9 GB → footprint = 3.48 GB
+    };
+
+    let spawnedProcess: any;
+
+    /**
+     * Helper: start server with given model, run generateImage, return spawned args
+     */
+    async function generateAndCaptureArgs(
+      server: DiffusionServerManager,
+      serverConfig: DiffusionServerConfig,
+      model: ModelInfo
+    ): Promise<string[]> {
+      mockModelManager.getModelInfo.mockResolvedValue(model);
+      await server.start(serverConfig);
+
+      const mockImageBuffer = Buffer.from('fake-image-data');
+      mockReadFile.mockResolvedValue(mockImageBuffer);
+
+      spawnedProcess = new EventEmitter() as any;
+      spawnedProcess.pid = 99999;
+      spawnedProcess.stdout = new EventEmitter();
+      spawnedProcess.stderr = new EventEmitter();
+      spawnedProcess.kill = jest.fn();
+
+      mockProcessSpawn.mockImplementation((_bin: string, _args: string[], options: any) => {
+        if (options.onExit) spawnedProcess.on('exit', options.onExit);
+        if (options.onError) spawnedProcess.on('error', options.onError);
+        return spawnedProcess;
+      });
+
+      const resultPromise = server.generateImage({ prompt: 'test' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      spawnedProcess.emit('exit', 0, null);
+      await resultPromise;
+
+      const spawnCall = mockProcessSpawn.mock.calls[0];
+      return spawnCall[1] as string[];
+    }
+
+    afterEach(() => {
+      if (spawnedProcess) {
+        spawnedProcess.removeAllListeners?.();
+        spawnedProcess.stdout?.removeAllListeners?.();
+        spawnedProcess.stderr?.removeAllListeners?.();
+      }
+    });
+
+    it('should enable --clip-on-cpu on 8 GB GPU with 2.9 GB model (headroom < 6 GB)', async () => {
+      // 8 GB VRAM - 3.48 GB footprint = 4.52 GB headroom → clip ON, vae OFF
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 8 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await generateAndCaptureArgs(server, mockConfig, smallModelInfo);
+
+      expect(args).toContain('--clip-on-cpu');
+      expect(args).not.toContain('--vae-on-cpu');
+
+      await server.stop();
+    });
+
+    it('should not enable either flag on 12 GB GPU with 2.9 GB model (headroom >= 6 GB)', async () => {
+      // 12 GB VRAM - 3.48 GB footprint = 8.52 GB headroom → clip OFF, vae OFF
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 12 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await generateAndCaptureArgs(server, mockConfig, smallModelInfo);
+
+      expect(args).not.toContain('--clip-on-cpu');
+      expect(args).not.toContain('--vae-on-cpu');
+
+      await server.stop();
+    });
+
+    it('should enable both flags on 8 GB GPU with 6.5 GB model (headroom < 2 GB)', async () => {
+      // 8 GB VRAM - 7.8 GB footprint = 0.2 GB headroom → clip ON, vae ON
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 8 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await generateAndCaptureArgs(server, mockConfig, mockModelInfo);
+
+      expect(args).toContain('--clip-on-cpu');
+      expect(args).toContain('--vae-on-cpu');
+
+      await server.stop();
+    });
+
+    it('should enable --clip-on-cpu when no GPU is available', async () => {
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: false,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await generateAndCaptureArgs(server, mockConfig, smallModelInfo);
+
+      expect(args).toContain('--clip-on-cpu');
+      expect(args).not.toContain('--vae-on-cpu');
+
+      await server.stop();
+    });
+
+    it('should respect user override clipOnCpu: false on 8 GB GPU', async () => {
+      // Auto would be clip ON, but user says no
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 8 * 1024 ** 3,
+      });
+
+      const overrideConfig: DiffusionServerConfig = { ...mockConfig, clipOnCpu: false };
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await generateAndCaptureArgs(server, overrideConfig, smallModelInfo);
+
+      expect(args).not.toContain('--clip-on-cpu');
+
+      await server.stop();
+    });
+
+    it('should respect user override clipOnCpu: true on 24 GB GPU', async () => {
+      // Auto would be clip OFF, but user forces it on
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const overrideConfig: DiffusionServerConfig = { ...mockConfig, clipOnCpu: true };
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await generateAndCaptureArgs(server, overrideConfig, smallModelInfo);
+
+      expect(args).toContain('--clip-on-cpu');
+
+      await server.stop();
+    });
+
+    it('should pass through batchSize as -b flag', async () => {
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const batchConfig: DiffusionServerConfig = { ...mockConfig, batchSize: 4 };
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await generateAndCaptureArgs(server, batchConfig, smallModelInfo);
+
+      expect(args).toContain('-b');
+      expect(args).toContain('4');
+
+      await server.stop();
+    });
+
+    it('should escalate to clip-on-cpu when vramAvailable is critically low', async () => {
+      // Total VRAM is 12 GB (headroom = 8.52 GB, normally no clip-on-cpu)
+      // But vramAvailable = 4 GB (available - footprint = 0.52 GB < 2 GB → escalate)
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 12 * 1024 ** 3,
+        vramAvailable: 4 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await generateAndCaptureArgs(server, mockConfig, smallModelInfo);
+
+      expect(args).toContain('--clip-on-cpu');
+
+      await server.stop();
     });
   });
 });

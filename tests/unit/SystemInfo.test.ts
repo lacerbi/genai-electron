@@ -172,6 +172,90 @@ describe('SystemInfo', () => {
       expect(result.reason).toContain('RAM');
     });
 
+    it('should reduce RAM requirement when gpuLayers are specified', async () => {
+      // 6.4 GB model, 5.6 GB free RAM
+      // With gpuLayers=44/totalLayers=48: cpuRatio = 4/48 ≈ 0.083
+      // requiredMemory = 6.4 * 0.083 * 1.2 ≈ 0.64 GB → passes
+      mockFreemem.mockReturnValue(5.6 * 1024 ** 3);
+
+      const result = await systemInfo.canRunModel(
+        {
+          id: 'test-model',
+          name: 'Test Model',
+          type: 'llm',
+          size: 6.4 * 1024 * 1024 * 1024,
+          path: '/test/path',
+          downloadedAt: new Date().toISOString(),
+          source: { type: 'url', url: 'http://test.com' },
+        },
+        { gpuLayers: 44, totalLayers: 48 }
+      );
+
+      expect(result.possible).toBe(true);
+    });
+
+    it('should fail same model without gpuLayers', async () => {
+      // Same 6.4 GB model, 5.6 GB free RAM
+      // Without gpuLayers: requiredMemory = 6.4 * 1.2 = 7.68 GB → fails
+      mockFreemem.mockReturnValue(5.6 * 1024 ** 3);
+
+      const result = await systemInfo.canRunModel({
+        id: 'test-model',
+        name: 'Test Model',
+        type: 'llm',
+        size: 6.4 * 1024 * 1024 * 1024,
+        path: '/test/path',
+        downloadedAt: new Date().toISOString(),
+        source: { type: 'url', url: 'http://test.com' },
+      });
+
+      expect(result.possible).toBe(false);
+      expect(result.reason).toContain('RAM');
+    });
+
+    it('should treat gpuLayers=0 same as no gpuLayers', async () => {
+      // 6.4 GB model, 5.6 GB free RAM, gpuLayers=0 → full model check → fails
+      mockFreemem.mockReturnValue(5.6 * 1024 ** 3);
+
+      const result = await systemInfo.canRunModel(
+        {
+          id: 'test-model',
+          name: 'Test Model',
+          type: 'llm',
+          size: 6.4 * 1024 * 1024 * 1024,
+          path: '/test/path',
+          downloadedAt: new Date().toISOString(),
+          source: { type: 'url', url: 'http://test.com' },
+        },
+        { gpuLayers: 0 }
+      );
+
+      expect(result.possible).toBe(false);
+      expect(result.reason).toContain('RAM');
+    });
+
+    it('should use getLayerCountWithFallback when totalLayers omitted', async () => {
+      // 6.4 GB model → ~43 estimated layers (6.4 GB / 150 MB per layer)
+      // gpuLayers=40 without totalLayers → uses fallback estimation
+      // cpuRatio ≈ 3/43 ≈ 0.07, requiredMemory ≈ 0.54 GB → passes with 5.6 GB free
+      mockFreemem.mockReturnValue(5.6 * 1024 ** 3);
+
+      const result = await systemInfo.canRunModel(
+        {
+          id: 'test-model',
+          name: 'Test Model',
+          type: 'llm',
+          size: 6.4 * 1024 * 1024 * 1024,
+          path: '/test/path',
+          downloadedAt: new Date().toISOString(),
+          source: { type: 'url', url: 'http://test.com' },
+        },
+        { gpuLayers: 40 }
+      );
+
+      expect(result.possible).toBe(true);
+    });
+
     it('should handle edge cases with minimal margin', async () => {
       const result = await systemInfo.canRunModel({
         id: 'test-model',

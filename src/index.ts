@@ -234,7 +234,12 @@ export type { UIErrorFormat } from './utils/error-helpers.js';
 // ============================================================================
 
 export { PATHS, getBinaryPath, getModelFilePath } from './config/paths.js';
-export { BINARY_VERSIONS, DEFAULT_PORTS, DEFAULT_TIMEOUTS } from './config/defaults.js';
+export {
+  BINARY_VERSIONS,
+  DEFAULT_PORTS,
+  DEFAULT_TIMEOUTS,
+  DIFFUSION_VRAM_THRESHOLDS,
+} from './config/defaults.js';
 
 // ============================================================================
 // Type Exports

@@ -107,7 +107,9 @@ export class LlamaServerManager extends ServerManager {
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
 
       // 2. Check if system can run this model
-      const canRun = await this.systemInfo.canRunModel(modelInfo);
+      const canRun = await this.systemInfo.canRunModel(modelInfo, {
+        gpuLayers: config.gpuLayers,
+      });
       if (!canRun.possible) {
         throw new InsufficientResourcesError(
           `System cannot run model: ${canRun.reason || 'Insufficient resources'}`,

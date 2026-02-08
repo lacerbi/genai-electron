@@ -123,15 +123,41 @@ export interface DiffusionServerConfig {
   /** Number of GPU layers to offload (auto-detected if not specified, 0 = CPU-only) */
   gpuLayers?: number;
 
-  /** VRAM budget in MB (optional, stable-diffusion.cpp will try to fit within this) */
-  vramBudget?: number;
-
   /**
    * Force binary validation even if cached validation exists
    * Default: false (use cached validation if available)
    * Set to true to re-run Phase 1 & Phase 2 tests (e.g., after driver updates)
    */
   forceValidation?: boolean;
+
+  /**
+   * Offload CLIP text encoder to CPU to reduce VRAM usage (~1-2 GB savings).
+   *
+   * Auto-detected if not specified: enabled when GPU VRAM headroom < 6 GB after
+   * accounting for the model footprint. Set explicitly to override auto-detection.
+   *
+   * Maps to `--clip-on-cpu` flag in stable-diffusion.cpp.
+   */
+  clipOnCpu?: boolean;
+
+  /**
+   * Offload VAE decoder to CPU to reduce VRAM usage.
+   *
+   * Auto-detected if not specified: enabled when GPU VRAM headroom < 2 GB after
+   * accounting for the model footprint. Only use when severely VRAM-constrained
+   * as CPU VAE decoding is significantly slower.
+   *
+   * Maps to `--vae-on-cpu` flag in stable-diffusion.cpp.
+   */
+  vaeOnCpu?: boolean;
+
+  /**
+   * Batch size for image generation. Lower values reduce VRAM usage.
+   *
+   * Not auto-detected — passthrough only. If specified, maps to `-b` flag
+   * in stable-diffusion.cpp.
+   */
+  batchSize?: number;
 }
 
 /**

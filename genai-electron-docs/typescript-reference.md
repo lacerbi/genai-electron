@@ -259,7 +259,6 @@ interface DiffusionServerConfig {
   port?: number;
   threads?: number;
   gpuLayers?: number;
-  vramBudget?: number;
   forceValidation?: boolean;
 }
 ```

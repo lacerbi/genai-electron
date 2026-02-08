@@ -64,6 +64,8 @@ interface ResourceRequirements {
  * ```
  */
 export class ResourceOrchestrator {
+  private static readonly RELOAD_RETRY_DELAY_MS = 2000;
+
   private systemInfo: SystemInfo;
   private llamaServer: LlamaServerManager;
   private diffusionServer: DiffusionServerManager;
@@ -371,20 +373,45 @@ export class ResourceOrchestrator {
       return;
     }
 
+    const savedConfig = this.savedLLMState.config;
+
+    // First attempt
     try {
-      // Restart with saved configuration
       console.log('[Orchestrator] Restarting LLM with saved config:', {
-        modelId: this.savedLLMState.config.modelId,
-        port: this.savedLLMState.config.port,
+        modelId: savedConfig.modelId,
+        port: savedConfig.port,
       });
-      await this.llamaServer.start(this.savedLLMState.config);
+      await this.llamaServer.start(savedConfig);
       console.log('[Orchestrator] ✅ LLM server restarted successfully');
       this.savedLLMState = undefined;
-    } catch (error) {
+      return;
+    } catch (firstError) {
+      console.warn('[Orchestrator] ⚠️ First reload attempt failed:', firstError);
+    }
+
+    // Retry after delay (allows OS memory reclamation)
+    try {
+      console.log(
+        `[Orchestrator] Retrying reload after ${ResourceOrchestrator.RELOAD_RETRY_DELAY_MS}ms...`
+      );
+      await this.delay(ResourceOrchestrator.RELOAD_RETRY_DELAY_MS);
+      this.systemInfo.clearCache();
+      await this.llamaServer.start(savedConfig);
+      console.log('[Orchestrator] ✅ LLM server restarted on retry');
+      this.savedLLMState = undefined;
+    } catch (retryError) {
       // Log error but don't throw - image generation succeeded
-      console.error('[Orchestrator] ❌ Failed to reload LLM:', error);
+      console.error('[Orchestrator] ❌ Failed to reload LLM after retry:', retryError);
       // Keep saved state in case user wants to manually restart
     }
+  }
+
+  /**
+   * Delay helper for retry logic
+   * @private
+   */
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**

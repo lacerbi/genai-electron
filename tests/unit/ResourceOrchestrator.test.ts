@@ -308,7 +308,9 @@ describe('ResourceOrchestrator', () => {
       expect(mockLlamaServer.start).toHaveBeenCalled();
     });
 
-    it('should handle LLM reload failure gracefully', async () => {
+    it('should handle LLM reload failure gracefully after retry', async () => {
+      jest.useFakeTimers();
+
       mockLlamaServer.isRunning.mockReturnValue(true);
       mockLlamaServer.getConfig.mockReturnValue({
         modelId: 'llama-2-7b',
@@ -330,21 +332,81 @@ describe('ResourceOrchestrator', () => {
         },
       });
 
-      // Make reload fail
+      // Make both reload attempts fail
       mockLlamaServer.start.mockRejectedValue(new Error('Failed to start'));
 
       const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-      // Should not throw - reload failure is logged but not propagated
-      const result = await orchestrator.orchestrateImageGeneration(imageConfig);
+      // Start orchestration (don't await yet - timer needs to advance)
+      const resultPromise = orchestrator.orchestrateImageGeneration(imageConfig);
+
+      // Advance past the 2s retry delay
+      await jest.advanceTimersByTimeAsync(3000);
+
+      const result = await resultPromise;
 
       expect(result).toBeDefined();
+      // Both attempts should have been made
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(2);
+      // Cache should be cleared between attempts
+      expect(mockSystemInfo.clearCache).toHaveBeenCalled();
       expect(consoleErrorSpy).toHaveBeenCalledWith(
-        '[Orchestrator] ❌ Failed to reload LLM:',
+        '[Orchestrator] ❌ Failed to reload LLM after retry:',
         expect.any(Error)
       );
 
       consoleErrorSpy.mockRestore();
+      consoleWarnSpy.mockRestore();
+      jest.useRealTimers();
+    });
+
+    it('should succeed on retry when first reload attempt fails', async () => {
+      jest.useFakeTimers();
+
+      mockLlamaServer.isRunning.mockReturnValue(true);
+      mockLlamaServer.getConfig.mockReturnValue({
+        modelId: 'llama-2-7b',
+        port: 8080,
+        gpuLayers: 35,
+      });
+
+      // Small VRAM to trigger offload
+      mockSystemInfo.detect.mockResolvedValue({
+        cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+        memory: { total: 16 * 1024 ** 3, available: 12 * 1024 ** 3, used: 4 * 1024 ** 3 },
+        gpu: { available: true, type: 'nvidia', vram: 6 * 1024 ** 3 },
+        platform: 'linux',
+        recommendations: {
+          maxModelSize: '7B',
+          recommendedQuantization: ['Q4_K_M'],
+          threads: 7,
+          gpuLayers: 35,
+        },
+      });
+
+      // First attempt fails, retry succeeds
+      mockLlamaServer.start
+        .mockRejectedValueOnce(new Error('Insufficient RAM'))
+        .mockResolvedValueOnce({ status: 'running', port: 8080 });
+
+      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const resultPromise = orchestrator.orchestrateImageGeneration(imageConfig);
+
+      // Advance past the 2s retry delay
+      await jest.advanceTimersByTimeAsync(3000);
+
+      const result = await resultPromise;
+
+      expect(result).toBeDefined();
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(2);
+      expect(mockSystemInfo.clearCache).toHaveBeenCalled();
+      // Saved state should be cleared after successful retry
+      expect(orchestrator.getSavedState()).toBeUndefined();
+
+      consoleWarnSpy.mockRestore();
+      jest.useRealTimers();
     });
   });
 
@@ -443,6 +505,8 @@ describe('ResourceOrchestrator', () => {
     });
 
     it('should return saved state after offload', async () => {
+      jest.useFakeTimers();
+
       mockLlamaServer.isRunning.mockReturnValue(true);
       mockLlamaServer.getConfig.mockReturnValue({
         modelId: 'llama-2-7b',
@@ -464,14 +528,18 @@ describe('ResourceOrchestrator', () => {
         },
       });
 
-      // Prevent reload to keep saved state
-      mockLlamaServer.start.mockImplementation(() => {
-        throw new Error('Prevent reload');
-      });
+      // Prevent reload to keep saved state (both attempts fail)
+      mockLlamaServer.start.mockRejectedValue(new Error('Prevent reload'));
 
       const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-      await orchestrator.orchestrateImageGeneration({ prompt: 'test' });
+      const resultPromise = orchestrator.orchestrateImageGeneration({ prompt: 'test' });
+
+      // Advance past the retry delay
+      await jest.advanceTimersByTimeAsync(3000);
+
+      await resultPromise;
 
       const state = orchestrator.getSavedState();
 
@@ -481,6 +549,8 @@ describe('ResourceOrchestrator', () => {
       expect(state?.savedAt).toBeInstanceOf(Date);
 
       consoleErrorSpy.mockRestore();
+      consoleWarnSpy.mockRestore();
+      jest.useRealTimers();
     });
 
     it('should return undefined after successful reload', async () => {
@@ -516,6 +586,8 @@ describe('ResourceOrchestrator', () => {
 
   describe('clearSavedState()', () => {
     it('should clear saved state', async () => {
+      jest.useFakeTimers();
+
       mockLlamaServer.isRunning.mockReturnValue(true);
       mockLlamaServer.getConfig.mockReturnValue({
         modelId: 'llama-2-7b',
@@ -537,14 +609,18 @@ describe('ResourceOrchestrator', () => {
         },
       });
 
-      // Prevent reload to keep saved state
-      mockLlamaServer.start.mockImplementation(() => {
-        throw new Error('Prevent reload');
-      });
+      // Prevent reload to keep saved state (both attempts fail)
+      mockLlamaServer.start.mockRejectedValue(new Error('Prevent reload'));
 
       const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-      await orchestrator.orchestrateImageGeneration({ prompt: 'test' });
+      const resultPromise = orchestrator.orchestrateImageGeneration({ prompt: 'test' });
+
+      // Advance past the retry delay
+      await jest.advanceTimersByTimeAsync(3000);
+
+      await resultPromise;
 
       // State should exist
       expect(orchestrator.getSavedState()).toBeDefined();
@@ -556,6 +632,8 @@ describe('ResourceOrchestrator', () => {
       expect(orchestrator.getSavedState()).toBeUndefined();
 
       consoleErrorSpy.mockRestore();
+      consoleWarnSpy.mockRestore();
+      jest.useRealTimers();
     });
   });
 

@@ -264,8 +264,10 @@ describe('LlamaServerManager', () => {
       // Verify model validation
       expect(mockModelManager.getModelInfo).toHaveBeenCalledWith('test-model');
 
-      // Verify system detection
-      expect(mockSystemInfo.canRunModel).toHaveBeenCalledWith(mockModelInfo);
+      // Verify system detection (gpuLayers passed from config, undefined for fresh start)
+      expect(mockSystemInfo.canRunModel).toHaveBeenCalledWith(mockModelInfo, {
+        gpuLayers: undefined,
+      });
 
       // Verify process was spawned
       expect(mockProcessSpawn).toHaveBeenCalled();

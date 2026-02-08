@@ -23,7 +23,7 @@ import { diffusionServer, DiffusionServerManager } from 'genai-electron';
 
 Starts HTTP wrapper. Auto-downloads binary on first run.
 
-**Config:** `modelId` (required), `port` (8081), `threads`, `gpuLayers`, `vramBudget` (Phase 3), `forceValidation`.
+**Config:** `modelId` (required), `port` (8081), `threads`, `gpuLayers`, `forceValidation`.
 
 ```typescript
 await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081, threads: 8, gpuLayers: 35 });

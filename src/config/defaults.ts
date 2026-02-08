@@ -198,6 +198,23 @@ export const BINARY_VERSIONS = {
 } as const;
 
 /**
+ * VRAM optimization thresholds for diffusion image generation.
+ *
+ * Used by DiffusionServerManager.computeDiffusionOptimizations() to decide
+ * whether to offload CLIP/VAE to CPU based on available GPU headroom.
+ *
+ * headroom = totalVRAM - (modelFileSize * modelOverheadMultiplier)
+ */
+export const DIFFUSION_VRAM_THRESHOLDS = {
+  /** Headroom below which --clip-on-cpu is auto-enabled (6 GB) */
+  clipOnCpuHeadroomBytes: 6 * 1024 ** 3,
+  /** Headroom below which --vae-on-cpu is auto-enabled (2 GB) */
+  vaeOnCpuHeadroomBytes: 2 * 1024 ** 3,
+  /** Multiplier applied to model file size to estimate runtime VRAM footprint */
+  modelOverheadMultiplier: 1.2,
+} as const;
+
+/**
  * Health check configuration
  */
 export const HEALTH_CHECK_CONFIG = {

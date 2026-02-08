@@ -18,7 +18,7 @@ import { GenerationRegistry } from './GenerationRegistry.js';
 import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import { getTempPath } from '../config/paths.js';
-import { BINARY_VERSIONS, DEFAULT_PORTS } from '../config/defaults.js';
+import { BINARY_VERSIONS, DEFAULT_PORTS, DIFFUSION_VRAM_THRESHOLDS } from '../config/defaults.js';
 import { deleteFile } from '../utils/file-utils.js';
 import { ServerError, ModelNotFoundError, InsufficientResourcesError } from '../errors/index.js';
 import type {
@@ -660,8 +660,11 @@ export class DiffusionServerManager extends ServerManager {
     // Initialize progress tracking
     this.initializeProgressTracking(normalizedConfig);
 
+    // Compute VRAM optimizations (fresh GPU info, respects user overrides)
+    const optimizations = await this.computeDiffusionOptimizations();
+
     // Build command-line arguments
-    const args = this.buildDiffusionArgs(normalizedConfig, this.currentModelInfo);
+    const args = this.buildDiffusionArgs(normalizedConfig, this.currentModelInfo, optimizations);
 
     // Output file path
     const outputPath = getTempPath(`sd-output-${Date.now()}.png`);
@@ -672,6 +675,8 @@ export class DiffusionServerManager extends ServerManager {
     // Spawn stable-diffusion.cpp
     let cancelled = false;
     let pid: number | undefined;
+    const stderrLines: string[] = [];
+    const MAX_STDERR_LINES = 20;
 
     const generationPromise = new Promise<ImageGenerationResult>((resolve, reject) => {
       const spawnResult = this.processManager.spawn(this.binaryPath!, args, {
@@ -681,6 +686,14 @@ export class DiffusionServerManager extends ServerManager {
         },
         onStderr: (data) => {
           this.logManager?.write(data, 'warn').catch(() => void 0);
+          // Accumulate stderr for error diagnostics (sliding window of last N lines)
+          const lines = data.split('\n').filter((line: string) => line.trim() !== '');
+          for (const line of lines) {
+            stderrLines.push(line);
+          }
+          if (stderrLines.length > MAX_STDERR_LINES) {
+            stderrLines.splice(0, stderrLines.length - MAX_STDERR_LINES);
+          }
         },
         onExit: async (code) => {
           // Clean up synthetic progress interval
@@ -692,7 +705,12 @@ export class DiffusionServerManager extends ServerManager {
           }
 
           if (code !== 0) {
-            reject(new ServerError(`stable-diffusion.cpp exited with code ${code}`));
+            reject(
+              new ServerError(`stable-diffusion.cpp exited with code ${code}`, {
+                exitCode: code,
+                stderr: stderrLines.length > 0 ? stderrLines.join('\n') : undefined,
+              })
+            );
             return;
           }
 
@@ -803,14 +821,79 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
+   * Compute VRAM optimization flags based on current GPU state and model size.
+   *
+   * Called at generation time (not start time) so headroom reflects the current
+   * VRAM landscape — the orchestrator may have offloaded the LLM between start()
+   * and generation.
+   *
+   * User-provided overrides in DiffusionServerConfig always win via nullish coalescing.
+   *
+   * @returns Resolved optimization flags: clipOnCpu, vaeOnCpu, batchSize
+   * @private
+   */
+  private async computeDiffusionOptimizations(): Promise<{
+    clipOnCpu: boolean;
+    vaeOnCpu: boolean;
+    batchSize?: number;
+  }> {
+    const serverConfig = this._config as DiffusionServerConfig;
+    const modelSize = this.currentModelInfo?.size ?? 0;
+    const modelFootprint = modelSize * DIFFUSION_VRAM_THRESHOLDS.modelOverheadMultiplier;
+
+    let autoClipOnCpu = false;
+    let autoVaeOnCpu = false;
+
+    try {
+      const gpu = await this.systemInfo.getGPUInfo();
+
+      if (!gpu.available || gpu.vram === undefined) {
+        // No GPU or no VRAM info — safe default: clip on CPU, VAE stays on GPU
+        autoClipOnCpu = true;
+        autoVaeOnCpu = false;
+      } else {
+        const headroom = gpu.vram - modelFootprint;
+
+        autoClipOnCpu = headroom < DIFFUSION_VRAM_THRESHOLDS.clipOnCpuHeadroomBytes;
+        autoVaeOnCpu = headroom < DIFFUSION_VRAM_THRESHOLDS.vaeOnCpuHeadroomBytes;
+
+        // Escalation: if vramAvailable is known and critically low, force clip-on-cpu
+        if (gpu.vramAvailable !== undefined && gpu.vramAvailable - modelFootprint < 2 * 1024 ** 3) {
+          autoClipOnCpu = true;
+        }
+      }
+    } catch {
+      // GPU detection failed — use safe defaults
+      autoClipOnCpu = true;
+      autoVaeOnCpu = false;
+    }
+
+    const clipOnCpu = serverConfig.clipOnCpu ?? autoClipOnCpu;
+    const vaeOnCpu = serverConfig.vaeOnCpu ?? autoVaeOnCpu;
+    const batchSize = serverConfig.batchSize;
+
+    await this.logManager?.write(
+      `VRAM optimizations: clipOnCpu=${clipOnCpu}, vaeOnCpu=${vaeOnCpu}${batchSize !== undefined ? `, batchSize=${batchSize}` : ''} (auto: clip=${autoClipOnCpu}, vae=${autoVaeOnCpu})`,
+      'info'
+    );
+
+    return { clipOnCpu, vaeOnCpu, batchSize };
+  }
+
+  /**
    * Build command-line arguments for stable-diffusion.cpp
    *
    * @param config - Image generation configuration
    * @param modelInfo - Model information
+   * @param optimizations - Resolved VRAM optimization flags
    * @returns Array of command-line arguments
    * @private
    */
-  private buildDiffusionArgs(config: ImageGenerationConfig, modelInfo: ModelInfo): string[] {
+  private buildDiffusionArgs(
+    config: ImageGenerationConfig,
+    modelInfo: ModelInfo,
+    optimizations?: { clipOnCpu: boolean; vaeOnCpu: boolean; batchSize?: number }
+  ): string[] {
     const args: string[] = [];
 
     // Model path
@@ -863,6 +946,19 @@ export class DiffusionServerManager extends ServerManager {
     // Threads
     if (serverConfig.threads) {
       args.push('-t', String(serverConfig.threads));
+    }
+
+    // VRAM optimization flags
+    if (optimizations) {
+      if (optimizations.clipOnCpu) {
+        args.push('--clip-on-cpu');
+      }
+      if (optimizations.vaeOnCpu) {
+        args.push('--vae-on-cpu');
+      }
+      if (optimizations.batchSize !== undefined) {
+        args.push('-b', String(optimizations.batchSize));
+      }
     }
 
     return args;
