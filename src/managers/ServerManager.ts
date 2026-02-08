@@ -345,6 +345,41 @@ export abstract class ServerManager extends EventEmitter {
    * @throws {PortInUseError} If port is already in use
    * @protected
    */
+  /**
+   * Validate that all config fields are recognized
+   *
+   * Throws ServerError listing unknown fields and valid alternatives.
+   * Prevents silent acceptance of mismatched config objects (e.g., spreading
+   * LLM-specific fields into DiffusionServerManager.start()).
+   *
+   * @param config - Configuration object to validate
+   * @param validFields - Set of recognized field names
+   * @param serverName - Server name for error messages
+   * @throws {ServerError} If unknown fields are found
+   * @protected
+   */
+  protected validateConfigFields(
+    config: Record<string, unknown>,
+    validFields: ReadonlySet<string>,
+    serverName: string
+  ): void {
+    const unknownFields = Object.keys(config).filter((key) => !validFields.has(key));
+    if (unknownFields.length > 0) {
+      const validList = [...validFields].sort().join(', ');
+      throw new ServerError(
+        `Unknown configuration field${unknownFields.length > 1 ? 's' : ''}: ` +
+          `${unknownFields.join(', ')}. Valid fields for ${serverName} are: ${validList}`,
+        {
+          unknownFields,
+          validFields: [...validFields].sort(),
+          suggestion:
+            'Remove unrecognized fields from the configuration object. ' +
+            'If using getOptimalConfig(), pick only the fields needed for this server type.',
+        }
+      );
+    }
+  }
+
   protected async checkPortAvailability(port: number, timeout = 2000): Promise<void> {
     const { isServerResponding } = await import('../process/health-check.js');
     if (await isServerResponding(port, timeout)) {

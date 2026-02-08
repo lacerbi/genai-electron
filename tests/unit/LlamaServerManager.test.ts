@@ -553,6 +553,78 @@ describe('LlamaServerManager', () => {
     });
   });
 
+  describe('config validation', () => {
+    it('should accept all valid ServerConfig fields without error', async () => {
+      const validConfig: LlamaServerConfig = {
+        modelId: 'test-model',
+        port: 8080,
+        threads: 4,
+        contextSize: 2048,
+        gpuLayers: 20,
+        parallelRequests: 2,
+        flashAttention: true,
+        forceValidation: false,
+      };
+
+      const info = await llamaServer.start(validConfig);
+      expect(info.status).toBe('running');
+    });
+
+    it('should throw ServerError for DiffusionServerConfig-specific fields', async () => {
+      const badConfig = {
+        modelId: 'test-model',
+        port: 8080,
+        clipOnCpu: true,
+        vaeOnCpu: false,
+      };
+
+      await expect(llamaServer.start(badConfig as any)).rejects.toThrow(
+        /Unknown configuration field.*clipOnCpu.*vaeOnCpu/
+      );
+    });
+
+    it('should list all unknown fields and include valid fields in error details', async () => {
+      const badConfig = {
+        modelId: 'test-model',
+        port: 8080,
+        clipOnCpu: true,
+        randomField: 42,
+      };
+
+      try {
+        await llamaServer.start(badConfig as any);
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error.message).toContain('clipOnCpu');
+        expect(error.message).toContain('randomField');
+        expect(error.message).toContain('Valid fields for LlamaServerManager');
+        expect(error.details.unknownFields).toEqual(
+          expect.arrayContaining(['clipOnCpu', 'randomField'])
+        );
+        expect(error.details.validFields).toEqual(
+          expect.arrayContaining(['modelId', 'port', 'threads', 'contextSize', 'gpuLayers'])
+        );
+      }
+    });
+
+    it('should have code SERVER_ERROR and actionable suggestion', async () => {
+      const badConfig = {
+        modelId: 'test-model',
+        port: 8080,
+        unknownProp: true,
+      };
+
+      try {
+        await llamaServer.start(badConfig as any);
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error.code).toBe('SERVER_ERROR');
+        expect(error.details.suggestion).toContain('Remove unrecognized fields');
+        expect(error.details.suggestion).toContain('getOptimalConfig()');
+      }
+    });
+  });
+
   describe('Auto-configuration', () => {
     it('should use GPU layers if GPU is available', async () => {
       await llamaServer.start(mockConfig);

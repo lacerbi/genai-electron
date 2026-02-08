@@ -354,6 +354,79 @@ describe('DiffusionServerManager', () => {
     });
   });
 
+  describe('config validation', () => {
+    it('should accept all valid DiffusionServerConfig fields without error', async () => {
+      const validConfig: DiffusionServerConfig = {
+        modelId: 'sdxl-turbo',
+        port: 8081,
+        threads: 4,
+        gpuLayers: 20,
+        forceValidation: false,
+        clipOnCpu: true,
+        vaeOnCpu: false,
+        batchSize: 4,
+      };
+
+      const info = await diffusionServer.start(validConfig);
+      expect(info.status).toBe('running');
+    });
+
+    it('should throw ServerError for LLM-specific fields', async () => {
+      const badConfig = {
+        modelId: 'sdxl-turbo',
+        port: 8081,
+        contextSize: 4096,
+        parallelRequests: 4,
+        flashAttention: true,
+      };
+
+      await expect(diffusionServer.start(badConfig as any)).rejects.toThrow(
+        /Unknown configuration field.*contextSize/
+      );
+    });
+
+    it('should list all unknown fields and include valid fields in error details', async () => {
+      const badConfig = {
+        modelId: 'sdxl-turbo',
+        port: 8081,
+        contextSize: 4096,
+        flashAttention: true,
+      };
+
+      try {
+        await diffusionServer.start(badConfig as any);
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error.message).toContain('contextSize');
+        expect(error.message).toContain('flashAttention');
+        expect(error.message).toContain('Valid fields for DiffusionServerManager');
+        expect(error.details.unknownFields).toEqual(
+          expect.arrayContaining(['contextSize', 'flashAttention'])
+        );
+        expect(error.details.validFields).toEqual(
+          expect.arrayContaining(['modelId', 'port', 'threads', 'gpuLayers'])
+        );
+      }
+    });
+
+    it('should reject completely unknown fields', async () => {
+      const badConfig = {
+        modelId: 'sdxl-turbo',
+        port: 8081,
+        randomField: 'nonsense',
+      };
+
+      try {
+        await diffusionServer.start(badConfig as any);
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error.code).toBe('SERVER_ERROR');
+        expect(error.details.unknownFields).toEqual(['randomField']);
+        expect(error.details.suggestion).toContain('Remove unrecognized fields');
+      }
+    });
+  });
+
   describe('generateImage()', () => {
     let spawnedProcess: any;
 
@@ -634,7 +707,7 @@ describe('DiffusionServerManager', () => {
       await expect(resultPromise).rejects.toThrow('Failed to read generated image');
     });
 
-    it('should include GPU layers in args if configured', async () => {
+    it('should not pass --n-gpu-layers to sd.cpp (unsupported flag)', async () => {
       await diffusionServer.stop();
 
       const gpuConfig: DiffusionServerConfig = {
@@ -656,8 +729,9 @@ describe('DiffusionServerManager', () => {
 
       const spawnCall = mockProcessSpawn.mock.calls[0];
       const args = spawnCall[1] as string[];
-      expect(args).toContain('--n-gpu-layers');
-      expect(args).toContain('25');
+      // stable-diffusion.cpp doesn't support --n-gpu-layers (that's llama.cpp)
+      expect(args).not.toContain('--n-gpu-layers');
+      // threads should still be passed
       expect(args).toContain('-t');
       expect(args).toContain('8');
     });

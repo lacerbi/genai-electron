@@ -65,6 +65,18 @@ import type { LlamaServerManager } from './LlamaServerManager.js';
  * ```
  */
 export class DiffusionServerManager extends ServerManager {
+  /** Fields accepted by DiffusionServerManager.start() (DiffusionServerConfig) */
+  private static readonly VALID_CONFIG_FIELDS: ReadonlySet<string> = new Set([
+    'modelId',
+    'port',
+    'threads',
+    'gpuLayers',
+    'forceValidation',
+    'clipOnCpu',
+    'vaeOnCpu',
+    'batchSize',
+  ]);
+
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
@@ -146,6 +158,13 @@ export class DiffusionServerManager extends ServerManager {
         suggestion: 'Stop the server first with stop()',
       });
     }
+
+    // Validate config fields before proceeding
+    this.validateConfigFields(
+      config as unknown as Record<string, unknown>,
+      DiffusionServerManager.VALID_CONFIG_FIELDS,
+      'DiffusionServerManager'
+    );
 
     this.setStatus('starting');
     this._config = config as any; // DiffusionServerConfig extends ServerConfig semantically
@@ -937,13 +956,13 @@ export class DiffusionServerManager extends ServerManager {
       args.push('--sampling-method', config.sampler);
     }
 
-    // GPU layers (if configured)
-    const serverConfig = this._config as DiffusionServerConfig;
-    if (serverConfig.gpuLayers !== undefined && serverConfig.gpuLayers > 0) {
-      args.push('--n-gpu-layers', String(serverConfig.gpuLayers));
-    }
+    // Note: gpuLayers is accepted in DiffusionServerConfig but stable-diffusion.cpp
+    // does not have a --n-gpu-layers flag (that's llama.cpp). GPU offload in sd.cpp
+    // is automatic when built with CUDA/Metal support. The field is kept in the config
+    // for future use and for consistency with the ServerConfig pattern.
 
     // Threads
+    const serverConfig = this._config as DiffusionServerConfig;
     if (serverConfig.threads) {
       args.push('-t', String(serverConfig.threads));
     }

@@ -57,6 +57,23 @@ import { fileExists } from '../utils/file-utils.js';
  * ```
  */
 export class LlamaServerManager extends ServerManager {
+  /** Fields accepted by LlamaServerManager.start() (ServerConfig + LlamaServerConfig) */
+  private static readonly VALID_CONFIG_FIELDS: ReadonlySet<string> = new Set([
+    'modelId',
+    'port',
+    'threads',
+    'contextSize',
+    'gpuLayers',
+    'parallelRequests',
+    'flashAttention',
+    'forceValidation',
+    'modelAlias',
+    'continuousBatching',
+    'batchSize',
+    'useMmap',
+    'useMlock',
+  ]);
+
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
@@ -99,6 +116,13 @@ export class LlamaServerManager extends ServerManager {
         suggestion: 'Stop the server first with stop()',
       });
     }
+
+    // Validate config fields before proceeding
+    this.validateConfigFields(
+      config as unknown as Record<string, unknown>,
+      LlamaServerManager.VALID_CONFIG_FIELDS,
+      'LlamaServerManager'
+    );
 
     this.setStatus('starting');
 
