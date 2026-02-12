@@ -61,8 +61,11 @@ Automatically manage system resources when running both LLM and image generation
 2. If running, save configuration (modelId, port, threads, gpuLayers, etc.)
 3. Stop LLM server gracefully (frees memory)
 4. Generate image
-5. Restart LLM server with exact same configuration
-6. Clear saved state
+5. **Return image result immediately**
+6. Restart LLM server asynchronously in the background
+7. Clear saved state after reload completes
+
+**Note:** The LLM reload (step 6) runs asynchronously after the image result is returned. This eliminates a 10-30s delay between image generation completing and the result appearing. Use `waitForReload()` if you need to ensure the LLM is fully restored before proceeding.
 
 ---
 
@@ -87,8 +90,8 @@ const result = await diffusionServer.generateImage({
   steps: 30
 });
 
-// LLM server automatically offloaded if needed, then reloaded
-console.log('Image generated, LLM still running');
+// Image returned immediately — LLM reloads asynchronously in background
+console.log('Image generated, LLM reloading in background');
 ```
 
 **Important:** Batch generation (count > 1) currently bypasses orchestration. Planned for Phase 3.
@@ -124,8 +127,10 @@ Generates an image with automatic resource management.
 
 **Behavior:**
 - If resources ample: Generates directly without offload
-- If resources constrained: Offloads LLM → generates → reloads LLM
+- If resources constrained: Offloads LLM → generates → returns result → reloads LLM asynchronously
 - Uses 75% availability threshold
+- LLM reload runs in the background — the promise resolves as soon as the image is ready
+- Use `waitForReload()` if you need the LLM ready before making inference calls
 
 ### wouldNeedOffload()
 
@@ -209,6 +214,33 @@ await orchestrator.orchestrateImageGeneration({
   steps: 30
 });
 ```
+
+### waitForReload()
+
+Waits for any pending background LLM reload to complete. Resolves immediately if no reload is in progress.
+
+**Returns:** `Promise<void>`
+
+**Example:**
+```typescript
+// Generate image — returns immediately, LLM reloads in background
+const result = await orchestrator.orchestrateImageGeneration({
+  prompt: 'A mountain landscape',
+  steps: 30
+});
+
+// Image is ready here, but LLM may still be reloading
+console.log('Image ready!', result.image.length, 'bytes');
+
+// Wait for LLM to finish reloading before making inference calls
+await orchestrator.waitForReload();
+console.log('LLM is back online');
+```
+
+**Use cases:**
+- Ensuring the LLM is fully restored before sending inference requests
+- Testing: asserting on reload behavior after async orchestration
+- Sequential workflows that need both image result and LLM availability
 
 ---
 

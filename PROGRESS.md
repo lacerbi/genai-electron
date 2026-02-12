@@ -419,6 +419,21 @@ For detailed planning: `docs/dev/2025-10-23-documentation-restructure-plan.md`
 
 ---
 
+## Async LLM Reload in ResourceOrchestrator (2026-02-12)
+
+**Problem:** After image generation completed, the image result was blocked for 10-30s while the LLM server reloaded. This caused a visible "silent gap" in the UI between progress reaching 100% and the image appearing.
+
+**Fix:** `orchestrateImageGeneration()` now returns the image result immediately after generation completes. The LLM reload runs asynchronously in the background (fire-and-forget). A new `waitForReload()` public method allows callers to explicitly wait for the reload if needed.
+
+**Behavioral change:** The promise returned by `orchestrateImageGeneration()` now resolves ~10-30s earlier. The LLM may not yet be running when the promise resolves. Callers that need the LLM should use `waitForReload()` or check `llamaServer.isRunning()` before making inference calls.
+
+**Files modified:**
+- `src/managers/ResourceOrchestrator.ts` — async reload with `pendingReload` field, `waitForReload()` method
+- `tests/unit/ResourceOrchestrator.test.ts` — updated 9 tests, added 1 new concurrency guard test (19 total)
+- `genai-electron-docs/resource-orchestration.md` — documented async behavior and new API
+
+---
+
 For detailed historical information:
 - Phase 2 app development: `docs/dev/phase2/PHASE2-APP-PROGRESS.md`
 - Library extraction plan: `docs/dev/2025-10-23-library-extraction-plan.md`

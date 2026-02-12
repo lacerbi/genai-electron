@@ -71,6 +71,7 @@ export class ResourceOrchestrator {
   private diffusionServer: DiffusionServerManager;
   private modelManager: ModelManager;
   private savedLLMState?: SavedLLMState;
+  private pendingReload: Promise<void> | null = null;
 
   /**
    * Create a new ResourceOrchestrator
@@ -115,6 +116,14 @@ export class ResourceOrchestrator {
   async orchestrateImageGeneration(config: ImageGenerationConfig): Promise<ImageGenerationResult> {
     console.log('[Orchestrator] orchestrateImageGeneration called');
 
+    // If a previous generation's reload is still in progress, wait for it
+    // to finish before potentially offloading again (prevents VRAM contention)
+    if (this.pendingReload) {
+      console.log('[Orchestrator] Awaiting pending LLM reload from previous generation...');
+      await this.pendingReload;
+      this.pendingReload = null;
+    }
+
     // Check if we need to offload LLM
     const needsOffload = await this.needsOffloadForImage();
     const llamaIsRunning = this.llamaServer.isRunning();
@@ -127,16 +136,22 @@ export class ResourceOrchestrator {
       // Save LLM state and offload
       await this.offloadLLM();
 
+      let result: ImageGenerationResult;
       try {
         // Generate image directly (bypassing orchestrator to avoid recursion)
         console.log('[Orchestrator] Generating image with LLM offloaded...');
-        const result = await this.diffusionServer.executeImageGeneration(config);
-        return result;
-      } finally {
-        // Always reload LLM if it was running before
-        console.log('[Orchestrator] Reloading LLM after generation...');
-        await this.reloadLLM();
+        result = await this.diffusionServer.executeImageGeneration(config);
+      } catch (error) {
+        // Image generation failed — still reload LLM in background, then rethrow
+        console.log('[Orchestrator] Image generation failed, reloading LLM in background...');
+        this.fireAndForgetReload();
+        throw error;
       }
+
+      // Image ready — return immediately, reload LLM in background
+      console.log('[Orchestrator] Image ready, reloading LLM in background...');
+      this.fireAndForgetReload();
+      return result;
     } else {
       if (!needsOffload) {
         console.log('[Orchestrator] ✅ Sufficient resources - generating directly without offload');
@@ -407,6 +422,23 @@ export class ResourceOrchestrator {
   }
 
   /**
+   * Start LLM reload in the background (fire-and-forget)
+   *
+   * Stores the reload promise so concurrent orchestration calls
+   * can await it before starting a new offload cycle.
+   *
+   * @private
+   */
+  private fireAndForgetReload(): void {
+    this.pendingReload = this.reloadLLM();
+    // Safety net: prevent unhandled rejection warnings.
+    // reloadLLM() handles all errors internally, but Node.js
+    // may still flag the detached promise.
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    this.pendingReload.catch(() => {});
+  }
+
+  /**
    * Delay helper for retry logic
    * @private
    */
@@ -446,6 +478,30 @@ export class ResourceOrchestrator {
    */
   getSavedState(): SavedLLMState | undefined {
     return this.savedLLMState;
+  }
+
+  /**
+   * Wait for any pending LLM reload to complete
+   *
+   * After `orchestrateImageGeneration()` returns, the LLM reload runs
+   * asynchronously in the background. Call this method if you need to
+   * ensure the LLM is fully restored before proceeding.
+   *
+   * Resolves immediately if no reload is in progress.
+   *
+   * @example
+   * ```typescript
+   * const result = await orchestrator.orchestrateImageGeneration(config);
+   * // Image is ready, but LLM may still be reloading
+   * await orchestrator.waitForReload();
+   * // LLM is now fully reloaded (or reload has failed)
+   * ```
+   */
+  async waitForReload(): Promise<void> {
+    if (this.pendingReload) {
+      await this.pendingReload;
+      this.pendingReload = null;
+    }
   }
 
   /**

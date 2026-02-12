@@ -185,6 +185,9 @@ describe('ResourceOrchestrator', () => {
       // Should generate image (using internal method)
       expect(mockDiffusionServer.executeImageGeneration).toHaveBeenCalledWith(imageConfig);
 
+      // Wait for background reload to complete before asserting
+      await orchestrator.waitForReload();
+
       // Should reload LLM
       expect(mockLlamaServer.start).toHaveBeenCalledWith({
         modelId: 'llama-2-7b',
@@ -228,6 +231,9 @@ describe('ResourceOrchestrator', () => {
 
       // Should offload LLM due to RAM constraint
       expect(mockLlamaServer.stop).toHaveBeenCalled();
+
+      // Wait for background reload
+      await orchestrator.waitForReload();
       expect(mockLlamaServer.start).toHaveBeenCalled();
     });
 
@@ -261,6 +267,9 @@ describe('ResourceOrchestrator', () => {
       });
 
       await orchestrator.orchestrateImageGeneration(imageConfig);
+
+      // Wait for background reload
+      await orchestrator.waitForReload();
 
       // Should reload with exact same configuration
       expect(mockLlamaServer.start).toHaveBeenCalledWith(llmConfig);
@@ -304,7 +313,10 @@ describe('ResourceOrchestrator', () => {
         'Generation failed'
       );
 
-      // Should still reload LLM (in finally block)
+      // Wait for background reload (fires even on image generation failure)
+      await orchestrator.waitForReload();
+
+      // Should still reload LLM
       expect(mockLlamaServer.start).toHaveBeenCalled();
     });
 
@@ -338,15 +350,17 @@ describe('ResourceOrchestrator', () => {
       const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
       const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-      // Start orchestration (don't await yet - timer needs to advance)
-      const resultPromise = orchestrator.orchestrateImageGeneration(imageConfig);
-
-      // Advance past the 2s retry delay
-      await jest.advanceTimersByTimeAsync(3000);
-
-      const result = await resultPromise;
+      // Orchestration now resolves immediately after image generation
+      const result = await orchestrator.orchestrateImageGeneration(imageConfig);
 
       expect(result).toBeDefined();
+
+      // Background reload is in progress — advance past the 2s retry delay
+      await jest.advanceTimersByTimeAsync(3000);
+
+      // Wait for the reload promise to settle
+      await orchestrator.waitForReload();
+
       // Both attempts should have been made
       expect(mockLlamaServer.start).toHaveBeenCalledTimes(2);
       // Cache should be cleared between attempts
@@ -392,18 +406,81 @@ describe('ResourceOrchestrator', () => {
 
       const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-      const resultPromise = orchestrator.orchestrateImageGeneration(imageConfig);
-
-      // Advance past the 2s retry delay
-      await jest.advanceTimersByTimeAsync(3000);
-
-      const result = await resultPromise;
+      // Orchestration resolves immediately
+      const result = await orchestrator.orchestrateImageGeneration(imageConfig);
 
       expect(result).toBeDefined();
+
+      // Advance past the 2s retry delay for background reload
+      await jest.advanceTimersByTimeAsync(3000);
+
+      // Wait for reload to settle
+      await orchestrator.waitForReload();
+
       expect(mockLlamaServer.start).toHaveBeenCalledTimes(2);
       expect(mockSystemInfo.clearCache).toHaveBeenCalled();
       // Saved state should be cleared after successful retry
       expect(orchestrator.getSavedState()).toBeUndefined();
+
+      consoleWarnSpy.mockRestore();
+      jest.useRealTimers();
+    });
+
+    it('should await pending reload before starting new orchestration', async () => {
+      jest.useFakeTimers();
+
+      mockLlamaServer.isRunning.mockReturnValue(true);
+      mockLlamaServer.getConfig.mockReturnValue({
+        modelId: 'llama-2-7b',
+        port: 8080,
+        gpuLayers: 35,
+      });
+
+      // Small VRAM to trigger offload
+      mockSystemInfo.detect.mockResolvedValue({
+        cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+        memory: { total: 16 * 1024 ** 3, available: 12 * 1024 ** 3, used: 4 * 1024 ** 3 },
+        gpu: { available: true, type: 'nvidia', vram: 6 * 1024 ** 3 },
+        platform: 'linux',
+        recommendations: {
+          maxModelSize: '7B',
+          recommendedQuantization: ['Q4_K_M'],
+          threads: 7,
+          gpuLayers: 35,
+        },
+      });
+
+      // First reload: first attempt fails with delay, retry succeeds
+      // Second reload: succeeds immediately
+      mockLlamaServer.start
+        .mockRejectedValueOnce(new Error('Insufficient RAM'))
+        .mockResolvedValueOnce({ status: 'running', port: 8080 })
+        .mockResolvedValueOnce({ status: 'running', port: 8080 });
+
+      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // First generation: image resolves immediately, reload fires in background
+      const result1 = await orchestrator.orchestrateImageGeneration(imageConfig);
+      expect(result1).toBeDefined();
+
+      // Don't advance timers yet — reload is pending (waiting for 2s retry delay)
+      // Start second generation — it should block until the first reload completes
+      const result2Promise = orchestrator.orchestrateImageGeneration(imageConfig);
+
+      // Now advance timers to let the first reload's retry happen
+      await jest.advanceTimersByTimeAsync(3000);
+
+      const result2 = await result2Promise;
+      expect(result2).toBeDefined();
+
+      // First gen: 2 start calls (fail + retry)
+      // Second gen: 1 start call (background reload)
+      // Total: at least 2 start calls from first gen's reload
+      expect(mockLlamaServer.start.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+      // Clean up any pending reload from second generation
+      await jest.advanceTimersByTimeAsync(3000);
+      await orchestrator.waitForReload();
 
       consoleWarnSpy.mockRestore();
       jest.useRealTimers();
@@ -534,12 +611,14 @@ describe('ResourceOrchestrator', () => {
       const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
       const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-      const resultPromise = orchestrator.orchestrateImageGeneration({ prompt: 'test' });
+      // Orchestration resolves immediately
+      await orchestrator.orchestrateImageGeneration({ prompt: 'test' });
 
-      // Advance past the retry delay
+      // Advance past the retry delay for background reload
       await jest.advanceTimersByTimeAsync(3000);
 
-      await resultPromise;
+      // Wait for reload to settle (both attempts fail, keeping saved state)
+      await orchestrator.waitForReload();
 
       const state = orchestrator.getSavedState();
 
@@ -576,6 +655,9 @@ describe('ResourceOrchestrator', () => {
       });
 
       await orchestrator.orchestrateImageGeneration({ prompt: 'test' });
+
+      // Wait for background reload to complete
+      await orchestrator.waitForReload();
 
       // After successful reload, state should be cleared
       const state = orchestrator.getSavedState();
@@ -615,12 +697,14 @@ describe('ResourceOrchestrator', () => {
       const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
       const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
-      const resultPromise = orchestrator.orchestrateImageGeneration({ prompt: 'test' });
+      // Orchestration resolves immediately
+      await orchestrator.orchestrateImageGeneration({ prompt: 'test' });
 
-      // Advance past the retry delay
+      // Advance past the retry delay for background reload
       await jest.advanceTimersByTimeAsync(3000);
 
-      await resultPromise;
+      // Wait for reload to settle (both attempts fail, keeping saved state)
+      await orchestrator.waitForReload();
 
       // State should exist
       expect(orchestrator.getSavedState()).toBeDefined();
