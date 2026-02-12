@@ -756,6 +756,306 @@ describe('DiffusionServerManager', () => {
       info = diffusionServer.getInfo();
       expect((info as any).busy).toBe(false);
     });
+
+    describe('progress calibration', () => {
+      it('should report progress at stage transitions without progress bars', async () => {
+        const mockImageBuffer = Buffer.from('fake-image-data');
+        mockReadFile.mockResolvedValue(mockImageBuffer);
+        mockDeleteFile.mockResolvedValue(undefined);
+
+        const progressCallback = jest.fn();
+
+        const resultPromise = diffusionServer.generateImage({
+          ...imageConfig,
+          onProgress: progressCallback,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        // Emit stage transitions only (no progress bars)
+        spawnedProcess.stdout.emit('data', '[INFO ] loading tensors from /models/sdxl.gguf\n');
+        spawnedProcess.stdout.emit(
+          'data',
+          '[INFO ] stable-diffusion.cpp:2121 - generating image: 1/1 - seed 12345\n'
+        );
+        spawnedProcess.stdout.emit('data', '[INFO ] decoding 1 latents\n');
+        spawnedProcess.stdout.emit('data', '[INFO ] decode_first_stage completed\n');
+
+        spawnedProcess.emit('exit', 0, null);
+        await resultPromise;
+
+        // Verify progress was reported at each stage transition
+        expect(progressCallback).toHaveBeenCalledWith(0, 0, 'loading', expect.any(Number));
+        expect(progressCallback).toHaveBeenCalledWith(0, 0, 'diffusion', expect.any(Number));
+        expect(progressCallback).toHaveBeenCalledWith(0, 0, 'decoding', expect.any(Number));
+        // VAE completion reports 100%
+        expect(progressCallback).toHaveBeenCalledWith(0, 0, 'decoding', 100);
+      });
+
+      it('should recalculate denominator at stage transitions so percentage does not clamp prematurely', async () => {
+        const mockImageBuffer = Buffer.from('fake-image-data');
+        mockReadFile.mockResolvedValue(mockImageBuffer);
+        mockDeleteFile.mockResolvedValue(undefined);
+
+        const percentages: { stage: string; pct: number }[] = [];
+        const progressCallback = jest.fn(
+          (currentStep: number, totalSteps: number, stage: string, percentage: number) => {
+            percentages.push({ stage, pct: percentage });
+          }
+        );
+
+        const resultPromise = diffusionServer.generateImage({
+          ...imageConfig,
+          onProgress: progressCallback,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        // Simulate full pipeline with near-instantaneous loading
+        spawnedProcess.stdout.emit('data', 'loading tensors from /models/sdxl.gguf\n');
+        spawnedProcess.stdout.emit(
+          'data',
+          'stable-diffusion.cpp:2121 - generating image: 1/1 - seed 12345\n'
+        );
+
+        // Emit diffusion progress bars
+        spawnedProcess.stdout.emit('data', '  |=====     | 1/4 - 2.00it/s\n');
+        spawnedProcess.stdout.emit('data', '  |==========| 4/4 - 2.00it/s\n');
+
+        spawnedProcess.stdout.emit('data', 'decoding 1 latents\n');
+        spawnedProcess.stdout.emit('data', 'decode_first_stage completed\n');
+
+        spawnedProcess.emit('exit', 0, null);
+        await resultPromise;
+
+        // Percentage at diffusion transition should be near 0% (not near 100%)
+        // because recalculation replaced the estimated load time with actual (near-0)
+        const diffusionTransition = percentages.find((p) => p.stage === 'diffusion');
+        expect(diffusionTransition).toBeDefined();
+        expect(diffusionTransition!.pct).toBeLessThan(10);
+      });
+
+      it('should infer VAE calibration when decode_first_stage completed is missing', async () => {
+        const mockImageBuffer = Buffer.from('fake-image-data');
+        mockReadFile.mockResolvedValue(mockImageBuffer);
+        mockDeleteFile.mockResolvedValue(undefined);
+
+        // Mock Date.now for controlled timing
+        let mockTime = 10000;
+        const dateNowSpy = jest.spyOn(Date, 'now').mockImplementation(() => mockTime);
+
+        try {
+          // --- Generation 1: loading + diffusion markers but NO VAE end marker ---
+          // 512x512 = 0.262144 megapixels, 4 steps
+          const gen1Promise = diffusionServer.generateImage({
+            ...imageConfig,
+            width: 512,
+            height: 512,
+            steps: 4,
+            onProgress: jest.fn(),
+          });
+
+          await new Promise((resolve) => setTimeout(resolve, 50));
+
+          // Loading at t=10s
+          mockTime = 10000;
+          spawnedProcess.stdout.emit('data', 'loading tensors from /models/sdxl.gguf\n');
+          // Diffusion at t=11s (1s loading)
+          mockTime = 11000;
+          spawnedProcess.stdout.emit('data', 'generating image: 1/1 - seed 12345\n');
+          // VAE at t=12s (1s diffusion)
+          mockTime = 12000;
+          spawnedProcess.stdout.emit('data', 'decoding 1 latents\n');
+          // Exit at t=22s (10s VAE, no end marker)
+          mockTime = 22000;
+          spawnedProcess.emit('exit', 0, null);
+          await gen1Promise;
+
+          // After gen 1 inference:
+          // actualLoad=1s, actualDiffusion=1s, inferredVAE ≈ 10s
+          // vaeTimePerMegapixel = 10000 / 0.262144 ≈ 38147
+
+          // --- Generation 2: verify calibrated VAE estimate ---
+          spawnedProcess.removeAllListeners();
+          spawnedProcess.stdout.removeAllListeners();
+          spawnedProcess.stderr.removeAllListeners();
+          spawnedProcess = new EventEmitter() as any;
+          spawnedProcess.pid = 54322;
+          spawnedProcess.stdout = new EventEmitter();
+          spawnedProcess.stderr = new EventEmitter();
+          spawnedProcess.kill = jest.fn();
+
+          mockProcessSpawn.mockImplementation(
+            (binaryPath: string, args: string[], options: any) => {
+              if (options.onStdout) {
+                spawnedProcess.stdout.on('data', (data: Buffer) => {
+                  options.onStdout(data.toString());
+                });
+              }
+              if (options.onStderr) {
+                spawnedProcess.stderr.on('data', (data: Buffer) => {
+                  options.onStderr(data.toString());
+                });
+              }
+              if (options.onExit) {
+                spawnedProcess.on('exit', options.onExit);
+              }
+              if (options.onError) {
+                spawnedProcess.on('error', options.onError);
+              }
+              return spawnedProcess;
+            }
+          );
+
+          const gen2Percentages: { stage: string; pct: number }[] = [];
+          const gen2Callback = jest.fn(
+            (_step: number, _total: number, stage: string, pct: number) => {
+              gen2Percentages.push({ stage, pct });
+            }
+          );
+
+          // Start gen 2 at t=30s
+          mockTime = 30000;
+          const gen2Promise = diffusionServer.generateImage({
+            ...imageConfig,
+            width: 512,
+            height: 512,
+            steps: 4,
+            onProgress: gen2Callback,
+          });
+
+          await new Promise((resolve) => setTimeout(resolve, 50));
+
+          // Loading at t=30s
+          mockTime = 30000;
+          spawnedProcess.stdout.emit('data', 'loading tensors from /models/sdxl.gguf\n');
+          // Diffusion at t=31s (1s loading)
+          mockTime = 31000;
+          spawnedProcess.stdout.emit('data', 'generating image: 1/1 - seed 12345\n');
+          // VAE at t=32s (1s diffusion)
+          mockTime = 32000;
+          spawnedProcess.stdout.emit('data', 'decoding 1 latents\n');
+
+          // Exit at t=42s
+          mockTime = 42000;
+          spawnedProcess.emit('exit', 0, null);
+          await gen2Promise;
+
+          // With calibrated estimates from gen 1:
+          // totalEstimatedTime at VAE start = actualLoad(1s) + actualDiffusion(1s) + estVAE(10s) = 12s
+          // elapsedTotal at VAE start = 1s + 1s + 0 = 2s
+          // percentage at VAE start = 2000/12000 * 100 ≈ 17%
+          const vaeTransition = gen2Percentages.find((p) => p.stage === 'decoding');
+          expect(vaeTransition).toBeDefined();
+          expect(vaeTransition!.pct).toBeGreaterThan(0);
+          expect(vaeTransition!.pct).toBeLessThan(50);
+
+          // Without inference, the default vaeTimePerMegapixel=8000 would give estVAE=2097ms
+          // totalEstimatedTime = 1000 + 1000 + 2097 = 4097ms
+          // percentage at VAE start = 2000/4097 ≈ 49%
+          // With inference, the calibrated vaeTimePerMegapixel≈38147 gives estVAE≈10000ms
+          // percentage at VAE start = 2000/12000 ≈ 17%
+          // So the percentage should be well below 49% (the default would give)
+          expect(vaeTransition!.pct).toBeLessThan(30);
+        } finally {
+          dateNowSpy.mockRestore();
+        }
+      });
+
+      it('should calibrate times across generations for better accuracy', async () => {
+        const mockImageBuffer = Buffer.from('fake-image-data');
+        mockReadFile.mockResolvedValue(mockImageBuffer);
+        mockDeleteFile.mockResolvedValue(undefined);
+
+        // --- Generation 1: all three stage markers present ---
+        const gen1Promise = diffusionServer.generateImage({
+          ...imageConfig,
+          width: 512,
+          height: 512,
+          steps: 4,
+          onProgress: jest.fn(),
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        spawnedProcess.stdout.emit('data', 'loading tensors from /models/sdxl.gguf\n');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        spawnedProcess.stdout.emit('data', 'generating image: 1/1 - seed 12345\n');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        spawnedProcess.stdout.emit('data', 'decoding 1 latents\n');
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        spawnedProcess.stdout.emit('data', 'decode_first_stage completed\n');
+
+        spawnedProcess.emit('exit', 0, null);
+        await gen1Promise;
+
+        // --- Generation 2: verify calibrated estimates produce non-default percentages ---
+        spawnedProcess.removeAllListeners();
+        spawnedProcess.stdout.removeAllListeners();
+        spawnedProcess.stderr.removeAllListeners();
+        spawnedProcess = new EventEmitter() as any;
+        spawnedProcess.pid = 54323;
+        spawnedProcess.stdout = new EventEmitter();
+        spawnedProcess.stderr = new EventEmitter();
+        spawnedProcess.kill = jest.fn();
+
+        mockProcessSpawn.mockImplementation((binaryPath: string, args: string[], options: any) => {
+          if (options.onStdout) {
+            spawnedProcess.stdout.on('data', (data: Buffer) => {
+              options.onStdout(data.toString());
+            });
+          }
+          if (options.onStderr) {
+            spawnedProcess.stderr.on('data', (data: Buffer) => {
+              options.onStderr(data.toString());
+            });
+          }
+          if (options.onExit) {
+            spawnedProcess.on('exit', options.onExit);
+          }
+          if (options.onError) {
+            spawnedProcess.on('error', options.onError);
+          }
+          return spawnedProcess;
+        });
+
+        const gen2Percentages: number[] = [];
+        const gen2Callback = jest.fn(
+          (_step: number, _total: number, _stage: string, pct: number) => {
+            gen2Percentages.push(pct);
+          }
+        );
+
+        const gen2Promise = diffusionServer.generateImage({
+          ...imageConfig,
+          width: 512,
+          height: 512,
+          steps: 4,
+          onProgress: gen2Callback,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        spawnedProcess.stdout.emit('data', 'loading tensors from /models/sdxl.gguf\n');
+        spawnedProcess.stdout.emit('data', 'generating image: 1/1 - seed 12345\n');
+        spawnedProcess.stdout.emit('data', 'decoding 1 latents\n');
+        spawnedProcess.stdout.emit('data', 'decode_first_stage completed\n');
+
+        spawnedProcess.emit('exit', 0, null);
+        await gen2Promise;
+
+        // Gen 2 used calibrated estimates from gen 1, so progress was reported
+        expect(gen2Callback).toHaveBeenCalled();
+        // All percentages should be valid numbers between 0 and 100
+        const nonFinalPcts = gen2Percentages.filter((p) => p < 100);
+        for (const pct of nonFinalPcts) {
+          expect(pct).toBeGreaterThanOrEqual(0);
+          expect(pct).toBeLessThanOrEqual(100);
+        }
+        // Should reach 100% at completion
+        expect(gen2Percentages).toContain(100);
+      });
+    });
   });
 
   describe('stop()', () => {

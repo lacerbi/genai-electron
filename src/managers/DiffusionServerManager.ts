@@ -1023,6 +1023,36 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
+   * Recalculate totalEstimatedTime using actual durations for completed stages
+   * and estimated durations for remaining stages. Called at stage transitions
+   * to keep the denominator aligned with the numerator in calculateOverallPercentage().
+   * @private
+   */
+  private recalculateTotalEstimatedTime(config: ImageGenerationConfig): void {
+    const width = config.width || 512;
+    const height = config.height || 512;
+    const steps = config.steps || 20;
+    const megapixels = (width * height) / 1_000_000;
+
+    const loadTime =
+      this.loadStartTime && this.loadEndTime
+        ? this.loadEndTime - this.loadStartTime
+        : this.modelLoadTime;
+
+    const diffusionTime =
+      this.diffusionStartTime && this.diffusionEndTime
+        ? this.diffusionEndTime - this.diffusionStartTime
+        : steps * megapixels * this.diffusionTimePerStepPerMegapixel;
+
+    const vaeTime =
+      this.vaeStartTime && this.vaeEndTime
+        ? this.vaeEndTime - this.vaeStartTime
+        : megapixels * this.vaeTimePerMegapixel;
+
+    this.totalEstimatedTime = loadTime + diffusionTime + vaeTime;
+  }
+
+  /**
    * Process stdout data for progress tracking
    * @private
    */
@@ -1031,22 +1061,28 @@ export class DiffusionServerManager extends ServerManager {
     if (data.includes('loading tensors from')) {
       this.currentStage = 'loading';
       this.loadStartTime = Date.now();
+      this.reportProgress(config);
     } else if (data.includes('generating image:') || data.includes('sampling using')) {
       if (this.currentStage === 'loading') {
         this.loadEndTime = Date.now();
       }
       this.currentStage = 'diffusion';
       this.diffusionStartTime = Date.now();
+      this.recalculateTotalEstimatedTime(config);
+      this.reportProgress(config);
     } else if (data.includes('decoding 1 latents')) {
       if (this.currentStage === 'diffusion') {
         this.diffusionEndTime = Date.now();
       }
       this.currentStage = 'vae';
       this.vaeStartTime = Date.now();
+      this.recalculateTotalEstimatedTime(config);
+      this.reportProgress(config);
       // Start synthetic progress for VAE stage
       this.startSyntheticVaeProgress(config);
     } else if (data.includes('decode_first_stage completed')) {
       this.vaeEndTime = Date.now();
+      this.recalculateTotalEstimatedTime(config);
       this.cleanupSyntheticProgress();
       // Report 100% completion with decoding stage
       if (config.onProgress) {
@@ -1088,11 +1124,9 @@ export class DiffusionServerManager extends ServerManager {
     const percentage = this.calculateOverallPercentage();
 
     // Report progress based on current stage with stage information
-    if (this.currentStage === 'loading' && this.loadProgress.total > 0) {
-      // For loading: use actual progress bar values with loading stage
+    if (this.currentStage === 'loading') {
       config.onProgress(this.loadProgress.current, this.loadProgress.total, 'loading', percentage);
-    } else if (this.currentStage === 'diffusion' && this.diffusionProgress.total > 0) {
-      // For diffusion: use actual step count with diffusion stage
+    } else if (this.currentStage === 'diffusion') {
       config.onProgress(
         this.diffusionProgress.current,
         this.diffusionProgress.total,
@@ -1190,23 +1224,57 @@ export class DiffusionServerManager extends ServerManager {
     const height = config.height || 512;
     const steps = config.steps || 20;
     const megapixels = (width * height) / 1_000_000;
+    if (megapixels === 0 || steps === 0) return;
 
-    // Update model load time (fixed cost)
-    if (this.loadStartTime && this.loadEndTime) {
-      const actualLoadTime = this.loadEndTime - this.loadStartTime;
+    // Compute actual times for stages with both start+end markers
+    const hasLoad = !!(this.loadStartTime && this.loadEndTime);
+    const hasDiffusion = !!(this.diffusionStartTime && this.diffusionEndTime);
+    const hasVae = !!(this.vaeStartTime && this.vaeEndTime);
+
+    const actualLoadTime = hasLoad ? this.loadEndTime! - this.loadStartTime! : undefined;
+    const actualDiffusionTime = hasDiffusion
+      ? this.diffusionEndTime! - this.diffusionStartTime!
+      : undefined;
+    const actualVaeTime = hasVae ? this.vaeEndTime! - this.vaeStartTime! : undefined;
+
+    // Direct calibration for stages with known times
+    if (actualLoadTime !== undefined) {
       this.modelLoadTime = actualLoadTime;
     }
-
-    // Update diffusion time per step per megapixel
-    if (this.diffusionStartTime && this.diffusionEndTime) {
-      const actualDiffusionTime = this.diffusionEndTime - this.diffusionStartTime;
+    if (actualDiffusionTime !== undefined) {
       this.diffusionTimePerStepPerMegapixel = actualDiffusionTime / (steps * megapixels);
     }
-
-    // Update VAE time per megapixel
-    if (this.vaeStartTime && this.vaeEndTime) {
-      const actualVaeTime = this.vaeEndTime - this.vaeStartTime;
+    if (actualVaeTime !== undefined) {
       this.vaeTimePerMegapixel = actualVaeTime / megapixels;
+    }
+
+    // Inference: if exactly one stage is missing, infer from total wall-clock time
+    const knownCount = (hasLoad ? 1 : 0) + (hasDiffusion ? 1 : 0) + (hasVae ? 1 : 0);
+    if (knownCount !== 2 || !this.generationStartTime) return;
+
+    const totalActualTime = Date.now() - this.generationStartTime;
+    const knownSum = (actualLoadTime || 0) + (actualDiffusionTime || 0) + (actualVaeTime || 0);
+
+    // Subtract inter-stage gaps (overhead not belonging to any stage)
+    let gaps = 0;
+    if (this.loadStartTime && this.generationStartTime) {
+      gaps += this.loadStartTime - this.generationStartTime;
+    }
+    if (this.loadEndTime && this.diffusionStartTime) {
+      gaps += this.diffusionStartTime - this.loadEndTime;
+    }
+    if (this.diffusionEndTime && this.vaeStartTime) {
+      gaps += this.vaeStartTime - this.diffusionEndTime;
+    }
+
+    const inferredTime = Math.max(0, totalActualTime - knownSum - gaps);
+
+    if (!hasLoad) {
+      this.modelLoadTime = inferredTime;
+    } else if (!hasDiffusion) {
+      this.diffusionTimePerStepPerMegapixel = inferredTime / (steps * megapixels);
+    } else if (!hasVae) {
+      this.vaeTimePerMegapixel = inferredTime / megapixels;
     }
   }
 }
