@@ -3,7 +3,8 @@
  * @module managers/StorageManager
  */
 
-import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile, rm } from 'node:fs/promises';
+import path from 'node:path';
 import type { ModelInfo, ModelType } from '../types/index.js';
 import { FileSystemError, ChecksumError } from '../errors/index.js';
 import {
@@ -194,17 +195,42 @@ export class StorageManager {
     const metadata = await this.loadModelMetadata(type, modelId);
     const metadataPath = this.getModelMetadataPath(type, modelId);
 
-    // Delete model file
-    try {
-      const modelExists = await fileExists(metadata.path);
-      if (modelExists) {
-        await deleteFile(metadata.path);
+    if (metadata.components) {
+      // Multi-component: delete each component file
+      for (const component of Object.values(metadata.components)) {
+        try {
+          const exists = await fileExists(component.path);
+          if (exists) {
+            await deleteFile(component.path);
+          }
+        } catch (error) {
+          throw new FileSystemError(`Failed to delete component file: ${component.path}`, {
+            path: component.path,
+            error,
+          });
+        }
       }
-    } catch (error) {
-      throw new FileSystemError(`Failed to delete model file: ${metadata.path}`, {
-        path: metadata.path,
-        error,
-      });
+
+      // Try to remove the model subdirectory (only succeeds if empty)
+      try {
+        const modelDir = path.dirname(metadata.path);
+        await rm(modelDir, { recursive: false });
+      } catch {
+        // Directory not empty or doesn't exist — ignore
+      }
+    } else {
+      // Single-file: delete model file
+      try {
+        const modelExists = await fileExists(metadata.path);
+        if (modelExists) {
+          await deleteFile(metadata.path);
+        }
+      } catch (error) {
+        throw new FileSystemError(`Failed to delete model file: ${metadata.path}`, {
+          path: metadata.path,
+          error,
+        });
+      }
     }
 
     // Delete metadata file
@@ -303,12 +329,40 @@ export class StorageManager {
   public async verifyModelIntegrity(type: ModelType, modelId: string): Promise<boolean> {
     const metadata = await this.loadModelMetadata(type, modelId);
 
-    // If no checksum stored, we can't verify
+    if (metadata.components) {
+      // Multi-component: verify each component file
+      let hasAnyChecksum = false;
+
+      for (const [role, component] of Object.entries(metadata.components)) {
+        const exists = await fileExists(component.path);
+        if (!exists) {
+          throw new FileSystemError(`Component file not found (${role}): ${component.path}`, {
+            path: component.path,
+            modelId,
+          });
+        }
+
+        if (component.checksum) {
+          hasAnyChecksum = true;
+          const actualChecksum = await calculateChecksum(component.path);
+          const expected = component.checksum.replace(/^sha256:/, '');
+          if (actualChecksum !== expected) {
+            throw new ChecksumError(`SHA256 checksum mismatch for component: ${role}`, {
+              expected,
+              actual: actualChecksum,
+            });
+          }
+        }
+      }
+
+      return hasAnyChecksum;
+    }
+
+    // Single-file: original behavior
     if (!metadata.checksum) {
       return false;
     }
 
-    // Check if file exists
     const exists = await fileExists(metadata.path);
     if (!exists) {
       throw new FileSystemError(`Model file not found: ${metadata.path}`, {
@@ -317,11 +371,8 @@ export class StorageManager {
       });
     }
 
-    // Calculate actual checksum
     const actualChecksum = await calculateChecksum(metadata.path);
-
-    // Compare checksums
-    const expected = metadata.checksum.replace(/^sha256:/, ''); // Remove prefix if present
+    const expected = metadata.checksum.replace(/^sha256:/, '');
     if (actualChecksum !== expected) {
       throw new ChecksumError('SHA256 checksum mismatch', {
         expected,

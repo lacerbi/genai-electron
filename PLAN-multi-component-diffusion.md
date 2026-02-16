@@ -1,7 +1,16 @@
 # Plan: Multi-Component Diffusion Model Support
 
 Created: 2026-02-12
-Status: APPROVED
+Status: COMPLETE
+
+## Implementation Progress
+- [x] Phase 1: Type System
+- [x] Phase 2: Storage & Paths
+- [x] Phase 3: Multi-Component Download
+- [x] Phase 4: Component-Aware CLI Args
+- [x] Phase 5: Resource Estimation Verification (no code changes needed)
+- [x] Phase 6: Tests (22 new tests added: 9 DiffusionServerManager + 11 StorageManager + 2 ResourceOrchestrator)
+- [x] Phase 7: Exports, Documentation & Project Files
 
 ## Summary
 
@@ -662,4 +671,40 @@ await diffusionServer.start({ modelId: 'flux-2-klein' });
 
 ---
 
-**Status: APPROVED — Ready to implement.**
+## Post-Implementation Review Findings (2026-02-16)
+
+Doublecheck verification identified these follow-up items. None are blockers — the implementation is production-ready.
+
+### CRITICAL: Missing tests
+
+- [x] **Add tests for `ModelManager.downloadMultiComponentModel()`** — 22 new tests added covering:
+  - Happy path: download 3 components sequentially, verify aggregate size and components map
+  - Validation: reject `diffusion_model` role in components array
+  - Progress aggregation: HEAD pre-fetch + wrapped callback reports smooth 0→100%
+  - GGUF conditional fetch: only for `.gguf` files, skip `.safetensors`
+  - Partial failure cleanup: delete all files + subdirectory on error
+  - Per-component checksum verification
+  - `resolveComponentURL()` for both huggingface and url sources
+  - Edge case: empty `components: []` falls through to single-file path
+
+### WARNING: Defensive validation
+
+- [x] **Guard against empty/missing `diffusion_model` in components map** — If `modelInfo.components` is truthy but `{}` or missing `diffusion_model`, `buildDiffusionArgs()` emits no model path to sd.cpp. Add validation in `start()` or `buildDiffusionArgs()` that `components.diffusion_model` exists when `components` is present.
+
+### WARNING: Documentation fixes
+
+- [x] **typescript-reference.md: Add 3 missing `DiffusionServerConfig` fields** — `clipOnCpu`, `vaeOnCpu`, `batchSize` are in source but not in the type reference doc (pre-existing omission, not a regression).
+- [x] **model-management.md: Fix metadata structure example** — Shows `role`, `filename`, `source` fields that aren't in `DiffusionComponentInfo`. Should use `path`, `size`, `checksum`.
+- [x] **model-management.md: Fix component role list** — Lists `'clip'` instead of the actual `'clip_l'`/`'clip_g'` roles. Replace with complete 7-role list.
+- [x] **resource-orchestration.md: Clarify aggregate size wording** — Current text "sum of all component files × 1.2 overhead" is slightly ambiguous. Clarify that `modelInfo.size` is the pre-computed aggregate.
+
+### NOTES: Minor improvements
+
+- [x] Add CLI arg ordering assertion in DiffusionServerManager tests (verify `DIFFUSION_COMPONENT_ORDER` is respected, not just `toContain`)
+- [x] Update CLAUDE.md Phase 2 test count from 50 to 72
+- [x] Add `toHaveBeenCalledTimes` assertions in StorageManager delete tests
+- [x] Progress can exceed 100% when HEAD requests fail — added library-side clamp in `downloadMultiComponentModel()`
+
+---
+
+**Status: ✅ ALL COMPLETE (2026-02-16) — All follow-up items resolved. 403/403 tests passing, 17 suites.**

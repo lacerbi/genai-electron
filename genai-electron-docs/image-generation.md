@@ -23,13 +23,59 @@ import { diffusionServer, DiffusionServerManager } from 'genai-electron';
 
 Starts HTTP wrapper. Auto-downloads binary on first run.
 
-**Config:** `modelId` (required), `port` (8081), `threads`, `gpuLayers`, `forceValidation`.
+**Config:** `modelId` (required), `port` (8081), `threads`, `gpuLayers`, `forceValidation`, `clipOnCpu`, `vaeOnCpu`, `batchSize`, `offloadToCpu`, `diffusionFlashAttention`.
 
 ```typescript
 await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081, threads: 8, gpuLayers: 35 });
+
+// Start Flux 2 Klein — same API, automatic component handling
+await diffusionServer.start({
+  modelId: 'flux-2-klein',
+  port: 8081,
+  // Auto-detected: offloadToCpu, diffusionFlashAttention
+  // Override if needed:
+  // offloadToCpu: true,
+  // diffusionFlashAttention: true,
+});
 ```
 
 **Throws:** `ModelNotFoundError`, `ServerError`, `PortInUseError`, `InsufficientResourcesError`, `BinaryError`
+
+### Multi-Component Models
+
+Multi-component models (Flux 2, SDXL split) work with the same `start({ modelId })` API — component resolution is handled internally. The server automatically detects multi-component models and emits the appropriate CLI flags for each component.
+
+**Automatic Optimization:**
+- `--offload-to-cpu` is auto-enabled when the model footprint exceeds 85% of VRAM
+- `--diffusion-fa` (flash attention) is auto-enabled when the model has an `llm` component (Flux 2 architecture)
+- Both can be explicitly overridden in the config
+
+**Config Fields for Multi-Component Models:**
+
+```typescript
+offloadToCpu?: boolean
+```
+Offload model weights to CPU RAM, load to VRAM on demand. `undefined` = auto-detect (enabled when model footprint > 85% of VRAM), `true` = force on, `false` = force off. Maps to `--offload-to-cpu`.
+
+```typescript
+diffusionFlashAttention?: boolean
+```
+Enable flash attention in the diffusion model. `undefined` = auto-detect (enabled when model has an `llm` component, indicating Flux 2), `true` = force on, `false` = force off. Maps to `--diffusion-fa`.
+
+```typescript
+clipOnCpu?: boolean
+```
+Force CLIP model to run on CPU instead of GPU. Maps to `--clip-on-cpu`.
+
+```typescript
+vaeOnCpu?: boolean
+```
+Force VAE model to run on CPU instead of GPU. Maps to `--vae-on-cpu`.
+
+```typescript
+batchSize?: number
+```
+Batch size for processing (default: 1). Maps to `-b` flag.
 
 ### stop()
 

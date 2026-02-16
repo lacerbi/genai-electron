@@ -233,12 +233,14 @@ export type { UIErrorFormat } from './utils/error-helpers.js';
 // Configuration and Paths
 // ============================================================================
 
-export { PATHS, getBinaryPath, getModelFilePath } from './config/paths.js';
+export { PATHS, getBinaryPath, getModelFilePath, getModelDirectory } from './config/paths.js';
 export {
   BINARY_VERSIONS,
   DEFAULT_PORTS,
   DEFAULT_TIMEOUTS,
   DIFFUSION_VRAM_THRESHOLDS,
+  DIFFUSION_COMPONENT_FLAGS,
+  DIFFUSION_COMPONENT_ORDER,
 } from './config/defaults.js';
 
 // ============================================================================
@@ -261,6 +263,10 @@ export type {
   DownloadProgressCallback,
   GGUFMetadata,
   MetadataFetchStrategy,
+  DiffusionComponentRole,
+  DiffusionComponentInfo,
+  DiffusionModelComponents,
+  DiffusionComponentDownload,
   // Server types
   ServerStatus,
   HealthStatus,

@@ -18,7 +18,13 @@ import { GenerationRegistry } from './GenerationRegistry.js';
 import http from 'node:http';
 import { promises as fs } from 'node:fs';
 import { getTempPath } from '../config/paths.js';
-import { BINARY_VERSIONS, DEFAULT_PORTS, DIFFUSION_VRAM_THRESHOLDS } from '../config/defaults.js';
+import {
+  BINARY_VERSIONS,
+  DEFAULT_PORTS,
+  DIFFUSION_VRAM_THRESHOLDS,
+  DIFFUSION_COMPONENT_FLAGS,
+  DIFFUSION_COMPONENT_ORDER,
+} from '../config/defaults.js';
 import { deleteFile } from '../utils/file-utils.js';
 import { ServerError, ModelNotFoundError, InsufficientResourcesError } from '../errors/index.js';
 import type {
@@ -75,6 +81,8 @@ export class DiffusionServerManager extends ServerManager {
     'clipOnCpu',
     'vaeOnCpu',
     'batchSize',
+    'offloadToCpu',
+    'diffusionFlashAttention',
   ]);
 
   private processManager: ProcessManager;
@@ -854,6 +862,8 @@ export class DiffusionServerManager extends ServerManager {
   private async computeDiffusionOptimizations(): Promise<{
     clipOnCpu: boolean;
     vaeOnCpu: boolean;
+    offloadToCpu: boolean;
+    diffusionFlashAttention: boolean;
     batchSize?: number;
   }> {
     const serverConfig = this._config as DiffusionServerConfig;
@@ -862,6 +872,7 @@ export class DiffusionServerManager extends ServerManager {
 
     let autoClipOnCpu = false;
     let autoVaeOnCpu = false;
+    let autoOffloadToCpu = false;
 
     try {
       const gpu = await this.systemInfo.getGPUInfo();
@@ -870,11 +881,15 @@ export class DiffusionServerManager extends ServerManager {
         // No GPU or no VRAM info — safe default: clip on CPU, VAE stays on GPU
         autoClipOnCpu = true;
         autoVaeOnCpu = false;
+        autoOffloadToCpu = false;
       } else {
         const headroom = gpu.vram - modelFootprint;
 
         autoClipOnCpu = headroom < DIFFUSION_VRAM_THRESHOLDS.clipOnCpuHeadroomBytes;
         autoVaeOnCpu = headroom < DIFFUSION_VRAM_THRESHOLDS.vaeOnCpuHeadroomBytes;
+
+        // Auto-enable offload-to-cpu when model footprint > 85% of VRAM
+        autoOffloadToCpu = modelFootprint > gpu.vram * 0.85;
 
         // Escalation: if vramAvailable is known and critically low, force clip-on-cpu
         if (gpu.vramAvailable !== undefined && gpu.vramAvailable - modelFootprint < 2 * 1024 ** 3) {
@@ -885,18 +900,26 @@ export class DiffusionServerManager extends ServerManager {
       // GPU detection failed — use safe defaults
       autoClipOnCpu = true;
       autoVaeOnCpu = false;
+      autoOffloadToCpu = false;
     }
+
+    // Auto-enable diffusion flash attention when model has an 'llm' component (Flux 2)
+    const hasLLMComponent = !!this.currentModelInfo?.components?.llm;
+    const autoDiffusionFlashAttention = hasLLMComponent;
 
     const clipOnCpu = serverConfig.clipOnCpu ?? autoClipOnCpu;
     const vaeOnCpu = serverConfig.vaeOnCpu ?? autoVaeOnCpu;
+    const offloadToCpu = serverConfig.offloadToCpu ?? autoOffloadToCpu;
+    const diffusionFlashAttention =
+      serverConfig.diffusionFlashAttention ?? autoDiffusionFlashAttention;
     const batchSize = serverConfig.batchSize;
 
     await this.logManager?.write(
-      `VRAM optimizations: clipOnCpu=${clipOnCpu}, vaeOnCpu=${vaeOnCpu}${batchSize !== undefined ? `, batchSize=${batchSize}` : ''} (auto: clip=${autoClipOnCpu}, vae=${autoVaeOnCpu})`,
+      `VRAM optimizations: clipOnCpu=${clipOnCpu}, vaeOnCpu=${vaeOnCpu}, offloadToCpu=${offloadToCpu}, diffusionFa=${diffusionFlashAttention}${batchSize !== undefined ? `, batchSize=${batchSize}` : ''} (auto: clip=${autoClipOnCpu}, vae=${autoVaeOnCpu}, offload=${autoOffloadToCpu}, fa=${autoDiffusionFlashAttention})`,
       'info'
     );
 
-    return { clipOnCpu, vaeOnCpu, batchSize };
+    return { clipOnCpu, vaeOnCpu, offloadToCpu, diffusionFlashAttention, batchSize };
   }
 
   /**
@@ -911,12 +934,38 @@ export class DiffusionServerManager extends ServerManager {
   private buildDiffusionArgs(
     config: ImageGenerationConfig,
     modelInfo: ModelInfo,
-    optimizations?: { clipOnCpu: boolean; vaeOnCpu: boolean; batchSize?: number }
+    optimizations?: {
+      clipOnCpu: boolean;
+      vaeOnCpu: boolean;
+      offloadToCpu: boolean;
+      diffusionFlashAttention: boolean;
+      batchSize?: number;
+    }
   ): string[] {
     const args: string[] = [];
 
-    // Model path
-    args.push('-m', modelInfo.path);
+    // Model path(s) — multi-component or single-file
+    if (modelInfo.components) {
+      // Validate that the components map includes the primary diffusion_model
+      if (!modelInfo.components.diffusion_model) {
+        throw new ServerError(
+          'Multi-component model is missing required diffusion_model component',
+          {
+            modelId: modelInfo.id,
+            components: Object.keys(modelInfo.components),
+            suggestion: 'The model metadata appears corrupted. Try re-downloading the model.',
+          }
+        );
+      }
+      for (const role of DIFFUSION_COMPONENT_ORDER) {
+        const component = modelInfo.components[role];
+        if (component) {
+          args.push(DIFFUSION_COMPONENT_FLAGS[role], component.path);
+        }
+      }
+    } else {
+      args.push('-m', modelInfo.path);
+    }
 
     // Prompt (required)
     if (config.prompt) {
@@ -974,6 +1023,12 @@ export class DiffusionServerManager extends ServerManager {
       }
       if (optimizations.vaeOnCpu) {
         args.push('--vae-on-cpu');
+      }
+      if (optimizations.offloadToCpu) {
+        args.push('--offload-to-cpu');
+      }
+      if (optimizations.diffusionFlashAttention) {
+        args.push('--diffusion-fa');
       }
       if (optimizations.batchSize !== undefined) {
         args.push('-b', String(optimizations.batchSize));

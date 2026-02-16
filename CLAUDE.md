@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **genai-electron** is an Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). It handles platform-specific operations like model downloads, binary management, server lifecycle, and resource orchestration. This library complements **genai-lite** (the API abstraction layer) by managing the runtime infrastructure.
 
-**Current Status**: Phase 2.6 Complete (LLM + Image Generation + Async API). Production-ready with 273/273 tests passing.
+**Current Status**: Phase 2.6 Complete + Multi-component diffusion model support. Production-ready with 403/403 tests passing.
 
 ## Essential Commands
 
@@ -131,22 +131,27 @@ src/
 - **GGUF Utilities**: `fetchGGUFMetadata()`, `fetchLocalGGUFMetadata()`, `getArchField()` - Extract metadata from GGUF files
 - **Reasoning Detection**: `detectReasoningSupport()`, `REASONING_MODEL_PATTERNS` - Identify reasoning-capable models
 - **Generation ID**: `generateId()` - Used internally by async image generation API
+- **Multi-Component**: `DIFFUSION_COMPONENT_FLAGS`, `DIFFUSION_COMPONENT_ORDER`, `getModelDirectory()` - Multi-file diffusion model support
+- **Types**: `DiffusionComponentRole`, `DiffusionComponentInfo`, `DiffusionModelComponents`, `DiffusionComponentDownload`
 - **Complete list**: See `src/index.ts` for all exported utilities, types, and classes
 
 ## Testing Approach
 
 **Current Status** (Phase 2.6 Complete):
 - Jest 30 + ts-jest with ESM experimental support
-- 273/273 tests passing (100% pass rate)
-- 13 test suites covering all Phase 1, 2, 2.5 functionality
+- 403/403 tests passing (100% pass rate)
+- 17 test suites covering all Phase 1, 2, 2.5 functionality + multi-component support
 - Clean test exit (no memory leaks, no warnings)
 - Fast execution (~4 seconds for full suite)
 
 **Test Coverage**:
-- Phase 1: 138 tests (errors, utils, core managers)
-- Phase 2: 50 tests (DiffusionServerManager, ResourceOrchestrator)
+- Phase 1: 104 tests (errors, utils, platform, SystemInfo, LlamaServerManager, Downloader)
+- Phase 2: 84 tests (DiffusionServerManager, ResourceOrchestrator, multi-component)
 - Phase 2.5: 27 tests (GenerationRegistry, async API)
-- Infrastructure: 58 tests (BinaryManager, health-check, validation cache)
+- Infrastructure: 61 tests (BinaryManager, health-check)
+- Phase 3 Prep: 47 tests (structured-logs, electron-lifecycle, error-helpers)
+- Storage: 28 tests (StorageManager, multi-component delete/verify)
+- Model Management: 52 tests (ModelManager, downloads, multi-component)
 
 **Test Structure**:
 ```
@@ -174,6 +179,8 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 **Phase 2 (Complete)**: Image generation & async API
 - DiffusionServerManager (HTTP wrapper for stable-diffusion.cpp)
 - ResourceOrchestrator (automatic LLM offload/reload when VRAM constrained)
+- Multi-component diffusion model support (Flux 2 Klein, SDXL split)
+- Auto-detection of `--offload-to-cpu` and `--diffusion-fa` optimization flags
 - Cross-platform CI/CD with automated testing
 - electron-control-panel example app available
 
@@ -244,7 +251,7 @@ This is documented in the electron-control-panel example for reference.
 1. **Run `npm run build`** - Must compile with 0 TypeScript errors
 2. **Run `npm run lint`** - Must pass with 0 errors (warnings OK if intentional)
 3. **Run `npm run format`** - Auto-format all files with Prettier
-4. **Run `npm test`** - All tests must pass (273/273)
+4. **Run `npm test`** - All tests must pass (403/403)
 5. **Commit `package-lock.json`** - Never add lockfiles to .gitignore (needed for CI)
 
 **Note**: CI will fail if any of these checks fail. Run them locally before pushing.

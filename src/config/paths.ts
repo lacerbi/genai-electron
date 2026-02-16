@@ -67,6 +67,24 @@ export async function ensureDirectories(): Promise<void> {
 }
 
 /**
+ * Returns the path to a per-model subdirectory for multi-component models.
+ * Creates: {models_dir}/{type}/{modelId}/
+ *
+ * @param type - Model type (llm or diffusion)
+ * @param modelId - Model identifier (used as subdirectory name)
+ * @returns Absolute path to model subdirectory
+ *
+ * @example
+ * ```typescript
+ * const dir = getModelDirectory('diffusion', 'flux-2-klein');
+ * // Returns: /path/to/userData/models/diffusion/flux-2-klein/
+ * ```
+ */
+export function getModelDirectory(type: 'llm' | 'diffusion', modelId: string): string {
+  return path.join(PATHS.models[type], modelId);
+}
+
+/**
  * Get the metadata file path for a model
  *
  * @param type - Model type (llm or diffusion)

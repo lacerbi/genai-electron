@@ -1491,4 +1491,417 @@ describe('DiffusionServerManager', () => {
       await server.stop();
     });
   });
+
+  describe('multi-component model support', () => {
+    const flux2KleinModelInfo: ModelInfo = {
+      id: 'flux-2-klein',
+      name: 'Flux 2 Klein',
+      type: 'diffusion' as const,
+      size: 7.1 * 1024 ** 3, // aggregate
+      path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+      downloadedAt: '2025-10-17T10:00:00Z',
+      source: { type: 'url' as const, url: 'https://example.com/flux-2-klein.gguf' },
+      components: {
+        diffusion_model: {
+          path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+          size: 4.3 * 1024 ** 3,
+        },
+        llm: {
+          path: '/test/models/diffusion/flux-2-klein/Qwen3-4B-Q4_0.gguf',
+          size: 2.5 * 1024 ** 3,
+        },
+        vae: {
+          path: '/test/models/diffusion/flux-2-klein/flux2-vae.safetensors',
+          size: 335 * 1024 ** 2,
+        },
+      },
+    };
+
+    const sdxlSplitModelInfo: ModelInfo = {
+      id: 'sdxl-split',
+      name: 'SDXL Split',
+      type: 'diffusion' as const,
+      size: 6.9 * 1024 ** 3,
+      path: '/test/models/diffusion/sdxl-split/sdxl-unet.safetensors',
+      downloadedAt: '2025-10-17T10:00:00Z',
+      source: { type: 'url' as const, url: 'https://example.com/sdxl-split.safetensors' },
+      components: {
+        diffusion_model: {
+          path: '/test/models/diffusion/sdxl-split/sdxl-unet.safetensors',
+          size: 5.1 * 1024 ** 3,
+        },
+        clip_l: {
+          path: '/test/models/diffusion/sdxl-split/clip_l.safetensors',
+          size: 246 * 1024 ** 2,
+        },
+        clip_g: {
+          path: '/test/models/diffusion/sdxl-split/clip_g.safetensors',
+          size: 1.4 * 1024 ** 3,
+        },
+        vae: {
+          path: '/test/models/diffusion/sdxl-split/sdxl-vae.safetensors',
+          size: 335 * 1024 ** 2,
+        },
+      },
+    };
+
+    let spawnedProcess: any;
+
+    /**
+     * Helper: start server with given model, run generateImage, return spawned args
+     */
+    async function multiComponentGenerateAndCaptureArgs(
+      server: DiffusionServerManager,
+      serverConfig: DiffusionServerConfig,
+      model: ModelInfo
+    ): Promise<string[]> {
+      mockModelManager.getModelInfo.mockResolvedValue(model);
+      await server.start(serverConfig);
+
+      const mockImageBuffer = Buffer.from('fake-image-data');
+      mockReadFile.mockResolvedValue(mockImageBuffer);
+
+      spawnedProcess = new EventEmitter() as any;
+      spawnedProcess.pid = 88888;
+      spawnedProcess.stdout = new EventEmitter();
+      spawnedProcess.stderr = new EventEmitter();
+      spawnedProcess.kill = jest.fn();
+
+      mockProcessSpawn.mockImplementation((_bin: string, _args: string[], options: any) => {
+        if (options.onExit) spawnedProcess.on('exit', options.onExit);
+        if (options.onError) spawnedProcess.on('error', options.onError);
+        return spawnedProcess;
+      });
+
+      const resultPromise = server.generateImage({ prompt: 'test' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      spawnedProcess.emit('exit', 0, null);
+      await resultPromise;
+
+      const spawnCall = mockProcessSpawn.mock.calls[0];
+      return spawnCall[1] as string[];
+    }
+
+    afterEach(() => {
+      if (spawnedProcess) {
+        spawnedProcess.removeAllListeners?.();
+        spawnedProcess.stdout?.removeAllListeners?.();
+        spawnedProcess.stderr?.removeAllListeners?.();
+      }
+    });
+
+    it('should use per-component CLI flags for Flux 2 Klein topology', async () => {
+      // 24 GB GPU so no VRAM optimizations interfere
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await multiComponentGenerateAndCaptureArgs(
+        server,
+        mockConfig,
+        flux2KleinModelInfo
+      );
+
+      // Should NOT contain -m (single-file flag)
+      expect(args).not.toContain('-m');
+
+      // Should contain per-component flags with correct paths
+      expect(args).toContain('--diffusion-model');
+      expect(args).toContain(flux2KleinModelInfo.components!.diffusion_model!.path);
+      expect(args).toContain('--llm');
+      expect(args).toContain(flux2KleinModelInfo.components!.llm!.path);
+      expect(args).toContain('--vae');
+      expect(args).toContain(flux2KleinModelInfo.components!.vae!.path);
+
+      // Should NOT contain flags for components that are absent
+      expect(args).not.toContain('--clip_l');
+      expect(args).not.toContain('--clip_g');
+      expect(args).not.toContain('--t5xxl');
+      expect(args).not.toContain('--llm_vision');
+
+      await server.stop();
+    });
+
+    it('should use per-component CLI flags for SDXL split topology', async () => {
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await multiComponentGenerateAndCaptureArgs(
+        server,
+        mockConfig,
+        sdxlSplitModelInfo
+      );
+
+      // Should NOT contain -m (single-file flag)
+      expect(args).not.toContain('-m');
+
+      // Should contain per-component flags with correct paths
+      expect(args).toContain('--diffusion-model');
+      expect(args).toContain(sdxlSplitModelInfo.components!.diffusion_model!.path);
+      expect(args).toContain('--clip_l');
+      expect(args).toContain(sdxlSplitModelInfo.components!.clip_l!.path);
+      expect(args).toContain('--clip_g');
+      expect(args).toContain(sdxlSplitModelInfo.components!.clip_g!.path);
+      expect(args).toContain('--vae');
+      expect(args).toContain(sdxlSplitModelInfo.components!.vae!.path);
+
+      // Should NOT contain flags for components that are absent
+      expect(args).not.toContain('--t5xxl');
+      expect(args).not.toContain('--llm');
+      expect(args).not.toContain('--llm_vision');
+
+      await server.stop();
+    });
+
+    it('should use -m flag for single-file model (backwards compat)', async () => {
+      const singleFileModel: ModelInfo = {
+        id: 'sd-15',
+        name: 'SD 1.5',
+        type: 'diffusion' as const,
+        size: 4 * 1024 ** 3,
+        path: '/test/models/diffusion/sd-v1-5.safetensors',
+        downloadedAt: '2025-10-17T10:00:00Z',
+        source: { type: 'url' as const, url: 'https://example.com/sd-v1-5.safetensors' },
+        // No components field → single-file model
+      };
+
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await multiComponentGenerateAndCaptureArgs(server, mockConfig, singleFileModel);
+
+      // Should use -m (single-file flag)
+      expect(args).toContain('-m');
+      expect(args).toContain(singleFileModel.path);
+
+      // Should NOT contain any per-component flags
+      expect(args).not.toContain('--diffusion-model');
+      expect(args).not.toContain('--clip_l');
+      expect(args).not.toContain('--clip_g');
+      expect(args).not.toContain('--t5xxl');
+      expect(args).not.toContain('--llm');
+      expect(args).not.toContain('--llm_vision');
+      expect(args).not.toContain('--vae');
+
+      await server.stop();
+    });
+
+    it('should auto-enable --offload-to-cpu for large multi-component model', async () => {
+      // Flux 2 Klein aggregate size = 7.1 GB
+      // modelFootprint = 7.1 * 1.2 = 8.52 GB
+      // GPU VRAM = 8 GB → 8.52 > 8 * 0.85 (6.8) → auto offload
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 8 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await multiComponentGenerateAndCaptureArgs(
+        server,
+        mockConfig,
+        flux2KleinModelInfo
+      );
+
+      expect(args).toContain('--offload-to-cpu');
+
+      await server.stop();
+    });
+
+    it('should auto-enable --diffusion-fa for model with llm component (Flux 2)', async () => {
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await multiComponentGenerateAndCaptureArgs(
+        server,
+        mockConfig,
+        flux2KleinModelInfo
+      );
+
+      expect(args).toContain('--diffusion-fa');
+
+      await server.stop();
+    });
+
+    it('should not auto-enable --diffusion-fa for model without llm component (SDXL split)', async () => {
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await multiComponentGenerateAndCaptureArgs(
+        server,
+        mockConfig,
+        sdxlSplitModelInfo
+      );
+
+      expect(args).not.toContain('--diffusion-fa');
+
+      await server.stop();
+    });
+
+    it('should respect user override offloadToCpu: false', async () => {
+      // Auto would enable offload (8.52 GB footprint > 8 * 0.85 = 6.8 GB)
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 8 * 1024 ** 3,
+      });
+
+      const overrideConfig: DiffusionServerConfig = { ...mockConfig, offloadToCpu: false };
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await multiComponentGenerateAndCaptureArgs(
+        server,
+        overrideConfig,
+        flux2KleinModelInfo
+      );
+
+      expect(args).not.toContain('--offload-to-cpu');
+
+      await server.stop();
+    });
+
+    it('should respect user override diffusionFlashAttention: false', async () => {
+      // Auto would enable flash attention (Flux 2 has llm component)
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const overrideConfig: DiffusionServerConfig = {
+        ...mockConfig,
+        diffusionFlashAttention: false,
+      };
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await multiComponentGenerateAndCaptureArgs(
+        server,
+        overrideConfig,
+        flux2KleinModelInfo
+      );
+
+      expect(args).not.toContain('--diffusion-fa');
+
+      await server.stop();
+    });
+
+    it('should throw ServerError when components map is missing diffusion_model', async () => {
+      const brokenModelInfo: ModelInfo = {
+        id: 'broken-model',
+        name: 'Broken Model',
+        type: 'diffusion' as const,
+        size: 3 * 1024 ** 3,
+        path: '/test/models/diffusion/broken/some-file.gguf',
+        downloadedAt: '2025-10-17T10:00:00Z',
+        source: { type: 'url' as const, url: 'https://example.com/broken.gguf' },
+        components: {
+          // Missing diffusion_model — only has llm and vae
+          llm: {
+            path: '/test/models/diffusion/broken/llm.gguf',
+            size: 2 * 1024 ** 3,
+          },
+          vae: {
+            path: '/test/models/diffusion/broken/vae.safetensors',
+            size: 335 * 1024 ** 2,
+          },
+        },
+      };
+
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      mockModelManager.getModelInfo.mockResolvedValue(brokenModelInfo);
+      await server.start(mockConfig);
+
+      mockReadFile.mockResolvedValue(Buffer.from('fake-image-data'));
+
+      spawnedProcess = new EventEmitter() as any;
+      spawnedProcess.pid = 77777;
+      spawnedProcess.stdout = new EventEmitter();
+      spawnedProcess.stderr = new EventEmitter();
+      spawnedProcess.kill = jest.fn();
+
+      mockProcessSpawn.mockImplementation((_bin: string, _args: string[], options: any) => {
+        if (options.onExit) spawnedProcess.on('exit', options.onExit);
+        if (options.onError) spawnedProcess.on('error', options.onError);
+        return spawnedProcess;
+      });
+
+      await expect(server.generateImage({ prompt: 'test' })).rejects.toThrow(
+        'missing required diffusion_model component'
+      );
+
+      await server.stop();
+    });
+
+    it('should emit component CLI flags in DIFFUSION_COMPONENT_ORDER', async () => {
+      // Verify that flags appear in the canonical order, not random object key order
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 24 * 1024 ** 3,
+      });
+
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      const args = await multiComponentGenerateAndCaptureArgs(
+        server,
+        mockConfig,
+        sdxlSplitModelInfo
+      );
+
+      // Find indices of component flags in the args array
+      const diffusionModelIdx = args.indexOf('--diffusion-model');
+      const clipLIdx = args.indexOf('--clip_l');
+      const clipGIdx = args.indexOf('--clip_g');
+      const vaeIdx = args.indexOf('--vae');
+
+      // All should be present
+      expect(diffusionModelIdx).toBeGreaterThanOrEqual(0);
+      expect(clipLIdx).toBeGreaterThanOrEqual(0);
+      expect(clipGIdx).toBeGreaterThanOrEqual(0);
+      expect(vaeIdx).toBeGreaterThanOrEqual(0);
+
+      // Order: diffusion_model < clip_l < clip_g < vae
+      expect(diffusionModelIdx).toBeLessThan(clipLIdx);
+      expect(clipLIdx).toBeLessThan(clipGIdx);
+      expect(clipGIdx).toBeLessThan(vaeIdx);
+
+      await server.stop();
+    });
+  });
+
+  describe('config validation with new fields', () => {
+    it('should accept offloadToCpu and diffusionFlashAttention without error', async () => {
+      const validConfig: DiffusionServerConfig = {
+        modelId: 'sdxl-turbo',
+        port: 8081,
+        offloadToCpu: true,
+        diffusionFlashAttention: true,
+      };
+
+      const info = await diffusionServer.start(validConfig);
+      expect(info.status).toBe('running');
+    });
+  });
 });

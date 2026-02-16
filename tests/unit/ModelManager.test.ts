@@ -60,21 +60,55 @@ jest.unstable_mockModule('../../src/download/checksum.js', () => ({
   formatChecksum: mockFormatChecksum,
 }));
 
+// Mock node:fs/promises (used for mkdir in downloadMultiComponentModel and dynamic rm in cleanup)
+const mockMkdir = jest.fn().mockResolvedValue(undefined);
+const mockRm = jest.fn().mockResolvedValue(undefined);
+
+jest.unstable_mockModule('node:fs/promises', () => ({
+  mkdir: mockMkdir,
+  rm: mockRm,
+}));
+
 // Mock file-utils
 const mockFileExists = jest.fn();
 const mockGetFileSize = jest.fn();
-const mockSanitizeFilename = jest.fn((filename: string) => filename);
+// sanitizeFilename must be a plain function (not jest.fn) to survive jest.clearAllMocks()
+const mockSanitizeFilename = (filename: string) => filename;
+const mockDeleteFile = jest.fn().mockResolvedValue(undefined);
 
 jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
   fileExists: mockFileExists,
   getFileSize: mockGetFileSize,
   sanitizeFilename: mockSanitizeFilename,
+  deleteFile: mockDeleteFile,
 }));
 
-// Mock paths
+// Mock paths - use plain functions to survive jest.clearAllMocks()
+// Track getModelDirectory calls via shared state
+const pathsMockState = {
+  getModelDirectoryCalls: [] as Array<{ type: string; modelId: string }>,
+};
+
 jest.unstable_mockModule('../../src/config/paths.js', () => ({
   getModelFilePath: (type: string, filename: string) => `/test/models/${type}/${filename}`,
   getModelMetadataPath: (type: string, modelId: string) => `/test/models/${type}/${modelId}.json`,
+  getModelDirectory: (type: string, modelId: string) => {
+    pathsMockState.getModelDirectoryCalls.push({ type, modelId });
+    return `/test/models/${type}/${modelId}`;
+  },
+  PATHS: {
+    models: { llm: '/test/models/llm', diffusion: '/test/models/diffusion' },
+    binaries: { llama: '/test/binaries/llama', diffusion: '/test/binaries/diffusion' },
+    logs: '/test/logs',
+    config: '/test/config',
+    temp: '/test/temp',
+  },
+  BASE_DIR: '/test',
+  ensureDirectories: async () => undefined,
+  getBinaryPath: (type: string, name: string) => `/test/binaries/${type}/${name}`,
+  getLogPath: (name: string) => `/test/logs/${name}`,
+  getConfigPath: (name: string) => `/test/config/${name}`,
+  getTempPath: (name: string) => `/test/temp/${name}`,
 }));
 
 // Mock reasoning-models
@@ -83,47 +117,43 @@ jest.unstable_mockModule('../../src/config/reasoning-models.js', () => ({
 }));
 
 // Mock GGUF parser - use plain async functions for ESM compatibility
+// Track calls via a shared state object (jest.fn() implementations get cleared by clearAllMocks)
+const ggufMockState = {
+  fetchGGUFMetadataCallCount: 0,
+  fetchGGUFMetadataShouldReject: false,
+  fetchGGUFMetadataRejectError: null as Error | null,
+};
+
+const defaultGGUFResponse = {
+  metadata: {
+    version: 3,
+    tensor_count: 291n, // BigInt - matches real GGUF format
+    kv_count: 19n, // BigInt - matches real GGUF format
+    'general.architecture': 'llama',
+    'general.name': 'Test Model',
+    'general.file_type': 10,
+    'llama.block_count': 32,
+    'llama.context_length': 4096,
+    'llama.attention.head_count': 32,
+    'llama.embedding_length': 4096,
+    'llama.feed_forward_length': 11008,
+    'llama.vocab_size': 32000,
+    'llama.rope.dimension_count': 128,
+    'llama.rope.freq_base': 10000,
+    'llama.attention.layer_norm_rms_epsilon': 1e-5,
+  },
+  tensorInfos: [],
+};
+
 jest.unstable_mockModule('../../src/utils/gguf-parser.js', () => ({
-  fetchGGUFMetadata: async () => ({
-    metadata: {
-      version: 3,
-      tensor_count: 291n, // BigInt - matches real GGUF format
-      kv_count: 19n, // BigInt - matches real GGUF format
-      'general.architecture': 'llama',
-      'general.name': 'Test Model',
-      'general.file_type': 10,
-      'llama.block_count': 32,
-      'llama.context_length': 4096,
-      'llama.attention.head_count': 32,
-      'llama.embedding_length': 4096,
-      'llama.feed_forward_length': 11008,
-      'llama.vocab_size': 32000,
-      'llama.rope.dimension_count': 128,
-      'llama.rope.freq_base': 10000,
-      'llama.attention.layer_norm_rms_epsilon': 1e-5,
-    },
-    tensorInfos: [],
-  }),
-  fetchLocalGGUFMetadata: async () => ({
-    metadata: {
-      version: 3,
-      tensor_count: 291n, // BigInt - matches real GGUF format
-      kv_count: 19n, // BigInt - matches real GGUF format
-      'general.architecture': 'llama',
-      'general.name': 'Test Model',
-      'general.file_type': 10,
-      'llama.block_count': 32,
-      'llama.context_length': 4096,
-      'llama.attention.head_count': 32,
-      'llama.embedding_length': 4096,
-      'llama.feed_forward_length': 11008,
-      'llama.vocab_size': 32000,
-      'llama.rope.dimension_count': 128,
-      'llama.rope.freq_base': 10000,
-      'llama.attention.layer_norm_rms_epsilon': 1e-5,
-    },
-    tensorInfos: [],
-  }),
+  fetchGGUFMetadata: async () => {
+    ggufMockState.fetchGGUFMetadataCallCount++;
+    if (ggufMockState.fetchGGUFMetadataShouldReject) {
+      throw ggufMockState.fetchGGUFMetadataRejectError || new Error('GGUF fetch error');
+    }
+    return defaultGGUFResponse;
+  },
+  fetchLocalGGUFMetadata: async () => defaultGGUFResponse,
   getArchField: (metadata: Record<string, unknown>, fieldPath: string) => {
     const arch = metadata['general.architecture'];
     if (arch && typeof arch === 'string') {
@@ -146,6 +176,7 @@ jest.unstable_mockModule('../../src/utils/model-metadata-helpers.js', () => ({
 
 // Import after mocking
 const { ModelManager } = await import('../../src/managers/ModelManager.js');
+const { DownloadError } = await import('../../src/errors/index.js');
 
 describe('ModelManager', () => {
   let modelManager: ModelManager;
@@ -165,6 +196,12 @@ describe('ModelManager', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    // Reset GGUF mock state
+    ggufMockState.fetchGGUFMetadataCallCount = 0;
+    ggufMockState.fetchGGUFMetadataShouldReject = false;
+    ggufMockState.fetchGGUFMetadataRejectError = null;
+    // Reset paths mock state
+    pathsMockState.getModelDirectoryCalls = [];
     modelManager = new ModelManager();
   });
 
@@ -592,6 +629,697 @@ describe('ModelManager', () => {
         expect(error).toBeDefined();
         expect((error as Error).message).toContain('Disk read error');
       }
+    });
+  });
+
+  describe('downloadMultiComponentModel()', () => {
+    // Helper: create a mock HEAD response with content-length
+    const createHeadResponse = (contentLength: number) =>
+      ({
+        headers: {
+          get: (name: string) => (name === 'content-length' ? String(contentLength) : null),
+        },
+      }) as unknown as Response;
+
+    // Flux 2 Klein-style 3-component config
+    const flux2KleinConfig: DownloadConfig = {
+      source: 'huggingface',
+      repo: 'leejet/FLUX.2-klein-4B-GGUF',
+      file: 'flux2-klein-4B-Q4_0.gguf',
+      name: 'Flux 2 Klein 4B',
+      type: 'diffusion',
+      components: [
+        {
+          role: 'llm',
+          source: 'huggingface',
+          repo: 'unsloth/Qwen3-4B-GGUF',
+          file: 'Qwen3-4B-Q4_0.gguf',
+        },
+        {
+          role: 'vae',
+          source: 'huggingface',
+          repo: 'Comfy-Org/flux2-dev',
+          file: 'flux2-vae.safetensors',
+        },
+      ],
+    };
+
+    let fetchSpy: jest.Spied<typeof globalThis.fetch>;
+
+    beforeEach(() => {
+      // Common setup for multi-component tests
+      mockStorageManager.checkDiskSpace.mockResolvedValue(100 * 1024 * 1024 * 1024);
+      mockDownload.mockResolvedValue(undefined);
+      mockFileExists.mockResolvedValue(false); // No pre-existing files
+      mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+      mockIsHuggingFaceURL.mockReturnValue(false);
+      mockGetHuggingFaceURL.mockImplementation(
+        (repo: string, file: string) => `https://huggingface.co/${repo}/resolve/main/${file}`
+      );
+      // Default file sizes: primary 4.3GB, llm 2.5GB, vae 335MB
+      // Called twice per component: once after download (completedBytes) + once for components map
+      mockGetFileSize
+        .mockResolvedValueOnce(4_300_000_000) // primary: after download
+        .mockResolvedValueOnce(2_500_000_000) // llm: after download
+        .mockResolvedValueOnce(335_000_000) // vae: after download
+        .mockResolvedValueOnce(4_300_000_000) // primary: components map
+        .mockResolvedValueOnce(2_500_000_000) // llm: components map
+        .mockResolvedValueOnce(335_000_000); // vae: components map
+
+      // Mock fetch for HEAD requests
+      fetchSpy = jest
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async (input: RequestInfo | URL) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          if (url.includes('flux2-klein')) {
+            return createHeadResponse(4_300_000_000);
+          } else if (url.includes('Qwen3')) {
+            return createHeadResponse(2_500_000_000);
+          } else if (url.includes('flux2-vae')) {
+            return createHeadResponse(335_000_000);
+          }
+          return createHeadResponse(0);
+        });
+    });
+
+    afterEach(() => {
+      fetchSpy.mockRestore();
+    });
+
+    describe('happy path', () => {
+      it('should download 3-component Flux 2 Klein model', async () => {
+        const model = await modelManager.downloadModel(flux2KleinConfig);
+
+        // Verify mkdir was called for model subdirectory
+        expect(mockMkdir).toHaveBeenCalledWith(expect.stringContaining('flux-2-klein-4b'), {
+          recursive: true,
+        });
+
+        // Verify all 3 components were downloaded
+        expect(mockDownload).toHaveBeenCalledTimes(3);
+
+        // Verify download order: primary, llm, vae
+        const downloadCalls = mockDownload.mock.calls;
+        expect(downloadCalls[0][0].url).toContain('flux2-klein-4B-Q4_0.gguf');
+        expect(downloadCalls[1][0].url).toContain('Qwen3-4B-Q4_0.gguf');
+        expect(downloadCalls[2][0].url).toContain('flux2-vae.safetensors');
+
+        // Verify all destinations are within the model subdirectory
+        for (const call of downloadCalls) {
+          expect(call[0].destination).toContain('flux-2-klein-4b');
+        }
+
+        // Verify model info has correct structure
+        expect(model.id).toBe('flux-2-klein-4b');
+        expect(model.name).toBe('Flux 2 Klein 4B');
+        expect(model.type).toBe('diffusion');
+        expect(model.path).toContain('flux2-klein-4B-Q4_0.gguf');
+
+        // Verify aggregate size
+        expect(model.size).toBe(4_300_000_000 + 2_500_000_000 + 335_000_000);
+
+        // Verify components map
+        expect(model.components).toBeDefined();
+        expect(model.components!.diffusion_model).toBeDefined();
+        expect(model.components!.diffusion_model!.size).toBe(4_300_000_000);
+        expect(model.components!.llm).toBeDefined();
+        expect(model.components!.llm!.size).toBe(2_500_000_000);
+        expect(model.components!.vae).toBeDefined();
+        expect(model.components!.vae!.size).toBe(335_000_000);
+
+        // Verify metadata was saved
+        expect(mockStorageManager.saveModelMetadata).toHaveBeenCalledWith(
+          expect.objectContaining({
+            id: 'flux-2-klein-4b',
+            components: expect.objectContaining({
+              diffusion_model: expect.objectContaining({ size: 4_300_000_000 }),
+              llm: expect.objectContaining({ size: 2_500_000_000 }),
+              vae: expect.objectContaining({ size: 335_000_000 }),
+            }),
+          })
+        );
+
+        // Verify GGUF metadata was fetched for primary .gguf file
+        expect(model.ggufMetadata).toBeDefined();
+        expect(model.ggufMetadata!.architecture).toBe('llama');
+      });
+
+      it('should use direct URL source for components', async () => {
+        const directURLConfig: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/diffusion-model.gguf',
+          name: 'Direct URL Model',
+          type: 'diffusion',
+          components: [
+            {
+              role: 'vae',
+              source: 'url',
+              url: 'https://example.com/vae.safetensors',
+            },
+          ],
+        };
+
+        // Reset file sizes for 2 components
+        mockGetFileSize.mockReset();
+        mockGetFileSize.mockResolvedValueOnce(1_000_000_000).mockResolvedValueOnce(200_000_000);
+
+        fetchSpy.mockImplementation(async () => createHeadResponse(500_000_000));
+
+        const model = await modelManager.downloadModel(directURLConfig);
+
+        expect(mockDownload).toHaveBeenCalledTimes(2);
+        expect(mockDownload.mock.calls[0][0].url).toBe('https://example.com/diffusion-model.gguf');
+        expect(mockDownload.mock.calls[1][0].url).toBe('https://example.com/vae.safetensors');
+        expect(model.components).toBeDefined();
+        expect(model.components!.diffusion_model).toBeDefined();
+        expect(model.components!.vae).toBeDefined();
+      });
+    });
+
+    describe('validation', () => {
+      it('should reject diffusion_model role in components array', async () => {
+        const invalidConfig: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/primary.gguf',
+          name: 'Invalid Config',
+          type: 'diffusion',
+          components: [
+            {
+              role: 'diffusion_model',
+              source: 'url',
+              url: 'https://example.com/another.gguf',
+            },
+          ],
+        };
+
+        await expect(modelManager.downloadModel(invalidConfig)).rejects.toThrow(DownloadError);
+        await expect(modelManager.downloadModel(invalidConfig)).rejects.toThrow(
+          /top-level config describes the primary diffusion model/
+        );
+      });
+    });
+
+    describe('progress aggregation', () => {
+      it('should report aggregate progress across multiple components', async () => {
+        const progressCallback = jest.fn();
+
+        // 2 components: primary (1000 bytes) + vae (500 bytes)
+        const twoComponentConfig: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/primary.gguf',
+          name: 'Progress Test',
+          type: 'diffusion',
+          onProgress: progressCallback,
+          components: [
+            {
+              role: 'vae',
+              source: 'url',
+              url: 'https://example.com/vae.safetensors',
+            },
+          ],
+        };
+
+        // HEAD requests return known sizes
+        fetchSpy.mockImplementation(async (input: RequestInfo | URL) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          if (url.includes('primary')) return createHeadResponse(1000);
+          if (url.includes('vae')) return createHeadResponse(500);
+          return createHeadResponse(0);
+        });
+
+        // After first download, getFileSize returns 1000 (completedBytes), then 500
+        mockGetFileSize.mockReset();
+        mockGetFileSize.mockResolvedValueOnce(1000).mockResolvedValueOnce(500);
+
+        // Capture onProgress wrappers from download calls
+        mockDownload.mockImplementation(
+          async (opts: { onProgress?: (d: number, t: number) => void }) => {
+            // Simulate some progress during download
+            if (opts.onProgress) {
+              opts.onProgress(250, 500);
+            }
+          }
+        );
+
+        await modelManager.downloadModel(twoComponentConfig);
+
+        // First component progress: completedBytes=0, downloaded=250, total=1500
+        // Second component progress: completedBytes=1000, downloaded=250, total=1500
+        expect(progressCallback).toHaveBeenCalled();
+
+        // Check first call: should be (0 + 250, 1500) = (250, 1500)
+        const firstCall = progressCallback.mock.calls[0];
+        expect(firstCall[0]).toBe(250); // completedBytes(0) + downloaded(250)
+        expect(firstCall[1]).toBe(1500); // totalBytes
+
+        // Check second call: should be (1000 + 250, 1500) = (1250, 1500)
+        const secondCall = progressCallback.mock.calls[1];
+        expect(secondCall[0]).toBe(1250); // completedBytes(1000) + downloaded(250)
+        expect(secondCall[1]).toBe(1500); // totalBytes
+      });
+    });
+
+    describe('GGUF conditional fetch', () => {
+      it('should fetch GGUF metadata when primary file is .gguf', async () => {
+        // Reset counter to track calls in this test
+        ggufMockState.fetchGGUFMetadataCallCount = 0;
+
+        // flux2KleinConfig has primary file ending in .gguf
+        const model = await modelManager.downloadModel(flux2KleinConfig);
+
+        expect(model.ggufMetadata).toBeDefined();
+        expect(model.ggufMetadata!.architecture).toBe('llama');
+        expect(ggufMockState.fetchGGUFMetadataCallCount).toBeGreaterThan(0);
+      });
+
+      it('should NOT fetch GGUF metadata when primary file is .safetensors', async () => {
+        const safetensorsConfig: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/model.safetensors',
+          name: 'Safetensors Model',
+          type: 'diffusion',
+          components: [
+            {
+              role: 'vae',
+              source: 'url',
+              url: 'https://example.com/vae.safetensors',
+            },
+          ],
+        };
+
+        // Reset file sizes for 2 components
+        mockGetFileSize.mockReset();
+        mockGetFileSize.mockResolvedValueOnce(1_000_000_000).mockResolvedValueOnce(200_000_000);
+
+        fetchSpy.mockImplementation(async () => createHeadResponse(500_000_000));
+
+        // Reset counter to track calls in this test
+        ggufMockState.fetchGGUFMetadataCallCount = 0;
+
+        const model = await modelManager.downloadModel(safetensorsConfig);
+
+        expect(model.ggufMetadata).toBeUndefined();
+        expect(ggufMockState.fetchGGUFMetadataCallCount).toBe(0);
+      });
+
+      it('should succeed even if GGUF metadata fetch fails for multi-component', async () => {
+        // Make GGUF metadata fetch fail
+        ggufMockState.fetchGGUFMetadataShouldReject = true;
+        ggufMockState.fetchGGUFMetadataRejectError = new Error('GGUF parse error');
+
+        const model = await modelManager.downloadModel(flux2KleinConfig);
+
+        // Should succeed without GGUF metadata (non-fatal for multi-component)
+        expect(model).toBeDefined();
+        expect(model.ggufMetadata).toBeUndefined();
+        expect(model.components).toBeDefined();
+      });
+    });
+
+    describe('partial failure cleanup', () => {
+      it('should clean up downloaded files when second component fails', async () => {
+        // First download succeeds, second fails
+        mockDownload
+          .mockResolvedValueOnce(undefined) // primary succeeds
+          .mockRejectedValueOnce(new Error('Network error')); // llm fails
+
+        await expect(modelManager.downloadModel(flux2KleinConfig)).rejects.toThrow(DownloadError);
+
+        // Verify cleanup: deleteFile called for the first downloaded file
+        expect(mockDeleteFile).toHaveBeenCalled();
+        // The first file (primary) was downloaded and tracked
+        expect(mockDeleteFile.mock.calls[0][0]).toContain('flux2-klein-4B-Q4_0.gguf');
+
+        // Verify rm called to remove model directory
+        expect(mockRm).toHaveBeenCalledWith(expect.stringContaining('flux-2-klein-4b'), {
+          recursive: true,
+          force: true,
+        });
+      });
+
+      it('should clean up all downloaded files when third component fails', async () => {
+        // First two downloads succeed, third fails
+        mockDownload
+          .mockResolvedValueOnce(undefined) // primary succeeds
+          .mockResolvedValueOnce(undefined) // llm succeeds
+          .mockRejectedValueOnce(new Error('Disk full')); // vae fails
+
+        await expect(modelManager.downloadModel(flux2KleinConfig)).rejects.toThrow(DownloadError);
+
+        // Both downloaded files should be cleaned up
+        expect(mockDeleteFile).toHaveBeenCalledTimes(2);
+        expect(mockDeleteFile.mock.calls[0][0]).toContain('flux2-klein-4B-Q4_0.gguf');
+        expect(mockDeleteFile.mock.calls[1][0]).toContain('Qwen3-4B-Q4_0.gguf');
+
+        // Model directory should be removed
+        expect(mockRm).toHaveBeenCalledWith(expect.stringContaining('flux-2-klein-4b'), {
+          recursive: true,
+          force: true,
+        });
+      });
+
+      it('should throw DownloadError when component file already exists', async () => {
+        // First file exists check returns true (file already exists)
+        mockFileExists.mockReset();
+        mockFileExists.mockResolvedValueOnce(true);
+
+        await expect(modelManager.downloadModel(flux2KleinConfig)).rejects.toThrow(DownloadError);
+
+        // Verify the error message mentions "already exists"
+        mockFileExists.mockReset();
+        mockFileExists.mockResolvedValueOnce(true);
+        try {
+          await modelManager.downloadModel({
+            ...flux2KleinConfig,
+            name: 'Flux 2 Klein 4B Duplicate',
+          });
+          throw new Error('Should have thrown');
+        } catch (error: any) {
+          expect(error).toBeInstanceOf(DownloadError);
+          expect(error.message).toMatch(/already exists/);
+        }
+      });
+
+      it('should wrap non-DownloadError errors as DownloadError', async () => {
+        // Simulate a generic error (not DownloadError) on first component download
+        mockDownload.mockReset();
+        mockDownload.mockRejectedValueOnce(new TypeError('fetch failed'));
+
+        await expect(modelManager.downloadModel(flux2KleinConfig)).rejects.toThrow(DownloadError);
+
+        // Verify the error message wraps the original
+        mockDownload.mockReset();
+        mockDownload.mockRejectedValueOnce(new TypeError('fetch failed'));
+        try {
+          await modelManager.downloadModel({
+            ...flux2KleinConfig,
+            name: 'Flux 2 Klein wrap test',
+          });
+          throw new Error('Should have thrown');
+        } catch (error: any) {
+          expect(error).toBeInstanceOf(DownloadError);
+          expect(error.message).toMatch(/Multi-component download failed/);
+        }
+      });
+    });
+
+    describe('per-component checksum verification', () => {
+      it('should verify checksums for all components when provided', async () => {
+        const configWithChecksums: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/primary.gguf',
+          name: 'Checksum Model',
+          type: 'diffusion',
+          checksum: 'sha256:aaa111',
+          components: [
+            {
+              role: 'vae',
+              source: 'url',
+              url: 'https://example.com/vae.safetensors',
+              checksum: 'sha256:bbb222',
+            },
+          ],
+        };
+
+        mockGetFileSize.mockReset();
+        mockGetFileSize.mockResolvedValueOnce(1_000_000_000).mockResolvedValueOnce(200_000_000);
+        fetchSpy.mockImplementation(async () => createHeadResponse(500_000_000));
+
+        // Checksums match
+        mockCalculateSHA256
+          .mockResolvedValueOnce('aaa111') // primary
+          .mockResolvedValueOnce('bbb222'); // vae
+        mockFormatChecksum.mockImplementation((hash: string) => `sha256:${hash}`);
+
+        const model = await modelManager.downloadModel(configWithChecksums);
+
+        expect(model).toBeDefined();
+        expect(mockCalculateSHA256).toHaveBeenCalledTimes(2);
+        expect(model.components!.diffusion_model!.checksum).toBe('sha256:aaa111');
+        expect(model.components!.vae!.checksum).toBe('sha256:bbb222');
+      });
+
+      it('should throw DownloadError when component checksum mismatches', async () => {
+        const configWithBadChecksum: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/primary.gguf',
+          name: 'Bad Checksum Model',
+          type: 'diffusion',
+          checksum: 'sha256:aaa111',
+          components: [
+            {
+              role: 'vae',
+              source: 'url',
+              url: 'https://example.com/vae.safetensors',
+              checksum: 'sha256:expected_hash',
+            },
+          ],
+        };
+
+        mockGetFileSize.mockReset();
+        mockGetFileSize.mockResolvedValueOnce(1_000_000_000).mockResolvedValueOnce(200_000_000);
+        fetchSpy.mockImplementation(async () => createHeadResponse(500_000_000));
+
+        // Primary checksum matches, vae checksum mismatches
+        mockCalculateSHA256
+          .mockResolvedValueOnce('aaa111') // primary matches
+          .mockResolvedValueOnce('wrong_hash'); // vae mismatches
+
+        await expect(modelManager.downloadModel(configWithBadChecksum)).rejects.toThrow(
+          DownloadError
+        );
+        await expect(
+          modelManager
+            .downloadModel({
+              ...configWithBadChecksum,
+              name: 'Bad Checksum Model 2',
+            })
+            .catch(async () => {
+              // Need to reset mocks for second assertion
+              mockCalculateSHA256
+                .mockResolvedValueOnce('aaa111')
+                .mockResolvedValueOnce('wrong_hash');
+              mockGetFileSize.mockReset();
+              mockGetFileSize
+                .mockResolvedValueOnce(1_000_000_000)
+                .mockResolvedValueOnce(200_000_000);
+              mockFileExists.mockResolvedValue(false);
+              throw await modelManager
+                .downloadModel({
+                  ...configWithBadChecksum,
+                  name: 'Bad Checksum Model 3',
+                })
+                .catch((e) => e);
+            })
+        ).rejects.toThrow(/Checksum verification failed for component: vae/);
+      });
+
+      it('should clean up on checksum failure', async () => {
+        const configWithBadChecksum: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/primary.gguf',
+          name: 'Checksum Cleanup',
+          type: 'diffusion',
+          checksum: 'sha256:good_hash',
+          components: [
+            {
+              role: 'vae',
+              source: 'url',
+              url: 'https://example.com/vae.safetensors',
+              checksum: 'sha256:expected',
+            },
+          ],
+        };
+
+        mockGetFileSize.mockReset();
+        mockGetFileSize.mockResolvedValueOnce(1_000_000_000).mockResolvedValueOnce(200_000_000);
+        fetchSpy.mockImplementation(async () => createHeadResponse(500_000_000));
+
+        // Primary checksum matches, vae fails
+        mockCalculateSHA256
+          .mockResolvedValueOnce('good_hash') // primary OK
+          .mockResolvedValueOnce('bad_hash'); // vae mismatch
+
+        try {
+          await modelManager.downloadModel(configWithBadChecksum);
+        } catch {
+          // Expected
+        }
+
+        // Primary was downloaded and tracked, should be cleaned up
+        expect(mockDeleteFile).toHaveBeenCalled();
+        // Should also have cleaned up the vae file (it was downloaded successfully before checksum check)
+        expect(mockRm).toHaveBeenCalledWith(expect.stringContaining('checksum-cleanup'), {
+          recursive: true,
+          force: true,
+        });
+      });
+    });
+
+    describe('resolveComponentURL', () => {
+      it('should resolve HuggingFace source via getHuggingFaceURL', async () => {
+        // The flux2KleinConfig uses HuggingFace sources
+        await modelManager.downloadModel(flux2KleinConfig);
+
+        // Primary + 2 components = 3 calls to getHuggingFaceURL
+        expect(mockGetHuggingFaceURL).toHaveBeenCalledTimes(3);
+        expect(mockGetHuggingFaceURL).toHaveBeenCalledWith(
+          'leejet/FLUX.2-klein-4B-GGUF',
+          'flux2-klein-4B-Q4_0.gguf'
+        );
+        expect(mockGetHuggingFaceURL).toHaveBeenCalledWith(
+          'unsloth/Qwen3-4B-GGUF',
+          'Qwen3-4B-Q4_0.gguf'
+        );
+        expect(mockGetHuggingFaceURL).toHaveBeenCalledWith(
+          'Comfy-Org/flux2-dev',
+          'flux2-vae.safetensors'
+        );
+      });
+
+      it('should use direct URL when source is url', async () => {
+        const urlConfig: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/primary.gguf',
+          name: 'URL Test',
+          type: 'diffusion',
+          components: [
+            {
+              role: 'vae',
+              source: 'url',
+              url: 'https://cdn.example.com/vae.safetensors',
+            },
+          ],
+        };
+
+        mockGetFileSize.mockReset();
+        mockGetFileSize.mockResolvedValueOnce(500_000_000).mockResolvedValueOnce(100_000_000);
+        fetchSpy.mockImplementation(async () => createHeadResponse(300_000_000));
+
+        await modelManager.downloadModel(urlConfig);
+
+        // Direct URLs should be used directly, not via getHuggingFaceURL
+        expect(mockDownload.mock.calls[0][0].url).toBe('https://example.com/primary.gguf');
+        expect(mockDownload.mock.calls[1][0].url).toBe('https://cdn.example.com/vae.safetensors');
+      });
+
+      it('should throw DownloadError when URL source has no url', async () => {
+        const noURLConfig: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/primary.gguf',
+          name: 'Missing URL Test',
+          type: 'diffusion',
+          components: [
+            {
+              role: 'vae',
+              source: 'url',
+              // Missing url!
+            } as any,
+          ],
+        };
+
+        await expect(modelManager.downloadModel(noURLConfig)).rejects.toThrow(DownloadError);
+        await expect(
+          modelManager.downloadModel({
+            ...noURLConfig,
+            name: 'Missing URL Test 2',
+          })
+        ).rejects.toThrow(/URL is required/);
+      });
+
+      it('should throw DownloadError when HuggingFace source missing repo/file', async () => {
+        const noRepoConfig: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/primary.gguf',
+          name: 'Missing Repo Test',
+          type: 'diffusion',
+          components: [
+            {
+              role: 'vae',
+              source: 'huggingface',
+              // Missing repo and file!
+            } as any,
+          ],
+        };
+
+        await expect(modelManager.downloadModel(noRepoConfig)).rejects.toThrow(DownloadError);
+        await expect(
+          modelManager.downloadModel({
+            ...noRepoConfig,
+            name: 'Missing Repo Test 2',
+          })
+        ).rejects.toThrow(/Repository and file are required/);
+      });
+
+      it('should throw DownloadError when primary URL source has no url', async () => {
+        const noPrimaryURLConfig: DownloadConfig = {
+          source: 'url',
+          // Missing url for primary!
+          name: 'No Primary URL',
+          type: 'diffusion',
+          components: [
+            {
+              role: 'vae',
+              source: 'url',
+              url: 'https://example.com/vae.safetensors',
+            },
+          ],
+        } as any;
+
+        await expect(modelManager.downloadModel(noPrimaryURLConfig)).rejects.toThrow(DownloadError);
+      });
+    });
+
+    describe('HEAD request pre-fetch', () => {
+      it('should make parallel HEAD requests for all components', async () => {
+        await modelManager.downloadModel(flux2KleinConfig);
+
+        // 3 HEAD requests (one per component)
+        const headCalls = fetchSpy.mock.calls.filter(
+          (call) => (call[1] as RequestInit)?.method === 'HEAD'
+        );
+        expect(headCalls).toHaveLength(3);
+      });
+
+      it('should handle HEAD request failures gracefully', async () => {
+        // HEAD requests all fail
+        fetchSpy.mockRejectedValue(new Error('Network error'));
+
+        // Should still succeed (totalBytes defaults to 0 for failed HEAD)
+        const model = await modelManager.downloadModel(flux2KleinConfig);
+
+        expect(model).toBeDefined();
+        expect(model.components).toBeDefined();
+      });
+    });
+
+    describe('empty components edge case', () => {
+      it('should use single-file flow when components array is empty', async () => {
+        const emptyComponentsConfig: DownloadConfig = {
+          source: 'url',
+          url: 'https://example.com/model.gguf',
+          name: 'Empty Components',
+          type: 'llm',
+          components: [],
+        };
+
+        // Setup for single-file download path
+        mockFileExists.mockReset();
+        mockFileExists.mockResolvedValueOnce(false).mockResolvedValue(true);
+        mockGetFileSize.mockReset();
+        mockGetFileSize.mockResolvedValue(1_000_000_000);
+
+        const model = await modelManager.downloadModel(emptyComponentsConfig);
+
+        // Should NOT create a subdirectory (single-file path)
+        expect(mockMkdir).not.toHaveBeenCalled();
+
+        // Should download once (single file)
+        expect(mockDownload).toHaveBeenCalledTimes(1);
+
+        // Should not have components
+        expect(model.components).toBeUndefined();
+      });
     });
   });
 });

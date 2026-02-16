@@ -1,23 +1,25 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Phase 2.6 Complete - genai-lite Integration (2025-10-23)
+> **Current Status**: Multi-component diffusion model support added (2026-02-16)
 
 ---
 
 ## Current Build Status
 
-- **Build:** ✅ 0 TypeScript errors (library + example app)
-- **Tests:** ✅ 287/287 passing (100% pass rate)
+- **Build:** ✅ 0 TypeScript errors
+- **Tests:** ✅ 403/403 passing (100% pass rate)
 - **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `feat/extraction` (Library Extraction Phase 1 - Part 1 complete)
-- **Last Updated:** 2025-10-23
+- **Branch:** `main`
+- **Last Updated:** 2026-02-16
 
 **Test Suite Breakdown:**
-- Phase 1 Tests: 138 tests (errors, utils, core managers)
-- Phase 2 Tests: 50 tests (DiffusionServerManager, ResourceOrchestrator)
+- Phase 1 Tests: 104 tests (errors, utils, platform, SystemInfo, LlamaServerManager, Downloader)
+- Phase 2 Tests: 84 tests (DiffusionServerManager, ResourceOrchestrator, multi-component)
 - Phase 2.5 Tests: 27 tests (GenerationRegistry, async API)
-- Infrastructure: 58 tests (BinaryManager, health-check, validation cache)
-- Phase 3 Prep Tests: 14 tests (structured-logs API - getStructuredLogs())
+- Infrastructure: 61 tests (BinaryManager, health-check)
+- Phase 3 Prep Tests: 47 tests (structured-logs, electron-lifecycle, error-helpers)
+- Storage Tests: 28 tests (StorageManager, multi-component delete/verify)
+- Model Management: 52 tests (ModelManager, downloads, multi-component)
 
 ---
 
@@ -416,6 +418,42 @@ Key design decisions that inform future development:
 - ✅ Production-ready documentation structure
 
 For detailed planning: `docs/dev/2025-10-23-documentation-restructure-plan.md`
+
+---
+
+## Multi-Component Diffusion Model Support (2026-02-16)
+
+**Goal:** Support diffusion models composed of multiple separate files (Flux 2 Klein, SDXL split) instead of only monolithic single-file models.
+
+**Core Features:**
+- New type system: `DiffusionComponentRole`, `DiffusionComponentInfo`, `DiffusionModelComponents`, `DiffusionComponentDownload`
+- Multi-file download flow with aggregate progress tracking (smooth 0→100% across all components)
+- Per-model subdirectory storage for multi-component models (flat layout preserved for single-file)
+- Component-aware CLI arg building (`--diffusion-model`, `--llm`, `--vae`, etc.)
+- Auto-detection of `--offload-to-cpu` (model footprint > 85% VRAM) and `--diffusion-fa` (Flux 2 architecture)
+- Multi-component delete and integrity verification in StorageManager
+- New config fields: `offloadToCpu`, `diffusionFlashAttention` (three-state: undefined/true/false)
+- Backwards-compatible: single-file models work exactly as before
+
+**Target Architectures:**
+- Flux 2 Klein: `--diffusion-model` + `--llm` (Qwen3-4B) + `--vae` (3 files, ~7-9 GB)
+- SDXL Split: `--diffusion-model` + `--clip_l` + `--clip_g` + `--vae` (4 files, ~7 GB)
+
+**Files Modified:**
+- `src/types/models.ts` — 4 new types, extended `ModelInfo` and `DownloadConfig`
+- `src/types/images.ts` — 2 new fields on `DiffusionServerConfig`
+- `src/config/defaults.ts` — `DIFFUSION_COMPONENT_FLAGS`, `DIFFUSION_COMPONENT_ORDER`
+- `src/config/paths.ts` — `getModelDirectory()` helper
+- `src/managers/ModelManager.ts` — `downloadMultiComponentModel()` with aggregate progress
+- `src/managers/StorageManager.ts` — Multi-component delete and verify
+- `src/managers/DiffusionServerManager.ts` — Per-component CLI args, new optimization flags
+- `src/index.ts` — New exports (types, constants, utilities)
+- Tests: 22 new test cases across 4 test suites
+- Documentation: typescript-reference, model-management, image-generation, DESIGN.md updated
+
+**Build Status:**
+- ✅ 0 TypeScript errors
+- ✅ 403/403 tests passing (357 existing + 46 new)
 
 ---
 

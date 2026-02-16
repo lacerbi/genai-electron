@@ -10,6 +10,7 @@ Electron-specific library for managing local AI model servers (llama.cpp, stable
 - ✅ **Model management** - Download GGUF models with progress tracking and metadata extraction
 - ✅ **LLM server** - Manage llama-server lifecycle with auto-configuration
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
+- ✅ **Multi-component diffusion models** - Flux 2, SDXL split components with aggregate checksum validation
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when memory constrained
 - ✅ **Binary management** - Automatic binary download with GPU variant testing (CUDA→Vulkan→CPU)
 - ✅ **TypeScript-first** - Full type safety, zero runtime dependencies

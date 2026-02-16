@@ -464,6 +464,21 @@ await init({
 
 This enables download-once-use-everywhere for developers building multiple apps or power users with disk constraints. Migration from per-app to shared storage will be supported.
 
+**Multi-Component Model Storage**: Models with multiple component files (e.g., Flux 2 Klein: diffusion model + LLM text encoder + VAE) are stored in per-model subdirectories:
+
+```
+userData/models/diffusion/
+  sdxl-turbo.json                      # metadata (monolithic, unchanged)
+  sdxl-turbo.safetensors               # model file (monolithic, unchanged)
+  flux-2-klein/                        # per-model dir (multi-component)
+    flux-2-klein-4b-Q8_0.gguf         # diffusion model (~4.3 GB)
+    Qwen3-4B-Q4_0.gguf                # LLM text encoder (~2.5 GB)
+    flux2-vae.safetensors              # Flux 2 VAE (~335 MB)
+  flux-2-klein.json                    # metadata (components map inside)
+```
+
+Single-file models keep the existing flat layout. The `ModelInfo.components` map (type `DiffusionModelComponents`) stores per-component paths, sizes, and checksums. `ModelInfo.path` points to the primary diffusion model component, and `ModelInfo.size` is the aggregate total.
+
 **Summary**: MVP uses isolated per-app storage (safest, simplest). Future extensions may add configurable shared storage.
 
 ---

@@ -50,6 +50,8 @@ Automatically manage system resources when running both LLM and image generation
 **Diffusion Usage:**
 - `RAM/VRAM = model_size * 1.2`
 
+> **Multi-component models:** Resource estimation uses `modelInfo.size` (pre-computed aggregate of all component file sizes) × 1.2 overhead. This is conservative — with `--offload-to-cpu`, only the largest single component needs to fit in VRAM at any time. Future versions may refine this to check per-component VRAM requirements.
+
 ### Offload Decision
 
 - **Combined usage > 75% of available resource** → Offload LLM, generate image, reload LLM

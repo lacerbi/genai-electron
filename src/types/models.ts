@@ -9,6 +9,56 @@
 export type ModelType = 'llm' | 'diffusion';
 
 /**
+ * Component roles in a multi-file diffusion model.
+ * Each role maps to a specific sd.cpp CLI flag.
+ */
+export type DiffusionComponentRole =
+  | 'diffusion_model' // --diffusion-model (main UNet/DiT)
+  | 'clip_l' // --clip_l (CLIP-L text encoder)
+  | 'clip_g' // --clip_g (CLIP-G text encoder, SDXL)
+  | 't5xxl' // --t5xxl (T5-XXL text encoder, SD3/Flux 1)
+  | 'llm' // --llm (LLM text encoder, Flux 2/Qwen Image)
+  | 'llm_vision' // --llm_vision (LLM vision, Qwen Image)
+  | 'vae'; // --vae (VAE decoder)
+
+/** Info about a single component file within a multi-component model. */
+export interface DiffusionComponentInfo {
+  /** Absolute path to this component file on disk. */
+  path: string;
+  /** File size in bytes. */
+  size: number;
+  /** SHA256 checksum with sha256: prefix. */
+  checksum?: string;
+}
+
+/**
+ * Map of component roles to their file info.
+ * Present on ModelInfo only for multi-component diffusion models.
+ */
+export type DiffusionModelComponents = Partial<
+  Record<DiffusionComponentRole, DiffusionComponentInfo>
+>;
+
+/**
+ * Download specification for a single component within a multi-file model.
+ * Used inside DownloadConfig.components.
+ */
+export interface DiffusionComponentDownload {
+  /** Which component this file represents. */
+  role: DiffusionComponentRole;
+  /** Download source type. */
+  source: 'huggingface' | 'url';
+  /** Direct download URL (required if source is 'url'). */
+  url?: string;
+  /** HuggingFace repository (required if source is 'huggingface'). */
+  repo?: string;
+  /** File path within the HuggingFace repo (required if source is 'huggingface'). */
+  file?: string;
+  /** Expected SHA256 checksum for verification. */
+  checksum?: string;
+}
+
+/**
  * Strategy for fetching GGUF metadata when updating model metadata
  *
  * @remarks
@@ -149,6 +199,14 @@ export interface ModelInfo {
    * May be undefined for models downloaded before this feature.
    */
   ggufMetadata?: GGUFMetadata;
+
+  /**
+   * Component files for multi-component diffusion models.
+   * Undefined for single-file models (LLM, monolithic diffusion).
+   * When present, `path` points to the diffusion_model component
+   * and `size` is the aggregate total.
+   */
+  components?: DiffusionModelComponents;
 }
 
 /**
@@ -183,6 +241,13 @@ export interface DownloadConfig {
 
   /** Progress callback function */
   onProgress?: DownloadProgressCallback;
+
+  /**
+   * Additional component files for multi-component diffusion models.
+   * When present, the top-level url/repo/file describes the primary
+   * diffusion model, and each entry here describes an additional component.
+   */
+  components?: DiffusionComponentDownload[];
 }
 
 /**

@@ -785,5 +785,111 @@ describe('ResourceOrchestrator', () => {
 
       expect(needsOffload).toBeDefined();
     });
+
+    describe('multi-component model estimation', () => {
+      const multiComponentDiffusionModel = {
+        id: 'flux-2-klein',
+        name: 'Flux 2 Klein',
+        type: 'diffusion',
+        size: 7.1 * 1024 * 1024 * 1024, // 7.1GB aggregate
+        path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+        downloadedAt: '2025-10-17T10:00:00Z',
+        source: { type: 'url', url: 'https://example.com/flux-2-klein.gguf' },
+        components: {
+          diffusion_model: {
+            path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+            size: 4.3 * 1024 * 1024 * 1024,
+          },
+          llm: {
+            path: '/test/models/diffusion/flux-2-klein/Qwen3-4B-Q4_0.gguf',
+            size: 2.5 * 1024 * 1024 * 1024,
+          },
+          vae: {
+            path: '/test/models/diffusion/flux-2-klein/flux2-vae.safetensors',
+            size: 335 * 1024 * 1024,
+          },
+        },
+      };
+
+      it('should estimate using aggregate size for multi-component models', async () => {
+        // Set up multi-component model
+        mockModelManager.getModelInfo.mockImplementation((modelId: string) => {
+          if (modelId === 'llama-2-7b') return Promise.resolve(llmModelInfo);
+          if (modelId === 'flux-2-klein') return Promise.resolve(multiComponentDiffusionModel);
+          return Promise.reject(new Error('Model not found'));
+        });
+
+        mockDiffusionServer.getConfig.mockReturnValue({
+          modelId: 'flux-2-klein',
+          port: 8081,
+        });
+
+        // LLM not running
+        mockLlamaServer.isRunning.mockReturnValue(false);
+
+        // 8GB VRAM (constrained)
+        mockSystemInfo.detect.mockResolvedValue({
+          cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+          memory: { total: 16 * 1024 ** 3, available: 12 * 1024 ** 3, used: 4 * 1024 ** 3 },
+          gpu: { available: true, type: 'nvidia', vram: 8 * 1024 ** 3 }, // 8GB VRAM
+          platform: 'linux',
+          recommendations: {
+            maxModelSize: '7B',
+            recommendedQuantization: ['Q4_K_M'],
+            threads: 7,
+            gpuLayers: 35,
+          },
+        });
+
+        const needsOffload = await orchestrator.wouldNeedOffload();
+
+        // Multi-component model size: 7.1GB
+        // Estimated footprint: 7.1 * 1.2 ≈ 8.52GB
+        // Available VRAM threshold: 8GB * 0.75 = 6GB
+        // 8.52 > 6 = true (needs offload)
+        expect(needsOffload).toBe(true);
+        expect(mockModelManager.getModelInfo).toHaveBeenCalledWith('flux-2-klein');
+      });
+
+      it('should not need offload with large VRAM for multi-component models', async () => {
+        // Set up multi-component model
+        mockModelManager.getModelInfo.mockImplementation((modelId: string) => {
+          if (modelId === 'llama-2-7b') return Promise.resolve(llmModelInfo);
+          if (modelId === 'flux-2-klein') return Promise.resolve(multiComponentDiffusionModel);
+          return Promise.reject(new Error('Model not found'));
+        });
+
+        mockDiffusionServer.getConfig.mockReturnValue({
+          modelId: 'flux-2-klein',
+          port: 8081,
+        });
+
+        // LLM not running
+        mockLlamaServer.isRunning.mockReturnValue(false);
+
+        // 24GB VRAM (plenty of room)
+        mockSystemInfo.detect.mockResolvedValue({
+          cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+          memory: { total: 32 * 1024 ** 3, available: 24 * 1024 ** 3, used: 8 * 1024 ** 3 },
+          gpu: { available: true, type: 'nvidia', vram: 24 * 1024 ** 3 }, // 24GB VRAM
+          platform: 'linux',
+          recommendations: {
+            maxModelSize: '70B',
+            recommendedQuantization: ['Q4_K_M', 'Q5_K_M'],
+            threads: 7,
+            gpuLayers: 35,
+          },
+        });
+
+        const needsOffload = await orchestrator.wouldNeedOffload();
+
+        // Multi-component model size: 7.1GB
+        // Estimated footprint: 7.1 * 1.2 ≈ 8.52GB
+        // Available VRAM threshold: 24GB * 0.75 = 18GB
+        // 8.52 < 18 = false (no offload needed)
+        expect(needsOffload).toBe(false);
+        expect(mockModelManager.getModelInfo).toHaveBeenCalledWith('flux-2-klein');
+      });
+    });
   });
 });

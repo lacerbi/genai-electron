@@ -166,6 +166,25 @@ const result = await diffusionServer.generateImage({
 
 ## Model Issues
 
+### Multi-Component Model Issues
+
+**Wrong VAE for Flux 2**
+- **Symptom:** Tensor shape mismatch or silent failure during generation
+- **Cause:** Using Flux 1 `ae.safetensors` (16 latent channels) instead of Flux 2 `flux2-vae.safetensors` (32 latent channels)
+- **Fix:** Download the Flux 2 VAE from `Comfy-Org/flux2-dev` → `split_files/vae/flux2-vae.safetensors`
+
+**Component Checksum Mismatch**
+- **Symptom:** `ChecksumError: SHA256 checksum mismatch for component: llm`
+- **Cause:** Corrupted or incomplete component download
+- **Fix:** Delete the model with `modelManager.deleteModel(modelId)` and re-download
+
+**Partial Download Cleanup**
+- If a multi-component download fails mid-way, all already-downloaded component files are automatically cleaned up. Re-run `downloadModel()` to start fresh.
+
+**"Model too large" with Multi-Component Models**
+- The `canRunModel()` check uses the aggregate size of all components, which may be conservative when `--offload-to-cpu` is available
+- Try setting `offloadToCpu: true` in the server config to enable CPU offloading
+
 ### Reasoning Not Extracted
 
 **Problem:** Reasoning-capable model doesn't extract `<think>...</think>` tags

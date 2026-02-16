@@ -4,21 +4,26 @@
  */
 
 import path from 'node:path';
+import { mkdir } from 'node:fs/promises';
 import type {
   ModelInfo,
   ModelType,
   DownloadConfig,
   GGUFMetadata,
   MetadataFetchStrategy,
+  DiffusionModelComponents,
+  DiffusionComponentInfo,
+  DiffusionComponentRole,
 } from '../types/index.js';
 import { ModelNotFoundError, DownloadError } from '../errors/index.js';
 import { storageManager } from './StorageManager.js';
 import { Downloader } from '../download/Downloader.js';
 import { getHuggingFaceURL } from '../download/huggingface.js';
 import { calculateSHA256, formatChecksum } from '../download/checksum.js';
-import { fileExists, getFileSize, sanitizeFilename } from '../utils/file-utils.js';
+import { fileExists, getFileSize, sanitizeFilename, deleteFile } from '../utils/file-utils.js';
 import { detectReasoningSupport } from '../config/reasoning-models.js';
 import { fetchGGUFMetadata, fetchLocalGGUFMetadata, getArchField } from '../utils/gguf-parser.js';
+import { getModelDirectory } from '../config/paths.js';
 import {
   getLayerCountWithFallback,
   getContextLengthWithFallback,
@@ -126,6 +131,11 @@ export class ModelManager {
   public async downloadModel(config: DownloadConfig): Promise<ModelInfo> {
     // Ensure storage is initialized
     await this.initialize();
+
+    // If multi-component, delegate to specialized method
+    if (config.components && config.components.length > 0) {
+      return this.downloadMultiComponentModel(config);
+    }
 
     // Determine download URL
     let downloadURL: string;
@@ -239,6 +249,245 @@ export class ModelManager {
     await storageManager.saveModelMetadata(modelInfo);
 
     return modelInfo;
+  }
+
+  /**
+   * Download a multi-component diffusion model.
+   *
+   * Downloads the primary diffusion model and all additional components
+   * into a per-model subdirectory. Reports aggregate progress across all files.
+   *
+   * @private
+   */
+  private async downloadMultiComponentModel(config: DownloadConfig): Promise<ModelInfo> {
+    const components = config.components!;
+
+    // Validate: reject if any component declares role 'diffusion_model'
+    // (the top-level config IS the diffusion_model)
+    const duplicatePrimary = components.find((c) => c.role === 'diffusion_model');
+    if (duplicatePrimary) {
+      throw new DownloadError(
+        'Component with role "diffusion_model" is not allowed — the top-level config describes the primary diffusion model'
+      );
+    }
+
+    // Resolve primary download URL
+    const primaryURL = this.resolveComponentURL(config);
+    const primaryFile = config.file ?? this.extractFilename(primaryURL);
+
+    // Generate model ID and create subdirectory
+    const modelId = this.generateModelId(config.name);
+    const modelDir = getModelDirectory(config.type, modelId);
+    await mkdir(modelDir, { recursive: true });
+
+    // Build download plan: primary + all components
+    interface DownloadItem {
+      role: string;
+      url: string;
+      filename: string;
+      destination: string;
+      checksum?: string;
+    }
+
+    const downloadItems: DownloadItem[] = [
+      {
+        role: 'diffusion_model',
+        url: primaryURL,
+        filename: primaryFile,
+        destination: path.join(modelDir, sanitizeFilename(primaryFile)),
+        checksum: config.checksum,
+      },
+    ];
+
+    for (const comp of components) {
+      const compURL = this.resolveComponentURL(comp);
+      const compFile = comp.file ?? this.extractFilename(compURL);
+      downloadItems.push({
+        role: comp.role,
+        url: compURL,
+        filename: compFile,
+        destination: path.join(modelDir, sanitizeFilename(compFile)),
+        checksum: comp.checksum,
+      });
+    }
+
+    // Pre-fetch total size via HEAD requests for aggregate progress
+    let totalBytes = 0;
+    const itemSizes: number[] = [];
+    await Promise.all(
+      downloadItems.map(async (item, index) => {
+        try {
+          const response = await fetch(item.url, { method: 'HEAD' });
+          const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
+          itemSizes[index] = contentLength;
+        } catch {
+          itemSizes[index] = 0; // Unknown size, will adjust when GET arrives
+        }
+      })
+    );
+    totalBytes = itemSizes.reduce((sum, s) => sum + s, 0);
+
+    // Fetch GGUF metadata for the primary model (only if it's a .gguf file)
+    let ggufMetadata: GGUFMetadata | undefined;
+    if (this.isGGUFFile(primaryFile)) {
+      try {
+        const parsedGGUF = await fetchGGUFMetadata(primaryURL);
+        ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+      } catch {
+        // Non-fatal for multi-component: metadata is optional
+      }
+    }
+
+    // Download components sequentially with aggregate progress
+    const downloadedPaths: string[] = [];
+    let completedBytes = 0;
+
+    try {
+      for (const item of downloadItems) {
+        // Check if file already exists
+        const exists = await fileExists(item.destination);
+        if (exists) {
+          throw new DownloadError(`Component file already exists: ${item.filename}`, {
+            path: item.destination,
+            component: item.role,
+          });
+        }
+
+        // Create wrapped progress callback for aggregate reporting
+        // Clamp to prevent >100% when HEAD requests failed to get accurate sizes
+        const wrappedProgress = config.onProgress
+          ? (downloaded: number, _total: number) => {
+              const aggregateDownloaded = completedBytes + downloaded;
+              const clampedTotal = Math.max(totalBytes, aggregateDownloaded);
+              config.onProgress!(aggregateDownloaded, clampedTotal);
+            }
+          : undefined;
+
+        await this.downloader.download({
+          url: item.url,
+          destination: item.destination,
+          onProgress: wrappedProgress,
+        });
+
+        downloadedPaths.push(item.destination);
+
+        // Verify checksum if provided
+        if (item.checksum) {
+          const calculatedChecksum = await calculateSHA256(item.destination);
+          const expectedChecksum = item.checksum.replace(/^sha256:/, '');
+
+          if (calculatedChecksum !== expectedChecksum) {
+            throw new DownloadError(`Checksum verification failed for component: ${item.role}`, {
+              expected: expectedChecksum,
+              actual: calculatedChecksum,
+              component: item.role,
+            });
+          }
+        }
+
+        // Update completed bytes for next component's progress offset
+        const actualSize = await getFileSize(item.destination);
+        completedBytes += actualSize;
+      }
+    } catch (error) {
+      // Clean up all downloaded files on failure
+      for (const filePath of downloadedPaths) {
+        try {
+          await deleteFile(filePath);
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+      // Try to remove the model directory
+      try {
+        const { rm } = await import('node:fs/promises');
+        await rm(modelDir, { recursive: true, force: true });
+      } catch {
+        // Ignore cleanup errors
+      }
+
+      if (error instanceof DownloadError) {
+        throw error;
+      }
+      throw new DownloadError('Multi-component download failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // Build components map and calculate aggregate size
+    const componentsMap: DiffusionModelComponents = {};
+    let aggregateSize = 0;
+
+    for (const item of downloadItems) {
+      const fileSize = await getFileSize(item.destination);
+      aggregateSize += fileSize;
+
+      const compInfo: DiffusionComponentInfo = {
+        path: item.destination,
+        size: fileSize,
+      };
+
+      if (item.checksum) {
+        compInfo.checksum = formatChecksum(item.checksum.replace(/^sha256:/, ''));
+      }
+
+      componentsMap[item.role as DiffusionComponentRole] = compInfo;
+    }
+
+    // Create model info — primary is always the first item (diffusion_model)
+    const primaryItem = downloadItems[0]!;
+    const modelInfo: ModelInfo = {
+      id: modelId,
+      name: config.name,
+      type: config.type,
+      size: aggregateSize,
+      path: primaryItem.destination,
+      downloadedAt: new Date().toISOString(),
+      source: {
+        type: config.source,
+        url: primaryURL,
+        repo: config.repo,
+        file: config.file,
+      },
+      ggufMetadata,
+      components: componentsMap,
+    };
+
+    // Save metadata
+    await storageManager.saveModelMetadata(modelInfo);
+
+    return modelInfo;
+  }
+
+  /**
+   * Resolve a component download specification to a URL.
+   */
+  private resolveComponentURL(spec: {
+    source: 'huggingface' | 'url';
+    url?: string;
+    repo?: string;
+    file?: string;
+  }): string {
+    if (spec.source === 'url') {
+      if (!spec.url) {
+        throw new DownloadError('URL is required when source is "url"');
+      }
+      return spec.url;
+    }
+    if (spec.source === 'huggingface') {
+      if (!spec.repo || !spec.file) {
+        throw new DownloadError('Repository and file are required when source is "huggingface"');
+      }
+      return getHuggingFaceURL(spec.repo, spec.file);
+    }
+    throw new DownloadError(`Unsupported source type: ${spec.source}`);
+  }
+
+  /**
+   * Check if a filename has a GGUF extension.
+   */
+  private isGGUFFile(filename: string): boolean {
+    return filename.toLowerCase().endsWith('.gguf');
   }
 
   /**

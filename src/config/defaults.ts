@@ -3,7 +3,7 @@
  * @module config/defaults
  */
 
-import type { ServerConfig } from '../types/index.js';
+import type { ServerConfig, DiffusionComponentRole } from '../types/index.js';
 
 /**
  * Default ports for different server types
@@ -196,6 +196,33 @@ export const BINARY_VERSIONS = {
     },
   },
 } as const;
+
+/**
+ * Maps DiffusionComponentRole to the sd.cpp CLI flag.
+ */
+export const DIFFUSION_COMPONENT_FLAGS: Record<DiffusionComponentRole, string> = {
+  diffusion_model: '--diffusion-model',
+  clip_l: '--clip_l',
+  clip_g: '--clip_g',
+  t5xxl: '--t5xxl',
+  llm: '--llm',
+  llm_vision: '--llm_vision',
+  vae: '--vae',
+};
+
+/**
+ * Canonical iteration order for component roles in CLI arg building.
+ * Ensures deterministic, testable arg output regardless of object key order.
+ */
+export const DIFFUSION_COMPONENT_ORDER: readonly DiffusionComponentRole[] = [
+  'diffusion_model',
+  'clip_l',
+  'clip_g',
+  't5xxl',
+  'llm',
+  'llm_vision',
+  'vae',
+] as const;
 
 /**
  * VRAM optimization thresholds for diffusion image generation.

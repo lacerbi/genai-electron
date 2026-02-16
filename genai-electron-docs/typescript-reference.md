@@ -14,6 +14,7 @@ Complete type definitions for genai-electron. The library is TypeScript-first wi
 - [UI Types](#ui-types)
 - [Low-Level Types](#low-level-types)
 - [Utility Types](#utility-types)
+- [Constants](#constants)
 - [Import Examples](#import-examples)
 
 ---
@@ -101,6 +102,7 @@ interface ModelInfo {
   checksum?: string;
   supportsReasoning?: boolean;
   ggufMetadata?: GGUFMetadata;
+  components?: DiffusionModelComponents;  // Component files for multi-component diffusion models. When present, `path` points to the primary diffusion_model component and `size` is the aggregate total.
 }
 ```
 
@@ -186,6 +188,57 @@ interface DownloadConfig {
   type: ModelType;
   checksum?: string;
   onProgress?: DownloadProgressCallback;
+  components?: DiffusionComponentDownload[];  // Additional component files for multi-component diffusion models
+}
+```
+
+### DiffusionComponentRole
+
+Component roles in a multi-file diffusion model. Each role maps to a specific sd.cpp CLI flag.
+
+```typescript
+type DiffusionComponentRole =
+  | 'diffusion_model'  // --diffusion-model (main UNet/DiT)
+  | 'clip_l'           // --clip_l (CLIP-L text encoder)
+  | 'clip_g'           // --clip_g (CLIP-G text encoder, SDXL)
+  | 't5xxl'            // --t5xxl (T5-XXL text encoder, SD3/Flux 1)
+  | 'llm'              // --llm (LLM text encoder, Flux 2)
+  | 'llm_vision'       // --llm_vision (LLM vision, Qwen Image)
+  | 'vae';             // --vae (VAE decoder)
+```
+
+### DiffusionComponentInfo
+
+Info about a single component file within a multi-component model.
+
+```typescript
+interface DiffusionComponentInfo {
+  path: string;       // Absolute path to component file
+  size: number;       // File size in bytes
+  checksum?: string;  // SHA256 checksum (sha256: prefix)
+}
+```
+
+### DiffusionModelComponents
+
+Map of component roles to their file info. Present on `ModelInfo` only for multi-component diffusion models.
+
+```typescript
+type DiffusionModelComponents = Partial<Record<DiffusionComponentRole, DiffusionComponentInfo>>;
+```
+
+### DiffusionComponentDownload
+
+Download specification for a single component within a multi-file model.
+
+```typescript
+interface DiffusionComponentDownload {
+  role: DiffusionComponentRole;
+  source: 'huggingface' | 'url';
+  url?: string;       // Required if source is 'url'
+  repo?: string;      // Required if source is 'huggingface'
+  file?: string;      // Required if source is 'huggingface'
+  checksum?: string;  // Expected SHA256 checksum
 }
 ```
 
@@ -260,6 +313,11 @@ interface DiffusionServerConfig {
   threads?: number;
   gpuLayers?: number;
   forceValidation?: boolean;
+  clipOnCpu?: boolean;               // Offload CLIP text encoder to CPU (--clip-on-cpu). undefined=auto-detect, true=force on, false=force off.
+  vaeOnCpu?: boolean;                // Offload VAE decoder to CPU (--vae-on-cpu). undefined=auto-detect, true=force on, false=force off.
+  batchSize?: number;                // Batch size for generation (-b flag). Not auto-detected.
+  offloadToCpu?: boolean;            // Offload model weights to CPU RAM (--offload-to-cpu). undefined=auto-detect, true=force on, false=force off.
+  diffusionFlashAttention?: boolean; // Enable flash attention (--diffusion-fa). undefined=auto-detect (enabled for Flux 2), true=force on, false=force off.
 }
 ```
 
@@ -555,6 +613,28 @@ type JSONValue =
 type AsyncFunction<T = void> = () => Promise<T>;
 
 type CleanupFunction = () => void | Promise<void>;
+```
+
+---
+
+## Constants
+
+### DIFFUSION_COMPONENT_FLAGS
+
+Maps component roles to sd.cpp CLI flags.
+
+```typescript
+const DIFFUSION_COMPONENT_FLAGS: Record<DiffusionComponentRole, string>;
+// { diffusion_model: '--diffusion-model', clip_l: '--clip_l', ... }
+```
+
+### DIFFUSION_COMPONENT_ORDER
+
+Canonical iteration order for component roles.
+
+```typescript
+const DIFFUSION_COMPONENT_ORDER: readonly DiffusionComponentRole[];
+// ['diffusion_model', 'clip_l', 'clip_g', 't5xxl', 'llm', 'llm_vision', 'vae']
 ```
 
 ---

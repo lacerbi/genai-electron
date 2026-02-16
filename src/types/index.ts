@@ -22,6 +22,10 @@ export type {
   DownloadProgressCallback,
   GGUFMetadata,
   MetadataFetchStrategy,
+  DiffusionComponentRole,
+  DiffusionComponentInfo,
+  DiffusionModelComponents,
+  DiffusionComponentDownload,
 } from './models.js';
 
 // Server types

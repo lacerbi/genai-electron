@@ -11,6 +11,7 @@ The `ModelManager` class handles model downloading, storage, and management for 
 - [Core Operations](#core-operations)
   - [listModels()](#listmodels)
   - [downloadModel()](#downloadmodel)
+  - [Multi-Component Model Downloads](#multi-component-model-downloads)
   - [getModelInfo()](#getmodelinfo)
   - [deleteModel()](#deletemodel)
   - [verifyModel()](#verifymodel)
@@ -106,6 +107,159 @@ const model = await modelManager.downloadModel({
 ```
 
 **Note**: GGUF metadata is automatically extracted before downloading to validate the file.
+
+---
+
+### Multi-Component Model Downloads
+
+Some diffusion models require multiple files to work together (e.g., diffusion model + text encoder + VAE). ModelManager supports downloading multi-component models by providing a `components` array in the download config.
+
+**How it works**:
+- The top-level `source`/`repo`/`file` (or `url`) describes the primary diffusion model
+- Each entry in `components` describes an additional component with its own source
+- Components have a `role` field (e.g., `'llm'`, `'vae'`, `'clip'`) identifying their purpose
+- All files are stored in a per-model subdirectory under the diffusion models folder
+- Progress reporting aggregates across all components (smooth 0→100%)
+- If any component download fails, all downloaded files are cleaned up automatically
+
+**Component Roles** (`DiffusionComponentRole`):
+- `'diffusion_model'` - Main UNet/DiT (`--diffusion-model`)
+- `'clip_l'` - CLIP-L text encoder (`--clip_l`)
+- `'clip_g'` - CLIP-G text encoder, SDXL (`--clip_g`)
+- `'t5xxl'` - T5-XXL text encoder, SD3/Flux 1 (`--t5xxl`)
+- `'llm'` - LLM text encoder, Flux 2 (`--llm`)
+- `'llm_vision'` - LLM vision encoder, Qwen Image (`--llm_vision`)
+- `'vae'` - VAE decoder (`--vae`)
+
+**Example: Downloading Flux 2 Klein**:
+
+```typescript
+const modelInfo = await modelManager.downloadModel({
+  source: 'huggingface',
+  repo: 'leejet/FLUX.2-klein-4B-GGUF',
+  file: 'flux-2-klein-4b-Q8_0.gguf',
+  name: 'Flux 2 Klein',
+  type: 'diffusion',
+  components: [
+    {
+      role: 'llm',
+      source: 'huggingface',
+      repo: 'unsloth/Qwen3-4B-GGUF',
+      file: 'Qwen3-4B-Q4_0.gguf',
+    },
+    {
+      role: 'vae',
+      source: 'url',
+      url: 'https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors',
+    },
+  ],
+  onProgress: (downloaded, total) => {
+    console.log(`${((downloaded / total) * 100).toFixed(1)}%`);
+  },
+});
+
+console.log('Total size:', (modelInfo.size / 1024 / 1024 / 1024).toFixed(2), 'GB');
+console.log('Components:', Object.keys(modelInfo.components || {}));
+// Output: Components: ['diffusion_model', 'llm', 'vae']
+```
+
+**Storage Layout**:
+
+Multi-component models are stored in a per-model subdirectory:
+
+```
+userData/models/diffusion/
+  sdxl-turbo.json              # metadata (monolithic model)
+  sdxl-turbo.safetensors       # model file (monolithic model)
+  flux-2-klein/                # per-model directory (multi-component)
+    flux-2-klein-4b-Q8_0.gguf # primary diffusion model
+    Qwen3-4B-Q4_0.gguf        # LLM text encoder component
+    flux2-vae.safetensors      # VAE component
+  flux-2-klein.json            # metadata with components map
+```
+
+**Metadata Structure**:
+
+For multi-component models, `ModelInfo.components` contains a map of component roles to component metadata:
+
+```typescript
+// ModelInfo with DiffusionModelComponents (Partial<Record<DiffusionComponentRole, DiffusionComponentInfo>>)
+{
+  id: 'flux-2-klein',
+  name: 'Flux 2 Klein',
+  type: 'diffusion',
+  size: 7600000000,  // aggregate size across all components
+  path: '/path/to/userData/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+  components: {
+    diffusion_model: {
+      path: '/path/to/userData/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+      size: 4300000000,
+      checksum: 'sha256:abc123...',
+    },
+    llm: {
+      path: '/path/to/userData/models/diffusion/flux-2-klein/Qwen3-4B-Q4_0.gguf',
+      size: 2500000000,
+      checksum: 'sha256:def456...',
+    },
+    vae: {
+      path: '/path/to/userData/models/diffusion/flux-2-klein/flux2-vae.safetensors',
+      size: 335000000,
+    }
+  }
+}
+```
+
+**GGUF Metadata Extraction**:
+- GGUF metadata is only extracted for the primary diffusion model if it's a `.gguf` file
+- Non-GGUF primary models (`.safetensors`) skip metadata extraction entirely
+- Component files do not have GGUF metadata extracted (only the primary model)
+
+**Checksum Verification**:
+
+Each component can have its own checksum for integrity verification:
+
+```typescript
+const modelInfo = await modelManager.downloadModel({
+  source: 'huggingface',
+  repo: 'leejet/FLUX.2-klein-4B-GGUF',
+  file: 'flux-2-klein-4b-Q8_0.gguf',
+  name: 'Flux 2 Klein',
+  type: 'diffusion',
+  checksum: 'abc123...',  // checksum for primary model
+  components: [
+    {
+      role: 'llm',
+      source: 'huggingface',
+      repo: 'unsloth/Qwen3-4B-GGUF',
+      file: 'Qwen3-4B-Q4_0.gguf',
+      checksum: 'def456...',  // checksum for LLM component
+    },
+    {
+      role: 'vae',
+      source: 'url',
+      url: 'https://...',
+      checksum: 'ghi789...',  // checksum for VAE component
+    },
+  ],
+});
+```
+
+**Error Handling and Cleanup**:
+
+If any component download fails, all already-downloaded files are automatically cleaned up to prevent partial installations:
+
+```typescript
+try {
+  const model = await modelManager.downloadModel({
+    // ... multi-component config
+  });
+} catch (error) {
+  if (error instanceof DownloadError) {
+    console.error('Component download failed:', error.message);
+    // All partial files have been cleaned up automatically
+  }
+}
+```
 
 ---
 

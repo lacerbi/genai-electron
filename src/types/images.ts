@@ -158,6 +158,22 @@ export interface DiffusionServerConfig {
    * in stable-diffusion.cpp.
    */
   batchSize?: number;
+
+  /**
+   * Offload model weights to CPU RAM, load to VRAM on demand (--offload-to-cpu).
+   *
+   * undefined = auto-detect (enabled when modelInfo.size > availableVRAM * 0.85),
+   * true = force on, false = force off.
+   */
+  offloadToCpu?: boolean;
+
+  /**
+   * Enable flash attention in the diffusion model (--diffusion-fa).
+   *
+   * undefined = auto-detect (enabled when model has an 'llm' component, indicating Flux 2),
+   * true = force on, false = force off.
+   */
+  diffusionFlashAttention?: boolean;
 }
 
 /**
