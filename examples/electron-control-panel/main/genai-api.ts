@@ -132,6 +132,28 @@ export function sendDownloadError(error: Error, modelName: string): void {
 }
 
 /**
+ * Send component download start event to renderer
+ */
+export function sendComponentStart(
+  role: string,
+  filename: string,
+  index: number,
+  total: number,
+  modelName: string
+): void {
+  const mainWindow = BrowserWindow.getAllWindows()[0];
+  if (mainWindow) {
+    mainWindow.webContents.send('download:component-start', {
+      role,
+      filename,
+      index,
+      total,
+      modelName,
+    });
+  }
+}
+
+/**
  * Send image generation progress to renderer
  */
 export function sendImageProgress(

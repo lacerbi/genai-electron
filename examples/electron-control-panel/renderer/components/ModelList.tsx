@@ -83,6 +83,14 @@ const ModelList: React.FC<ModelListProps> = ({ models, onDelete, onVerify }) => 
                 <span className={`model-type-badge model-type-${model.type}`}>
                   {model.type === 'llm' ? 'LLM' : 'Diffusion'}
                 </span>
+                {model.components && (
+                  <span
+                    className="model-type-badge model-type-components"
+                    title={Object.keys(model.components).join(', ')}
+                  >
+                    {Object.keys(model.components).length} components
+                  </span>
+                )}
               </td>
               <td>{formatBytes(model.size)}</td>
               <td className="model-date">{formatDate(model.downloadedAt)}</td>

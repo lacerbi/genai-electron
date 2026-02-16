@@ -248,6 +248,17 @@ export interface DownloadConfig {
    * diffusion model, and each entry here describes an additional component.
    */
   components?: DiffusionComponentDownload[];
+
+  /**
+   * Called when each component download begins (multi-component only).
+   * Useful for displaying which component is currently being downloaded.
+   */
+  onComponentStart?: (info: {
+    role: string;
+    filename: string;
+    index: number;
+    total: number;
+  }) => void;
 }
 
 /**

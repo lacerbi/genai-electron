@@ -21,11 +21,19 @@ export interface DownloadFormData {
   checksum?: string;
 }
 
+export interface ComponentProgress {
+  role: string;
+  filename: string;
+  index: number;
+  total: number;
+}
+
 export interface DownloadProgress {
   downloaded: number;
   total: number;
   percentage: number;
   modelName: string;
+  component?: ComponentProgress;
 }
 
 // Phase 2: Image generation form data

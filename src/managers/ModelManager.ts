@@ -343,7 +343,17 @@ export class ModelManager {
     let completedBytes = 0;
 
     try {
-      for (const item of downloadItems) {
+      for (let i = 0; i < downloadItems.length; i++) {
+        const item = downloadItems[i]!;
+
+        // Notify caller which component is being downloaded
+        config.onComponentStart?.({
+          role: item.role,
+          filename: item.filename,
+          index: i + 1,
+          total: downloadItems.length,
+        });
+
         // Check if file already exists
         const exists = await fileExists(item.destination);
         if (exists) {

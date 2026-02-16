@@ -69,6 +69,12 @@
   color: #9b59b6;
 }
 
+.model-type-components {
+  background: rgba(46, 204, 113, 0.15);
+  color: #2ecc71;
+  margin-left: 4px;
+}
+
 /* GGUF Info Button */
 .gguf-info-btn {
   background: none;

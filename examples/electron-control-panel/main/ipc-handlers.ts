@@ -9,6 +9,7 @@ import {
   sendDownloadProgress,
   sendDownloadComplete,
   sendDownloadError,
+  sendComponentStart,
   sendImageProgress,
 } from './genai-api.js';
 import { MetadataFetchStrategy, formatErrorForUI } from 'genai-electron';
@@ -87,6 +88,14 @@ export function registerIpcHandlers(): void {
         ...config,
         onProgress: (downloaded: number, total: number) => {
           sendDownloadProgress(downloaded, total, modelName);
+        },
+        onComponentStart: (info: {
+          role: string;
+          filename: string;
+          index: number;
+          total: number;
+        }) => {
+          sendComponentStart(info.role, info.filename, info.index, info.total, modelName);
         },
       });
 

@@ -17,6 +17,9 @@ import type {
   ImageGenerationProgress,
   DiffusionServerInfo as LibraryDiffusionServerInfo,
   SavedLLMState as LibrarySavedLLMState,
+  DiffusionComponentRole,
+  DiffusionComponentDownload,
+  DiffusionModelComponents,
 } from 'genai-electron';
 
 // Re-export library types for convenience
@@ -34,6 +37,9 @@ export type {
   ImageGenerationConfig,
   ImageGenerationStage,
   ImageGenerationProgress,
+  DiffusionComponentRole,
+  DiffusionComponentDownload,
+  DiffusionModelComponents,
 };
 
 // App-specific extension: ImageGenerationResult with imageDataUrl field

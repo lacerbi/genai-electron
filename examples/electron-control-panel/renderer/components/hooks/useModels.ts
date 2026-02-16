@@ -1,41 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
-
-interface ModelInfo {
-  id: string;
-  name: string;
-  type: 'llm' | 'diffusion';
-  size: number;
-  downloadedAt: string;
-  source?: {
-    type: string;
-    repo?: string;
-    file?: string;
-    url?: string;
-  };
-}
-
-interface DownloadConfig {
-  source: 'url' | 'huggingface';
-  url?: string;
-  repo?: string;
-  file?: string;
-  name: string;
-  type: 'llm' | 'diffusion';
-  checksum?: string;
-}
-
-interface DownloadProgress {
-  downloaded: number;
-  total: number;
-  percentage: number;
-  modelName: string;
-}
+import type { ModelInfo, DownloadConfig } from '../../types/api';
+import type { DownloadProgress, ComponentProgress } from '../../types/ui';
 
 export function useModels(type: 'llm' | 'diffusion' = 'llm') {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const [componentProgress, setComponentProgress] = useState<ComponentProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fetchModels = useCallback(async () => {
@@ -75,21 +47,28 @@ export function useModels(type: 'llm' | 'diffusion' = 'llm') {
       setDownloadProgress(progress);
     });
 
+    window.api.on('download:component-start', (data: ComponentProgress) => {
+      setComponentProgress(data);
+    });
+
     window.api.on('download:complete', () => {
       setDownloading(false);
       setDownloadProgress(null);
+      setComponentProgress(null);
       fetchModels(); // Refresh model list
     });
 
     window.api.on('download:error', (errorData: { message: string; modelName: string }) => {
       setDownloading(false);
       setDownloadProgress(null);
+      setComponentProgress(null);
       setError(`Download failed for ${errorData.modelName}: ${errorData.message}`);
     });
 
     return () => {
       if (window.api && window.api.off) {
         window.api.off('download:progress');
+        window.api.off('download:component-start');
         window.api.off('download:complete');
         window.api.off('download:error');
       }
@@ -147,6 +126,7 @@ export function useModels(type: 'llm' | 'diffusion' = 'llm') {
     loading,
     downloading,
     downloadProgress,
+    componentProgress,
     error,
     handleDownload,
     handleDelete,

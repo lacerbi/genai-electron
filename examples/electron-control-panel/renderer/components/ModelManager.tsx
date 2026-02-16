@@ -4,6 +4,7 @@ import Spinner from './common/Spinner';
 import ModelList from './ModelList';
 import ModelDownloadForm from './ModelDownloadForm';
 import { useModels } from './hooks/useModels';
+import type { DownloadConfig } from '../types/api';
 import './ModelManager.css';
 
 const ModelManager: React.FC = () => {
@@ -16,6 +17,7 @@ const ModelManager: React.FC = () => {
   const loading = llmHook.loading || diffusionHook.loading;
   const downloading = llmHook.downloading || diffusionHook.downloading;
   const downloadProgress = llmHook.downloadProgress || diffusionHook.downloadProgress;
+  const componentProgress = llmHook.componentProgress || diffusionHook.componentProgress;
   const error = llmHook.error || diffusionHook.error;
 
   const formatBytes = (bytes: number): string => {
@@ -27,15 +29,7 @@ const ModelManager: React.FC = () => {
   const totalSize = allModels.reduce((sum, model) => sum + model.size, 0);
 
   // Unified handlers that work for both types
-  const handleDownload = async (config: {
-    source: 'url' | 'huggingface';
-    url?: string;
-    repo?: string;
-    file?: string;
-    name: string;
-    type: 'llm' | 'diffusion';
-    checksum?: string;
-  }) => {
+  const handleDownload = async (config: DownloadConfig) => {
     if (config.type === 'llm') {
       await llmHook.handleDownload(config);
     } else {
@@ -102,6 +96,7 @@ const ModelManager: React.FC = () => {
           onDownload={handleDownload}
           downloading={downloading}
           progress={downloadProgress}
+          componentProgress={componentProgress}
         />
       </Card>
     </div>

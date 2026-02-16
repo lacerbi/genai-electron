@@ -11,6 +11,8 @@ import type {
   ImageSampler,
   BinaryLogEvent,
 } from '../types/api';
+import { MODEL_PRESETS } from '../data/model-presets';
+import type { PresetRecommendedSettings } from '../data/model-presets';
 import './DiffusionServerControl.css';
 
 const DiffusionServerControl: React.FC = () => {
@@ -187,6 +189,25 @@ const DiffusionServerControl: React.FC = () => {
     }
   };
 
+  // Match selected model to a preset for recommended settings
+  const matchedPreset = MODEL_PRESETS.find((p) => selectedModel === p.id);
+
+  const applyPresetSettings = (settings: PresetRecommendedSettings) => {
+    setSteps(settings.steps);
+    setStepsPreset(String(settings.steps));
+    setCfgScale(settings.cfgScale);
+    setCfgPreset(
+      settings.cfgScale % 1 === 0 ? `${settings.cfgScale}.0` : String(settings.cfgScale)
+    );
+    setSampler(settings.sampler as ImageSampler);
+    if (settings.width && settings.height) {
+      setWidth(settings.width);
+      setHeight(settings.height);
+      const dimStr = `${settings.width}\u00d7${settings.height}`;
+      setDimensionPreset(dimStr);
+    }
+  };
+
   const isRunning = serverInfo.status === 'running';
   const isBusy = serverInfo.busy || generating;
 
@@ -281,6 +302,26 @@ const DiffusionServerControl: React.FC = () => {
             </select>
           )}
         </div>
+
+        {matchedPreset?.recommendedSettings && (
+          <div className="settings-hint">
+            <span>
+              {matchedPreset.name} recommended: Steps {matchedPreset.recommendedSettings.steps}, CFG{' '}
+              {matchedPreset.recommendedSettings.cfgScale},{' '}
+              {matchedPreset.recommendedSettings.sampler} sampler
+              {matchedPreset.recommendedSettings.width &&
+                matchedPreset.recommendedSettings.height &&
+                `, ${matchedPreset.recommendedSettings.width}\u00d7${matchedPreset.recommendedSettings.height}`}
+            </span>
+            <button
+              type="button"
+              className="apply-preset-btn"
+              onClick={() => applyPresetSettings(matchedPreset.recommendedSettings!)}
+            >
+              Apply
+            </button>
+          </div>
+        )}
 
         <div className="server-actions">
           {!isRunning ? (

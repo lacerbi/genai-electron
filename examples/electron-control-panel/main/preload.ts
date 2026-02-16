@@ -74,6 +74,7 @@ contextBridge.exposeInMainWorld('api', {
       'download:progress',
       'download:complete',
       'download:error',
+      'download:component-start',
       'server:started',
       'server:stopped',
       'server:crashed',

@@ -281,3 +281,36 @@
 .binary-log-error .binary-log-level {
   color: var(--status-red);
 }
+
+/* Settings hint banner */
+.settings-hint {
+  background: rgba(33, 150, 243, 0.1);
+  border: 1px solid rgba(33, 150, 243, 0.3);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  gap: 12px;
+}
+
+.apply-preset-btn {
+  background: rgba(33, 150, 243, 0.2);
+  border: 1px solid rgba(33, 150, 243, 0.4);
+  border-radius: 4px;
+  padding: 4px 12px;
+  color: #2196f3;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+}
+
+.apply-preset-btn:hover {
+  background: rgba(33, 150, 243, 0.3);
+  border-color: #2196f3;
+}
