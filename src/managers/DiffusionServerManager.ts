@@ -175,7 +175,8 @@ export class DiffusionServerManager extends ServerManager {
     );
 
     this.setStatus('starting');
-    this._config = config as any; // DiffusionServerConfig extends ServerConfig semantically
+    // DiffusionServerConfig has optional port (resolved later), so cast via unknown
+    this._config = config as unknown as typeof this._config;
 
     try {
       // 1. Validate model exists and is correct type
@@ -221,7 +222,9 @@ export class DiffusionServerManager extends ServerManager {
       this._startedAt = new Date();
       this.setStatus('running');
 
-      await this.logManager!.write('Diffusion server is running', 'info');
+      if (this.logManager) {
+        await this.logManager.write('Diffusion server is running', 'info');
+      }
 
       // Clear system info cache so subsequent memory checks use fresh data
       this.systemInfo.clearCache();
@@ -267,7 +270,7 @@ export class DiffusionServerManager extends ServerManager {
       // Close HTTP server
       if (this.httpServer) {
         await new Promise<void>((resolve) => {
-          this.httpServer!.close(() => resolve());
+          this.httpServer?.close(() => resolve());
         });
         this.httpServer = undefined;
       }
@@ -320,16 +323,9 @@ export class DiffusionServerManager extends ServerManager {
       });
     }
 
-    // Use orchestrator if available (automatic resource management)
-    // Otherwise use direct execution (legacy behavior)
-    console.log('[DiffusionServer] generateImage called');
-    console.log('[DiffusionServer] orchestrator exists:', !!this.orchestrator);
-
     if (this.orchestrator) {
-      console.log('[DiffusionServer] Using orchestrator for automatic resource management');
       return this.orchestrator.orchestrateImageGeneration(config);
     } else {
-      console.log('[DiffusionServer] No orchestrator - using direct execution');
       return this.executeImageGeneration(config);
     }
   }

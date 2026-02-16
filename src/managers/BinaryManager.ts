@@ -547,13 +547,12 @@ export class BinaryManager {
         if (code === 0) {
           resolve({ stdout, stderr });
         } else {
-          const error: any = new Error(
-            `Process exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`
+          const error = Object.assign(
+            new Error(
+              `Process exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`
+            ),
+            { code, signal, stdout, stderr }
           );
-          error.code = code;
-          error.signal = signal;
-          error.stdout = stdout;
-          error.stderr = stderr;
           reject(error);
         }
       });
@@ -826,8 +825,9 @@ export class BinaryManager {
       return true;
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
-      const stdout = (error as any).stdout || '';
-      const stderr = (error as any).stderr || '';
+      const errorObj = error as { stdout?: string; stderr?: string };
+      const stdout = errorObj.stdout || '';
+      const stderr = errorObj.stderr || '';
 
       if (stdout || stderr) {
         this.log(
