@@ -338,13 +338,19 @@ export class ModelManager {
     // Use 15s timeout — metadata is optional, don't block the download
     let ggufMetadata: GGUFMetadata | undefined;
     if (this.isGGUFFile(primaryFile)) {
+      let metadataTimerId: ReturnType<typeof setTimeout> | undefined;
       try {
-        const metadataTimeout = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error('GGUF metadata fetch timeout')), 15_000)
-        );
+        const metadataTimeout = new Promise<never>((_, reject) => {
+          metadataTimerId = setTimeout(
+            () => reject(new Error('GGUF metadata fetch timeout')),
+            15_000
+          );
+        });
         const parsedGGUF = await Promise.race([fetchGGUFMetadata(primaryURL), metadataTimeout]);
+        clearTimeout(metadataTimerId);
         ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
       } catch {
+        clearTimeout(metadataTimerId);
         // Non-fatal for multi-component: metadata is optional
       }
     }
@@ -375,9 +381,13 @@ export class ModelManager {
         }
 
         // Create wrapped progress callback for aggregate reporting
-        // Clamp to prevent >100% when HEAD requests failed to get accurate sizes
+        // When HEAD failed for this item, use GET content-length to update totalBytes
         const wrappedProgress = config.onProgress
-          ? (downloaded: number, _total: number) => {
+          ? (downloaded: number, itemTotal: number) => {
+              if (itemSizes[i] === 0 && itemTotal > 0) {
+                itemSizes[i] = itemTotal;
+                totalBytes = itemSizes.reduce((sum, s) => sum + s, 0);
+              }
               const aggregateDownloaded = completedBytes + downloaded;
               const clampedTotal = Math.max(totalBytes, aggregateDownloaded);
               config.onProgress!(aggregateDownloaded, clampedTotal);
@@ -411,7 +421,7 @@ export class ModelManager {
         completedBytes += actualSize;
       }
     } catch (error) {
-      // Clean up all downloaded files on failure
+      // Clean up only files downloaded in THIS attempt — never delete pre-existing files
       for (const filePath of downloadedPaths) {
         try {
           await deleteFile(filePath);
@@ -419,12 +429,14 @@ export class ModelManager {
           // Ignore cleanup errors
         }
       }
-      // Try to remove the model directory
-      try {
-        const { rm } = await import('node:fs/promises');
-        await rm(modelDir, { recursive: true, force: true });
-      } catch {
-        // Ignore cleanup errors
+      // Only remove model directory if we created files (avoids destroying a previous download)
+      if (downloadedPaths.length > 0) {
+        try {
+          const { rm } = await import('node:fs/promises');
+          await rm(modelDir, { recursive: true, force: true });
+        } catch {
+          // Ignore cleanup errors
+        }
       }
 
       if (error instanceof DownloadError) {
