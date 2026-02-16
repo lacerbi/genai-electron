@@ -144,14 +144,14 @@ export const BINARY_VERSIONS = {
   /** stable-diffusion.cpp configuration (Phase 2) */
   diffusionCpp: {
     /** Version/commit tag */
-    version: 'master-330-db6f479',
+    version: 'master-504-636d3cb',
     /** Binary variants for each platform (in priority order for fallback) */
     variants: {
       'darwin-arm64': [
         {
           type: 'metal' as BinaryVariant,
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master--bin-Darwin-macOS-15.6.1-arm64.zip',
-          checksum: '63be1220757cb895432847967c3e17dd1fbcac8abdd77c100bee46c7d1a7c2a2',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-504-636d3cb/sd-master-636d3cb-bin-Darwin-macOS-15.7.3-arm64.zip',
+          checksum: '5053adb55137150b24a036c804329ec4063da32922b070fc800dbf785b819e63',
         },
       ],
       'darwin-x64': [
@@ -161,36 +161,37 @@ export const BINARY_VERSIONS = {
         // Priority order: CUDA (fastest) → Vulkan (cross-GPU) → AVX2 (CPU fallback)
         {
           type: 'cuda' as BinaryVariant,
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master-db6f479-bin-win-cuda12-x64.zip',
-          checksum: '5f15a0f08e2b34eaf8aa8b1bb50dd0b6a194bf21176ab9512ecacf0ccc8f1532',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-504-636d3cb/sd-master-636d3cb-bin-win-cuda12-x64.zip',
+          checksum: '701dac9b0d7959daf20d56798c4791f750746aef568dd009eb3a1bc33d3ceec8',
           dependencies: [
             {
-              url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/cudart-sd-bin-win-cu12-x64.zip',
-              checksum: 'cacc1f7e1e7b53ba310a6769893b8184de2afd5690aa2233d1416e84d3efccd6',
+              url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-504-636d3cb/cudart-sd-bin-win-cu12-x64.zip',
+              checksum: 'fe20366827d357c00797eebb58244dddab7fd9a348d70090c3871004c320f38d',
               description: 'CUDA 12 runtime libraries required for NVIDIA GPU acceleration',
             },
           ],
         },
         {
           type: 'vulkan' as BinaryVariant,
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master-db6f479-bin-win-vulkan-x64.zip',
-          checksum: 'fbd737e427741d36abd5807b4b06920d0c4fa66423a0fc257e16586ed255621d',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-504-636d3cb/sd-master-636d3cb-bin-win-vulkan-x64.zip',
+          checksum: '5d6481fab70e3836ac04beac209ad93590cf4d2433d68a449f0b03586c94b0ee',
         },
         {
           type: 'cpu' as BinaryVariant, // AVX2 variant (most compatible CPU version)
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master-db6f479-bin-win-avx2-x64.zip',
-          checksum: '908428c5f4e3743ceba5958157fc397c2a588acbf85d339ef0108a0a05611786',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-504-636d3cb/sd-master-636d3cb-bin-win-avx2-x64.zip',
+          checksum: 'd3c5f9ce9e78354ebf45590508e320416a430197957f74a60a8731151ea6a3bc',
         },
         // Additional CPU variants available if needed:
-        // AVX512: 58aa48de2f67f1628365f8f3284a43903d3cd5880353c8d67060d60a257d5f4f
-        // AVX: a1c5b5271e1256da68e9ccb931802f16fb3d150e73a829909b18314ddaaaf4dd
-        // No-AVX: 884d86f534136feed662fb7c13f7f303e28c2960b119cd4b6bb6444bf69b6a7e
+        // AVX512: 88c76d82ae458e90e36f767bcc64e46b4116edf315a982fdc4a2b34559108151
+        // AVX: b54ed8ebe048a302f0d2b0a5ddec0af9bc52eb05c2ab595d58ece4ae4cd71014
+        // No-AVX: aa80d621c41c40bcdbf6d48c069776524a63b699b79b282c30395e89bc1c65a6
+        // ROCm: e41e2c2e870bada985b863d158a02207511d2e15342fef2a3ceaa6863b2c2a3c
       ],
       'linux-x64': [
         {
           type: 'cpu' as BinaryVariant, // Works with both CPU and CUDA (auto-detects)
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-330-db6f479/sd-master--bin-Linux-Ubuntu-24.04-x86_64.zip',
-          checksum: 'eb886cbd37cf927095255bc406858a5a131fcc141e04e68007be80a9156566c3',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-504-636d3cb/sd-master-636d3cb-bin-Linux-Ubuntu-24.04-x86_64.zip',
+          checksum: '7485c413f4ac55c08d137a5a3ba31987067de830092f2cf0aed859235b1c6782',
         },
       ],
     },
