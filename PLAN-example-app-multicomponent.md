@@ -20,7 +20,7 @@ Add a preset-based download experience for multi-component models to the example
 ## Scope
 
 **In scope:**
-- Model preset data structure and Flux 2 Klein preset definition
+- Model preset data structure with Flux 2 Klein and SDXL Lightning preset definitions
 - Preset selector UI in ModelDownloadForm with quant variant dropdowns
 - Per-component download progress display
 - Multi-component badge in model list
@@ -28,7 +28,7 @@ Add a preset-based download experience for multi-component models to the example
 - Small library extension: `onComponentStart` callback in `DownloadConfig`
 
 **Out of scope:**
-- SDXL split preset (can be added later with the same system)
+- SDXL split (multi-component) preset — can be added later with the same system
 - Preset management / user-defined presets
 - Downloading presets from a remote registry
 - Changes to the async image generation API
@@ -111,7 +111,7 @@ config.onComponentStart?.({
 
 ### Phase 2: Preset Data
 
-**Goal**: Define the preset data structure and Flux 2 Klein preset.
+**Goal**: Define the preset data structure, Flux 2 Klein preset (multi-component), and SDXL Lightning preset (monolithic).
 
 **Files**:
 - `examples/electron-control-panel/renderer/data/model-presets.ts` — NEW
@@ -196,6 +196,27 @@ export const MODEL_PRESETS: ModelPreset[] = [
       sampler: 'euler',
       width: 768,
       height: 768,
+    },
+  },
+  {
+    id: 'sdxl-lightning-4step',
+    name: 'SDXL Lightning (4-step)',
+    description: 'Fast SDXL image generation in 4 steps. Single file, no extra components.',
+    primary: {
+      source: 'huggingface',
+      repo: 'mzwing/SDXL-Lightning-GGUF',
+      variants: [
+        { label: 'Q4_1 (~2.8 GB)', file: 'sdxl_lightning_4step.q4_1.gguf', sizeGB: 2.8 },
+        { label: 'Q5_1 (~3.2 GB)', file: 'sdxl_lightning_4step.q5_1.gguf', sizeGB: 3.2 },
+      ],
+    },
+    components: [],  // Monolithic single-file model — no extra components
+    recommendedSettings: {
+      steps: 4,
+      cfgScale: 1,
+      sampler: 'euler',
+      width: 1024,
+      height: 1024,
     },
   },
 ];
@@ -394,11 +415,11 @@ window.api.on('download:component-start', (data) => setComponentProgress(data));
 
 ---
 
-### Phase 6: Flux 2 Generation Settings Hint
+### Phase 6: Preset Generation Settings Hint
 
-**Goal**: When a Flux 2 model is selected in DiffusionServerControl, show recommended settings.
+**Goal**: When a model matching a preset is selected in DiffusionServerControl, show recommended settings from that preset.
 
-**Depends on**: Phase 5 (model list must include `components` data from library `ModelInfo` type).
+**Depends on**: Phase 2 (preset data with `recommendedSettings`), Phase 5 (model list must include `components` data from library `ModelInfo` type).
 
 **Files**:
 - `examples/electron-control-panel/renderer/components/DiffusionServerControl.tsx`
@@ -406,26 +427,39 @@ window.api.on('download:component-start', (data) => setComponentProgress(data));
 
 **Work**:
 
-1. Add model info lookup (component currently only stores `selectedModel` as string ID):
+1. Add model info lookup and preset matching:
 
 ```typescript
 const selectedModelInfo = models.find(m => m.id === selectedModel);
+const matchedPreset = MODEL_PRESETS.find(p => selectedModel?.startsWith(p.id));
 ```
 
-2. Detect Flux 2 model: check if selected model has `components?.llm` (Flux 2 architecture indicator).
-
-3. Show a hint banner above the generation form:
+2. Show a hint banner when a preset with `recommendedSettings` is matched:
 
 ```tsx
-{selectedModelInfo?.components?.llm && (
+{matchedPreset?.recommendedSettings && (
   <div className="settings-hint">
-    Flux 2 recommended: Steps 4, CFG Scale 1.0, Euler sampler, 768×768
-    <button onClick={applyFlux2Settings}>Apply</button>
+    {matchedPreset.name} recommended: Steps {matchedPreset.recommendedSettings.steps},
+    CFG Scale {matchedPreset.recommendedSettings.cfgScale},
+    {matchedPreset.recommendedSettings.sampler} sampler,
+    {matchedPreset.recommendedSettings.width}×{matchedPreset.recommendedSettings.height}
+    <button onClick={() => applyPresetSettings(matchedPreset.recommendedSettings)}>Apply</button>
   </div>
 )}
 ```
 
-4. `applyFlux2Settings` function sets: `steps=4, cfgScale=1, sampler='euler', dimensions=768×768`.
+3. Generic `applyPresetSettings` function (works for any preset, not hardcoded to Flux 2):
+
+```typescript
+function applyPresetSettings(settings: ModelPreset['recommendedSettings']) {
+  if (!settings) return;
+  setSteps(settings.steps);
+  setCfgScale(settings.cfgScale);
+  setSampler(settings.sampler);
+  if (settings.width) setWidth(settings.width);
+  if (settings.height) setHeight(settings.height);
+}
+```
 
 5. Add CSS for the hint banner in `DiffusionServerControl.css`:
 
@@ -486,7 +520,7 @@ const selectedModelInfo = models.find(m => m.id === selectedModel);
 
 ## Notes
 
-- Only Flux 2 Klein preset for now. More presets (SDXL split, Flux 2 Dev) can be added to the `MODEL_PRESETS` array later.
+- Two presets shipped: Flux 2 Klein (multi-component, 3 files) and SDXL Lightning 4-step (monolithic, single file). More presets (SDXL split, Flux 2 Dev) can be added to the `MODEL_PRESETS` array later.
 - The library's `onComponentStart` callback is the only public API change. It's optional and backwards compatible.
 - The example app is a reference implementation — keep it simple, no over-engineering.
 - `renderer/data/` is a new directory (doesn't exist yet).
