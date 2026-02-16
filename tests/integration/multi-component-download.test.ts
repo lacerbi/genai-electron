@@ -48,8 +48,7 @@ const mockStorageManager = {
   saveModelMetadata: async (info: unknown) => {
     savedMetadata.push(info);
   },
-  getModelPath: (type: string, filename: string) =>
-    path.join(testState.tempDir, type, filename),
+  getModelPath: (type: string, filename: string) => path.join(testState.tempDir, type, filename),
   listModelFiles: async () => [],
   loadModelMetadata: async () => {
     throw new Error('not found');
@@ -65,8 +64,7 @@ jest.unstable_mockModule('../../src/managers/StorageManager.js', () => ({
 
 // Paths — redirect to temp directory (avoids Electron app.getPath dependency)
 jest.unstable_mockModule('../../src/config/paths.js', () => ({
-  getModelDirectory: (type: string, modelId: string) =>
-    path.join(testState.tempDir, type, modelId),
+  getModelDirectory: (type: string, modelId: string) => path.join(testState.tempDir, type, modelId),
   getModelFilePath: (type: string, filename: string) =>
     path.join(testState.tempDir, type, filename),
   getModelMetadataPath: (type: string, modelId: string) =>

@@ -548,9 +548,7 @@ export class BinaryManager {
           resolve({ stdout, stderr });
         } else {
           const error = Object.assign(
-            new Error(
-              `Process exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`
-            ),
+            new Error(`Process exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`),
             { code, signal, stdout, stderr }
           );
           reject(error);
