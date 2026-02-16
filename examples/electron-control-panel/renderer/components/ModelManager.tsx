@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import Card from './common/Card';
 import Spinner from './common/Spinner';
 import ModelList from './ModelList';
 import ModelDownloadForm from './ModelDownloadForm';
 import { useModels } from './hooks/useModels';
 import type { DownloadConfig } from '../types/api';
+import type { DownloadProgress, ComponentProgress } from '../types/ui';
 import './ModelManager.css';
 
 const ModelManager: React.FC = () => {
@@ -12,13 +13,38 @@ const ModelManager: React.FC = () => {
   const llmHook = useModels('llm');
   const diffusionHook = useModels('diffusion');
 
+  // Download state — centralized here (not in individual hooks) to avoid
+  // the preload removeAllListeners collision when two hooks register for
+  // the same IPC channels.
+  const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const [componentProgress, setComponentProgress] = useState<ComponentProgress | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  // Single IPC listener registration for download progress events
+  useEffect(() => {
+    if (!window.api || !window.api.on) return;
+
+    window.api.on('download:progress', (progress: DownloadProgress) => {
+      setDownloadProgress(progress);
+    });
+
+    window.api.on('download:component-start', (data: ComponentProgress) => {
+      setComponentProgress(data);
+    });
+
+    return () => {
+      if (window.api && window.api.off) {
+        window.api.off('download:progress');
+        window.api.off('download:component-start');
+      }
+    };
+  }, []);
+
   // Merge both model lists
   const allModels = [...llmHook.models, ...diffusionHook.models];
   const loading = llmHook.loading || diffusionHook.loading;
-  const downloading = llmHook.downloading || diffusionHook.downloading;
-  const downloadProgress = llmHook.downloadProgress || diffusionHook.downloadProgress;
-  const componentProgress = llmHook.componentProgress || diffusionHook.componentProgress;
-  const error = llmHook.error || diffusionHook.error;
+  const error = llmHook.error || diffusionHook.error || downloadError;
 
   const formatBytes = (bytes: number): string => {
     const gb = bytes / (1024 * 1024 * 1024);
@@ -28,12 +54,30 @@ const ModelManager: React.FC = () => {
   // Calculate total disk usage across both types
   const totalSize = allModels.reduce((sum, model) => sum + model.size, 0);
 
-  // Unified handlers that work for both types
+  // Unified download handler — manages state and dispatches to the right hook
   const handleDownload = async (config: DownloadConfig) => {
-    if (config.type === 'llm') {
-      await llmHook.handleDownload(config);
-    } else {
-      await diffusionHook.handleDownload(config);
+    setDownloading(true);
+    setDownloadError(null);
+    setDownloadProgress({
+      downloaded: 0,
+      total: 0,
+      percentage: 0,
+      modelName: config.name,
+    });
+    setComponentProgress(null);
+
+    try {
+      const hook = config.type === 'llm' ? llmHook : diffusionHook;
+      await hook.handleDownload(config);
+    } catch (err) {
+      setDownloadError(`Download failed: ${(err as Error).message}`);
+    } finally {
+      setDownloading(false);
+      setDownloadProgress(null);
+      setComponentProgress(null);
+      // Refresh model lists after download completes or fails
+      llmHook.refresh();
+      diffusionHook.refresh();
     }
   };
 

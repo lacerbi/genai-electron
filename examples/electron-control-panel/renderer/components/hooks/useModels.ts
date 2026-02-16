@@ -1,17 +1,20 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { ModelInfo, DownloadConfig } from '../../types/api';
-import type { DownloadProgress, ComponentProgress } from '../../types/ui';
 
+/**
+ * Hook for model listing and operations (download invoke, delete, verify).
+ *
+ * Download progress IPC listeners are NOT registered here — they live in
+ * ModelManager.tsx as a single registration to avoid the preload
+ * removeAllListeners collision when two useModels hooks (llm + diffusion)
+ * both try to register for the same IPC channels.
+ */
 export function useModels(type: 'llm' | 'diffusion' = 'llm') {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [downloading, setDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
-  const [componentProgress, setComponentProgress] = useState<ComponentProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const fetchModels = useCallback(async () => {
-    // Safety check: ensure window.api exists
     if (!window.api || !window.api.models) {
       console.error('window.api not available');
       setError('Models API not available');
@@ -35,63 +38,8 @@ export function useModels(type: 'llm' | 'diffusion' = 'llm') {
     fetchModels();
   }, [fetchModels]);
 
-  // Listen to download progress events
-  useEffect(() => {
-    // Safety check: ensure window.api exists
-    if (!window.api || !window.api.on) {
-      console.error('window.api not available');
-      return;
-    }
-
-    window.api.on('download:progress', (progress: DownloadProgress) => {
-      setDownloadProgress(progress);
-    });
-
-    window.api.on('download:component-start', (data: ComponentProgress) => {
-      setComponentProgress(data);
-    });
-
-    window.api.on('download:complete', () => {
-      setDownloading(false);
-      setDownloadProgress(null);
-      setComponentProgress(null);
-      fetchModels(); // Refresh model list
-    });
-
-    window.api.on('download:error', (errorData: { message: string; modelName: string }) => {
-      setDownloading(false);
-      setDownloadProgress(null);
-      setComponentProgress(null);
-      setError(`Download failed for ${errorData.modelName}: ${errorData.message}`);
-    });
-
-    return () => {
-      if (window.api && window.api.off) {
-        window.api.off('download:progress');
-        window.api.off('download:component-start');
-        window.api.off('download:complete');
-        window.api.off('download:error');
-      }
-    };
-  }, [fetchModels]);
-
   const handleDownload = async (config: DownloadConfig) => {
-    setDownloading(true);
-    setError(null);
-    setDownloadProgress({
-      downloaded: 0,
-      total: 0,
-      percentage: 0,
-      modelName: config.name,
-    });
-
-    try {
-      await window.api.models.download(config);
-    } catch (err) {
-      setDownloading(false);
-      setDownloadProgress(null);
-      setError((err as Error).message);
-    }
+    await window.api.models.download(config);
   };
 
   const handleDelete = async (modelId: string): Promise<boolean> => {
@@ -124,9 +72,6 @@ export function useModels(type: 'llm' | 'diffusion' = 'llm') {
   return {
     models,
     loading,
-    downloading,
-    downloadProgress,
-    componentProgress,
     error,
     handleDownload,
     handleDelete,
