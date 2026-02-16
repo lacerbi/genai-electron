@@ -458,7 +458,7 @@ export class BinaryManager {
       const binaryNamesToSearch =
         this.config.type === 'llama'
           ? ['llama-server.exe', 'llama-server', 'llama-cli.exe', 'llama-cli']
-          : ['sd.exe', 'sd'];
+          : ['sd-cli.exe', 'sd-cli', 'sd.exe', 'sd'];
 
       // Extract main binary archive to same directory as dependencies
       const extractedBinaryPath = await extractBinary(archivePath, extractDir, binaryNamesToSearch);

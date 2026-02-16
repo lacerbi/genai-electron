@@ -364,7 +364,7 @@ export class DiffusionServerManager extends ServerManager {
   private async ensureBinary(modelPath?: string, forceValidation = false): Promise<string> {
     return this.ensureBinaryHelper(
       'diffusion',
-      'sd',
+      'sd-cli',
       BINARY_VERSIONS.diffusionCpp,
       modelPath,
       forceValidation
