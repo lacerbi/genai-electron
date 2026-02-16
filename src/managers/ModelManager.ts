@@ -312,12 +312,19 @@ export class ModelManager {
     }
 
     // Pre-fetch total size via HEAD requests for aggregate progress
+    // Use 10s timeout — HEAD requests should be fast; if they hang, fall back to 0
     let totalBytes = 0;
     const itemSizes: number[] = [];
     await Promise.all(
       downloadItems.map(async (item, index) => {
         try {
-          const response = await fetch(item.url, { method: 'HEAD' });
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10_000);
+          const response = await fetch(item.url, {
+            method: 'HEAD',
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
           const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
           itemSizes[index] = contentLength;
         } catch {
@@ -328,10 +335,14 @@ export class ModelManager {
     totalBytes = itemSizes.reduce((sum, s) => sum + s, 0);
 
     // Fetch GGUF metadata for the primary model (only if it's a .gguf file)
+    // Use 15s timeout — metadata is optional, don't block the download
     let ggufMetadata: GGUFMetadata | undefined;
     if (this.isGGUFFile(primaryFile)) {
       try {
-        const parsedGGUF = await fetchGGUFMetadata(primaryURL);
+        const metadataTimeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('GGUF metadata fetch timeout')), 15_000)
+        );
+        const parsedGGUF = await Promise.race([fetchGGUFMetadata(primaryURL), metadataTimeout]);
         ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
       } catch {
         // Non-fatal for multi-component: metadata is optional
