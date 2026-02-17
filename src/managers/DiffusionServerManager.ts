@@ -904,21 +904,25 @@ export class DiffusionServerManager extends ServerManager {
       } else {
         const headroom = gpu.vram - modelFootprint;
 
-        autoClipOnCpu = headroom < DIFFUSION_VRAM_THRESHOLDS.clipOnCpuHeadroomBytes;
-        autoVaeOnCpu = headroom < DIFFUSION_VRAM_THRESHOLDS.vaeOnCpuHeadroomBytes;
+        // CPU offloading flags (--clip-on-cpu, --vae-on-cpu, --offload-to-cpu) crash
+        // sd.cpp CUDA builds silently (build master-504-636d3cb). Disable all auto
+        // CPU offloading when the CUDA variant is installed.
+        const isCuda = await this.isInstalledVariantCuda();
 
-        // Auto-enable offload-to-cpu when model footprint > 85% of VRAM
-        // (disabled for CUDA backend — --offload-to-cpu crashes sd.cpp CUDA builds)
-        autoOffloadToCpu = modelFootprint > gpu.vram * 0.85;
-        if (autoOffloadToCpu) {
-          const isCuda = await this.isInstalledVariantCuda();
-          if (isCuda) {
-            autoOffloadToCpu = false;
-          }
-        }
+        autoClipOnCpu = isCuda
+          ? false
+          : headroom < DIFFUSION_VRAM_THRESHOLDS.clipOnCpuHeadroomBytes;
+        autoVaeOnCpu = isCuda
+          ? false
+          : headroom < DIFFUSION_VRAM_THRESHOLDS.vaeOnCpuHeadroomBytes;
+        autoOffloadToCpu = isCuda ? false : modelFootprint > gpu.vram * 0.85;
 
         // Escalation: if vramAvailable is known and critically low, force clip-on-cpu
-        if (gpu.vramAvailable !== undefined && gpu.vramAvailable - modelFootprint < 2 * 1024 ** 3) {
+        if (
+          !isCuda &&
+          gpu.vramAvailable !== undefined &&
+          gpu.vramAvailable - modelFootprint < 2 * 1024 ** 3
+        ) {
           autoClipOnCpu = true;
         }
       }

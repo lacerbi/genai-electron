@@ -35,11 +35,11 @@ await llamaServer.start({
 
 **Why this matters:** Binary validation is cached (checksum-based) for fast subsequent starts. After GPU driver updates, the cached validation may be stale even though the checksum matches.
 
-### CUDA + `--offload-to-cpu` Crash
+### CUDA + CPU Offloading Crash
 
-**Problem:** Diffusion generation crashes silently when using CUDA backend with `--offload-to-cpu` (sd.cpp build `master-504-636d3cb`).
+**Problem:** Diffusion generation crashes silently (exit code `0xC0000005`) when using CUDA backend with any CPU offloading flag: `--clip-on-cpu`, `--vae-on-cpu`, or `--offload-to-cpu` (sd.cpp build `master-504-636d3cb`).
 
-**Solution:** Auto-detection disables `--offload-to-cpu` for CUDA variants automatically. If you set `offloadToCpu: true` manually and generation fails silently, try `offloadToCpu: false`.
+**Solution:** Auto-detection disables all CPU offloading flags for CUDA variants automatically. If you force any of `clipOnCpu`, `vaeOnCpu`, or `offloadToCpu` to `true` manually and generation crashes silently, set them to `false`.
 
 ### Missing Shared Libraries
 
