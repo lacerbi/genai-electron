@@ -68,6 +68,12 @@ export interface BinaryManagerConfig {
    * If not provided, falls back to basic --version/--help test.
    */
   testModelPath?: string;
+  /**
+   * Optional pre-built CLI args for the model in Phase 2 diffusion test.
+   * When provided, these replace the default `-m <testModelPath>` args.
+   * Used for multi-component models that require --diffusion-model + --llm + --vae.
+   */
+  testModelArgs?: string[];
   /** Expected binary version from BINARY_VERSIONS — used for cache invalidation */
   version?: string;
 }
@@ -796,9 +802,12 @@ export class BinaryManager {
       this.log('Phase 2: Testing GPU functionality with real inference...', 'info');
 
       const tempOutput = path.join(PATHS.binaries[this.config.type], '.test-output.png');
+
+      // Use pre-built model args for multi-component models, otherwise default to -m
+      const modelArgs = this.config.testModelArgs || ['-m', modelPath];
+
       const testArgs = [
-        '-m',
-        modelPath,
+        ...modelArgs,
         '-p',
         'test',
         '-o',
@@ -811,7 +820,9 @@ export class BinaryManager {
         '1',
       ];
 
-      const { stdout, stderr } = await this.spawnWithTimeout(binaryPath, testArgs, 15000);
+      // Multi-component models (7GB+) need more time to load all components
+      const timeout = this.config.testModelArgs ? 120000 : 15000;
+      const { stdout, stderr } = await this.spawnWithTimeout(binaryPath, testArgs, timeout);
 
       const gpuError = this.checkForGpuErrors(`${stdout} ${stderr}`);
       if (gpuError) {

@@ -202,8 +202,8 @@ export class DiffusionServerManager extends ServerManager {
         );
       }
 
-      // 3. Ensure binary is downloaded (pass model path for real functionality testing)
-      this.binaryPath = await this.ensureBinary(modelInfo.path, config.forceValidation);
+      // 3. Ensure binary is downloaded (pass model info for real functionality testing)
+      this.binaryPath = await this.ensureBinary(modelInfo, config.forceValidation);
 
       // 4. Check if port is in use
       const port = config.port || DEFAULT_PORTS.diffusion;
@@ -355,19 +355,35 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Ensure stable-diffusion.cpp binary is downloaded
    *
-   * @param modelPath - Optional model path for real functionality testing
+   * @param modelInfo - Optional model info for real functionality testing (Phase 2)
    * @param forceValidation - If true, re-run validation tests even if cached validation exists
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails
    * @private
    */
-  private async ensureBinary(modelPath?: string, forceValidation = false): Promise<string> {
+  private async ensureBinary(modelInfo?: ModelInfo, forceValidation = false): Promise<string> {
+    // Build the correct test model args based on single-file vs multi-component
+    let testModelArgs: string[] | undefined;
+    if (modelInfo?.components) {
+      testModelArgs = [];
+      for (const role of DIFFUSION_COMPONENT_ORDER) {
+        const component = modelInfo.components[role];
+        if (component) {
+          testModelArgs.push(DIFFUSION_COMPONENT_FLAGS[role], component.path);
+        }
+      }
+      // Multi-component models need --offload-to-cpu for the test since they
+      // typically don't fit in VRAM without it (conservative, always safe)
+      testModelArgs.push('--offload-to-cpu');
+    }
+
     return this.ensureBinaryHelper(
       'diffusion',
       'sd-cli',
       BINARY_VERSIONS.diffusionCpp,
-      modelPath,
-      forceValidation
+      modelInfo?.path,
+      forceValidation,
+      testModelArgs
     );
   }
 

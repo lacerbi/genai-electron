@@ -481,7 +481,8 @@ export abstract class ServerManager extends EventEmitter {
     binaryName: string,
     binaryConfig: any,
     testModelPath?: string,
-    forceValidation = false
+    forceValidation = false,
+    testModelArgs?: string[]
   ): Promise<string> {
     const platformKey = getPlatformKey();
     const variants = binaryConfig.variants[platformKey];
@@ -493,6 +494,7 @@ export abstract class ServerManager extends EventEmitter {
       platformKey,
       variants: variants || [],
       testModelPath,
+      testModelArgs,
       version: binaryConfig.version,
       log: (message, level = 'info') => {
         // Write to log file
