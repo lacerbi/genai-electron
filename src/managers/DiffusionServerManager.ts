@@ -912,9 +912,7 @@ export class DiffusionServerManager extends ServerManager {
         autoClipOnCpu = isCuda
           ? false
           : headroom < DIFFUSION_VRAM_THRESHOLDS.clipOnCpuHeadroomBytes;
-        autoVaeOnCpu = isCuda
-          ? false
-          : headroom < DIFFUSION_VRAM_THRESHOLDS.vaeOnCpuHeadroomBytes;
+        autoVaeOnCpu = isCuda ? false : headroom < DIFFUSION_VRAM_THRESHOLDS.vaeOnCpuHeadroomBytes;
         autoOffloadToCpu = isCuda ? false : modelFootprint > gpu.vram * 0.85;
 
         // Escalation: if vramAvailable is known and critically low, force clip-on-cpu
