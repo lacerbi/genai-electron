@@ -3,7 +3,7 @@
  * @module config/defaults
  */
 
-import type { ServerConfig, DiffusionComponentRole } from '../types/index.js';
+import type { DiffusionComponentRole } from '../types/index.js';
 
 /**
  * Default ports for different server types
@@ -29,17 +29,6 @@ export const DEFAULT_TIMEOUTS = {
   healthCheck: 5000, // 5 seconds
 } as const;
 
-/**
- * Default server configuration
- * Values marked as -1 will be auto-detected based on system capabilities
- */
-export const DEFAULT_SERVER_CONFIG: Partial<ServerConfig> = {
-  threads: -1, // Auto-detect based on CPU cores
-  contextSize: 4096,
-  gpuLayers: -1, // Auto-detect based on GPU availability
-  parallelRequests: 4,
-  flashAttention: false,
-} as const;
 
 /**
  * Binary variant type
@@ -242,43 +231,6 @@ export const DIFFUSION_VRAM_THRESHOLDS = {
   modelOverheadMultiplier: 1.2,
 } as const;
 
-/**
- * Health check configuration
- */
-export const HEALTH_CHECK_CONFIG = {
-  /** Initial retry delay in milliseconds */
-  initialDelay: 500,
-  /** Maximum retry delay in milliseconds */
-  maxDelay: 5000,
-  /** Backoff multiplier */
-  backoffMultiplier: 1.5,
-  /** Maximum number of retries */
-  maxRetries: 10,
-} as const;
-
-/**
- * Model size recommendations (in GB)
- * Based on quantization and parameter count
- */
-export const MODEL_SIZE_ESTIMATES = {
-  /** 7B parameter models */
-  '7B': {
-    Q4_K_M: 4.4, // ~4.4GB
-    Q5_K_M: 5.2, // ~5.2GB
-    Q8_0: 7.2, // ~7.2GB
-  },
-  /** 13B parameter models */
-  '13B': {
-    Q4_K_M: 8.1, // ~8.1GB
-    Q5_K_M: 9.5, // ~9.5GB
-    Q8_0: 13.5, // ~13.5GB
-  },
-  /** 70B parameter models */
-  '70B': {
-    Q4_K_M: 41.0, // ~41GB
-    Q5_K_M: 48.0, // ~48GB
-  },
-} as const;
 
 /**
  * Recommended quantizations by use case
