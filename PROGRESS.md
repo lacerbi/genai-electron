@@ -1,25 +1,16 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Multi-component diffusion model support added (2026-02-16)
+> **Current Status**: Shared-variant downloads, storage dedup, checksum verification (2026-02-17)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 403/403 passing (100% pass rate)
+- **Tests:** ✅ 418/418 passing (18 suites)
 - **Jest:** ✅ Clean exit with no warnings
 - **Branch:** `main`
-- **Last Updated:** 2026-02-16
-
-**Test Suite Breakdown:**
-- Phase 1 Tests: 104 tests (errors, utils, platform, SystemInfo, LlamaServerManager, Downloader)
-- Phase 2 Tests: 84 tests (DiffusionServerManager, ResourceOrchestrator, multi-component)
-- Phase 2.5 Tests: 27 tests (GenerationRegistry, async API)
-- Infrastructure: 61 tests (BinaryManager, health-check)
-- Phase 3 Prep Tests: 47 tests (structured-logs, electron-lifecycle, error-helpers)
-- Storage Tests: 28 tests (StorageManager, multi-component delete/verify)
-- Model Management: 52 tests (ModelManager, downloads, multi-component)
+- **Last Updated:** 2026-02-17
 
 ---
 

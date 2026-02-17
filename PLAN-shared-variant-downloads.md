@@ -190,17 +190,14 @@ Doublecheck verification identified these items. Critical items were fixed immed
 - [x] **No test for idempotency guard** — Added test: `loadModelMetadata` succeeds (model exists)
   → `DownloadError` thrown with "already exists" message.
 
-### WARNING (deferred — not blockers)
+### WARNING (resolved)
 
-- [ ] **W4: `getStorageUsed()` double-counts shared components** — When two variants share
-  encoder.bin (2.5 GB) and vae.safetensors (0.3 GB), total storage is over-reported by ~2.8 GB
-  per extra variant. Fix: deduplicate component paths when summing. Cosmetic only — no data
-  integrity impact.
+- [x] **W4: `getStorageUsed()` double-counts shared components** — Fixed: deduplicate by file
+  path using `Map<path, size>` before summing. Test added for two variants sharing LLM + VAE.
 
-- [ ] **W5: Skip-if-exists doesn't verify checksums of existing files** — A corrupted or wrong
-  file at the expected path will be silently reused. Low risk: Downloader uses atomic rename
-  (`.partial` → final), so crashes leave `.partial` files, not corrupted finals. Defense-in-depth
-  improvement: verify checksum of existing file when `checksum` is provided, re-download on mismatch.
+- [x] **W5: Skip-if-exists doesn't verify checksums of existing files** — Fixed: verify checksum
+  of pre-existing files when `checksum` is provided; delete and re-download on mismatch.
+  Tests added for both match (skip) and mismatch (re-download) cases.
 
 ### NOTES (no action needed)
 
@@ -210,9 +207,9 @@ Doublecheck verification identified these items. Critical items were fixed immed
 - Primary path protected redundantly via `sharedPaths.add(otherMeta.path)` — defense-in-depth
 - Race condition between concurrent downloads to same directory — mitigated by singleton +
   Downloader's `isDownloading` guard; file-based locking deferred to future if needed
-- Documentation updates needed: `typescript-reference.md` (add `modelDirectory`, `onComponentStart`),
-  `CLAUDE.md` (test count), `model-management.md` (shared variant usage example)
+- Documentation updated: `typescript-reference.md` (`modelDirectory`, `onComponentStart`),
+  `CLAUDE.md` (ephemeral content removed), `model-management.md` (shared variant usage example)
 
 ---
 
-**Status: ✅ ALL CRITICAL ITEMS RESOLVED (2026-02-17) — 415/415 tests passing, 18 suites.**
+**Status: ✅ ALL ITEMS RESOLVED (2026-02-17) — 418/418 tests passing, 18 suites.**
