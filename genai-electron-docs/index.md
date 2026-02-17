@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.3.0 (Phase 2.6 - Async API & genai-lite Integration)
+> **Version**: 0.5.0 (Multi-Component Diffusion Models & Shared Variant Downloads)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -24,6 +24,9 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Integration Guide](integration-guide.md)** - Electron patterns, lifecycle management, error handling
 - **[TypeScript Reference](typescript-reference.md)** - Complete type definitions and interfaces
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
+
+### Migration
+- **[Migrating from v0.4.x to v0.5.0](migration-0-4-to-0-5.md)** - Multi-component models, presets, Flux 2 Klein
 
 ### Examples
 - **[Example: Control Panel](example-control-panel.md)** - Reference implementation patterns
