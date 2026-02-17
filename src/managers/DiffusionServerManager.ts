@@ -710,6 +710,10 @@ export class DiffusionServerManager extends ServerManager {
     args.push('-o', outputPath);
 
     await this.logManager?.write(`Generating image: ${this.binaryPath} ${args.join(' ')}`, 'info');
+    await this.logManager?.write(
+      `Model info: id=${this.currentModelInfo.id}, components=${this.currentModelInfo.components ? Object.keys(this.currentModelInfo.components).join(',') : 'none'}, path=${this.currentModelInfo.path}`,
+      'info'
+    );
 
     // Spawn stable-diffusion.cpp
     let cancelled = false;
@@ -745,12 +749,14 @@ export class DiffusionServerManager extends ServerManager {
 
           if (code !== 0) {
             const stderrOutput = stderrLines.length > 0 ? stderrLines.join('\n') : '';
+            const argsStr = args.join(' ');
             reject(
               new ServerError(
-                `stable-diffusion.cpp exited with code ${code}${stderrOutput ? `\n${stderrOutput}` : ''}`,
+                `stable-diffusion.cpp exited with code ${code}${stderrOutput ? `\n${stderrOutput}` : ''}\nArgs: ${argsStr}`,
                 {
                   exitCode: code,
                   stderr: stderrOutput || undefined,
+                  args: argsStr,
                 }
               )
             );
