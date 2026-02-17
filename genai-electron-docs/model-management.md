@@ -106,7 +106,7 @@ const model = await modelManager.downloadModel({
 });
 ```
 
-**Note**: GGUF metadata is automatically extracted before downloading to validate the file.
+**Note**: GGUF metadata is automatically extracted before downloading. For single-file downloads, metadata extraction failure is fatal (throws `DownloadError`). For multi-component downloads, metadata extraction is optional — failure is silently ignored since the primary file may not be a GGUF file.
 
 ---
 
@@ -378,6 +378,8 @@ console.log('Remaining models:', updated.length);
 
 **Throws**: `ModelNotFoundError` if model doesn't exist
 
+**Multi-component models**: When deleting a multi-component model that shares a directory with other variants (via `modelDirectory`), only component files unique to the deleted model are removed. Shared component files still referenced by other models are preserved.
+
 ---
 
 ### verifyModel()
@@ -391,23 +393,34 @@ verifyModel(id: string): Promise<boolean>
 **Parameters**:
 - `id: string` - Model ID to verify
 
-**Returns**: `Promise<boolean>` - `true` if valid, `false` if checksum doesn't match
+**Returns**: `Promise<boolean>` - `true` if checksum matches, `false` if no checksum was stored (cannot verify)
+
+**Throws**:
+- `ModelNotFoundError` if model doesn't exist
+- `ChecksumError` if checksum doesn't match (file corrupted or tampered)
+- `FileSystemError` if a multi-component model has missing component files
 
 **Example**:
 ```typescript
-const isValid = await modelManager.verifyModel('llama-2-7b');
+try {
+  const isValid = await modelManager.verifyModel('llama-2-7b');
 
-if (isValid) {
-  console.log('✅ Model file is valid');
-} else {
-  console.log('❌ Model file is corrupted or tampered with');
-  console.log('Consider re-downloading the model');
+  if (isValid) {
+    console.log('✅ Model file is valid');
+  } else {
+    console.log('⚠️ No checksum stored — cannot verify integrity');
+  }
+} catch (error) {
+  if (error instanceof ChecksumError) {
+    console.log('❌ Model file is corrupted or tampered with');
+    console.log('Consider re-downloading the model');
+  } else if (error instanceof FileSystemError) {
+    console.log('❌ Missing component file in multi-component model');
+  }
 }
 ```
 
-**Note**: Only works if checksum was provided during download. Returns `false` if no checksum stored (cannot verify integrity without checksum).
-
-**Throws**: `ModelNotFoundError` if model doesn't exist
+**Multi-component models**: Each component's checksum is verified individually. Throws `FileSystemError` if any component file is missing from disk. Throws `ChecksumError` on the first component mismatch.
 
 ---
 
@@ -619,15 +632,16 @@ import {
 } from 'genai-electron';
 
 // Fetch metadata before downloading (useful for validation)
-const metadata = await fetchGGUFMetadata('https://huggingface.co/.../model.gguf');
-console.log('Layers:', metadata.block_count);
-console.log('Architecture:', metadata.architecture);
+const parsed = await fetchGGUFMetadata('https://huggingface.co/.../model.gguf');
+// parsed.metadata is a Record<string, unknown> of all GGUF key-value pairs
 
 // Read metadata from local file
-const localMetadata = await fetchLocalGGUFMetadata('/path/to/model.gguf');
+const localParsed = await fetchLocalGGUFMetadata('/path/to/model.gguf');
 
-// Extract architecture-specific fields from raw metadata
-const blockCount = getArchField(metadata.raw, 'block_count');
+// Extract architecture-specific fields from parsed metadata
+const blockCount = getArchField(parsed.metadata, 'block_count');
+const contextLength = getArchField(parsed.metadata, 'context_length');
+const arch = parsed.metadata['general.architecture'];
 ```
 
 **Note**: Most users don't need these - `ModelManager.downloadModel()` automatically extracts and stores GGUF metadata. Use these for custom workflows or validation before downloading.
@@ -666,7 +680,11 @@ try {
     console.error('Download failed:', error.message);
   } else if (error instanceof InsufficientResourcesError) {
     console.error('Not enough disk space:', error.message);
-    console.log('Suggestion:', error.details.suggestion);
+    // error.details is typed as `unknown` — narrow before accessing properties
+    const details = error.details as { suggestion?: string } | undefined;
+    if (details?.suggestion) {
+      console.log('Suggestion:', details.suggestion);
+    }
   } else if (error instanceof ChecksumError) {
     console.error('File corrupted:', error.message);
   }

@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.3.0 | **Status**: Production Ready - LLM & Image Generation
+> **Version**: 0.5.0 | **Status**: Production Ready - LLM & Image Generation
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 
@@ -13,7 +13,7 @@ Electron-specific library for managing local AI model servers (llama.cpp, stable
 - ✅ **Multi-component diffusion models** - Flux 2, SDXL split components with aggregate checksum validation
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when memory constrained
 - ✅ **Binary management** - Automatic binary download with GPU variant testing (CUDA→Vulkan→CPU)
-- ✅ **TypeScript-first** - Full type safety, zero runtime dependencies
+- ✅ **TypeScript-first** - Full type safety, minimal runtime dependencies
 
 ## Installation
 

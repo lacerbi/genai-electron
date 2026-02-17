@@ -8,6 +8,7 @@ Reference implementation demonstrating genai-electron integration patterns for i
 - [Features](#features)
 - [Architecture](#architecture)
 - [Key Patterns](#key-patterns)
+- [Multi-Component & Preset Patterns](#multi-component--preset-patterns)
 - [Advanced Patterns](#advanced-patterns)
 - [Running the Example](#running-the-example)
 - [Using for Testing](#using-for-testing)
@@ -33,11 +34,11 @@ Reference implementation demonstrating genai-electron integration patterns for i
 
 **System Info**: Hardware detection (CPU/RAM/GPU), auto-refreshes every 5s, updates on server events
 
-**Model Management**: Download (HuggingFace/URL), list/delete models, **GGUF Metadata Viewer** with auto-fetch and smart truncation for 50k+ item arrays
+**Model Management**: Download (HuggingFace/URL), list/delete models, **GGUF Metadata Viewer** with auto-fetch and smart truncation for 50k+ item arrays, **Preset Downloads** (Flux 2 Klein, SDXL Lightning) with per-component progress, multi-component badge in model list
 
 **LLM Server**: Start/stop/restart with auto-config or manual mode, real-time logs, test chat, health monitoring
 
-**Diffusion Server**: Start/stop, generate images with full parameter control (prompt, dimensions, steps, samplers), real-time progress, metadata display
+**Diffusion Server**: Start/stop, generate images with full parameter control (prompt, dimensions, steps, samplers), real-time progress, metadata display, preset-matched recommended settings with one-click apply
 
 **Resource Monitor**: Memory polling (2s), GPU/VRAM tracking, server status grid, resource orchestration status, event log (20 events), debug tools
 
@@ -47,7 +48,7 @@ Reference implementation demonstrating genai-electron integration patterns for i
 
 **Tech Stack**: Electron + React + TypeScript + Vite
 
-**Structure**: `main/` (Node.js: window, IPC handlers, genai wrappers) + `renderer/` (Browser: React components, custom hooks, types)
+**Structure**: `main/` (Node.js: window, IPC handlers, genai wrappers) + `renderer/` (Browser: React components, custom hooks, types, data)
 
 **IPC**: Main ↔ Renderer via `ipcMain.handle()` + `contextBridge.exposeInMainWorld()`, events via `webContents.send()`
 
@@ -99,7 +100,7 @@ useEffect(() => {
   window.api.on('diffusion:stopped', handleServerEvent);
 
   return () => {
-    window.api.off('server:started', handleServerEvent);
+    window.api.off('server:started');
     // ... cleanup other listeners
   };
 }, []);
@@ -131,12 +132,13 @@ export function setupServerEventForwarding(): void {
     }
   });
 
-  llamaServer.on('crashed', (error: Error) => {
+  llamaServer.on('crashed', (data: { code: number | null; signal: string | null }) => {
     const mainWindow = BrowserWindow.getAllWindows()[0];
     if (mainWindow) {
       mainWindow.webContents.send('server:crashed', {
-        message: error.message,
-        stack: error.stack,
+        message: `Server crashed with exit code ${data.code}`,
+        code: data.code,
+        signal: data.signal,
       });
     }
   });
@@ -183,6 +185,8 @@ export function sendDownloadProgress(downloaded: number, total: number, modelNam
 ```
 
 **Key insight**: IPC handler wraps async operation and forwards progress via separate IPC events, not return values.
+
+**Multi-component models**: For per-component progress tracking (which component is currently downloading), see [Per-Component Download Progress](#pattern-per-component-download-progress-ipc-flow) below.
 
 ---
 
@@ -256,6 +260,254 @@ const visibleLogs = logs.filter((log) => {
 
 ---
 
+## Multi-Component & Preset Patterns
+
+Patterns for multi-component diffusion model downloads, presets, and settings hints:
+
+### Pattern: Preset Data Separation
+
+**Challenge**: Support one-click downloads for multi-component models without hardcoding UI logic.
+
+**Solution** (`renderer/data/model-presets.ts`):
+```typescript
+export interface ModelPreset {
+  id: string;
+  name: string;
+  description: string;
+  type: 'llm' | 'diffusion';
+  primary: {
+    source: 'huggingface' | 'url';
+    repo?: string;
+    variants: PresetVariant[];
+  };
+  components: PresetComponent[];     // Additional files (text encoder, VAE, etc.)
+  recommendedSettings?: PresetRecommendedSettings;
+}
+
+export const MODEL_PRESETS: ModelPreset[] = [
+  {
+    id: 'flux-2-klein',
+    name: 'Flux 2 Klein',
+    description: 'Fast Flux 2 image generation with Qwen3-4B text encoder. 3 components.',
+    type: 'diffusion',
+    primary: {
+      source: 'huggingface',
+      repo: 'leejet/FLUX.2-klein-4B-GGUF',
+      variants: [
+        { label: 'Q8_0 (~4.3 GB)', file: 'flux-2-klein-4b-Q8_0.gguf', sizeGB: 4.3 },
+        { label: 'Q4_0 (~2.5 GB)', file: 'flux-2-klein-4b-Q4_0.gguf', sizeGB: 2.5 },
+      ],
+    },
+    components: [
+      { role: 'llm', label: 'Text Encoder (Qwen3-4B base)', source: 'huggingface', /* ... */ },
+      { role: 'vae', label: 'VAE (Flux 2, 32ch)', source: 'url', fixedUrl: '...', fixedSizeGB: 0.34 },
+    ],
+    recommendedSettings: { steps: 4, cfgScale: 1, sampler: 'euler', width: 768, height: 768 },
+  },
+  // ... additional presets (SDXL Lightning, etc.)
+];
+```
+
+**Key insight**: Adding a new preset requires only a data entry — no UI code changes.
+
+---
+
+### Pattern: Preset-to-DownloadConfig Translation
+
+**Challenge**: Convert user-selected preset + variant choices into a library `DownloadConfig`.
+
+**Solution** (`renderer/components/ModelDownloadForm.tsx:64-104`):
+```typescript
+const handlePresetDownload = async () => {
+  if (!selectedPreset) return;
+
+  const primaryVariant = selectedPreset.primary.variants[getVariantIndex('primary')];
+  if (!primaryVariant) return;
+
+  // Include variant tag in name so each quant gets a distinct model entry
+  const variantTag = primaryVariant.label.split(' ')[0]; // "Q8_0" from "Q8_0 (~4.3 GB)"
+  const config: DownloadConfig = {
+    source: selectedPreset.primary.source,
+    repo: selectedPreset.primary.repo,
+    file: primaryVariant.file,
+    name: `${selectedPreset.name} ${variantTag}`,
+    type: selectedPreset.type,
+    modelDirectory: selectedPreset.id, // Share directory across variants
+  };
+
+  // Build components array for multi-component presets
+  if (selectedPreset.components.length > 0) {
+    config.components = selectedPreset.components.map((comp) => {
+      if (comp.variants) {
+        const variant = comp.variants[getVariantIndex(comp.role)];
+        return { role: comp.role, source: comp.source, repo: comp.repo, file: variant?.file };
+      }
+      return { role: comp.role, source: comp.source, url: comp.fixedUrl };
+    });
+  }
+
+  await onDownload(config);
+};
+```
+
+**Key insight**: `modelDirectory: preset.id` enables shared storage across quant variants; variant tag in the name gives each quant its own model entry.
+
+---
+
+### Pattern: Per-Component Download Progress (IPC Flow)
+
+**Challenge**: Show which component is downloading during multi-file downloads.
+
+**Solution**: Full IPC flow from library callback to renderer display.
+
+1. **IPC handler** registers `onComponentStart` callback (`main/ipc-handlers.ts:92-99`):
+```typescript
+await modelManager.downloadModel({
+  ...config,
+  onProgress: (downloaded: number, total: number) => {
+    sendDownloadProgress(downloaded, total, modelName);
+  },
+  onComponentStart: (info: { role: string; filename: string; index: number; total: number }) => {
+    sendComponentStart(info.role, info.filename, info.index, info.total, modelName);
+  },
+});
+```
+
+2. **Main → Renderer** helper sends IPC event (`main/genai-api.ts:139-156`):
+```typescript
+export function sendComponentStart(
+  role: string, filename: string, index: number, total: number, modelName: string
+): void {
+  const mainWindow = BrowserWindow.getAllWindows()[0];
+  if (mainWindow) {
+    mainWindow.webContents.send('download:component-start', {
+      role, filename, index, total, modelName,
+    });
+  }
+}
+```
+
+3. **Renderer display** (`renderer/components/ModelDownloadForm.tsx:244-249`):
+```typescript
+{componentProgress && componentProgress.total > 1 && (
+  <p className="component-status">
+    Component {componentProgress.index}/{componentProgress.total}: {componentProgress.filename}
+  </p>
+)}
+```
+
+**Key insight**: `componentProgress` state lives in the parent `ModelManager.tsx` to avoid the preload `removeAllListeners` collision — same reason download progress is centralized there (see next pattern).
+
+---
+
+### Pattern: Centralized Download State Management
+
+**Challenge**: Multiple hooks registering for the same IPC channel causes silent listener destruction (preload calls `removeAllListeners` before each `on()`).
+
+**Solution** (`renderer/components/ModelManager.tsx:16-42`):
+```typescript
+// Download state — centralized here (not in individual hooks) to avoid
+// the preload removeAllListeners collision when two hooks register for
+// the same IPC channels.
+const [downloading, setDownloading] = useState(false);
+const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+const [componentProgress, setComponentProgress] = useState<ComponentProgress | null>(null);
+
+// Single IPC listener registration for download progress events
+useEffect(() => {
+  if (!window.api || !window.api.on) return;
+
+  window.api.on('download:progress', (progress: DownloadProgress) => {
+    setDownloadProgress(progress);
+  });
+
+  window.api.on('download:component-start', (data: ComponentProgress) => {
+    setComponentProgress(data);
+  });
+
+  return () => {
+    if (window.api && window.api.off) {
+      window.api.off('download:progress');
+      window.api.off('download:component-start');
+    }
+  };
+}, []);
+```
+
+**Key insight**: This is a general Electron IPC pattern — when the preload uses `removeAllListeners` before adding a listener, only one component can register per channel. Centralize all listeners in a shared parent.
+
+---
+
+### Pattern: Multi-Component Badge in Model List
+
+**Challenge**: Visually distinguish multi-component models from single-file models in the list.
+
+**Solution** (`renderer/components/ModelList.tsx:82-93`):
+```typescript
+<td>
+  <span className={`model-type-badge model-type-${model.type}`}>
+    {model.type === 'llm' ? 'LLM' : 'Diffusion'}
+  </span>
+  {model.components && (
+    <span
+      className="model-type-badge model-type-components"
+      title={Object.keys(model.components).join(', ')}
+    >
+      {Object.keys(model.components).length} components
+    </span>
+  )}
+</td>
+```
+
+**Key insight**: `Object.keys(model.components).length` gives the component count; tooltip shows role names (e.g., "llm, vae").
+
+---
+
+### Pattern: Preset-Matched Settings Hint
+
+**Challenge**: When a model from a preset is selected, suggest optimal generation parameters.
+
+**Solution** (`renderer/components/DiffusionServerControl.tsx:193-324`):
+```typescript
+// Match selected model to a preset for recommended settings
+const matchedPreset = MODEL_PRESETS.find((p) => selectedModel.startsWith(p.id));
+
+const applyPresetSettings = (settings: PresetRecommendedSettings) => {
+  setSteps(settings.steps);
+  setStepsPreset(String(settings.steps));
+  setCfgScale(settings.cfgScale);
+  // Integer-to-float formatting for CFG scale dropdowns (1 → "1.0")
+  setCfgPreset(settings.cfgScale % 1 === 0 ? `${settings.cfgScale}.0` : String(settings.cfgScale));
+  setSampler(settings.sampler as ImageSampler);
+  if (settings.width && settings.height) {
+    setWidth(settings.width);
+    setHeight(settings.height);
+    setDimensionPreset(`${settings.width}\u00d7${settings.height}`);
+  }
+};
+
+// Hint banner in JSX:
+{matchedPreset?.recommendedSettings && (
+  <div className="settings-hint">
+    <span>
+      {matchedPreset.name} recommended: Steps {matchedPreset.recommendedSettings.steps},
+      CFG {matchedPreset.recommendedSettings.cfgScale},
+      {matchedPreset.recommendedSettings.sampler} sampler
+      {matchedPreset.recommendedSettings.width && matchedPreset.recommendedSettings.height &&
+        `, ${matchedPreset.recommendedSettings.width}\u00d7${matchedPreset.recommendedSettings.height}`}
+    </span>
+    <button type="button" className="apply-preset-btn"
+      onClick={() => applyPresetSettings(matchedPreset.recommendedSettings!)}>
+      Apply
+    </button>
+  </div>
+)}
+```
+
+**Key insight**: `applyPresetSettings` updates both actual values AND preset selector states (bidirectional sync), including integer-to-float formatting for CFG scale dropdowns.
+
+---
+
 ## Advanced Patterns
 
 Critical patterns for production Electron apps with AI integration:
@@ -284,8 +536,10 @@ contextBridge.exposeInMainWorld('api', {
   on: (channel: string, callback: (...args: unknown[]) => void) => {
     const validChannels = [
       'download:progress', 'download:complete', 'download:error',
-      'server:started', 'server:stopped', 'server:crashed',
-      'diffusion:started', 'diffusion:stopped', 'diffusion:progress',
+      'download:component-start',
+      'server:started', 'server:stopped', 'server:crashed', 'server:binary-log',
+      'diffusion:started', 'diffusion:stopped', 'diffusion:crashed',
+      'diffusion:binary-log', 'diffusion:progress',
     ];
 
     if (validChannels.includes(channel)) {
@@ -478,7 +732,7 @@ const handleDimensionPresetChange = (value: string) => {
 
 **Key insights**:
 - Bidirectional sync: preset changes → update values, manual changes → switch to "Custom"
-- Same pattern for steps (20/30/50), cfgScale (5.0/7.5/10.0), seed (Random/-1, Fixed values)
+- Same pattern for steps (1/2/4/8/20/30), cfgScale (1.0/2.0/7.5/10.0/15.0), seed (Random/-1, Fixed values)
 - Reduces cognitive load for common cases while allowing full control
 
 ---

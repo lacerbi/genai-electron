@@ -259,7 +259,7 @@ Key design decisions that inform future development:
 
 ### Production Readiness
 - **Zero TypeScript errors**: Strict mode compilation, full type safety
-- **Zero runtime dependencies**: Uses only Node.js built-ins (lightweight, no supply chain risk)
+- **Minimal runtime dependencies**: Three small packages (adm-zip, @huggingface/gguf, tar); everything else uses Node.js built-ins
 - **Comprehensive documentation**: API reference, setup guide, architecture docs, examples
 - **Example application**: Full-featured electron-control-panel demonstrating all features
 

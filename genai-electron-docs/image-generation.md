@@ -50,6 +50,8 @@ Multi-component models (Flux 2, SDXL split) work with the same `start({ modelId 
 - `--diffusion-fa` (flash attention) is auto-enabled when the model has an `llm` component (Flux 2 architecture)
 - Both can be explicitly overridden in the config
 
+**CUDA Backend Warning:** When using a CUDA variant, all CPU offloading flags (`--offload-to-cpu`, `--clip-on-cpu`, `--vae-on-cpu`) are automatically disabled regardless of auto-detection or user config. This prevents silent crashes in sd.cpp CUDA builds. If you need CPU offloading, use the Vulkan or CPU backend instead.
+
 **Config Fields for Multi-Component Models:**
 
 ```typescript
@@ -65,17 +67,17 @@ Enable flash attention in the diffusion model. `undefined` = auto-detect (enable
 ```typescript
 clipOnCpu?: boolean
 ```
-Force CLIP model to run on CPU instead of GPU. Maps to `--clip-on-cpu`.
+Force CLIP model to run on CPU instead of GPU. Maps to `--clip-on-cpu`. Auto-detected: enabled when VRAM headroom after model load is less than 6GB. Disabled for CUDA backend (see warning above).
 
 ```typescript
 vaeOnCpu?: boolean
 ```
-Force VAE model to run on CPU instead of GPU. Maps to `--vae-on-cpu`.
+Force VAE model to run on CPU instead of GPU. Maps to `--vae-on-cpu`. Auto-detected: enabled when VRAM headroom after model load is less than 2GB. Disabled for CUDA backend (see warning above).
 
 ```typescript
 batchSize?: number
 ```
-Batch size for processing (default: 1). Maps to `-b` flag.
+Batch size for processing. Maps to `-b` flag. If not specified, the flag is omitted and sd.cpp uses its own internal default.
 
 ### stop()
 
@@ -125,7 +127,7 @@ await fs.writeFile('output.png', result.image);
 **Throws:**
 - `ServerError` - Server not running, already generating, or generation failed
 
-**Note:** Only one generation at a time. Batch generation (count > 1) requires HTTP API. Model validation occurs during `start()`. Automatic resource orchestration built into singleton `diffusionServer`.
+**Note:** `generateImage()` always returns a single image. The `count` parameter is only used by the HTTP async API for batch generation (1-5 images). Only one generation at a time. Model validation occurs during `start()`. Automatic resource orchestration built into singleton `diffusionServer`.
 
 ---
 
@@ -321,8 +323,9 @@ DiffusionServerManager extends `EventEmitter`:
 
 - `'started'` - Server started successfully (receives `DiffusionServerInfo`)
 - `'stopped'` - Server stopped
-- `'crashed'` - Server crashed (receives `Error`)
 - `'binary-log'` - Binary download/validation progress (receives `{ message, level }`)
+
+**Note:** DiffusionServerManager does not emit a `'crashed'` event because it does not maintain a persistent process — stable-diffusion.cpp is spawned on-demand for each generation. Generation failures are reported via the returned promise or HTTP error responses.
 
 ---
 
@@ -357,7 +360,7 @@ Use cases: custom async operation tracking, request correlation, unique file nam
 
 **Methods:** `create(config)`, `get(id)`, `update(id, updates)`, `delete(id)`, `getAllIds()`, `size()`, `cleanup(maxAgeMs)`, `clear()`, `destroy()`
 
-**Environment Variables:** Configure TTL with `IMAGE_RESULT_TTL_MS` (default: 300000) and `IMAGE_CLEANUP_INTERVAL_MS` (default: 60000). If polling too slowly, results may expire.
+**Environment Variables:** Configure TTL with `IMAGE_RESULT_TTL_MS` (default: 300000) and `IMAGE_CLEANUP_INTERVAL_MS` (default: 60000). If polling too slowly, results may expire. **Note:** These environment variables only take effect when using the singleton `diffusionServer` (which creates the registry internally). Direct `GenerationRegistry` construction ignores env vars — use constructor options instead.
 
 ---
 

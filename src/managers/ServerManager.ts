@@ -49,7 +49,7 @@ import { getPlatformKey } from '../utils/platform-utils.js';
  *
  * const manager = new MyServerManager();
  * manager.on('started', () => console.log('Server started'));
- * manager.on('crashed', (error) => console.error('Server crashed:', error));
+ * manager.on('crashed', (data) => console.error('Server crashed:', data.code, data.signal));
  * ```
  */
 export abstract class ServerManager extends EventEmitter {

@@ -66,10 +66,13 @@ export function useServerStatus() {
       fetchStatus();
     });
 
-    window.api.on('server:crashed', (errorData: { message: string; stack?: string }) => {
-      setError(`Server crashed: ${errorData.message}`);
-      fetchStatus();
-    });
+    window.api.on(
+      'server:crashed',
+      (errorData: { message: string; code?: number | null; signal?: string | null }) => {
+        setError(`Server crashed: ${errorData.message}`);
+        fetchStatus();
+      }
+    );
 
     return () => {
       if (window.api && window.api.off) {

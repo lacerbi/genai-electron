@@ -36,7 +36,7 @@ npm install electron@>=25.0.0
 - Architecture: x64
 - GPU: NVIDIA CUDA, AMD ROCm (experimental), Intel
 
-**Technology Stack**: Node.js >=22.0.0, TypeScript ^5.7.2, zero runtime dependencies (Node.js built-ins only).
+**Technology Stack**: Node.js >=22.0.0, TypeScript ^5.7.2, minimal runtime dependencies (adm-zip, @huggingface/gguf, tar).
 
 ---
 
@@ -59,7 +59,7 @@ GPU acceleration is optional but recommended for performance.
 On first call to `llamaServer.start()` or `diffusionServer.start()`, the library automatically:
 
 1. **Downloads appropriate binary** (~50-100MB) for your platform
-2. **Tests GPU variants** in priority order: CUDA → Vulkan → CPU
+2. **Tests GPU variants** in platform-specific priority order (e.g., CUDA → Vulkan → CPU on Linux/Windows)
 3. **Runs real functionality tests**:
    - LLM: Generates 1 token with GPU layers enabled (`-ngl 1`)
    - Diffusion: Generates 64x64 image with 1 diffusion step
@@ -68,7 +68,7 @@ On first call to `llamaServer.start()` or `diffusionServer.start()`, the library
 5. **Caches working variant** for fast subsequent starts
 
 **Timing**:
-- First start: 2-10 seconds (download + testing)
+- First start: 2-10 seconds for variant testing (plus download time, which depends on connection speed)
 - Subsequent starts: ~0.5 seconds (checksum verification only)
 
 **Validation Caching**:

@@ -190,7 +190,7 @@ const DiffusionServerControl: React.FC = () => {
   };
 
   // Match selected model to a preset for recommended settings
-  const matchedPreset = MODEL_PRESETS.find((p) => selectedModel === p.id);
+  const matchedPreset = MODEL_PRESETS.find((p) => selectedModel.startsWith(p.id));
 
   const applyPresetSettings = (settings: PresetRecommendedSettings) => {
     setSteps(settings.steps);

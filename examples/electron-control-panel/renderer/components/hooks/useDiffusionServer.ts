@@ -64,10 +64,13 @@ export function useDiffusionServer() {
       fetchStatus();
     });
 
-    window.api.on('diffusion:crashed', (errorData: { message: string; stack?: string }) => {
-      setError(`Diffusion server crashed: ${errorData.message}`);
-      fetchStatus();
-    });
+    window.api.on(
+      'diffusion:crashed',
+      (errorData: { message: string; code?: number | null; signal?: string | null }) => {
+        setError(`Diffusion server crashed: ${errorData.message}`);
+        fetchStatus();
+      }
+    );
 
     return () => {
       if (window.api && window.api.off) {

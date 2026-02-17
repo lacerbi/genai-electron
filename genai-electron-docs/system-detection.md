@@ -165,7 +165,7 @@ Checks if a specific model can run on the current system based on available or t
 ```typescript
 canRunModel(
   modelInfo: ModelInfo,
-  options?: { checkTotalMemory?: boolean }
+  options?: { checkTotalMemory?: boolean; gpuLayers?: number; totalLayers?: number }
 ): Promise<{ possible: boolean; reason?: string; suggestion?: string }>
 ```
 
@@ -173,6 +173,8 @@ canRunModel(
 - `modelInfo: ModelInfo` - Model information to check
 - `options?: { checkTotalMemory?: boolean }` - Optional configuration
   - `checkTotalMemory` - If `true`, checks against total system memory instead of currently available memory. Use this for servers that load models on-demand (e.g., diffusion server). Default: `false` (checks available memory)
+  - `gpuLayers` - Number of GPU layers to use for VRAM calculation. If omitted, uses auto-detected value.
+  - `totalLayers` - Total model layers (overrides GGUF metadata). If omitted, uses model metadata.
 
 **Returns**: `Promise<{ possible: boolean; reason?: string; suggestion?: string }>` - Whether model can run, reason if not, and optional suggestion
 
@@ -240,7 +242,6 @@ console.log('Threads:', config.threads);
 console.log('GPU Layers:', config.gpuLayers);
 console.log('Context Size:', config.contextSize);
 console.log('Parallel Requests:', config.parallelRequests);
-console.log('Flash Attention:', config.flashAttention);
 
 // Use the config to start the server
 await llamaServer.start({
@@ -251,12 +252,10 @@ await llamaServer.start({
 ```
 
 **What it determines**:
-- **threads**: Based on CPU core count (typically cores - 1 or cores / 2)
-- **gpuLayers**: Maximum layers that fit in VRAM (if GPU available), or 0 for CPU-only
-- **contextSize**: Appropriate context window based on model and available memory
-  - **Calculation**: Subtracts model size + 2GB OS overhead from available RAM, then selects context size based on remaining memory (8GB→8K, 4GB→4K, 2GB→2K, else 1K)
-- **parallelRequests**: Concurrent request slots based on available resources
-- **flashAttention**: Whether flash attention should be enabled
+- **threads**: Based on CPU core count: 1-2 cores → all cores, 3-8 → cores - 1, 9-16 → cores - 2, 17+ → floor(cores × 0.85)
+- **gpuLayers**: Maximum layers that fit in VRAM (if GPU available), or 0 for CPU-only. Reserves 2GB of VRAM as buffer for OS/runtime overhead before calculating layer capacity.
+- **contextSize**: Currently defaults to 4096 (llama.cpp default), capped to the model's native context length from GGUF metadata. VRAM-aware dynamic context calculation is planned but not yet implemented.
+- **parallelRequests**: Always 1 (single-user Electron apps)
 
 ---
 
@@ -318,11 +317,13 @@ The `canRunModel()` and `getOptimalConfig()` methods use real-time `getMemoryInf
     available: true,
     type: 'apple',
     name: 'Apple M1 Pro',
-    vram: 17179869184, // 16GB (unified with RAM)
+    vram: 12348030566, // ~11.5GB (estimated ~70% of 16GB unified RAM)
     metal: true
   }
 }
 ```
+
+**Note**: On Apple Silicon, VRAM is estimated as ~70% of total unified memory since GPU and CPU share the same RAM. The actual usable VRAM depends on current system memory pressure.
 
 ### Windows
 
@@ -366,8 +367,7 @@ The `canRunModel()` and `getOptimalConfig()` methods use real-time `getMemoryInf
     type: 'nvidia',
     name: 'NVIDIA GeForce RTX 4090',
     vram: 25769803776, // 24GB
-    cuda: true,
-    vulkan: true
+    cuda: true
   }
 }
 ```
@@ -380,8 +380,7 @@ The `canRunModel()` and `getOptimalConfig()` methods use real-time `getMemoryInf
     type: 'amd',
     name: 'AMD Radeon RX 7900 XTX',
     vram: 25769803776, // 24GB
-    rocm: true,
-    vulkan: true
+    rocm: true
   }
 }
 ```

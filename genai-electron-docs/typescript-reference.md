@@ -361,7 +361,7 @@ type ServerEvent =
 interface ServerEventData {
   event: ServerEvent;
   serverInfo: ServerInfo;
-  error?: Error;
+  crashData?: { code: number | null; signal: NodeJS.Signals | null };
   timestamp: string;
 }
 ```

@@ -278,8 +278,8 @@ llamaServer.on('started', () => {
   mainWindow.webContents.send('server-status', { status: 'running' });
 });
 
-llamaServer.on('crashed', (error) => {
-  mainWindow.webContents.send('server-status', { status: 'crashed', error: error.message });
+llamaServer.on('crashed', (data) => {
+  mainWindow.webContents.send('server-status', { status: 'crashed', code: data.code, signal: data.signal });
 });
 ```
 

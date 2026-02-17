@@ -31,7 +31,7 @@ The `LlamaServerManager` class manages the llama-server process lifecycle for ru
 
 ## Overview
 
-LlamaServerManager manages llama-server processes with automatic binary download (CUDA→Vulkan→CPU variant testing), auto-configuration, health monitoring, and reasoning model flag injection.
+LlamaServerManager manages llama-server processes with automatic binary download (platform-specific variant testing), auto-configuration, health monitoring, and reasoning model flag injection.
 
 **Architecture**: Uses native llama-server (HTTP server from llama.cpp), spawned as a child process and managed by genai-electron.
 
@@ -94,7 +94,7 @@ await llamaServer.start({
 - `InsufficientResourcesError` - Not enough RAM/VRAM
 - `BinaryError` - Binary download or execution failed (all variants failed)
 
-**Note**: See [Binary Management](#binary-management) for details on automatic download, variant testing, and validation caching.
+**Note**: The TypeScript signature accepts `ServerConfig`, but `LlamaServerConfig` fields (e.g., `modelAlias`, `continuousBatching`) are also accepted at runtime via validation. See [Binary Management](#binary-management) for details on automatic download, variant testing, and validation caching.
 
 **Health Check Behavior**: After spawning llama-server, `start()` waits for the health endpoint to respond with 'ok' status. Uses exponential backoff: starts at 100ms intervals, multiplies by 1.5 after each attempt, caps at 2s intervals. Default timeout is 60 seconds.
 
@@ -146,10 +146,11 @@ await llamaServer.restart();
 
 ## Configuration Options
 
-**LlamaServerConfig**:
+**LlamaServerConfig** (extends `ServerConfig`):
 
 ```typescript
-interface LlamaServerConfig {
+interface LlamaServerConfig extends ServerConfig {
+  // Inherited from ServerConfig:
   modelId: string;            // Required - Model ID to load
   port: number;               // Required - Port to listen on (typically 8080)
   threads?: number;           // Optional - CPU threads (auto-detected if not specified)
@@ -158,6 +159,13 @@ interface LlamaServerConfig {
   parallelRequests?: number;  // Optional - Concurrent request slots (default: 1)
   flashAttention?: boolean;   // Optional - Enable flash attention (default: false)
   forceValidation?: boolean;  // Optional - Force re-validation of binary (default: false)
+
+  // LlamaServerConfig-specific:
+  modelAlias?: string;        // Optional - Model alias for API responses
+  continuousBatching?: boolean; // Optional - Enable continuous batching
+  batchSize?: number;         // Optional - Batch size for prompt processing
+  useMmap?: boolean;          // Optional - Use memory-mapped file I/O
+  useMlock?: boolean;         // Optional - Lock model in memory (prevent swapping)
 }
 ```
 
@@ -211,10 +219,12 @@ getInfo(): ServerInfo
 ```typescript
 const info = llamaServer.getInfo();
 console.log('Status:', info.status);
-console.log('Health:', info.health);
+console.log('Health:', info.health); // Note: always 'unknown' — use getHealthStatus() for real health
 console.log('PID:', info.pid);
 console.log('Port:', info.port);
 ```
+
+**Note**: The `health` field in `ServerInfo` always returns `'unknown'` because health checks are asynchronous. For real-time health status, use `getHealthStatus()` instead.
 
 ---
 
@@ -263,6 +273,23 @@ if (healthStatus === 'ok') {
   console.log('⏳ Server is still loading the model');
 }
 ```
+
+### Additional Methods (inherited from ServerManager)
+
+These methods are inherited from the `ServerManager` base class:
+
+| Method | Return Type | Description |
+|--------|-------------|-------------|
+| `getPort()` | `number` | Returns the configured port |
+| `getPid()` | `number \| undefined` | Returns the process PID if running |
+| `isRunning()` | `boolean` | `true` if status is `'running'` |
+| `isStopped()` | `boolean` | `true` if status is `'stopped'` |
+| `isStarting()` | `boolean` | `true` if status is `'starting'` |
+| `isStopping()` | `boolean` | `true` if status is `'stopping'` |
+| `hasCrashed()` | `boolean` | `true` if status is `'crashed'` |
+| `getConfig()` | `ServerConfig \| undefined` | Returns the current server config |
+| `clearLogs()` | `Promise<void>` | Clears all server logs |
+| `getLogPath()` | `string \| undefined` | Returns the log file path |
 
 ---
 
@@ -368,8 +395,28 @@ llamaServer.on('stopped', () => {
 Emitted when server crashes unexpectedly.
 
 ```typescript
-llamaServer.on('crashed', (error: Error) => {
-  console.error('Server crashed:', error.message);
+llamaServer.on('crashed', (data: { code: number | null; signal: NodeJS.Signals | null }) => {
+  console.error('Server crashed with code:', data.code, 'signal:', data.signal);
+});
+```
+
+### 'restarted'
+
+Emitted when server restarts after a crash.
+
+```typescript
+llamaServer.on('restarted', () => {
+  console.log('Server restarted');
+});
+```
+
+### 'status'
+
+Emitted when server status changes. Receives the new and old status.
+
+```typescript
+llamaServer.on('status', (newStatus: ServerStatus, oldStatus: ServerStatus) => {
+  console.log(`Status changed: ${oldStatus} → ${newStatus}`);
 });
 ```
 
@@ -387,8 +434,8 @@ llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 
 ```typescript
 llamaServer.on('started', () => console.log('✅ Server started'));
 llamaServer.on('stopped', () => console.log('🛑 Server stopped'));
-llamaServer.on('crashed', (error) => {
-  console.error('💥 Server crashed:', error.message);
+llamaServer.on('crashed', (data) => {
+  console.error('💥 Server crashed with exit code:', data.code, 'signal:', data.signal);
   // Implement custom restart logic if needed
 });
 
@@ -403,7 +450,7 @@ genai-electron automatically downloads and manages llama-server binaries:
 
 **First Start**:
 1. Downloads appropriate binary for your platform (~50-100MB)
-2. Tests GPU variants in priority order: CUDA (NVIDIA) → Vulkan (cross-platform) → CPU (fallback)
+2. Tests GPU variants in platform-specific priority order (e.g., CUDA → Vulkan → CPU on Linux/Windows). CUDA variants are pre-filtered: only included if an NVIDIA GPU is detected.
 3. Runs real functionality test: generates 1 token with GPU layers enabled (`-ngl 1`)
 4. Verifies CUDA actually works (parses output for GPU errors: "CUDA error", "failed to allocate", etc.)
 5. Falls back to next variant if test fails

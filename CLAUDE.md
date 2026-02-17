@@ -61,8 +61,9 @@ src/
 
 ### Key Architectural Decisions
 
-**1. Zero Runtime Dependencies**
-- All functionality uses Node.js built-ins (fs, crypto, child_process, os, native fetch)
+**1. Minimal Runtime Dependencies**
+- Three small packages: adm-zip (archive extraction), @huggingface/gguf (metadata parsing), tar (archive extraction)
+- Everything else uses Node.js built-ins (fs, crypto, child_process, os, native fetch)
 - Keeps package lightweight (~5-10MB code only, binaries downloaded on-demand)
 
 **2. ESM-Only (type: "module")**

@@ -84,10 +84,10 @@ export function useSystemInfo() {
 
     return () => {
       if (window.api && window.api.off) {
-        window.api.off('server:started', handleServerEvent);
-        window.api.off('server:stopped', handleServerEvent);
-        window.api.off('diffusion:started', handleServerEvent);
-        window.api.off('diffusion:stopped', handleServerEvent);
+        window.api.off('server:started');
+        window.api.off('server:stopped');
+        window.api.off('diffusion:started');
+        window.api.off('diffusion:stopped');
       }
     };
   }, []);

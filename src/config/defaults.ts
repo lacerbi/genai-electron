@@ -29,7 +29,6 @@ export const DEFAULT_TIMEOUTS = {
   healthCheck: 5000, // 5 seconds
 } as const;
 
-
 /**
  * Binary variant type
  */
@@ -230,7 +229,6 @@ export const DIFFUSION_VRAM_THRESHOLDS = {
   /** Multiplier applied to model file size to estimate runtime VRAM footprint */
   modelOverheadMultiplier: 1.2,
 } as const;
-
 
 /**
  * Recommended quantizations by use case

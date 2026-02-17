@@ -57,7 +57,7 @@ genai-electron manages the runtime infrastructure for running local AI models (l
 - ✅ **Binary management** - Automatic binary download and verification on first run
 - ✅ **Progress tracking** - Real-time progress updates for image generation
 - ✅ **TypeScript-first** - Full type safety with comprehensive type definitions
-- ✅ **Zero runtime dependencies** - Uses only Node.js built-ins
+- ✅ **Minimal runtime dependencies** - Three small packages (adm-zip, @huggingface/gguf, tar); everything else uses Node.js built-ins
 
 ---
 
@@ -74,7 +74,7 @@ async function setupLocalAI() {
   console.log('System capabilities:', {
     cpu: capabilities.cpu.cores,
     ram: `${(capabilities.memory.total / 1024 / 1024 / 1024).toFixed(1)}GB`,
-    gpu: capabilities.gpu.available ? capabilities.gpu.type : 'none',
+    gpu: capabilities.gpu.available ? capabilities.gpu.type ?? 'unknown' : 'none',
     maxModelSize: capabilities.recommendations.maxModelSize
   });
 
@@ -224,7 +224,7 @@ async function setupBothServices() {
   console.log('System:', {
     cpu: `${capabilities.cpu.cores} cores`,
     ram: `${(capabilities.memory.total / 1024 ** 3).toFixed(1)}GB`,
-    gpu: capabilities.gpu.available ? `${capabilities.gpu.type} (${(capabilities.gpu.vram / 1024 ** 3).toFixed(1)}GB)` : 'none',
+    gpu: capabilities.gpu.available ? `${capabilities.gpu.type ?? 'unknown'} (${((capabilities.gpu.vram ?? 0) / 1024 ** 3).toFixed(1)}GB)` : 'none',
   });
 
   // 2. Start LLM server
@@ -320,7 +320,7 @@ No additional code needed - it just works! See [Resource Orchestration](resource
 - **Automatic reasoning**: Reasoning-capable models get `--jinja --reasoning-format deepseek` flags automatically
 - **Binary management**: Automatic variant selection with real GPU functionality testing
   - Downloads appropriate binary on first `start()` call (~50-100MB)
-  - Tests variants in priority order: CUDA → Vulkan → CPU
+  - Tests variants in platform-specific priority order (e.g., CUDA → Vulkan → CPU on Linux/Windows)
   - Runs real GPU inference test (1 token for LLM, 64x64 image for diffusion)
   - Detects CUDA errors and automatically falls back to Vulkan
   - Caches working variant for fast subsequent starts

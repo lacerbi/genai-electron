@@ -40,12 +40,13 @@ export function setupServerEventForwarding(): void {
     }
   });
 
-  llamaServer.on('crashed', (error: Error) => {
+  llamaServer.on('crashed', (data: { code: number | null; signal: string | null }) => {
     const mainWindow = BrowserWindow.getAllWindows()[0];
     if (mainWindow) {
       mainWindow.webContents.send('server:crashed', {
-        message: error.message,
-        stack: error.stack,
+        message: `Server crashed with exit code ${data.code}`,
+        code: data.code,
+        signal: data.signal,
       });
     }
   });
@@ -72,12 +73,15 @@ export function setupServerEventForwarding(): void {
     }
   });
 
-  diffusionServer.on('crashed', (error: Error) => {
+  // Note: DiffusionServerManager does not currently emit 'crashed' (it uses on-demand
+  // spawning, not a persistent process). Kept for forward-compatibility.
+  diffusionServer.on('crashed', (data: { code: number | null; signal: string | null }) => {
     const mainWindow = BrowserWindow.getAllWindows()[0];
     if (mainWindow) {
       mainWindow.webContents.send('diffusion:crashed', {
-        message: error.message,
-        stack: error.stack,
+        message: `Diffusion server crashed with exit code ${data.code}`,
+        code: data.code,
+        signal: data.signal,
       });
     }
   });

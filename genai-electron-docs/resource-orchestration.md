@@ -54,8 +54,9 @@ Automatically manage system resources when running both LLM and image generation
 
 ### Offload Decision
 
-- **Combined usage > 75% of available resource** → Offload LLM, generate image, reload LLM
-- **Combined usage ≤ 75% of available resource** → Generate directly without offload
+- **GPU systems:** Combined VRAM usage > `totalVRAM × 0.75` → Offload LLM
+- **CPU-only systems:** Combined RAM usage > `availableRAM × 0.75` → Offload LLM
+- If combined usage is within the threshold → Generate directly without offload
 
 ### Offload/Reload Cycle
 
@@ -199,6 +200,8 @@ Clears any saved LLM state. Use if you don't want LLM to be automatically reload
 
 **Returns:** `void`
 
+**Note:** Since `orchestrateImageGeneration()` returns the image result immediately and reloads the LLM asynchronously in the background, calling `clearSavedState()` right after may not prevent a reload that is already in-flight. Use `waitForReload()` first if you need to ensure the reload has completed before clearing state.
+
 **Example:**
 ```typescript
 // Generate image with offload
@@ -207,7 +210,8 @@ await orchestrator.orchestrateImageGeneration({
   steps: 30
 });
 
-// Prevent automatic LLM reload for next generation
+// Wait for any in-flight reload, then clear state
+await orchestrator.waitForReload();
 orchestrator.clearSavedState();
 
 // Next generation won't reload LLM
@@ -258,9 +262,9 @@ console.log('LLM is back online');
    - Combined: 12.5GB < 24GB × 0.75 (18GB) → **No offload** ✅
    - Generates directly without stopping LLM
 
-**3. CPU-Only System with 16GB RAM (Offload Needed)**:
+**3. CPU-Only System with 16GB RAM, 12GB Available (Offload Needed)**:
    - LLM: 4.2GB RAM, Diffusion: 8.3GB RAM
-   - Combined: 12.5GB > 16GB × 0.75 (12GB) → **Offload** ✅
+   - Combined: 12.5GB > 12GB available × 0.75 (9GB) → **Offload** ✅
    - Stops LLM, generates image, restarts LLM
 
 ---

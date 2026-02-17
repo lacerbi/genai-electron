@@ -1,7 +1,7 @@
 # genai-electron Development Setup
 
-> **Version**: 0.3.0 (Phase 2.6 Complete)
-> **Last Updated**: 2025-10-23
+> **Version**: 0.5.0 (Multi-Component Diffusion Models & Shared Variant Downloads)
+> **Last Updated**: 2026-02-17
 
 Complete guide for setting up the genai-electron development environment.
 
@@ -136,7 +136,7 @@ npm install
 
 This installs:
 - Development dependencies (TypeScript, Jest, ESLint, Prettier)
-- No runtime dependencies (uses Node.js built-ins)
+- Minimal runtime dependencies (adm-zip, @huggingface/gguf, tar)
 
 ### 3. Build
 

@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.3.0
+ * @version 0.5.0
  * @license MIT
  *
  * @example
@@ -119,7 +119,7 @@ export const modelManager = ModelManager.getInstance();
  * // Listen to events
  * llamaServer.on('started', () => console.log('Server started'));
  * llamaServer.on('stopped', () => console.log('Server stopped'));
- * llamaServer.on('crashed', (error) => console.error('Server crashed:', error));
+ * llamaServer.on('crashed', (data) => console.error('Server crashed:', data.code, data.signal));
  *
  * // Check health
  * const healthy = await llamaServer.isHealthy();
@@ -275,6 +275,7 @@ export type {
   LlamaServerConfig,
   ServerEvent,
   ServerEventData,
+  BinaryLogEvent,
   // Image generation types (Phase 2)
   ImageSampler,
   ImageGenerationStage,
