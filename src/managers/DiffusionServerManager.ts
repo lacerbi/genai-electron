@@ -744,11 +744,15 @@ export class DiffusionServerManager extends ServerManager {
           }
 
           if (code !== 0) {
+            const stderrOutput = stderrLines.length > 0 ? stderrLines.join('\n') : '';
             reject(
-              new ServerError(`stable-diffusion.cpp exited with code ${code}`, {
-                exitCode: code,
-                stderr: stderrLines.length > 0 ? stderrLines.join('\n') : undefined,
-              })
+              new ServerError(
+                `stable-diffusion.cpp exited with code ${code}${stderrOutput ? `\n${stderrOutput}` : ''}`,
+                {
+                  exitCode: code,
+                  stderr: stderrOutput || undefined,
+                }
+              )
             );
             return;
           }
