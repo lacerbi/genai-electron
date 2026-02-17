@@ -189,6 +189,13 @@ interface DownloadConfig {
   checksum?: string;
   onProgress?: DownloadProgressCallback;
   components?: DiffusionComponentDownload[];  // Additional component files for multi-component diffusion models
+  modelDirectory?: string;  // Subdirectory name override — allows multiple variants to share a directory
+  onComponentStart?: (info: {  // Called when each component download begins (multi-component only)
+    role: string;
+    filename: string;
+    index: number;   // 1-based
+    total: number;
+  }) => void;
 }
 ```
 

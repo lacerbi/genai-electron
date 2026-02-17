@@ -6,8 +6,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **genai-electron** is an Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). It handles platform-specific operations like model downloads, binary management, server lifecycle, and resource orchestration. This library complements **genai-lite** (the API abstraction layer) by managing the runtime infrastructure.
 
-**Current Status**: Phase 2.6 Complete + Multi-component diffusion model support. Production-ready with 403/403 tests passing.
-
 ## Essential Commands
 
 ```bash
@@ -29,8 +27,6 @@ npm run format:check        # Check formatting only
 # Clean
 npm run clean               # Remove dist/ and coverage/
 ```
-
-**Note**: All test commands use `NODE_OPTIONS=--experimental-vm-modules` for Jest ESM support.
 
 ## Architecture Overview
 
@@ -137,21 +133,7 @@ src/
 
 ## Testing Approach
 
-**Current Status** (Phase 2.6 Complete):
-- Jest 30 + ts-jest with ESM experimental support
-- 403/403 tests passing (100% pass rate)
-- 17 test suites covering all Phase 1, 2, 2.5 functionality + multi-component support
-- Clean test exit (no memory leaks, no warnings)
-- Fast execution (~4 seconds for full suite)
-
-**Test Coverage**:
-- Phase 1: 104 tests (errors, utils, platform, SystemInfo, LlamaServerManager, Downloader)
-- Phase 2: 84 tests (DiffusionServerManager, ResourceOrchestrator, multi-component)
-- Phase 2.5: 27 tests (GenerationRegistry, async API)
-- Infrastructure: 61 tests (BinaryManager, health-check)
-- Phase 3 Prep: 47 tests (structured-logs, electron-lifecycle, error-helpers)
-- Storage: 28 tests (StorageManager, multi-component delete/verify)
-- Model Management: 52 tests (ModelManager, downloads, multi-component)
+Jest 30 + ts-jest with ESM experimental support. All test commands use `NODE_OPTIONS=--experimental-vm-modules`.
 
 **Test Structure**:
 ```
@@ -169,28 +151,9 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 
 **Note**: See `docs/dev/ESM-TESTING-GUIDE.md` for ESM mocking patterns and best practices.
 
-## Phase-Specific Context
+## Phase Status
 
-**Phase 1 (Complete)**: LLM support
-- SystemInfo, ModelManager, LlamaServerManager operational
-- Binary management with variant testing (CUDA/Vulkan/CPU fallback)
-- Documentation complete (README, genai-electron-docs/, SETUP.md)
-
-**Phase 2 (Complete)**: Image generation & async API
-- DiffusionServerManager (HTTP wrapper for stable-diffusion.cpp)
-- ResourceOrchestrator (automatic LLM offload/reload when VRAM constrained)
-- Multi-component diffusion model support (Flux 2 Klein, SDXL split)
-- Auto-detection of `--offload-to-cpu` and `--diffusion-fa` optimization flags
-- Cross-platform CI/CD with automated testing
-- electron-control-panel example app available
-
-**Phase 2.5 (Complete)**: Async image generation API
-- GenerationRegistry (in-memory state with TTL cleanup)
-- HTTP endpoints (POST for start, GET for polling)
-- Batch generation support (1-5 images with auto-seed increment)
-- Breaking change from synchronous to async polling pattern
-
-**Future Phases**: See DESIGN.md for complete roadmap (Phase 3: Production Core, Phase 4: Production Polish)
+See **PROGRESS.md** for current phase status and **DESIGN.md** for the complete roadmap.
 
 ## Important Files to Reference
 
@@ -201,7 +164,7 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
 - **docs/dev/phase1/**: Archived Phase 1 detailed planning and logs
 - **docs/dev/phase2/PHASE2-PROGRESS.md**: Complete Phase 2 development history
 - **docs/dev/ESM-TESTING-GUIDE.md**: ESM mocking patterns and testing best practices
-- **genai-electron-docs/**: Self-contained documentation (11 modular files)
+- **genai-electron-docs/**: Self-contained documentation
   - **index.md**: Documentation entry point with navigation
   - **installation-and-setup.md**: Setup, requirements, GPU drivers
   - **system-detection.md**: SystemInfo API and capabilities
@@ -210,7 +173,7 @@ npm test -- --testNamePattern="ModelNotFoundError"  # Run specific test
   - **image-generation.md**: DiffusionServerManager API and async generation
   - **resource-orchestration.md**: ResourceOrchestrator for memory management
   - **integration-guide.md**: Electron patterns and error handling
-  - **typescript-reference.md**: Complete type definitions (39 types)
+  - **typescript-reference.md**: Complete type definitions
   - **troubleshooting.md**: Common issues, error codes, FAQ
   - **example-control-panel.md**: Reference implementation patterns
 - **docs/SETUP.md**: Development environment setup for all platforms
@@ -251,7 +214,7 @@ This is documented in the electron-control-panel example for reference.
 1. **Run `npm run build`** - Must compile with 0 TypeScript errors
 2. **Run `npm run lint`** - Must pass with 0 errors (warnings OK if intentional)
 3. **Run `npm run format`** - Auto-format all files with Prettier
-4. **Run `npm test`** - All tests must pass (403/403)
+4. **Run `npm test`** - All tests must pass
 5. **Commit `package-lock.json`** - Never add lockfiles to .gitignore (needed for CI)
 
 **Note**: CI will fail if any of these checks fail. Run them locally before pushing.

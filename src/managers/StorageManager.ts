@@ -3,7 +3,7 @@
  * @module managers/StorageManager
  */
 
-import { readdir, readFile, writeFile, rm } from 'node:fs/promises';
+import { readdir, readFile, writeFile, rmdir } from 'node:fs/promises';
 import path from 'node:path';
 import type { ModelInfo, ModelType } from '../types/index.js';
 import { FileSystemError, ChecksumError } from '../errors/index.js';
@@ -196,8 +196,30 @@ export class StorageManager {
     const metadataPath = this.getModelMetadataPath(type, modelId);
 
     if (metadata.components) {
-      // Multi-component: delete each component file
+      // Build set of component paths used by OTHER models of the same type
+      const sharedPaths = new Set<string>();
+      const otherModelIds = await this.listModelFiles(type);
+      for (const otherId of otherModelIds) {
+        if (otherId === modelId) continue;
+        try {
+          const otherMeta = await this.loadModelMetadata(type, otherId);
+          if (otherMeta.components) {
+            for (const comp of Object.values(otherMeta.components)) {
+              sharedPaths.add(comp.path);
+            }
+            // Also protect the primary path if it's referenced
+            sharedPaths.add(otherMeta.path);
+          }
+        } catch {
+          // Skip models with corrupted metadata
+        }
+      }
+
+      // Multi-component: delete each component file only if not shared
       for (const component of Object.values(metadata.components)) {
+        if (sharedPaths.has(component.path)) {
+          continue; // Another variant still needs this file
+        }
         try {
           const exists = await fileExists(component.path);
           if (exists) {
@@ -214,7 +236,7 @@ export class StorageManager {
       // Try to remove the model subdirectory (only succeeds if empty)
       try {
         const modelDir = path.dirname(metadata.path);
-        await rm(modelDir, { recursive: false });
+        await rmdir(modelDir);
       } catch {
         // Directory not empty or doesn't exist — ignore
       }
@@ -397,7 +419,9 @@ export class StorageManager {
    */
   public async getStorageUsed(type?: ModelType): Promise<number> {
     const types: ModelType[] = type ? [type] : ['llm', 'diffusion'];
-    let totalSize = 0;
+    // Deduplicate by file path to avoid double-counting shared components
+    // (e.g., two quant variants sharing the same LLM encoder and VAE)
+    const uniqueFiles = new Map<string, number>();
 
     for (const modelType of types) {
       const modelIds = await this.listModelFiles(modelType);
@@ -405,13 +429,23 @@ export class StorageManager {
       for (const modelId of modelIds) {
         try {
           const metadata = await this.loadModelMetadata(modelType, modelId);
-          totalSize += metadata.size;
+          if (metadata.components) {
+            for (const comp of Object.values(metadata.components)) {
+              uniqueFiles.set(comp.path, comp.size);
+            }
+          } else {
+            uniqueFiles.set(metadata.path, metadata.size);
+          }
         } catch {
           // Skip models with missing/corrupt metadata
         }
       }
     }
 
+    let totalSize = 0;
+    for (const size of uniqueFiles.values()) {
+      totalSize += size;
+    }
     return totalSize;
   }
 

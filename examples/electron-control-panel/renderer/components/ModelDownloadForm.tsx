@@ -67,13 +67,17 @@ const ModelDownloadForm: React.FC<ModelDownloadFormProps> = ({
     const primaryVariant = selectedPreset.primary.variants[getVariantIndex('primary')];
     if (!primaryVariant) return;
 
+    // Include variant tag in name so each quant gets a distinct model entry
+    // e.g., "Flux 2 Klein Q8_0" vs "Flux 2 Klein Q4_0"
+    const variantTag = primaryVariant.label.split(' ')[0]; // "Q8_0" from "Q8_0 (~4.3 GB)"
     const config: DownloadConfig = {
       source: selectedPreset.primary.source,
       repo: selectedPreset.primary.repo,
       file: primaryVariant.file,
       url: primaryVariant.url,
-      name: selectedPreset.name,
+      name: `${selectedPreset.name} ${variantTag}`,
       type: selectedPreset.type,
+      modelDirectory: selectedPreset.id, // Share directory across variants
     };
 
     // Build components array for multi-component presets

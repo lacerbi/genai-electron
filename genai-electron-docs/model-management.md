@@ -261,6 +261,58 @@ try {
 }
 ```
 
+**Shared Variant Downloads**:
+
+Multiple quant variants of the same model can share a directory and reuse identical component files (e.g., the LLM encoder and VAE). Use `modelDirectory` to specify a shared subdirectory name independent of the model ID:
+
+```typescript
+// Download Q8_0 variant
+await modelManager.downloadModel({
+  source: 'huggingface',
+  repo: 'leejet/FLUX.2-klein-4B-GGUF',
+  file: 'flux-2-klein-4b-Q8_0.gguf',
+  name: 'Flux 2 Klein Q8_0',           // Variant-specific name → distinct model ID
+  type: 'diffusion',
+  modelDirectory: 'flux-2-klein',       // Shared directory for all variants
+  components: [
+    { role: 'llm', source: 'huggingface', repo: 'unsloth/Qwen3-4B-GGUF', file: 'Qwen3-4B-Q4_0.gguf' },
+    { role: 'vae', source: 'url', url: 'https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors' },
+  ],
+});
+
+// Download Q4_0 variant — shared LLM and VAE are automatically reused (not re-downloaded)
+await modelManager.downloadModel({
+  source: 'huggingface',
+  repo: 'leejet/FLUX.2-klein-4B-GGUF',
+  file: 'flux-2-klein-4b-Q4_0.gguf',
+  name: 'Flux 2 Klein Q4_0',
+  type: 'diffusion',
+  modelDirectory: 'flux-2-klein',       // Same shared directory
+  components: [
+    { role: 'llm', source: 'huggingface', repo: 'unsloth/Qwen3-4B-GGUF', file: 'Qwen3-4B-Q4_0.gguf' },
+    { role: 'vae', source: 'url', url: 'https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors' },
+  ],
+});
+```
+
+When a component file already exists on disk, it is skipped (with checksum verification if a checksum is provided — mismatched files are deleted and re-downloaded). Deleting one variant preserves shared component files that are still referenced by other variants.
+
+**Per-Component Progress Tracking**:
+
+Use the `onComponentStart` callback to show which component is currently downloading:
+
+```typescript
+await modelManager.downloadModel({
+  // ... config
+  onComponentStart: ({ role, filename, index, total }) => {
+    console.log(`Downloading component ${index}/${total}: ${filename} (${role})`);
+  },
+  onProgress: (downloaded, total) => {
+    console.log(`${((downloaded / total) * 100).toFixed(1)}%`);
+  },
+});
+```
+
 ---
 
 ### getModelInfo()

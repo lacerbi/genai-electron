@@ -13,7 +13,7 @@ const mockWriteFile = jest.fn();
 const mockUnlink = jest.fn();
 const mockReaddir = jest.fn();
 const mockStat = jest.fn();
-const mockRm = jest.fn();
+const mockRmdir = jest.fn();
 
 jest.unstable_mockModule('fs/promises', () => ({
   mkdir: mockMkdir,
@@ -22,7 +22,7 @@ jest.unstable_mockModule('fs/promises', () => ({
   unlink: mockUnlink,
   readdir: mockReaddir,
   stat: mockStat,
-  rm: mockRm,
+  rmdir: mockRmdir,
 }));
 
 // Mock file-utils
@@ -230,16 +230,27 @@ describe('StorageManager', () => {
       mockFileExists.mockResolvedValue(true);
       mockReadFile
         .mockResolvedValueOnce(
-          JSON.stringify({ ...mockModelInfo, id: 'model1', size: 1024 * 1024 * 1024 })
+          JSON.stringify({
+            ...mockModelInfo,
+            id: 'model1',
+            path: '/test/models/llm/model1.gguf',
+            size: 1024 * 1024 * 1024,
+          })
         )
         .mockResolvedValueOnce(
-          JSON.stringify({ ...mockModelInfo, id: 'model2', size: 2 * 1024 * 1024 * 1024 })
+          JSON.stringify({
+            ...mockModelInfo,
+            id: 'model2',
+            path: '/test/models/llm/model2.gguf',
+            size: 2 * 1024 * 1024 * 1024,
+          })
         )
         .mockResolvedValueOnce(
           JSON.stringify({
             ...mockModelInfo,
             id: 'diffusion1',
             type: 'diffusion',
+            path: '/test/models/diffusion/diffusion1.safetensors',
             size: 3 * 1024 * 1024 * 1024,
           })
         );
@@ -255,6 +266,62 @@ describe('StorageManager', () => {
       const total = await storageManager.getStorageUsed();
 
       expect(total).toBe(0);
+    });
+
+    it('should deduplicate shared component files across variants', async () => {
+      const sharedLlmPath = '/test/models/diffusion/flux-2-klein/Qwen3-4B-Q4_0.gguf';
+      const sharedVaePath = '/test/models/diffusion/flux-2-klein/flux2-vae.safetensors';
+
+      mockReaddir
+        .mockResolvedValueOnce([]) // llm models
+        .mockResolvedValueOnce(['flux-2-klein-q80.json', 'flux-2-klein-q40.json']); // diffusion
+
+      mockFileExists.mockResolvedValue(true);
+      mockReadFile
+        .mockResolvedValueOnce(
+          JSON.stringify({
+            id: 'flux-2-klein-q80',
+            name: 'Flux 2 Klein Q8_0',
+            type: 'diffusion',
+            size: 7_100_000_000,
+            path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+            downloadedAt: '2026-02-17T00:00:00Z',
+            source: { type: 'huggingface', url: 'https://example.com' },
+            components: {
+              diffusion_model: {
+                path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+                size: 4_300_000_000,
+              },
+              llm: { path: sharedLlmPath, size: 2_500_000_000 },
+              vae: { path: sharedVaePath, size: 335_000_000 },
+            },
+          })
+        )
+        .mockResolvedValueOnce(
+          JSON.stringify({
+            id: 'flux-2-klein-q40',
+            name: 'Flux 2 Klein Q4_0',
+            type: 'diffusion',
+            size: 5_335_000_000,
+            path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q4_0.gguf',
+            downloadedAt: '2026-02-17T00:00:00Z',
+            source: { type: 'huggingface', url: 'https://example.com' },
+            components: {
+              diffusion_model: {
+                path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q4_0.gguf',
+                size: 2_500_000_000,
+              },
+              llm: { path: sharedLlmPath, size: 2_500_000_000 },
+              vae: { path: sharedVaePath, size: 335_000_000 },
+            },
+          })
+        );
+
+      const total = await storageManager.getStorageUsed();
+
+      // Unique files: Q8_0 (4.3G) + Q4_0 (2.5G) + shared LLM (2.5G) + shared VAE (0.335G) = 9.635G
+      // Without dedup it would be 7.1G + 5.335G = 12.435G
+      expect(total).toBe(4_300_000_000 + 2_500_000_000 + 2_500_000_000 + 335_000_000);
     });
   });
 
@@ -302,7 +369,9 @@ describe('StorageManager', () => {
       // Set up loadModelMetadata to succeed with multi-component model
       mockFileExists.mockResolvedValue(true);
       mockReadFile.mockResolvedValue(JSON.stringify(multiComponentModelInfo));
-      mockRm.mockResolvedValue(undefined);
+      mockRmdir.mockResolvedValue(undefined);
+      // listModelFiles is called to find shared component paths — default: no other models
+      mockReaddir.mockResolvedValue(['flux-2-klein.json']);
     });
 
     it('should delete each component file', async () => {
@@ -324,9 +393,7 @@ describe('StorageManager', () => {
     it('should try to remove the model subdirectory', async () => {
       await storageManager.deleteModelFiles('diffusion', 'flux-2-klein');
 
-      expect(mockRm).toHaveBeenCalledWith('/test/models/diffusion/flux-2-klein', {
-        recursive: false,
-      });
+      expect(mockRmdir).toHaveBeenCalledWith('/test/models/diffusion/flux-2-klein');
     });
 
     it('should delete the metadata JSON file', async () => {
@@ -337,7 +404,7 @@ describe('StorageManager', () => {
     });
 
     it('should not fail if model subdirectory removal fails', async () => {
-      mockRm.mockRejectedValue(new Error('Directory not empty'));
+      mockRmdir.mockRejectedValue(new Error('Directory not empty'));
 
       // Should not throw — directory removal failure is silently ignored
       await expect(
@@ -367,6 +434,135 @@ describe('StorageManager', () => {
       expect(mockDeleteFile).toHaveBeenCalledWith(
         '/test/models/diffusion/flux-2-klein/flux2-vae.safetensors'
       );
+    });
+  });
+
+  describe('deleteModelFiles() with shared component paths', () => {
+    const variantA: ModelInfo = {
+      id: 'flux-2-klein-q80',
+      name: 'Flux 2 Klein Q8_0',
+      type: 'diffusion',
+      size: 7.1 * 1024 ** 3,
+      path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+      downloadedAt: '2025-10-17T10:00:00Z',
+      source: { type: 'url', url: 'https://example.com/flux-2-klein-q80.gguf' },
+      components: {
+        diffusion_model: {
+          path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
+          size: 4.3 * 1024 ** 3,
+        },
+        llm: {
+          path: '/test/models/diffusion/flux-2-klein/Qwen3-4B-Q4_0.gguf',
+          size: 2.5 * 1024 ** 3,
+        },
+        vae: {
+          path: '/test/models/diffusion/flux-2-klein/flux2-vae.safetensors',
+          size: 335 * 1024 ** 2,
+        },
+      },
+    };
+
+    const variantB: ModelInfo = {
+      id: 'flux-2-klein-q40',
+      name: 'Flux 2 Klein Q4_0',
+      type: 'diffusion',
+      size: 5.3 * 1024 ** 3,
+      path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q4_0.gguf',
+      downloadedAt: '2025-10-17T11:00:00Z',
+      source: { type: 'url', url: 'https://example.com/flux-2-klein-q40.gguf' },
+      components: {
+        diffusion_model: {
+          path: '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q4_0.gguf',
+          size: 2.5 * 1024 ** 3,
+        },
+        llm: {
+          path: '/test/models/diffusion/flux-2-klein/Qwen3-4B-Q4_0.gguf', // SHARED
+          size: 2.5 * 1024 ** 3,
+        },
+        vae: {
+          path: '/test/models/diffusion/flux-2-klein/flux2-vae.safetensors', // SHARED
+          size: 335 * 1024 ** 2,
+        },
+      },
+    };
+
+    let mockDeleteFile: jest.Mock;
+
+    beforeEach(async () => {
+      const fileUtils = await import('../../src/utils/file-utils.js');
+      mockDeleteFile = fileUtils.deleteFile as jest.Mock;
+      mockFileExists.mockResolvedValue(true);
+      mockRmdir.mockResolvedValue(undefined);
+    });
+
+    it('should preserve shared component files when another variant exists', async () => {
+      // Two variants exist: deleting A should keep files shared with B
+      mockReaddir.mockResolvedValue(['flux-2-klein-q80.json', 'flux-2-klein-q40.json']);
+      // loadModelMetadata: first call loads A (the model being deleted),
+      // second call loads B (to check shared paths)
+      mockReadFile
+        .mockResolvedValueOnce(JSON.stringify(variantA)) // loading A for deletion
+        .mockResolvedValueOnce(JSON.stringify(variantB)); // loading B to check shared paths
+
+      await storageManager.deleteModelFiles('diffusion', 'flux-2-klein-q80');
+
+      // Only the unique diffusion_model file should be deleted (Q8_0 GGUF)
+      expect(mockDeleteFile).toHaveBeenCalledWith(
+        '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf'
+      );
+      // Shared files should NOT be deleted
+      expect(mockDeleteFile).not.toHaveBeenCalledWith(
+        '/test/models/diffusion/flux-2-klein/Qwen3-4B-Q4_0.gguf'
+      );
+      expect(mockDeleteFile).not.toHaveBeenCalledWith(
+        '/test/models/diffusion/flux-2-klein/flux2-vae.safetensors'
+      );
+      // Metadata JSON should still be deleted
+      expect(mockDeleteFile).toHaveBeenCalledWith(expect.stringContaining('flux-2-klein-q80.json'));
+    });
+
+    it('should delete all files when no other variant shares them', async () => {
+      // Only one variant exists — all files can be deleted
+      mockReaddir.mockResolvedValue(['flux-2-klein-q80.json']);
+      mockReadFile.mockResolvedValue(JSON.stringify(variantA));
+
+      await storageManager.deleteModelFiles('diffusion', 'flux-2-klein-q80');
+
+      // All 3 component files + metadata should be deleted
+      expect(mockDeleteFile).toHaveBeenCalledTimes(4);
+      expect(mockDeleteFile).toHaveBeenCalledWith(
+        '/test/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf'
+      );
+      expect(mockDeleteFile).toHaveBeenCalledWith(
+        '/test/models/diffusion/flux-2-klein/Qwen3-4B-Q4_0.gguf'
+      );
+      expect(mockDeleteFile).toHaveBeenCalledWith(
+        '/test/models/diffusion/flux-2-klein/flux2-vae.safetensors'
+      );
+    });
+
+    it('should try to remove directory after deleting last variant', async () => {
+      mockReaddir.mockResolvedValue(['flux-2-klein-q80.json']);
+      mockReadFile.mockResolvedValue(JSON.stringify(variantA));
+
+      await storageManager.deleteModelFiles('diffusion', 'flux-2-klein-q80');
+
+      // rmdir only succeeds on empty directories — correct for shared variant cleanup
+      expect(mockRmdir).toHaveBeenCalledWith('/test/models/diffusion/flux-2-klein');
+    });
+
+    it('should not remove directory when shared files remain', async () => {
+      // Two variants — shared files remain after deleting one
+      mockReaddir.mockResolvedValue(['flux-2-klein-q80.json', 'flux-2-klein-q40.json']);
+      mockReadFile
+        .mockResolvedValueOnce(JSON.stringify(variantA))
+        .mockResolvedValueOnce(JSON.stringify(variantB));
+      // rmdir will fail because directory is not empty (ENOTEMPTY)
+      mockRmdir.mockRejectedValue(new Error('Directory not empty'));
+
+      await expect(
+        storageManager.deleteModelFiles('diffusion', 'flux-2-klein-q80')
+      ).resolves.toBeUndefined();
     });
   });
 

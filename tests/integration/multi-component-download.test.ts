@@ -293,6 +293,101 @@ describe('Multi-component download integration', () => {
     expect((savedMetadata[0] as { id: string }).id).toBe('test-multi-model');
   }, 15_000);
 
+  it('skips existing shared components when downloading a second variant', async () => {
+    // Reset singleton to get fresh state
+    // @ts-expect-error accessing private static for test
+    ModelManager.instance = undefined;
+    const mm = ModelManager.getInstance();
+    await mm.initialize();
+
+    const sharedDir = 'shared-model';
+    const componentStarts: Array<{
+      role: string;
+      filename: string;
+      index: number;
+      total: number;
+    }> = [];
+
+    // Download variant A: all 3 components (model.bin + encoder.bin + vae.bin)
+    const resultA = await mm.downloadModel({
+      source: 'url',
+      url: `http://localhost:${port}/model.bin`,
+      name: 'Shared Model Variant A',
+      type: 'diffusion',
+      modelDirectory: sharedDir,
+      components: [
+        {
+          role: 'llm' as const,
+          source: 'url' as const,
+          url: `http://localhost:${port}/encoder.bin`,
+        },
+        {
+          role: 'vae' as const,
+          source: 'url' as const,
+          url: `http://localhost:${port}/vae.bin`,
+        },
+      ],
+    });
+
+    expect(resultA.id).toBe('shared-model-variant-a');
+    const modelDir = path.join(testState.tempDir, 'diffusion', sharedDir);
+    expect(await fileExists(path.join(modelDir, 'model.bin'))).toBe(true);
+    expect(await fileExists(path.join(modelDir, 'encoder.bin'))).toBe(true);
+    expect(await fileExists(path.join(modelDir, 'vae.bin'))).toBe(true);
+
+    // Download variant B: different primary, same encoder + vae
+    // encoder.bin and vae.bin already exist → should be SKIPPED, not re-downloaded
+    savedMetadata.length = 0;
+    componentStarts.length = 0;
+
+    // Create a second model file to serve as variant B's primary
+    const VARIANT_B_CONTENT = Buffer.alloc(2048, 'B');
+    FILES['/model-b.bin'] = VARIANT_B_CONTENT;
+
+    const resultB = await mm.downloadModel({
+      source: 'url',
+      url: `http://localhost:${port}/model-b.bin`,
+      name: 'Shared Model Variant B',
+      type: 'diffusion',
+      modelDirectory: sharedDir,
+      onComponentStart: (info) => {
+        componentStarts.push(info);
+      },
+      components: [
+        {
+          role: 'llm' as const,
+          source: 'url' as const,
+          url: `http://localhost:${port}/encoder.bin`,
+        },
+        {
+          role: 'vae' as const,
+          source: 'url' as const,
+          url: `http://localhost:${port}/vae.bin`,
+        },
+      ],
+    });
+
+    // Variant B should succeed (not throw "already exists")
+    expect(resultB.id).toBe('shared-model-variant-b');
+
+    // Variant B should have its own primary + shared encoder & vae
+    expect(await fileExists(path.join(modelDir, 'model-b.bin'))).toBe(true);
+    expect(resultB.components).toBeDefined();
+    expect(resultB.components!.diffusion_model!.path).toContain('model-b.bin');
+    expect(resultB.components!.llm!.path).toContain('encoder.bin');
+    expect(resultB.components!.vae!.path).toContain('vae.bin');
+
+    // Size should reflect all components (including skipped shared ones)
+    const expectedTotal = VARIANT_B_CONTENT.length + ENCODER_CONTENT.length + VAE_CONTENT.length;
+    expect(resultB.size).toBe(expectedTotal);
+
+    // onComponentStart should have been called for all 3 (including skipped ones)
+    expect(componentStarts).toHaveLength(3);
+
+    // Clean up variant B file from FILES
+    delete FILES['/model-b.bin'];
+  }, 15_000);
+
   it('reports correct progress when HEAD returns no Content-Length', async () => {
     // Create a server that omits Content-Length from HEAD responses
     const noHeadServer = http.createServer((req, res) => {

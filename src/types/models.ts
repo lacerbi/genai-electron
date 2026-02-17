@@ -250,6 +250,14 @@ export interface DownloadConfig {
   components?: DiffusionComponentDownload[];
 
   /**
+   * Subdirectory name for multi-component model storage.
+   * When provided, used instead of the model ID for the directory name.
+   * Allows multiple model variants to share the same directory on disk
+   * (e.g., different quant levels sharing encoder/VAE files).
+   */
+  modelDirectory?: string;
+
+  /**
    * Called when each component download begins (multi-component only).
    * Useful for displaying which component is currently being downloaded.
    */

@@ -60,13 +60,13 @@ jest.unstable_mockModule('../../src/download/checksum.js', () => ({
   formatChecksum: mockFormatChecksum,
 }));
 
-// Mock node:fs/promises (used for mkdir in downloadMultiComponentModel and dynamic rm in cleanup)
+// Mock node:fs/promises (used for mkdir in downloadMultiComponentModel and rmdir in cleanup)
 const mockMkdir = jest.fn().mockResolvedValue(undefined);
-const mockRm = jest.fn().mockResolvedValue(undefined);
+const mockRmdir = jest.fn().mockResolvedValue(undefined);
 
 jest.unstable_mockModule('node:fs/promises', () => ({
   mkdir: mockMkdir,
-  rm: mockRm,
+  rmdir: mockRmdir,
 }));
 
 // Mock file-utils
@@ -672,6 +672,8 @@ describe('ModelManager', () => {
       mockDownload.mockResolvedValue(undefined);
       mockFileExists.mockResolvedValue(false); // No pre-existing files
       mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+      // Idempotency guard: model doesn't exist yet (loadModelMetadata throws)
+      mockStorageManager.loadModelMetadata.mockRejectedValue(new Error('not found'));
       mockIsHuggingFaceURL.mockReturnValue(false);
       mockGetHuggingFaceURL.mockImplementation(
         (repo: string, file: string) => `https://huggingface.co/${repo}/resolve/main/${file}`
@@ -950,11 +952,8 @@ describe('ModelManager', () => {
         // The first file (primary) was downloaded and tracked
         expect(mockDeleteFile.mock.calls[0][0]).toContain('flux2-klein-4B-Q4_0.gguf');
 
-        // Verify rm called to remove model directory
-        expect(mockRm).toHaveBeenCalledWith(expect.stringContaining('flux-2-klein-4b'), {
-          recursive: true,
-          force: true,
-        });
+        // Verify rmdir called to remove model directory (only if empty — protects shared files)
+        expect(mockRmdir).toHaveBeenCalledWith(expect.stringContaining('flux-2-klein-4b'));
       });
 
       it('should clean up all downloaded files when third component fails', async () => {
@@ -971,33 +970,47 @@ describe('ModelManager', () => {
         expect(mockDeleteFile.mock.calls[0][0]).toContain('flux2-klein-4B-Q4_0.gguf');
         expect(mockDeleteFile.mock.calls[1][0]).toContain('Qwen3-4B-Q4_0.gguf');
 
-        // Model directory should be removed
-        expect(mockRm).toHaveBeenCalledWith(expect.stringContaining('flux-2-klein-4b'), {
-          recursive: true,
-          force: true,
-        });
+        // rmdir only removes empty directory (protects shared files from other variants)
+        expect(mockRmdir).toHaveBeenCalledWith(expect.stringContaining('flux-2-klein-4b'));
       });
 
-      it('should throw DownloadError when component file already exists', async () => {
-        // First file exists check returns true (file already exists)
+      it('should skip existing component files instead of throwing', async () => {
+        // Simulate: primary exists, llm does not, vae does not
+        // fileExists is called: 3x during HEAD pre-fetch, 3x during download loop
         mockFileExists.mockReset();
-        mockFileExists.mockResolvedValueOnce(true);
+        // HEAD pre-fetch phase: primary exists (skip HEAD), llm doesn't, vae doesn't
+        mockFileExists
+          .mockResolvedValueOnce(true) // HEAD: primary exists
+          .mockResolvedValueOnce(false) // HEAD: llm doesn't exist
+          .mockResolvedValueOnce(false) // HEAD: vae doesn't exist
+          // Download loop phase:
+          .mockResolvedValueOnce(true) // download loop: primary exists → skip
+          .mockResolvedValueOnce(false) // download loop: llm doesn't exist → download
+          .mockResolvedValueOnce(false); // download loop: vae doesn't exist → download
 
-        await expect(modelManager.downloadModel(flux2KleinConfig)).rejects.toThrow(DownloadError);
+        // getFileSize called: 1 for HEAD pre-fetch (primary exists), 1 for skip (primary exists),
+        // plus 2 after download + 3 for components map
+        mockGetFileSize.mockReset();
+        mockGetFileSize
+          .mockResolvedValueOnce(4_300_000_000) // HEAD pre-fetch: primary file size
+          .mockResolvedValueOnce(4_300_000_000) // download loop: skip primary, count size
+          .mockResolvedValueOnce(2_500_000_000) // download loop: after llm download
+          .mockResolvedValueOnce(335_000_000) // download loop: after vae download
+          .mockResolvedValueOnce(4_300_000_000) // components map: primary
+          .mockResolvedValueOnce(2_500_000_000) // components map: llm
+          .mockResolvedValueOnce(335_000_000); // components map: vae
 
-        // Verify the error message mentions "already exists"
-        mockFileExists.mockReset();
-        mockFileExists.mockResolvedValueOnce(true);
-        try {
-          await modelManager.downloadModel({
-            ...flux2KleinConfig,
-            name: 'Flux 2 Klein 4B Duplicate',
-          });
-          throw new Error('Should have thrown');
-        } catch (error: any) {
-          expect(error).toBeInstanceOf(DownloadError);
-          expect(error.message).toMatch(/already exists/);
-        }
+        const model = await modelManager.downloadModel(flux2KleinConfig);
+
+        // Only 2 components should be downloaded (primary was skipped)
+        expect(mockDownload).toHaveBeenCalledTimes(2);
+        // Skipped file should still appear in the components map
+        expect(model.components).toBeDefined();
+        expect(model.components!.diffusion_model).toBeDefined();
+        expect(model.components!.llm).toBeDefined();
+        expect(model.components!.vae).toBeDefined();
+        // Aggregate size includes the skipped file
+        expect(model.size).toBe(4_300_000_000 + 2_500_000_000 + 335_000_000);
       });
 
       it('should wrap non-DownloadError errors as DownloadError', async () => {
@@ -1020,6 +1033,251 @@ describe('ModelManager', () => {
           expect(error).toBeInstanceOf(DownloadError);
           expect(error.message).toMatch(/Multi-component download failed/);
         }
+      });
+    });
+
+    describe('idempotency guard', () => {
+      it('should throw DownloadError when model ID already exists', async () => {
+        // loadModelMetadata succeeds → model already exists
+        mockStorageManager.loadModelMetadata.mockReset();
+        mockStorageManager.loadModelMetadata.mockResolvedValueOnce({ id: 'flux-2-klein-4b' });
+
+        await expect(modelManager.downloadModel(flux2KleinConfig)).rejects.toThrow(DownloadError);
+        await expect(
+          modelManager.downloadModel({
+            ...flux2KleinConfig,
+            name: 'Flux 2 Klein 4B dupe',
+          })
+        ).rejects.toThrow(/already exists/);
+      });
+    });
+
+    describe('modelDirectory support', () => {
+      it('should use modelDirectory for subdirectory instead of model ID', async () => {
+        pathsMockState.getModelDirectoryCalls = [];
+
+        await modelManager.downloadModel({
+          ...flux2KleinConfig,
+          name: 'Flux 2 Klein Q8_0',
+          modelDirectory: 'flux-2-klein',
+        });
+
+        // getModelDirectory should be called with the sanitized modelDirectory, not the model ID
+        expect(pathsMockState.getModelDirectoryCalls).toContainEqual({
+          type: 'diffusion',
+          modelId: 'flux-2-klein', // modelDirectory, NOT 'flux-2-klein-q80'
+        });
+      });
+
+      it('should sanitize modelDirectory to prevent path traversal', async () => {
+        pathsMockState.getModelDirectoryCalls = [];
+
+        await modelManager.downloadModel({
+          ...flux2KleinConfig,
+          name: 'Flux 2 Klein Traversal',
+          modelDirectory: '../../etc/evil',
+        });
+
+        // generateModelId strips special chars: '../../etc/evil' → 'etcevil'
+        const dirCall = pathsMockState.getModelDirectoryCalls[0];
+        expect(dirCall?.modelId).not.toContain('..');
+        expect(dirCall?.modelId).not.toContain('/');
+      });
+    });
+
+    describe('error cleanup with shared files', () => {
+      it('should not delete pre-existing shared files on error', async () => {
+        // Simulate: encoder.bin and vae.bin already exist (from variant A)
+        // Primary downloads, then something fails
+        mockFileExists.mockReset();
+        // HEAD pre-fetch: primary doesn't exist, llm exists, vae exists
+        mockFileExists
+          .mockResolvedValueOnce(false) // HEAD: primary
+          .mockResolvedValueOnce(true) // HEAD: llm exists
+          .mockResolvedValueOnce(true) // HEAD: vae exists
+          // Download loop: primary doesn't exist → download, llm exists → skip, vae exists → skip
+          .mockResolvedValueOnce(false) // loop: primary
+          .mockResolvedValueOnce(true) // loop: llm exists → skip
+          .mockResolvedValueOnce(true); // loop: vae exists → skip
+
+        // Primary download succeeds, but then we simulate a late failure
+        // by making getFileSize fail after primary download
+        mockGetFileSize.mockReset();
+        mockGetFileSize
+          .mockResolvedValueOnce(2_500_000_000) // HEAD: llm file size
+          .mockResolvedValueOnce(335_000_000) // HEAD: vae file size
+          .mockResolvedValueOnce(4_300_000_000) // loop: primary after download
+          .mockResolvedValueOnce(2_500_000_000) // loop: llm skip size
+          .mockResolvedValueOnce(335_000_000); // loop: vae skip size
+
+        // Make primary download succeed but then checksum fails
+        mockDownload.mockResolvedValueOnce(undefined);
+        mockCalculateSHA256.mockResolvedValueOnce('wrong_hash');
+
+        const configWithChecksum: DownloadConfig = {
+          ...flux2KleinConfig,
+          name: 'Flux 2 Klein Shared Cleanup',
+          checksum: 'sha256:expected_hash',
+          modelDirectory: 'flux-2-klein',
+        };
+
+        try {
+          await modelManager.downloadModel(configWithChecksum);
+        } catch {
+          // Expected
+        }
+
+        // Only the primary file (downloaded in THIS attempt) should be cleaned up
+        expect(mockDeleteFile).toHaveBeenCalledTimes(1);
+        expect(mockDeleteFile.mock.calls[0][0]).toContain('flux2-klein-4B-Q4_0.gguf');
+      });
+    });
+
+    describe('all components already exist', () => {
+      it('should succeed without downloading when all components exist', async () => {
+        // All files already exist on disk (e.g., from another variant)
+        mockFileExists.mockReset();
+        // HEAD pre-fetch: all exist
+        mockFileExists
+          .mockResolvedValueOnce(true) // HEAD: primary exists
+          .mockResolvedValueOnce(true) // HEAD: llm exists
+          .mockResolvedValueOnce(true) // HEAD: vae exists
+          // Download loop: all exist → skip all
+          .mockResolvedValueOnce(true) // loop: primary exists
+          .mockResolvedValueOnce(true) // loop: llm exists
+          .mockResolvedValueOnce(true); // loop: vae exists
+
+        mockGetFileSize.mockReset();
+        mockGetFileSize
+          .mockResolvedValueOnce(4_300_000_000) // HEAD: primary size
+          .mockResolvedValueOnce(2_500_000_000) // HEAD: llm size
+          .mockResolvedValueOnce(335_000_000) // HEAD: vae size
+          .mockResolvedValueOnce(4_300_000_000) // loop: primary skip size
+          .mockResolvedValueOnce(2_500_000_000) // loop: llm skip size
+          .mockResolvedValueOnce(335_000_000) // loop: vae skip size
+          .mockResolvedValueOnce(4_300_000_000) // components map: primary
+          .mockResolvedValueOnce(2_500_000_000) // components map: llm
+          .mockResolvedValueOnce(335_000_000); // components map: vae
+
+        const model = await modelManager.downloadModel({
+          ...flux2KleinConfig,
+          name: 'All Exist Model',
+        });
+
+        // No downloads should have been made
+        expect(mockDownload).not.toHaveBeenCalled();
+        // Model should still be valid with correct aggregate size
+        expect(model.components).toBeDefined();
+        expect(model.size).toBe(4_300_000_000 + 2_500_000_000 + 335_000_000);
+      });
+    });
+
+    describe('existing file checksum verification', () => {
+      it('should skip existing file when checksum matches', async () => {
+        const configWithChecksums: DownloadConfig = {
+          ...flux2KleinConfig,
+          name: 'Checksum Skip Model',
+          components: [
+            {
+              role: 'llm',
+              source: 'huggingface',
+              repo: 'unsloth/Qwen3-4B-GGUF',
+              file: 'Qwen3-4B-Q4_0.gguf',
+              checksum: 'sha256:goodhash',
+            },
+            {
+              role: 'vae',
+              source: 'huggingface',
+              repo: 'Comfy-Org/flux2-dev',
+              file: 'flux2-vae.safetensors',
+            },
+          ],
+        };
+
+        // Primary doesn't exist, LLM exists (has checksum), VAE doesn't exist
+        mockFileExists.mockReset();
+        mockFileExists
+          .mockResolvedValueOnce(false) // HEAD: primary doesn't exist
+          .mockResolvedValueOnce(true) // HEAD: llm exists
+          .mockResolvedValueOnce(false) // HEAD: vae doesn't exist
+          .mockResolvedValueOnce(false) // loop: primary → download
+          .mockResolvedValueOnce(true) // loop: llm exists → verify checksum
+          .mockResolvedValueOnce(false); // loop: vae → download
+
+        mockGetFileSize.mockReset();
+        mockGetFileSize
+          .mockResolvedValueOnce(2_500_000_000) // HEAD: llm existing size
+          .mockResolvedValueOnce(4_300_000_000) // loop: primary after download
+          .mockResolvedValueOnce(2_500_000_000) // loop: llm skip size
+          .mockResolvedValueOnce(335_000_000) // loop: vae after download
+          .mockResolvedValueOnce(4_300_000_000) // components map: primary
+          .mockResolvedValueOnce(2_500_000_000) // components map: llm
+          .mockResolvedValueOnce(335_000_000); // components map: vae
+
+        // Checksum matches → skip
+        mockVerifyChecksum.mockResolvedValueOnce(true);
+
+        const model = await modelManager.downloadModel(configWithChecksums);
+
+        // LLM was skipped (checksum valid), so only 2 downloads
+        expect(mockDownload).toHaveBeenCalledTimes(2);
+        expect(mockVerifyChecksum).toHaveBeenCalledTimes(1);
+        expect(model.components!.llm).toBeDefined();
+      });
+
+      it('should re-download existing file when checksum mismatches', async () => {
+        const configWithChecksums: DownloadConfig = {
+          ...flux2KleinConfig,
+          name: 'Checksum Mismatch Model',
+          components: [
+            {
+              role: 'llm',
+              source: 'huggingface',
+              repo: 'unsloth/Qwen3-4B-GGUF',
+              file: 'Qwen3-4B-Q4_0.gguf',
+              checksum: 'sha256:expectedhash',
+            },
+            {
+              role: 'vae',
+              source: 'huggingface',
+              repo: 'Comfy-Org/flux2-dev',
+              file: 'flux2-vae.safetensors',
+            },
+          ],
+        };
+
+        // Primary doesn't exist, LLM exists (bad checksum), VAE doesn't exist
+        mockFileExists.mockReset();
+        mockFileExists
+          .mockResolvedValueOnce(false) // HEAD: primary doesn't exist
+          .mockResolvedValueOnce(true) // HEAD: llm exists
+          .mockResolvedValueOnce(false) // HEAD: vae doesn't exist
+          .mockResolvedValueOnce(false) // loop: primary → download
+          .mockResolvedValueOnce(true) // loop: llm exists → verify checksum (fails)
+          .mockResolvedValueOnce(false); // loop: vae → download
+
+        mockGetFileSize.mockReset();
+        mockGetFileSize
+          .mockResolvedValueOnce(2_500_000_000) // HEAD: llm existing size
+          .mockResolvedValueOnce(4_300_000_000) // loop: primary after download
+          .mockResolvedValueOnce(2_500_000_000) // loop: llm after re-download
+          .mockResolvedValueOnce(335_000_000) // loop: vae after download
+          .mockResolvedValueOnce(4_300_000_000) // components map: primary
+          .mockResolvedValueOnce(2_500_000_000) // components map: llm
+          .mockResolvedValueOnce(335_000_000); // components map: vae
+
+        // Checksum mismatch → delete and re-download
+        mockVerifyChecksum.mockResolvedValueOnce(false);
+        // After re-download, post-download checksum verification must pass
+        mockCalculateSHA256.mockResolvedValueOnce('expectedhash');
+
+        const model = await modelManager.downloadModel(configWithChecksums);
+
+        // LLM was re-downloaded after checksum mismatch, so all 3 downloaded
+        expect(mockDownload).toHaveBeenCalledTimes(3);
+        expect(mockVerifyChecksum).toHaveBeenCalledTimes(1);
+        expect(mockDeleteFile).toHaveBeenCalled();
+        expect(model.components!.llm).toBeDefined();
       });
     });
 
@@ -1148,11 +1406,8 @@ describe('ModelManager', () => {
 
         // Primary was downloaded and tracked, should be cleaned up
         expect(mockDeleteFile).toHaveBeenCalled();
-        // Should also have cleaned up the vae file (it was downloaded successfully before checksum check)
-        expect(mockRm).toHaveBeenCalledWith(expect.stringContaining('checksum-cleanup'), {
-          recursive: true,
-          force: true,
-        });
+        // rmdir only removes empty directory (protects shared files from other variants)
+        expect(mockRmdir).toHaveBeenCalledWith(expect.stringContaining('checksum-cleanup'));
       });
     });
 

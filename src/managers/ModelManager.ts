@@ -4,7 +4,7 @@
  */
 
 import path from 'node:path';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rmdir } from 'node:fs/promises';
 import type {
   ModelInfo,
   ModelType,
@@ -19,7 +19,7 @@ import { ModelNotFoundError, DownloadError } from '../errors/index.js';
 import { storageManager } from './StorageManager.js';
 import { Downloader } from '../download/Downloader.js';
 import { getHuggingFaceURL } from '../download/huggingface.js';
-import { calculateSHA256, formatChecksum } from '../download/checksum.js';
+import { calculateSHA256, formatChecksum, verifyChecksum } from '../download/checksum.js';
 import { fileExists, getFileSize, sanitizeFilename, deleteFile } from '../utils/file-utils.js';
 import { detectReasoningSupport } from '../config/reasoning-models.js';
 import { fetchGGUFMetadata, fetchLocalGGUFMetadata, getArchField } from '../utils/gguf-parser.js';
@@ -276,8 +276,20 @@ export class ModelManager {
     const primaryFile = config.file ?? this.extractFilename(primaryURL);
 
     // Generate model ID and create subdirectory
+    // modelDirectory allows multiple variants to share a directory
     const modelId = this.generateModelId(config.name);
-    const modelDir = getModelDirectory(config.type, modelId);
+
+    // Idempotency guard: prevent silent metadata overwrite
+    try {
+      await storageManager.loadModelMetadata(config.type, modelId);
+      throw new DownloadError(`Model already exists: ${modelId}`, { modelId });
+    } catch (error) {
+      if (error instanceof DownloadError) throw error;
+      // FileSystemError means metadata doesn't exist — proceed with download
+    }
+
+    const dirName = config.modelDirectory ? this.generateModelId(config.modelDirectory) : modelId;
+    const modelDir = getModelDirectory(config.type, dirName);
     await mkdir(modelDir, { recursive: true });
 
     // Build download plan: primary + all components
@@ -311,12 +323,18 @@ export class ModelManager {
       });
     }
 
-    // Pre-fetch total size via HEAD requests for aggregate progress
-    // Use 10s timeout — HEAD requests should be fast; if they hang, fall back to 0
+    // Pre-fetch total size: use local file size for existing files, HEAD requests for new files
     let totalBytes = 0;
     const itemSizes: number[] = [];
     await Promise.all(
       downloadItems.map(async (item, index) => {
+        // If file already exists on disk, use its size directly (skip HEAD request)
+        const alreadyExists = await fileExists(item.destination);
+        if (alreadyExists) {
+          itemSizes[index] = await getFileSize(item.destination);
+          return;
+        }
+        // HEAD request for files we need to download (10s timeout)
         try {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 10_000);
@@ -356,6 +374,7 @@ export class ModelManager {
     }
 
     // Download components sequentially with aggregate progress
+    // Track only files downloaded in THIS attempt (not pre-existing) for error cleanup
     const downloadedPaths: string[] = [];
     let completedBytes = 0;
 
@@ -371,13 +390,25 @@ export class ModelManager {
           total: downloadItems.length,
         });
 
-        // Check if file already exists
+        // Skip files that already exist (shared components from another variant)
         const exists = await fileExists(item.destination);
         if (exists) {
-          throw new DownloadError(`Component file already exists: ${item.filename}`, {
-            path: item.destination,
-            component: item.role,
-          });
+          // Verify checksum of existing file if provided — re-download on mismatch
+          if (item.checksum) {
+            const isValid = await verifyChecksum(item.destination, item.checksum);
+            if (!isValid) {
+              await deleteFile(item.destination);
+              // Fall through to download below
+            } else {
+              const existingSize = await getFileSize(item.destination);
+              completedBytes += existingSize;
+              continue;
+            }
+          } else {
+            const existingSize = await getFileSize(item.destination);
+            completedBytes += existingSize;
+            continue;
+          }
         }
 
         // Create wrapped progress callback for aggregate reporting
@@ -429,14 +460,11 @@ export class ModelManager {
           // Ignore cleanup errors
         }
       }
-      // Only remove model directory if we created files (avoids destroying a previous download)
-      if (downloadedPaths.length > 0) {
-        try {
-          const { rm } = await import('node:fs/promises');
-          await rm(modelDir, { recursive: true, force: true });
-        } catch {
-          // Ignore cleanup errors
-        }
+      // Try to remove model directory only if empty (don't destroy another variant's files)
+      try {
+        await rmdir(modelDir);
+      } catch {
+        // Directory not empty or doesn't exist — ignore
       }
 
       if (error instanceof DownloadError) {
