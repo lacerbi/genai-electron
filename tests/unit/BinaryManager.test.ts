@@ -339,18 +339,18 @@ describe('BinaryManager', () => {
       expect(result).toBe('/mock/binaries/llama/llama-server.exe');
     });
 
-    it('should try cached variant first if cache exists', async () => {
+    it('should respect priority order even if cache points to a different variant', async () => {
       // Simulate cache pointing to 'cpu' variant
       mockReadFile.mockResolvedValue(JSON.stringify({ variant: 'cpu', platform: 'win32-x64' }));
       // Default spawn behavior (set in beforeEach) works for this test
 
       await binaryManager.ensureBinary();
 
-      // Should try CPU first (cached), and it should succeed on first try
+      // Should still try CUDA first (priority order), not CPU (cached)
       expect(mockDownload).toHaveBeenCalledTimes(1);
       expect(mockDownload).toHaveBeenCalledWith({
-        url: cpuVariant.url,
-        destination: expect.stringContaining('.cpu.zip'),
+        url: cudaVariant.url,
+        destination: expect.stringContaining('.cuda.zip'),
         onProgress: expect.any(Function),
       });
     });

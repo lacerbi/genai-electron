@@ -17,7 +17,7 @@ import { ResourceOrchestrator } from './ResourceOrchestrator.js';
 import { GenerationRegistry } from './GenerationRegistry.js';
 import http from 'node:http';
 import { promises as fs } from 'node:fs';
-import { getTempPath } from '../config/paths.js';
+import { getTempPath, PATHS } from '../config/paths.js';
 import {
   BINARY_VERSIONS,
   DEFAULT_PORTS,
@@ -372,9 +372,6 @@ export class DiffusionServerManager extends ServerManager {
           testModelArgs.push(DIFFUSION_COMPONENT_FLAGS[role], component.path);
         }
       }
-      // Multi-component models need --offload-to-cpu for the test since they
-      // typically don't fit in VRAM without it (conservative, always safe)
-      testModelArgs.push('--offload-to-cpu');
     }
 
     return this.ensureBinaryHelper(
@@ -911,7 +908,14 @@ export class DiffusionServerManager extends ServerManager {
         autoVaeOnCpu = headroom < DIFFUSION_VRAM_THRESHOLDS.vaeOnCpuHeadroomBytes;
 
         // Auto-enable offload-to-cpu when model footprint > 85% of VRAM
+        // (disabled for CUDA backend — --offload-to-cpu crashes sd.cpp CUDA builds)
         autoOffloadToCpu = modelFootprint > gpu.vram * 0.85;
+        if (autoOffloadToCpu) {
+          const isCuda = await this.isInstalledVariantCuda();
+          if (isCuda) {
+            autoOffloadToCpu = false;
+          }
+        }
 
         // Escalation: if vramAvailable is known and critically low, force clip-on-cpu
         if (gpu.vramAvailable !== undefined && gpu.vramAvailable - modelFootprint < 2 * 1024 ** 3) {
@@ -942,6 +946,23 @@ export class DiffusionServerManager extends ServerManager {
     );
 
     return { clipOnCpu, vaeOnCpu, offloadToCpu, diffusionFlashAttention, batchSize };
+  }
+
+  /**
+   * Check if the installed diffusion binary is the CUDA variant.
+   * Reads the variant cache written by BinaryManager after variant selection.
+   * @returns true if the installed variant is CUDA
+   * @private
+   */
+  private async isInstalledVariantCuda(): Promise<boolean> {
+    try {
+      const variantCachePath = `${PATHS.binaries.diffusion}/.variant.json`;
+      const content = await fs.readFile(variantCachePath, 'utf-8');
+      const cache = JSON.parse(content);
+      return cache.variant === 'cuda';
+    } catch {
+      return false; // No cache or unreadable — assume not CUDA
+    }
   }
 
   /**

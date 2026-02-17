@@ -284,28 +284,10 @@ export class BinaryManager {
       }
     }
 
-    // Check if we have a cached variant preference
-    let cachedVariant: string | undefined;
-    try {
-      const cache = await fs.readFile(variantCachePath, 'utf-8');
-      cachedVariant = JSON.parse(cache).variant;
-    } catch {
-      // No cache or invalid cache
-    }
-
-    // Reorder variants to try cached one first
+    // Try each variant in priority order (defined in defaults.ts)
+    // No reordering based on cached variant — priority order reflects performance
+    // preference (e.g., CUDA > Vulkan > CPU) and should always be respected
     const orderedVariants = [...variants];
-    if (cachedVariant) {
-      const cachedIndex = orderedVariants.findIndex((v) => v.type === cachedVariant);
-      if (cachedIndex > 0) {
-        const cached = orderedVariants.splice(cachedIndex, 1)[0];
-        if (cached) {
-          orderedVariants.unshift(cached);
-        }
-      }
-    }
-
-    // Try each variant until one works
     const errors: string[] = [];
     for (const variant of orderedVariants) {
       this.log(`Trying ${variant.type} variant for ${platformKey}...`, 'info');

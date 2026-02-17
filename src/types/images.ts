@@ -162,7 +162,8 @@ export interface DiffusionServerConfig {
   /**
    * Offload model weights to CPU RAM, load to VRAM on demand (--offload-to-cpu).
    *
-   * undefined = auto-detect (enabled when modelInfo.size > availableVRAM * 0.85),
+   * undefined = auto-detect (enabled when modelInfo.size > availableVRAM * 0.85,
+   *   but disabled for CUDA backend — crashes sd.cpp CUDA builds silently),
    * true = force on, false = force off.
    */
   offloadToCpu?: boolean;

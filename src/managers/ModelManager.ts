@@ -323,15 +323,17 @@ export class ModelManager {
       });
     }
 
-    // Pre-fetch total size: use local file size for existing files, HEAD requests for new files
+    // Pre-fetch total size: only count files that need downloading (skip existing)
     let totalBytes = 0;
     const itemSizes: number[] = [];
+    const itemExists: boolean[] = [];
     await Promise.all(
       downloadItems.map(async (item, index) => {
-        // If file already exists on disk, use its size directly (skip HEAD request)
+        // If file already exists on disk, exclude from total (it will be skipped)
         const alreadyExists = await fileExists(item.destination);
+        itemExists[index] = alreadyExists;
         if (alreadyExists) {
-          itemSizes[index] = await getFileSize(item.destination);
+          itemSizes[index] = 0;
           return;
         }
         // HEAD request for files we need to download (10s timeout)
@@ -391,23 +393,20 @@ export class ModelManager {
         });
 
         // Skip files that already exist (shared components from another variant)
-        const exists = await fileExists(item.destination);
-        if (exists) {
+        if (itemExists[i]) {
           // Verify checksum of existing file if provided — re-download on mismatch
           if (item.checksum) {
             const isValid = await verifyChecksum(item.destination, item.checksum);
             if (!isValid) {
               await deleteFile(item.destination);
+              // No longer exists — add its HEAD size back to total
+              itemExists[i] = false;
               // Fall through to download below
             } else {
-              const existingSize = await getFileSize(item.destination);
-              completedBytes += existingSize;
-              continue;
+              continue; // Existing file excluded from totalBytes, don't touch completedBytes
             }
           } else {
-            const existingSize = await getFileSize(item.destination);
-            completedBytes += existingSize;
-            continue;
+            continue; // Existing file excluded from totalBytes, don't touch completedBytes
           }
         }
 

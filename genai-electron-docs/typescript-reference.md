@@ -323,7 +323,7 @@ interface DiffusionServerConfig {
   clipOnCpu?: boolean;               // Offload CLIP text encoder to CPU (--clip-on-cpu). undefined=auto-detect, true=force on, false=force off.
   vaeOnCpu?: boolean;                // Offload VAE decoder to CPU (--vae-on-cpu). undefined=auto-detect, true=force on, false=force off.
   batchSize?: number;                // Batch size for generation (-b flag). Not auto-detected.
-  offloadToCpu?: boolean;            // Offload model weights to CPU RAM (--offload-to-cpu). undefined=auto-detect, true=force on, false=force off.
+  offloadToCpu?: boolean;            // Offload model weights to CPU RAM (--offload-to-cpu). undefined=auto-detect (disabled for CUDA backend), true=force on, false=force off.
   diffusionFlashAttention?: boolean; // Enable flash attention (--diffusion-fa). undefined=auto-detect (enabled for Flux 2), true=force on, false=force off.
 }
 ```

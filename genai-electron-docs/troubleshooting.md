@@ -35,6 +35,12 @@ await llamaServer.start({
 
 **Why this matters:** Binary validation is cached (checksum-based) for fast subsequent starts. After GPU driver updates, the cached validation may be stale even though the checksum matches.
 
+### CUDA + `--offload-to-cpu` Crash
+
+**Problem:** Diffusion generation crashes silently when using CUDA backend with `--offload-to-cpu` (sd.cpp build `master-504-636d3cb`).
+
+**Solution:** Auto-detection disables `--offload-to-cpu` for CUDA variants automatically. If you set `offloadToCpu: true` manually and generation fails silently, try `offloadToCpu: false`.
+
 ### Missing Shared Libraries
 
 **Problem:** `BinaryError: error while loading shared libraries`
@@ -183,7 +189,7 @@ const result = await diffusionServer.generateImage({
 
 **"Model too large" with Multi-Component Models**
 - The `canRunModel()` check uses the aggregate size of all components, which may be conservative when `--offload-to-cpu` is available
-- Try setting `offloadToCpu: true` in the server config to enable CPU offloading
+- Try setting `offloadToCpu: true` in the server config to enable CPU offloading (note: crashes on CUDA backend in sd.cpp `master-504-636d3cb`)
 
 ### Reasoning Not Extracted
 
