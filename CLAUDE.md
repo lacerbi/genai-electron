@@ -108,9 +108,9 @@ src/
 
 **Health Checking Pattern**
 - `llamaServer.start()` waits for health check before resolving
-- Health endpoint: `http://localhost:{port}/health`
+- Health endpoint: `http://127.0.0.1:{port}/health` (literal loopback avoids the Windows IPv6 penalty)
 - Uses exponential backoff (see `src/process/health-check.ts`)
-- Timeout configurable via `DEFAULT_TIMEOUTS.serverStart`
+- Timeout configurable per-start via `ServerConfig.startupTimeout` (default 120 s from `DEFAULT_TIMEOUTS.serverStart`)
 
 **Download Streaming**
 - Uses native `fetch()` with `fs.createWriteStream()`
@@ -129,7 +129,9 @@ src/
 - **Reasoning Detection**: `detectReasoningSupport()`, `REASONING_MODEL_PATTERNS` - Identify reasoning-capable models
 - **Generation ID**: `generateId()` - Used internally by async image generation API
 - **Multi-Component**: `DIFFUSION_COMPONENT_FLAGS`, `DIFFUSION_COMPONENT_ORDER`, `getModelDirectory()` - Multi-file diffusion model support
-- **Types**: `DiffusionComponentRole`, `DiffusionComponentInfo`, `DiffusionModelComponents`, `DiffusionComponentDownload`
+- **Port Utilities**: `findFreePort()`, `isPortBindable()` - Free-port selection and bind testing (also `port: 'auto'` on server configs)
+- **Cancellation**: `DiffusionServerManager.cancelImageGeneration()` / `getActiveGenerationId()` - Cancel in-flight async image generation (also `DELETE /v1/images/generations/:id`)
+- **Types**: `DiffusionComponentRole`, `DiffusionComponentInfo`, `DiffusionModelComponents`, `DiffusionComponentDownload`, `ShardInfo`, `KVCacheType`, `FlashAttentionSetting`, `LogRotationOptions`
 - **Complete list**: See `src/index.ts` for all exported utilities, types, and classes
 
 ## Testing Approach
@@ -264,12 +266,13 @@ This is documented in the electron-control-panel example for reference.
 - genai-electron starts servers, genai-lite talks to those servers
 - Clean separation: runtime management vs API abstraction
 - Repository: https://github.com/lacerbi/genai-lite
+- Pairing: genai-electron ≥ 0.6 pairs with genai-lite ≥ 0.9 (v0.9.0 pairing planned — see PLAN-local-model-features.md in genai-lite); the reasoning toggle needs the server started with `--jinja`, now always on here
 
 ## genai-lite Documentation Reference
 
 **IMPORTANT**: When implementing features that integrate with genai-lite (LLMService, ImageService), **read the relevant documentation first** to ensure correct API usage.
 
-**Documentation Location**: `.ath_materials/genai-lite-docs/` (v0.5.1 reference docs)
+**Documentation Location**: `.ath_materials/genai-lite-docs/` (v0.5.1 reference docs) (refresh to v0.9.0 docs when published)
 
 **Key Documentation Files**:
 - **`index.md`** - Overview, installation, quick starts (LLM and image generation)

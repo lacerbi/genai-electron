@@ -71,6 +71,15 @@ On first call to `llamaServer.start()` or `diffusionServer.start()`, the library
 - First start: 2-10 seconds for variant testing (plus download time, which depends on connection speed)
 - Subsequent starts: ~0.5 seconds (checksum verification only)
 
+**Server-start (health-check) timeout**: After the binary is ready, `start()` waits for the server to become healthy before resolving. The default timeout is **120 seconds** (`DEFAULT_TIMEOUTS.serverStart`), raised to accommodate cold loads of large GGUFs on slow disks. Override it per start with the `startupTimeout` option (milliseconds):
+
+```typescript
+await llamaServer.start({
+  modelId: 'huge-70b',
+  startupTimeout: 300000, // 5 minutes for a very large cold load
+});
+```
+
 **Validation Caching**:
 After first successful validation, subsequent starts skip expensive tests and only verify binary integrity via checksum. Use `forceValidation: true` to re-run full tests after driver updates.
 
@@ -89,6 +98,16 @@ export IMAGE_CLEANUP_INTERVAL_MS=60000
 ```
 
 **When to use**: Adjust TTL if polling slowly - results expire after TTL and return "not found" errors.
+
+### Debugging
+
+```bash
+# Enable verbose internal debug logging (auto-configuration and
+# ResourceOrchestrator traces). Silent by default.
+export GENAI_ELECTRON_DEBUG=1
+```
+
+Set `GENAI_ELECTRON_DEBUG` to any truthy value to surface the library's internal diagnostics (server auto-config decisions, resource orchestration steps) on the console. Leave it unset for normal operation.
 
 **Note**: Binary download location is fixed to `userData/binaries/` (configurable storage planned for Phase 4).
 

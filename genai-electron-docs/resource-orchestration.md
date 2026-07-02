@@ -70,6 +70,8 @@ Automatically manage system resources when running both LLM and image generation
 
 **Note:** The LLM reload (step 6) runs asynchronously after the image result is returned. This eliminates a 10-30s delay between image generation completing and the result appearing. Use `waitForReload()` if you need to ensure the LLM is fully restored before proceeding.
 
+**Cancellation:** If an orchestrated generation is cancelled (or otherwise fails) after the LLM was offloaded, the background LLM reload still fires — so the LLM is restored even when no image is produced.
+
 ---
 
 ## Automatic vs Manual Usage

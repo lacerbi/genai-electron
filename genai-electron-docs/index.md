@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.5.0 (Multi-Component Diffusion Models & Shared Variant Downloads)
+> **Version**: 0.6.0 (Local-Server Launch Contract, Multi-Shard Models & Reliability)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.5.x to v0.6.0](migration-0-5-to-0-6.md)** - Optional/`'auto'` ports, always-on `--jinja`, multi-shard models, generation cancellation
 - **[Migrating from v0.4.x to v0.5.0](migration-0-4-to-0-5.md)** - Multi-component models, presets, Flux 2 Klein
 
 ### Examples
@@ -317,7 +318,7 @@ No additional code needed - it just works! See [Resource Orchestration](resource
 - **LLM inference**: Native llama-server (HTTP server from llama.cpp)
 - **Image generation**: HTTP wrapper created by genai-electron that spawns stable-diffusion.cpp
 - **Resource management**: ResourceOrchestrator automatically offloads LLM when resources are constrained
-- **Automatic reasoning**: Reasoning-capable models get `--jinja --reasoning-format deepseek` flags automatically
+- **Reasoning support**: llama-server is always launched with `--jinja`; reasoning extraction uses `--reasoning-format` (default `'auto'`, overridable via the `reasoningFormat` option). Reasoning-capable models are still flagged via `supportsReasoning` metadata, but there is no longer any conditional flag injection.
 - **Binary management**: Automatic variant selection with real GPU functionality testing
   - Downloads appropriate binary on first `start()` call (~50-100MB)
   - Tests variants in platform-specific priority order (e.g., CUDA → Vulkan → CPU on Linux/Windows)
@@ -357,6 +358,7 @@ No additional code needed - it just works! See [Resource Orchestration](resource
 **Related Projects**:
 - **genai-lite** (v0.5.1): Lightweight API abstraction layer for AI providers (cloud and local)
   - Repository: https://github.com/lacerbi/genai-lite
+  - **Version pairing**: genai-lite ≥ 0.9 pairs with genai-electron ≥ 0.6 — the reasoning request toggle and the `'cancelled'` generation status require that pairing. (genai-lite 0.9.0 is pending publish; the current npm release is 0.5.1.)
 
 **Examples**:
 - `examples/electron-control-panel/` - Full-featured Electron app showcasing all library features

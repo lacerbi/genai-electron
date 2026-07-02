@@ -1,16 +1,15 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Shared-variant downloads, storage dedup, checksum verification (2026-02-17)
+> **Current Status**: v0.6.0 — llama.cpp b9860 launch contract, multi-shard GGUFs, lifecycle reliability, diffusion cancellation (2026-07-03)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 418/418 passing (18 suites)
-- **Jest:** ✅ Clean exit with no warnings
-- **Branch:** `main`
-- **Last Updated:** 2026-02-17
+- **Tests:** ✅ 486/486 passing (20 suites)
+- **Branch:** `feat/v0.6.0-local-server`
+- **Last Updated:** 2026-07-03
 
 ---
 
@@ -467,3 +466,24 @@ For detailed historical information:
 - Phase 2 app development: `docs/dev/phase2/PHASE2-APP-PROGRESS.md`
 - Library extraction plan: `docs/dev/2025-10-23-library-extraction-plan.md`
 - Documentation restructure: `docs/dev/2025-10-23-documentation-restructure-plan.md`
+
+---
+
+## v0.6.0: Local-Server Launch Contract, Multi-Shard Models & Reliability (2026-07-03)
+
+**Goal:** Port gmbench's battle-tested llama-server knowledge into the library and pair with genai-lite v0.9.0 (reasoning toggle needs an always-`--jinja` server). Plan: `docs/dev/plans/PLAN-local-server-features.md`.
+
+**Core Features:**
+- llama.cpp pinned b7956 → b9860 (checksums from the releases-API digests; Linux x64 CUDA prebuilts discontinued upstream → Vulkan → CPU chain); fixed a latent macOS/Linux install bug (nested `llama-<tag>/` tar layouts now flattened)
+- Modernized launch contract: unconditional `--jinja` (opt-out), tri-state `flashAttention` (`-fa on|off|auto`), KV-cache quantization (`cacheTypeK/V` + FA constraint enforcement), MoE offload (`overrideTensors`, `cacheRam`, `cpuMoe`, `nCpuMoe`), `reasoningFormat`, `fit` (default `off`), `host`, explicit `-ngl 0` for CPU-only; previously-dead fields wired (`modelAlias`, `batchSize`, `continuousBatching`, `useMmap`, `useMlock`)
+- All health/validation probes use 127.0.0.1 (Windows IPv6 penalty); host-aware health checks
+- Port optional with defaults + `port: 'auto'` (new `findFreePort`/`isPortBindable`); real bind test in availability check; cross-app occupancy safety rail (`occupancyCheck`, `/props` fingerprint)
+- Reliability: per-start `startupTimeout` (default 60 s → 120 s), `ServerInfo.loadTimeMs`, opt-in crash `autoRestart` with backoff + `maxRestarts`, opt-in hang watchdog (`healthCheckInterval`, emits `health-check-ok/failed`), LogManager size-based rotation
+- Multi-shard GGUF downloads (`-00001-of-0000N` auto-detection, `shardFiles` override, aggregate progress, `ModelInfo.shards`)
+- Diffusion cancellation: `cancelImageGeneration(id)`, `getActiveGenerationId()`, `DELETE /v1/images/generations/:id`, terminal `'cancelled'` status (genai-lite ≤ 0.9.0 caveat documented; follow-up filed in genai-lite)
+- Debug traces gated behind `GENAI_ELECTRON_DEBUG`
+- Example app v0.4.0: reasoning request toggle, flash-attention/KV-cache form controls, image-generation Cancel button (genai-lite bump to ^0.9.0 pending its npm publish)
+
+**Files Modified:** `src/config/defaults.ts`, `src/types/{servers,models,images,index}.ts`, `src/managers/{LlamaServerManager,DiffusionServerManager,ModelManager,StorageManager,BinaryManager,ServerManager,ResourceOrchestrator,GenerationRegistry}.ts`, `src/process/{health-check,log-manager,port-utils}.ts`, `src/utils/debug-log.ts`, `src/index.ts`, example app (TestChat, LlamaServerConfig/Control, DiffusionServerControl, preload, ipc-handlers), docs (`genai-electron-docs/*`, `migration-0-5-to-0-6.md`, `docs/dev/UPDATING-BINARIES.md`)
+
+**Build Status:** ✅ 0 TypeScript errors / 486/486 tests passing (20 suites)

@@ -1,7 +1,7 @@
 # Plan: Local-Server Features, Launch Contract & Reliability (v0.6.0)
 
 Created: 2026-07-03
-Status: IN PROGRESS (approved 2026-07-03)
+Status: IMPLEMENTED 2026-07-03 (branch feat/v0.6.0-local-server) — remaining: GPU-deferred live verifications (Phase 2 smoke, Phase 6 walkthrough) + genai-lite ^0.9.0 bump when published
 
 > **Execution notes (2026-07-03)**: Open Questions 1-4 resolved as recommended: sd.cpp bump OUT (follow-up plan), ROCm/HIP OUT, serverStart default → 120 s, occupancy rail default `'warn'`. **GPU is in use for ~4-5 h from start of execution** — all GPU-touching steps (binary two-phase validation, Phase 2 live smoke, Phase 6 walkthrough) are deferred to the end and marked `[!] GPU-deferred`; code, mocked tests, builds, and downloads proceed normally.
 
@@ -178,20 +178,20 @@ Each phase is a PR-sized, independently green unit (`npm run build` 0 errors + `
 **Goal**: docs tell the new story; v0.6.0 ready.
 
 **Work** (targets from the docs-impact audit; quotes verified against current files):
-1. [ ] `genai-electron-docs/llm-server.md` — highest impact: config-options block (`:149-170`) rewritten (port optional/'auto', host, tri-state flashAttention, new cache/MoE/fit/reasoningFormat/startupTimeout/autoRestart/watchdog/occupancy fields, dead fields now real); Reasoning section (`:487-545`) reframed (`--jinja` unconditional, `--reasoning-format` default auto); new subsections: auto-restart, load-time metric, occupancy rail; timeout note `:99`.
-2. [ ] `genai-electron-docs/typescript-reference.md` — `ServerConfig`/`LlamaServerConfig` interface diffs (`:282-295, 331-343`); `ServerInfo.loadTimeMs`; new shard + cancellation types.
-3. [ ] `genai-electron-docs/model-management.md` — new "Multi-Shard GGUF Downloads" subsection, explicitly distinguished from multi-*component* (roles) at `:113-314`; reasoning-flags sentence `:667` rewritten.
-4. [ ] `genai-electron-docs/image-generation.md` — `cancelImageGeneration` (Node API + DELETE endpoint); base-URL examples → `127.0.0.1` (`:140,157,182,209`); genai-lite ≤ 0.9.0 cancelled-status caveat.
-5. [ ] `genai-electron-docs/index.md` — version line `:3`, reasoning bullet `:320`, genai-lite version `:358`, migration nav link.
-6. [ ] `genai-electron-docs/troubleshooting.md` — reasoning prose `~:204-210`, port-conflict section gains `port: 'auto'` (`:316-337`); `installation-and-setup.md` — timing note + any new env vars; `integration-guide.md` — auto-restart × `attachAppLifecycle` note near `:277-283`; `system-detection.md` — `getOptimalConfig` example port pattern (`:233-250`); `resource-orchestration.md` — re-check batch/orchestration notes (`:100`); `example-control-panel.md` — reasoning *request* toggle pattern (distinct from the existing display toggle), cancel-button pattern.
-7. [ ] **`genai-electron-docs/migration-0-5-to-0-6.md`** — follow the `migration-0-4-to-0-5.md` skeleton. Compatibility section headlines the behavioral changes: binary re-download on first start (~50-300 MB); Linux NVIDIA CUDA→Vulkan; `--jinja` always on; `--reasoning-format` no longer forced; `-fa`/`-fit`/`-ngl 0` semantics; serverStart default 60→120 s; the genai-lite ≥ 0.9 pairing note.
-8. [ ] Root docs: `README.md:3` version; `CLAUDE.md` — health-endpoint line `:111` (127.0.0.1), timeout wording `:113`, genai-lite 0.9.0 (`:263,272` — note `.ath_materials/genai-lite-docs/` is absent in this checkout; refresh or flag), Key Exports list; `DESIGN.md` — cancellation no longer "deferred to Phase 3" (`:1286-1316, 1334, 392`), Linux binaries "Built with CUDA" note (`:1813-1818`), Phase 4 metrics partially delivered (`:1870-1875`).
-9. [ ] `PROGRESS.md` — new dated section per convention (Goal / Core Features / Files Modified / Build Status), top status line + test count refreshed.
-10. [ ] Release: `package.json` + `src/index.ts:9` → 0.6.0; full local CI trio (`build`, `lint`, `test`) + `npm run format`; commit `package-lock.json`. On completion, archive this plan via `git mv` to `docs/dev/plans/` (repo convention).
+1. [x] `genai-electron-docs/llm-server.md` — highest impact: config-options block (`:149-170`) rewritten (port optional/'auto', host, tri-state flashAttention, new cache/MoE/fit/reasoningFormat/startupTimeout/autoRestart/watchdog/occupancy fields, dead fields now real); Reasoning section (`:487-545`) reframed (`--jinja` unconditional, `--reasoning-format` default auto); new subsections: auto-restart, load-time metric, occupancy rail; timeout note `:99`.
+2. [x] `genai-electron-docs/typescript-reference.md` — `ServerConfig`/`LlamaServerConfig` interface diffs (`:282-295, 331-343`); `ServerInfo.loadTimeMs`; new shard + cancellation types.
+3. [x] `genai-electron-docs/model-management.md` — new "Multi-Shard GGUF Downloads" subsection, explicitly distinguished from multi-*component* (roles) at `:113-314`; reasoning-flags sentence `:667` rewritten.
+4. [x] `genai-electron-docs/image-generation.md` — `cancelImageGeneration` (Node API + DELETE endpoint); base-URL examples → `127.0.0.1` (`:140,157,182,209`); genai-lite ≤ 0.9.0 cancelled-status caveat.
+5. [x] `genai-electron-docs/index.md` — version line `:3`, reasoning bullet `:320`, genai-lite version `:358`, migration nav link.
+6. [x] `genai-electron-docs/troubleshooting.md` — reasoning prose `~:204-210`, port-conflict section gains `port: 'auto'` (`:316-337`); `installation-and-setup.md` — timing note + any new env vars; `integration-guide.md` — auto-restart × `attachAppLifecycle` note near `:277-283`; `system-detection.md` — `getOptimalConfig` example port pattern (`:233-250`); `resource-orchestration.md` — re-check batch/orchestration notes (`:100`); `example-control-panel.md` — reasoning *request* toggle pattern (distinct from the existing display toggle), cancel-button pattern.
+7. [x] **`genai-electron-docs/migration-0-5-to-0-6.md`** — follow the `migration-0-4-to-0-5.md` skeleton. Compatibility section headlines the behavioral changes: binary re-download on first start (~50-300 MB); Linux NVIDIA CUDA→Vulkan; `--jinja` always on; `--reasoning-format` no longer forced; `-fa`/`-fit`/`-ngl 0` semantics; serverStart default 60→120 s; the genai-lite ≥ 0.9 pairing note.
+8. [x] Root docs: `README.md:3` version; `CLAUDE.md` — health-endpoint line `:111` (127.0.0.1), timeout wording `:113`, genai-lite 0.9.0 (`:263,272` — note `.ath_materials/genai-lite-docs/` is absent in this checkout; refresh or flag), Key Exports list; `DESIGN.md` — cancellation no longer "deferred to Phase 3" (`:1286-1316, 1334, 392`), Linux binaries "Built with CUDA" note (`:1813-1818`), Phase 4 metrics partially delivered (`:1870-1875`).
+9. [x] `PROGRESS.md` — new dated section per convention (Goal / Core Features / Files Modified / Build Status), top status line + test count refreshed.
+10. [x] Release: `package.json` + `src/index.ts:9` → 0.6.0; full local CI trio (`build`, `lint`, `test`) + `npm run format`; commit `package-lock.json`. Archive DEFERRED: plan stays at repo root until the GPU-deferred verifications and the genai-lite ^0.9.0 bump complete; archive via `git mv` to `docs/dev/plans/` then.
 
 **Verification**:
-- [ ] Grep sweep: no stale `--reasoning-format deepseek` automatic-flag claims, no `localhost:{port}` health-probe claims, no `flashAttention?: boolean`-only signatures, no 0.5.0/v0.5.1 version strings outside historical docs.
-- [ ] CI-equivalent trio green locally.
+- [x] Grep sweep clean (remaining hits are intentional: migration-guide description of removed behavior; troubleshooting manual-CLI example; genai-lite v0.5.1 references kept deliberately until 0.9.0 publishes).
+- [x] CI-equivalent trio green locally (build 0 errors, lint 0 errors, 486/486 tests).
 
 ## Testing strategy
 

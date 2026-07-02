@@ -389,7 +389,8 @@ This flow demonstrates intelligent resource orchestration when system resources 
        └─► HTTP wrapper receives request
        └─► Spawns stable-diffusion.cpp executable with prompt and settings
        └─► Progress callbacks: step 1/30, 2/30, ...
-       └─► User can cancel via cancelImageGeneration()
+       └─► User can cancel the active/pending async generation via cancelImageGeneration()
+           (or DELETE /v1/images/generations/:id) — kills sd-cli, halts batches between images
        └─► Generate image (30-120 seconds)
        └─► Executable completes, writes image to disk
        └─► Wrapper returns image data via HTTP response
@@ -1294,9 +1295,9 @@ If a variant fails (e.g., Vulkan DLL missing), it tries the next variant automat
 - ✅ Support for both CPU and GPU image generation
 - ✅ Progress tracking for image generation
 - ✅ Basic documentation for image features
+- ✅ Cancellation API (cancelImageGeneration) — delivered in v0.6.0
 - ⏭️ Advanced features deferred to Phase 3:
   - LLM request queuing during image generation
-  - Cancellation API (cancelImageGeneration)
   - Advanced queue management with timeouts
 
 **Timeline**: 2-3 weeks
@@ -1331,7 +1332,7 @@ If a variant fails (e.g., Vulkan DLL missing), it tries the next variant automat
 - ✅ Advanced resource orchestration features (from Phase 2):
   - LLM request queuing during image generation (with timeout: 5 min default)
   - Queue status monitoring and management
-  - Cancellation API for image generation (cancelImageGeneration)
+  - Cancellation API for image generation (cancelImageGeneration) — delivered in v0.6.0 as a direct-cancel API (cancels the active/pending async generation; no request queue)
   - Per-request timeout tracking in queue
   - Queue cancellation via API
 
@@ -1812,10 +1813,15 @@ binaries/win32-x64/diffusion-cpp.exe       # Built with CUDA
 
 **Binaries**:
 ```
-binaries/linux-x64/llama-server        # Built with CUDA
+binaries/linux-x64/llama-server        # Vulkan (see note)
 binaries/linux-x64/llama-server-cpu    # CPU-only
-binaries/linux-x64/diffusion-cpp       # Built with CUDA
+binaries/linux-x64/diffusion-cpp       # CPU/CUDA auto-detect
 ```
+
+> **Note (as of llama.cpp b9860)**: upstream no longer publishes a Linux x64 CUDA
+> prebuilt. The Linux llama-server variant chain is Vulkan → CPU; NVIDIA GPUs are
+> accelerated via Vulkan (build from source for a CUDA binary). macOS (Metal) and
+> Windows (CUDA → Vulkan → CPU) are unaffected.
 
 **Special Considerations**:
 - Multiple GPU detection methods (nvidia-smi, rocm-smi, /sys/class/drm)
@@ -1869,9 +1875,9 @@ binaries/linux-x64/diffusion-cpp       # Built with CUDA
 
 **Phase 4: Production Polish**
 - 80%+ test coverage
-- Auto-restart on crash works reliably
+- Auto-restart on crash works reliably — ✅ delivered early in v0.6.0 (autoRestart + hang watchdog)
 - Configurable storage modes (isolated/shared/custom)
-- Port conflict detection and handling
+- Port conflict detection and handling — ✅ delivered early in v0.6.0 (port 'auto', bind test, occupancy safety rail)
 - Comprehensive monitoring and logging
 
 **Phase 5: Optional Extensions**

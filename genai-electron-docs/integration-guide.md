@@ -283,6 +283,22 @@ llamaServer.on('crashed', (data) => {
 });
 ```
 
+**Opt-in auto-restart**: By default a crash is terminal and you handle recovery yourself. Set `autoRestart: true` in the start config to have `LlamaServerManager` automatically respawn after an unexpected crash, with exponential backoff (1s, 2s, 4s, …), reusing the previously resolved configuration (including the concrete port). Cap the attempts with `maxRestarts` (default 3). When auto-restart succeeds, the event order is `'crashed'` → `'started'` → `'restarted'`, so you can update the UI accordingly:
+
+```typescript
+await llamaServer.start({
+  modelId: 'llama-2-7b',
+  autoRestart: true,
+  maxRestarts: 3,
+});
+
+llamaServer.on('restarted', () => {
+  mainWindow.webContents.send('server-status', { status: 'running' });
+});
+```
+
+**Note:** Auto-restart only fires on *unexpected* crashes. An intentional `stop()` never triggers a restart — and neither does the quit-time `stop()` performed by `attachAppLifecycle()`, so shutting the app down won't respawn the server.
+
 ### Download Progress Streaming
 
 Stream progress updates via IPC:

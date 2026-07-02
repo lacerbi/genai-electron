@@ -36,9 +36,9 @@ Reference implementation demonstrating genai-electron integration patterns for i
 
 **Model Management**: Download (HuggingFace/URL), list/delete models, **GGUF Metadata Viewer** with auto-fetch and smart truncation for 50k+ item arrays, **Preset Downloads** (Flux 2 Klein, SDXL Lightning) with per-component progress, multi-component badge in model list
 
-**LLM Server**: Start/stop/restart with auto-config or manual mode, real-time logs, test chat, health monitoring
+**LLM Server**: Start/stop/restart with auto-config or manual mode, real-time logs, test chat (with reasoning request toggle), health monitoring. The config form exposes the v0.6.0 options: a **flashAttention tri-state** select (`auto` / `on` / `off`) and **KV cache** selects for `cacheTypeK` / `cacheTypeV` (`f16`, `q8_0`, …)
 
-**Diffusion Server**: Start/stop, generate images with full parameter control (prompt, dimensions, steps, samplers), real-time progress, metadata display, preset-matched recommended settings with one-click apply
+**Diffusion Server**: Start/stop, generate images with full parameter control (prompt, dimensions, steps, samplers), **Cancel** button to abort an in-flight generation, real-time progress, metadata display, preset-matched recommended settings with one-click apply
 
 **Resource Monitor**: Memory polling (2s), GPU/VRAM tracking, server status grid, resource orchestration status, event log (20 events), debug tools
 
@@ -700,6 +700,46 @@ if (result.object === 'chat.completion') {
 - Empty content common with reasoning models + low max_tokens
 - Provide actionable error messages with specific suggestions
 - Display reasoning separately in UI (collapsible section)
+
+**Two distinct reasoning toggles** — don't conflate them:
+
+- **Display toggle** (shown above): a UI switch that controls whether the returned `choice.reasoning` is *rendered* in a collapsible panel. Purely presentational; works with any server.
+- **Request toggle** (new in v0.4.0): a UI switch that *asks the model to reason*, sending `settings.reasoning: { enabled: true }` on the request. This drives the model's hybrid thinking mode (e.g. Gemma 4, Qwen 3.5) rather than just showing/hiding text. It requires **genai-lite ≥ 0.9** and a server started with `--jinja` (always on in genai-electron ≥ 0.6):
+
+```typescript
+// Request toggle: ask the model to think (needs genai-lite ≥ 0.9)
+const result = await window.api.server.testMessage(message, {
+  maxTokens,
+  temperature,
+  reasoning: { enabled: reasoningRequested }, // → settings.reasoning.enabled
+});
+```
+
+Since the example app still pins genai-lite `^0.5.1` (0.9.0 is a fast-follow, not yet on npm), the request toggle is wired in the UI but only takes effect once the genai-lite dependency is bumped.
+
+---
+
+### Pattern: Cancel Generation
+
+**Challenge**: Let the user abort a long-running image generation from the UI.
+
+**Solution**: A **Cancel** button sends a `diffusion:cancel` IPC message; the main process cancels the currently active async generation:
+
+```typescript
+// Main process IPC handler
+ipcMain.handle('diffusion:cancel', async () => {
+  const activeId = diffusionServer.getActiveGenerationId();
+  if (activeId) {
+    await diffusionServer.cancelImageGeneration(activeId);
+  }
+});
+```
+
+**Key insights**:
+- `getActiveGenerationId()` avoids threading the generation ID back through the renderer — the main process already knows the in-flight ID
+- `cancelImageGeneration()` kills the running sd-cli process and halts batch loops between images
+- Cancelling a generation that is already terminal is a safe no-op
+- With orchestration, the offloaded LLM still reloads in the background after a cancel
 
 ---
 

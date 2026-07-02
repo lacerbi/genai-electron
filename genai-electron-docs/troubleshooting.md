@@ -35,6 +35,14 @@ await llamaServer.start({
 
 **Why this matters:** Binary validation is cached (checksum-based) for fast subsequent starts. After GPU driver updates, the cached validation may be stale even though the checksum matches.
 
+### Linux NVIDIA: No CUDA Prebuilt (Vulkan Used)
+
+**Problem:** On Linux x64, GPU acceleration runs through **Vulkan** rather than CUDA, even on NVIDIA hardware.
+
+**Cause:** As of the pinned llama.cpp build (`b9860`), upstream no longer ships a CUDA prebuilt for Linux x64. The Linux variant chain is now **Vulkan → CPU**. NVIDIA users get GPU acceleration via the Vulkan build (install the Vulkan loader / NVIDIA Vulkan drivers).
+
+**If you need CUDA on Linux:** Build llama.cpp from source with CUDA enabled and point genai-lite at it via `LLAMACPP_API_BASE_URL` (see the FAQ below). Windows CUDA prebuilts are unaffected.
+
 ### CUDA + CPU Offloading Crash
 
 **Problem:** Diffusion generation crashes silently (exit code `0xC0000005`) when using CUDA backend with any CPU offloading flag: `--clip-on-cpu`, `--vae-on-cpu`, or `--offload-to-cpu` (sd.cpp build `master-504-636d3cb`).
@@ -195,22 +203,32 @@ const result = await diffusionServer.generateImage({
 
 **Problem:** Reasoning-capable model doesn't extract `<think>...</think>` tags
 
-**Check:** Model has `supportsReasoning: true` (auto-set during download for Qwen3, DeepSeek-R1, GPT-OSS):
+**How it works now:** llama-server is **always** launched with `--jinja`, and reasoning extraction is handled by `--reasoning-format`, which defaults to `'auto'`. There is no longer any conditional flag injection based on `supportsReasoning` — that field is now purely informational metadata and does not gate how the server starts.
+
+**Check:** `supportsReasoning: true` is auto-set during download for Qwen3, DeepSeek-R1, and GPT-OSS. It is a display/UX hint only:
 
 ```typescript
 const modelInfo = await modelManager.getModelInfo('qwen3-8b');
 console.log('Supports reasoning:', modelInfo.supportsReasoning);
-
-// If false, reasoning flags won't be added to llama-server
 ```
 
-**Manual override:** Start llama-server manually with reasoning flags:
+**Override the format:** If `'auto'` isn't extracting reasoning for your model, set the `reasoningFormat` option when starting the server:
+
+```typescript
+await llamaServer.start({
+  modelId: 'qwen3-8b',
+  // 'auto' (default) | 'deepseek' | 'deepseek-legacy' | 'none'
+  reasoningFormat: 'deepseek',
+});
+```
+
+To disable the Jinja template entirely, pass `jinja: false` (this also disables genai-lite's reasoning request toggle, which needs `--jinja`).
+
+**Manual override:** Or start llama-server yourself and connect via `LLAMACPP_API_BASE_URL`:
 
 ```bash
 llama-server -m model.gguf --jinja --reasoning-format deepseek --port 8080
 ```
-
-Then connect with genai-lite using `LLAMACPP_API_BASE_URL`.
 
 ### Checksum Mismatch
 
@@ -317,15 +335,25 @@ console.log('Total:', (memory.total / 1024 ** 3).toFixed(1), 'GB');
 
 **Problem:** `PortInUseError: Port 8080 is already in use`
 
-**Solution:** Stop conflicting application or use different port:
+**Solution:** Stop the conflicting application, use a different port, or let the library pick a free one:
 
 ```typescript
-// Use alternative port
+// Use a specific alternative port
 await llamaServer.start({
   modelId: 'llama-2-7b',
   port: 8081  // Instead of 8080
 });
+
+// Or let the OS assign a free port automatically
+await llamaServer.start({
+  modelId: 'llama-2-7b',
+  port: 'auto'  // Resolved port is on ServerInfo.port after start
+});
+const { port } = llamaServer.getInfo();
+console.log('Server bound to port', port);
 ```
+
+**Note:** Port availability is now checked with a real bind test (via `isPortBindable`), not just an HTTP probe. This catches non-HTTP occupants (other processes holding the port) that a health-check probe would miss, so `PortInUseError` is raised before spawning the binary.
 
 **Find what's using the port:**
 ```bash
@@ -335,6 +363,25 @@ lsof -i :8080
 # Windows
 netstat -ano | findstr :8080
 ```
+
+### "Another llama-server appears to be running" Warning
+
+**Message:** `Another llama-server appears to be running on port(s) 8081 - starting a second one may double-load VRAM`
+
+**Cause:** Before starting, `LlamaServerManager` runs a cross-app *occupancy check*: it fingerprints ports 8080–8083 (via `GET /props`, so your own diffusion HTTP wrapper is never flagged) to catch a second llama-server that would double-load VRAM. This is a safety rail, not a hard error.
+
+**Control it via the `occupancyCheck` option:**
+
+```typescript
+await llamaServer.start({
+  modelId: 'llama-2-7b',
+  occupancyCheck: 'warn',   // default: log the warning and continue
+  // 'strict' → throw instead of starting
+  // 'off'    → skip the probe entirely
+});
+```
+
+If the detected server is expected (e.g. a deliberate second instance), set `occupancyCheck: 'off'` to silence the warning; use `'strict'` in setups where a double-load must never happen.
 
 ### Health Check Timeout
 

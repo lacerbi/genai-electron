@@ -23,7 +23,7 @@ import { diffusionServer, DiffusionServerManager } from 'genai-electron';
 
 Starts HTTP wrapper. Auto-downloads binary on first run.
 
-**Config:** `modelId` (required), `port` (8081), `threads`, `gpuLayers`, `forceValidation`, `clipOnCpu`, `vaeOnCpu`, `batchSize`, `offloadToCpu`, `diffusionFlashAttention`.
+**Config:** `modelId` (required), `port` (8081; also accepts `'auto'` to pick a free OS-assigned port — the resolved value is on `DiffusionServerInfo.port`), `threads`, `gpuLayers`, `forceValidation`, `clipOnCpu`, `vaeOnCpu`, `batchSize`, `offloadToCpu`, `diffusionFlashAttention`.
 
 ```typescript
 await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081, threads: 8, gpuLayers: 35 });
@@ -129,6 +129,33 @@ await fs.writeFile('output.png', result.image);
 
 **Note:** `generateImage()` always returns a single image. The `count` parameter is only used by the HTTP async API for batch generation (1-5 images). Only one generation at a time. Model validation occurs during `start()`. Automatic resource orchestration built into singleton `diffusionServer`.
 
+### cancelImageGeneration(id)
+
+Cancels an in-flight async-API generation by its registry ID. Marks the generation `'cancelled'`, halts the batch loop (also between images), and kills the running sd-cli process. Idempotent for terminal generations (already complete/error/cancelled — no-op); throws `ServerError` for an unknown ID.
+
+```typescript
+cancelImageGeneration(id: string): Promise<void>
+```
+
+Only generations started through the async HTTP API (or `runAsyncGeneration`) have IDs. Direct `generateImage()` calls are not individually cancellable — use `stop()` to abort them.
+
+```typescript
+const activeId = diffusionServer.getActiveGenerationId();
+if (activeId) {
+  await diffusionServer.cancelImageGeneration(activeId);
+}
+```
+
+### getActiveGenerationId()
+
+Returns the registry ID of the async generation currently being processed, or `undefined` when idle. Useful for cancelling the in-flight generation when the ID is otherwise only known to the HTTP client that started it (e.g. genai-lite).
+
+```typescript
+getActiveGenerationId(): string | undefined
+```
+
+> **genai-lite polling caveat:** genai-lite clients at or below v0.9.0 only treat `complete` and `error` as terminal statuses. If a generation is cancelled out-of-band (via `cancelImageGeneration()` or the DELETE endpoint from a different code path), those clients keep polling until their own client-side timeout (~120 s) rather than stopping immediately. A follow-up is filed in genai-lite.
+
 ---
 
 ## HTTP API (Async Pattern)
@@ -137,7 +164,7 @@ The HTTP API provides asynchronous image generation with a polling pattern. POST
 
 **Resource Orchestration**: HTTP endpoints inherit the same automatic LLM offload/reload as the Node.js API when resources are constrained. No additional configuration needed.
 
-**Base URL:** `http://localhost:{port}` (default: http://localhost:8081)
+**Base URL:** `http://127.0.0.1:{port}` (default: http://127.0.0.1:8081). Use `127.0.0.1` rather than `localhost` — on Windows the `localhost` → IPv6 lookup adds a noticeable per-request penalty.
 
 ### POST /v1/images/generations
 
@@ -154,7 +181,7 @@ Start an async image generation. Returns immediately with a generation ID.
 
 **Example:**
 ```typescript
-const response = await fetch('http://localhost:8081/v1/images/generations', {
+const response = await fetch('http://127.0.0.1:8081/v1/images/generations', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
@@ -174,12 +201,13 @@ Poll generation status and retrieve results.
 - `status: 'in_progress'` - `progress: { currentStep, totalSteps, stage, percentage?, currentImage?, totalImages? }`
 - `status: 'complete'` - `result: { images: [{ image, seed, width, height }], format, timeTaken }`
 - `status: 'error'` - `error: { message, code }`
+- `status: 'cancelled'` - Terminal; generation was cancelled (via DELETE or `cancelImageGeneration()`)
 - `404` - Generation not found or expired
 
 **Example (Polling Loop):**
 ```typescript
 while (true) {
-  const response = await fetch(`http://localhost:8081/v1/images/generations/${id}`);
+  const response = await fetch(`http://127.0.0.1:8081/v1/images/generations/${id}`);
   const data = await response.json();
 
   if (data.status === 'complete') {
@@ -195,6 +223,26 @@ while (true) {
 }
 ```
 
+### DELETE /v1/images/generations/:id
+
+Cancel an in-flight generation. Marks it `'cancelled'`, halts the batch loop, and kills the running sd-cli process.
+
+**Response (200 OK):**
+```typescript
+{ id: string; status: 'cancelled'; }
+```
+
+**Errors:**
+- `404 Not Found` - Generation ID not found or expired (`{ error: { message, code: 'NOT_FOUND' } }`)
+- `409 Conflict` - Generation is already `complete` or `error` and cannot be cancelled (`{ error: { message, code: 'ALREADY_TERMINAL' } }`)
+
+Cancelling an already-`cancelled` generation is idempotent and returns 200.
+
+**Example:**
+```typescript
+await fetch(`http://127.0.0.1:8081/v1/images/generations/${id}`, { method: 'DELETE' });
+```
+
 ### GET /health
 
 Check if the diffusion server is running and available.
@@ -206,7 +254,7 @@ Check if the diffusion server is running and available.
 
 **Example:**
 ```typescript
-const { status, busy } = await (await fetch('http://localhost:8081/health')).json();
+const { status, busy } = await (await fetch('http://127.0.0.1:8081/health')).json();
 ```
 
 ### Error Codes Reference
