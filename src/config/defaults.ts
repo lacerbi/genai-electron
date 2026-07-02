@@ -30,6 +30,16 @@ export const DEFAULT_TIMEOUTS = {
 } as const;
 
 /**
+ * Default log-rotation settings for server log files
+ */
+export const DEFAULT_LOG_ROTATION = {
+  /** Rotate when the log file exceeds this many bytes */
+  maxFileSize: 5 * 1024 * 1024, // 5 MB
+  /** Number of rotated archives to keep (server.log.1, server.log.2, ...) */
+  maxArchives: 2,
+} as const;
+
+/**
  * Binary variant type
  */
 export type BinaryVariant = 'cuda' | 'vulkan' | 'metal' | 'cpu';

@@ -197,7 +197,13 @@ export { Downloader } from './download/Downloader.js';
 // Utility Functions
 // ============================================================================
 
-export { checkHealth, waitForHealthy, isServerResponding } from './process/health-check.js';
+export {
+  checkHealth,
+  waitForHealthy,
+  isServerResponding,
+  normalizeHealthHost,
+} from './process/health-check.js';
+export { findFreePort, isPortBindable } from './process/port-utils.js';
 export { getCPUInfo, getRecommendedThreads } from './system/cpu-detect.js';
 export { getMemoryInfo, estimateVRAM } from './system/memory-detect.js';
 export { detectGPU } from './system/gpu-detect.js';
@@ -300,7 +306,7 @@ export type { SpawnOptions, SpawnResult } from './process/ProcessManager.js';
 
 export type { HealthCheckResponse } from './process/health-check.js';
 
-export type { LogLevel, LogEntry } from './process/log-manager.js';
+export type { LogLevel, LogEntry, LogRotationOptions } from './process/log-manager.js';
 
 // ============================================================================
 // Error Exports

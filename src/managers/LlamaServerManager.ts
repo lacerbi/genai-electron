@@ -12,6 +12,7 @@ import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
 import { checkHealth, waitForHealthy, normalizeHealthHost } from '../process/health-check.js';
+import { findFreePort } from '../process/port-utils.js';
 import { parseLlamaCppLogLevel, stripLlamaCppFormatting } from '../process/llama-log-parser.js';
 import type {
   ServerConfig,
@@ -89,6 +90,10 @@ export class LlamaServerManager extends ServerManager {
     'nCpuMoe',
     'reasoningFormat',
     'fit',
+    'occupancyCheck',
+    'autoRestart',
+    'maxRestarts',
+    'healthCheckInterval',
   ]);
 
   private processManager: ProcessManager;
@@ -97,6 +102,20 @@ export class LlamaServerManager extends ServerManager {
   private binaryPath?: string;
   /** Host used for health checks (config.host normalized; 0.0.0.0/:: → 127.0.0.1) */
   private healthHost = '127.0.0.1';
+  /** Duration of the last successful start, spawn → healthy (ms) */
+  private _loadTimeMs?: number;
+  /** Consecutive auto-restart attempts since the last manual start */
+  private restartAttempts = 0;
+  /** Pending auto-restart timer (crash backoff) */
+  private restartTimer?: NodeJS.Timeout;
+  /** True while an auto-restart start() call is in flight (skips counter reset) */
+  private isAutoRestarting = false;
+  /** Hang-watchdog interval timer */
+  private watchdogTimer?: NodeJS.Timeout;
+  /** Consecutive failed watchdog health checks */
+  private consecutiveHealthFailures = 0;
+  /** Set when the watchdog kills a hung process, so handleExit treats it as a crash */
+  private watchdogKill = false;
 
   /**
    * Create a new LlamaServerManager
@@ -143,11 +162,20 @@ export class LlamaServerManager extends ServerManager {
       'LlamaServerManager'
     );
 
+    // A manual start resets the auto-restart budget and cancels any pending
+    // auto-restart; the auto-restart path itself skips this.
+    if (!this.isAutoRestarting) {
+      this.restartAttempts = 0;
+      this.cancelPendingRestart();
+    }
+
     this.setStatus('starting');
 
     // Resolve the port once, up front — every later step (availability check,
     // health polling, CLI args, saved config for restart) uses this value.
-    const resolvedPort = config.port ?? DEFAULT_PORTS.llama;
+    // 'auto' binds port 0 to get an OS-assigned free port.
+    const resolvedPort =
+      config.port === 'auto' ? await findFreePort() : (config.port ?? DEFAULT_PORTS.llama);
 
     try {
       // 1. Validate model exists
@@ -175,6 +203,13 @@ export class LlamaServerManager extends ServerManager {
 
       // 4. Check if port is in use
       await this.checkPortAvailability(resolvedPort);
+
+      // 4b. Occupancy safety rail: detect other llama-servers that could
+      // double-load VRAM (default 'warn'; 'strict' throws; 'off' skips)
+      await this.runOccupancyCheck(
+        (config as LlamaServerConfig).occupancyCheck ?? 'warn',
+        resolvedPort
+      );
 
       // 5. Auto-configure if needed
       const finalConfig = await this.autoConfigureIfNeeded(
@@ -236,6 +271,7 @@ export class LlamaServerManager extends ServerManager {
       );
 
       // 10. Spawn the process
+      const spawnStartedAt = Date.now();
       const { pid } = this.processManager.spawn(this.binaryPath, args, {
         onStdout: (data) => this.handleStdout(data),
         onStderr: (data) => this.handleStderr(data),
@@ -260,10 +296,17 @@ export class LlamaServerManager extends ServerManager {
         this.healthHost
       );
 
+      this._loadTimeMs = Date.now() - spawnStartedAt;
       this._startedAt = new Date();
       this.setStatus('running');
 
-      await this.logManager!.write('Server is running and healthy', 'info');
+      // Start the hang watchdog if configured
+      this.startWatchdog(finalConfig);
+
+      await this.logManager!.write(
+        `Server is running and healthy (load time: ${this._loadTimeMs}ms)`,
+        'info'
+      );
 
       // Clear system info cache so subsequent memory checks use fresh data
       this.systemInfo.clearCache();
@@ -289,6 +332,10 @@ export class LlamaServerManager extends ServerManager {
    * @throws {ServerError} If stop fails
    */
   async stop(): Promise<void> {
+    // Intentional stop always cancels any pending auto-restart and the watchdog
+    this.cancelPendingRestart();
+    this.teardownWatchdog();
+
     if (this._status === 'stopped') {
       return; // Already stopped
     }
@@ -324,6 +371,16 @@ export class LlamaServerManager extends ServerManager {
         { error: error instanceof Error ? error.message : String(error) }
       );
     }
+  }
+
+  /**
+   * Get current server information (includes loadTimeMs of the last start)
+   */
+  override getInfo(): ServerInfo {
+    return {
+      ...super.getInfo(),
+      loadTimeMs: this._loadTimeMs,
+    };
   }
 
   /**
@@ -632,6 +689,11 @@ export class LlamaServerManager extends ServerManager {
    */
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
     const wasRunning = this._status === 'running';
+    const killedByWatchdog = this.watchdogKill;
+    this.watchdogKill = false;
+
+    // The watchdog must not keep polling a dead process
+    this.teardownWatchdog();
 
     if (this.logManager) {
       this.logManager
@@ -640,10 +702,11 @@ export class LlamaServerManager extends ServerManager {
     }
 
     // Update status
-    if (wasRunning && code !== 0 && code !== null) {
-      // Unexpected exit = crash
+    if (wasRunning && ((code !== 0 && code !== null) || killedByWatchdog)) {
+      // Unexpected exit (or watchdog-detected hang) = crash
       this.setStatus('crashed');
       this.emitEvent('crashed', { code, signal });
+      this.scheduleAutoRestartIfEnabled();
     } else {
       this.setStatus('stopped');
     }
@@ -651,5 +714,225 @@ export class LlamaServerManager extends ServerManager {
     // Cleanup
     this._pid = undefined;
     this._port = 0;
+  }
+
+  /**
+   * Schedule an auto-restart after a crash, if enabled and budget remains
+   *
+   * The restart runs on a backoff timer (1s, 2s, 4s, ...) — never inline from
+   * the synchronous exit handler — and reuses the previously RESOLVED config
+   * (concrete port; 'auto' is not re-run). A failed attempt counts against the
+   * budget and leaves the status 'crashed'.
+   *
+   * @private
+   */
+  private scheduleAutoRestartIfEnabled(): void {
+    const config = this._config as LlamaServerConfig | undefined;
+    if (!config || config.autoRestart !== true) {
+      return;
+    }
+
+    const maxRestarts = config.maxRestarts ?? 3;
+    if (this.restartAttempts >= maxRestarts) {
+      this.logManager
+        ?.write(
+          `Auto-restart budget exhausted (${maxRestarts} attempts) - staying crashed`,
+          'error'
+        )
+        .catch(() => void 0);
+      return;
+    }
+
+    this.restartAttempts++;
+    const delay = 1000 * 2 ** (this.restartAttempts - 1);
+    this.logManager
+      ?.write(
+        `Auto-restarting in ${delay}ms (attempt ${this.restartAttempts}/${maxRestarts})`,
+        'warn'
+      )
+      .catch(() => void 0);
+
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined;
+      this.isAutoRestarting = true;
+      this.start(this._config!)
+        .then((info) => {
+          this.emitEvent('restarted', info);
+        })
+        .catch((error: unknown) => {
+          // start() already reset status via handleStartupError; reflect the
+          // crash-loop state and let the next crash (if any) consume budget
+          this.setStatus('crashed');
+          this.logManager
+            ?.write(
+              `Auto-restart attempt ${this.restartAttempts} failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+              'error'
+            )
+            .catch(() => void 0);
+          // Try again if budget remains
+          this.scheduleAutoRestartIfEnabled();
+        })
+        .finally(() => {
+          this.isAutoRestarting = false;
+        });
+    }, delay);
+    this.restartTimer.unref?.();
+  }
+
+  /**
+   * Cancel a pending auto-restart timer
+   * @private
+   */
+  private cancelPendingRestart(): void {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = undefined;
+    }
+  }
+
+  /**
+   * Start the hang watchdog if healthCheckInterval is configured
+   * @private
+   */
+  private startWatchdog(config: ResolvedLlamaServerConfig): void {
+    const interval = config.healthCheckInterval;
+    if (interval === undefined || interval <= 0) {
+      return;
+    }
+
+    this.teardownWatchdog();
+    this.consecutiveHealthFailures = 0;
+    this.watchdogTimer = setInterval(() => {
+      void this.runWatchdogCheck();
+    }, interval);
+    this.watchdogTimer.unref?.();
+  }
+
+  /**
+   * Single watchdog tick: poll health, emit events, kill on 3 consecutive failures
+   * @private
+   */
+  private async runWatchdogCheck(): Promise<void> {
+    if (this._status !== 'running' || this._port === 0) {
+      return;
+    }
+
+    let healthy = false;
+    try {
+      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck, this.healthHost);
+      healthy = health.status === 'ok';
+    } catch {
+      healthy = false;
+    }
+
+    if (healthy) {
+      this.consecutiveHealthFailures = 0;
+      this.emitEvent('health-check-ok', this.getInfo());
+      return;
+    }
+
+    this.consecutiveHealthFailures++;
+    this.emitEvent('health-check-failed', {
+      consecutiveFailures: this.consecutiveHealthFailures,
+      serverInfo: this.getInfo(),
+    });
+
+    if (this.consecutiveHealthFailures >= 3 && this._pid) {
+      this.logManager
+        ?.write(
+          `Watchdog: ${this.consecutiveHealthFailures} consecutive health-check failures - killing hung process`,
+          'error'
+        )
+        .catch(() => void 0);
+      this.teardownWatchdog();
+      // Mark so handleExit treats the (signal-terminated) exit as a crash,
+      // feeding auto-restart when enabled
+      this.watchdogKill = true;
+      try {
+        await this.processManager.kill(this._pid, DEFAULT_TIMEOUTS.serverStop);
+      } catch {
+        this.watchdogKill = false;
+      }
+    }
+  }
+
+  /**
+   * Stop the hang watchdog
+   * @private
+   */
+  private teardownWatchdog(): void {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = undefined;
+    }
+  }
+
+  /**
+   * Occupancy safety rail: probe common llama-server ports for other instances
+   *
+   * Prevents accidental VRAM double-loading when another app (or a stray
+   * process) is already serving a model. Candidates are fingerprinted via
+   * GET /props — an endpoint the diffusion HTTP wrapper does NOT serve — so
+   * this app's own diffusion server on 8081 is never flagged.
+   *
+   * @private
+   */
+  private async runOccupancyCheck(mode: 'warn' | 'strict' | 'off', ownPort: number): Promise<void> {
+    if (mode === 'off') {
+      return;
+    }
+
+    const probePorts = [8080, 8081, 8082, 8083].filter((p) => p !== ownPort);
+    const results = await Promise.all(probePorts.map((p) => this.isLlamaServerAt(p)));
+    const occupied = probePorts.filter((_, i) => results[i]);
+
+    if (occupied.length === 0) {
+      return;
+    }
+
+    const message =
+      `Another llama-server appears to be running on port${occupied.length > 1 ? 's' : ''} ` +
+      `${occupied.join(', ')} - starting a second one may double-load VRAM`;
+
+    if (mode === 'strict') {
+      throw new ServerError(message, {
+        occupiedPorts: occupied,
+        suggestion:
+          "Stop the other server, or set occupancyCheck: 'warn' or 'off' to proceed anyway",
+      });
+    }
+
+    console.warn(`[genai-electron] ${message}`);
+    debugLog('[LlamaServer] occupancy check:', { occupied, mode });
+  }
+
+  /**
+   * Fingerprint a port as a llama-server: /health responds AND /props exists
+   * (the diffusion wrapper 404s /props; other HTTP servers rarely serve both)
+   *
+   * @private
+   */
+  private async isLlamaServerAt(port: number, timeout = 800): Promise<boolean> {
+    const probe = async (pathname: string): Promise<boolean> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
+          signal: controller.signal,
+        });
+        return response.ok;
+      } catch {
+        return false;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    if (!(await probe('/health'))) {
+      return false;
+    }
+    return probe('/props');
   }
 }

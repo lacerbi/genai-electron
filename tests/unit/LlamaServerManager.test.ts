@@ -76,6 +76,15 @@ jest.unstable_mockModule('../../src/process/health-check.js', () => ({
     host === undefined || host === '' || host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host,
 }));
 
+// Mock port-utils (never bind real sockets in unit tests)
+const mockFindFreePort = jest.fn(async () => 49152);
+const mockIsPortBindable = jest.fn(async () => true);
+
+jest.unstable_mockModule('../../src/process/port-utils.js', () => ({
+  findFreePort: mockFindFreePort,
+  isPortBindable: mockIsPortBindable,
+}));
+
 // Mock LogManager - create instance that's accessible in tests
 const mockLogManagerWrite = jest.fn(() => Promise.resolve());
 const mockLogManager = {
@@ -209,6 +218,8 @@ describe('LlamaServerManager', () => {
     mockFileExists.mockResolvedValue(true); // Binary exists
     mockWaitForHealthy.mockResolvedValue(undefined);
     mockIsServerResponding.mockResolvedValue(false); // Port not in use by default
+    mockIsPortBindable.mockResolvedValue(true); // Port bindable by default
+    mockFindFreePort.mockResolvedValue(49152);
 
     // Mock process spawn - need to capture callbacks to trigger events (track at describe level for cleanup)
     mockProcess = new EventEmitter() as any;
@@ -577,10 +588,192 @@ describe('LlamaServerManager', () => {
         nCpuMoe: 0,
         reasoningFormat: 'auto',
         fit: 'off',
+        occupancyCheck: 'off',
+        autoRestart: false,
+        maxRestarts: 3,
+        healthCheckInterval: 0,
       };
 
       const info = await llamaServer.start(everyField as unknown as LlamaServerConfig);
       expect(info.status).toBe('running');
+    });
+  });
+
+  describe('lifecycle niceties (Phase 4)', () => {
+    it("should resolve port 'auto' via findFreePort", async () => {
+      const info = await llamaServer.start({ ...mockConfig, port: 'auto' });
+
+      expect(mockFindFreePort).toHaveBeenCalledTimes(1);
+      expect(info.port).toBe(49152);
+      expect(mockWaitForHealthy).toHaveBeenCalledWith(
+        49152,
+        expect.any(Number),
+        undefined,
+        undefined,
+        '127.0.0.1'
+      );
+    });
+
+    it('should record loadTimeMs on successful start', async () => {
+      const info = await llamaServer.start(mockConfig);
+
+      expect(typeof info.loadTimeMs).toBe('number');
+      expect(info.loadTimeMs).toBeGreaterThanOrEqual(0);
+    });
+
+    describe('occupancy safety rail', () => {
+      it('should warn and proceed when another llama-server is detected (default)', async () => {
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        // A llama-server on 8082: /health and /props both respond ok
+        mockFetch.mockImplementation(async (url: unknown) => ({
+          ok: String(url).includes(':8082/'),
+        }));
+
+        const info = await llamaServer.start(mockConfig);
+
+        expect(info.status).toBe('running');
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('8082'));
+        warnSpy.mockRestore();
+      });
+
+      it('should throw in strict mode', async () => {
+        mockFetch.mockImplementation(async (url: unknown) => ({
+          ok: String(url).includes(':8082/'),
+        }));
+
+        await expect(
+          llamaServer.start({ ...mockConfig, occupancyCheck: 'strict' })
+        ).rejects.toMatchObject({ code: 'SERVER_ERROR' });
+      });
+
+      it('should not flag a diffusion wrapper (health ok but /props 404)', async () => {
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        // Diffusion wrapper on 8081: /health ok, /props not found
+        mockFetch.mockImplementation(async (url: unknown) => ({
+          ok: String(url).includes(':8081/health'),
+        }));
+
+        await llamaServer.start(mockConfig);
+
+        expect(warnSpy).not.toHaveBeenCalled();
+        warnSpy.mockRestore();
+      });
+
+      it('should skip probing when occupancyCheck is off', async () => {
+        mockFetch.mockImplementation(async () => ({ ok: true }));
+
+        const info = await llamaServer.start({ ...mockConfig, occupancyCheck: 'off' });
+
+        expect(info.status).toBe('running');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('crash auto-restart', () => {
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('should auto-restart after a crash when enabled', async () => {
+        jest.useFakeTimers();
+        await llamaServer.start({ ...mockConfig, autoRestart: true, maxRestarts: 2 });
+
+        const crashedHandler = jest.fn();
+        const restartedHandler = jest.fn();
+        llamaServer.on('crashed', crashedHandler);
+        llamaServer.on('restarted', restartedHandler);
+
+        mockProcess.emit('exit', 1, null);
+
+        expect(crashedHandler).toHaveBeenCalled();
+        expect(llamaServer.getStatus()).toBe('crashed');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
+
+        // Backoff: first attempt fires after 1s
+        await jest.advanceTimersByTimeAsync(1000);
+
+        expect(restartedHandler).toHaveBeenCalled();
+        expect(llamaServer.getStatus()).toBe('running');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(2);
+      });
+
+      it('should stay crashed when the restart budget is exhausted', async () => {
+        jest.useFakeTimers();
+        await llamaServer.start({ ...mockConfig, autoRestart: true, maxRestarts: 0 });
+
+        mockProcess.emit('exit', 1, null);
+        await jest.advanceTimersByTimeAsync(60000);
+
+        expect(llamaServer.getStatus()).toBe('crashed');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
+      });
+
+      it('should not restart by default (opt-in)', async () => {
+        jest.useFakeTimers();
+        await llamaServer.start(mockConfig);
+
+        mockProcess.emit('exit', 1, null);
+        await jest.advanceTimersByTimeAsync(60000);
+
+        expect(llamaServer.getStatus()).toBe('crashed');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
+      });
+
+      it('should never restart after an intentional stop', async () => {
+        jest.useFakeTimers();
+        await llamaServer.start({ ...mockConfig, autoRestart: true });
+
+        await llamaServer.stop();
+        mockProcess.emit('exit', 0, null);
+        await jest.advanceTimersByTimeAsync(60000);
+
+        expect(llamaServer.getStatus()).toBe('stopped');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('hang watchdog', () => {
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('should emit health-check-ok while healthy', async () => {
+        jest.useFakeTimers();
+        mockCheckHealth.mockResolvedValue({ status: 'ok' });
+        await llamaServer.start({ ...mockConfig, healthCheckInterval: 1000 });
+
+        const okHandler = jest.fn();
+        llamaServer.on('health-check-ok', okHandler);
+
+        await jest.advanceTimersByTimeAsync(2000);
+
+        expect(okHandler).toHaveBeenCalledTimes(2);
+        expect(mockProcessKill).not.toHaveBeenCalled();
+      });
+
+      it('should kill the process after 3 consecutive health failures', async () => {
+        jest.useFakeTimers();
+        mockCheckHealth.mockResolvedValue({ status: 'error' });
+        await llamaServer.start({ ...mockConfig, healthCheckInterval: 1000 });
+
+        const failHandler = jest.fn();
+        llamaServer.on('health-check-failed', failHandler);
+
+        await jest.advanceTimersByTimeAsync(3000);
+
+        expect(failHandler).toHaveBeenCalledTimes(3);
+        expect(mockProcessKill).toHaveBeenCalledWith(12345, expect.any(Number));
+      });
+
+      it('should not start the watchdog when healthCheckInterval is unset', async () => {
+        jest.useFakeTimers();
+        mockCheckHealth.mockResolvedValue({ status: 'error' });
+        await llamaServer.start(mockConfig);
+
+        await jest.advanceTimersByTimeAsync(10000);
+
+        expect(mockCheckHealth).not.toHaveBeenCalled();
+      });
     });
   });
 

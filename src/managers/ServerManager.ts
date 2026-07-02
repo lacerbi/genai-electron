@@ -382,7 +382,15 @@ export abstract class ServerManager extends EventEmitter {
 
   protected async checkPortAvailability(port: number, timeout = 2000): Promise<void> {
     const { isServerResponding } = await import('../process/health-check.js');
+    const { isPortBindable } = await import('../process/port-utils.js');
+
+    // HTTP probe first: identifies the occupant as a server for a better error
     if (await isServerResponding(port, timeout)) {
+      throw new PortInUseError(port);
+    }
+
+    // Real bind test: catches non-HTTP occupants the probe cannot see
+    if (!(await isPortBindable(port))) {
       throw new PortInUseError(port);
     }
   }

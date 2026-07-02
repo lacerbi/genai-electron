@@ -37,8 +37,9 @@ export interface ServerConfig {
    * Port to listen on
    * Optional — defaults to DEFAULT_PORTS.llama (8080) for LlamaServerManager
    * and DEFAULT_PORTS.diffusion (8081) for DiffusionServerManager.
+   * 'auto' picks a free OS-assigned port (see ServerInfo.port for the result).
    */
-  port?: number;
+  port?: number | 'auto';
 
   /** Number of CPU threads (auto-detected if not specified) */
   threads?: number;
@@ -105,6 +106,12 @@ export interface ServerInfo {
 
   /** Last error message (if crashed) */
   error?: string;
+
+  /**
+   * How long the last successful start took, spawn → healthy, in milliseconds
+   * (llama-server only; undefined before the first successful start)
+   */
+  loadTimeMs?: number;
 }
 
 /**
@@ -194,6 +201,32 @@ export interface LlamaServerConfig extends ServerConfig {
    * gpuLayers/contextSize auto-configuration for unset fields.
    */
   fit?: 'on' | 'off';
+
+  /**
+   * Cross-app occupancy safety rail: before starting, probe common llama-server
+   * ports (8080-8083) for another llama-server that could double-load VRAM.
+   * 'warn' (default): log a warning and continue; 'strict': throw; 'off': skip.
+   */
+  occupancyCheck?: 'warn' | 'strict' | 'off';
+
+  /**
+   * Automatically restart the server after an unexpected crash (default: false)
+   * Restarts are scheduled with exponential backoff (1s, 2s, 4s, ...) and reuse
+   * the previously resolved configuration (including the concrete port).
+   * Intentional stop() never triggers a restart.
+   */
+  autoRestart?: boolean;
+
+  /** Maximum consecutive auto-restart attempts before staying 'crashed' (default: 3) */
+  maxRestarts?: number;
+
+  /**
+   * Hang watchdog: poll the health endpoint every N milliseconds while running
+   * (default: disabled). Emits 'health-check-ok' / 'health-check-failed' events;
+   * after 3 consecutive failures the process is killed, which feeds autoRestart
+   * when enabled.
+   */
+  healthCheckInterval?: number;
 }
 
 /**

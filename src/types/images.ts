@@ -114,8 +114,8 @@ export interface DiffusionServerConfig {
   /** Model ID to load */
   modelId: string;
 
-  /** Port to listen on (default: 8081) */
-  port?: number;
+  /** Port to listen on (default: 8081; 'auto' picks a free OS-assigned port) */
+  port?: number | 'auto';
 
   /** Number of CPU threads (auto-detected if not specified) */
   threads?: number;

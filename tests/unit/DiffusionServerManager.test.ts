@@ -138,6 +138,15 @@ jest.unstable_mockModule('../../src/process/health-check.js', () => ({
   isServerResponding: mockIsServerResponding,
 }));
 
+// Mock port-utils (never bind real sockets in unit tests)
+const mockFindFreePort = jest.fn(async () => 49999);
+const mockIsPortBindable = jest.fn(async () => true);
+
+jest.unstable_mockModule('../../src/process/port-utils.js', () => ({
+  findFreePort: mockFindFreePort,
+  isPortBindable: mockIsPortBindable,
+}));
+
 // Mock file-utils
 const mockDeleteFile = jest.fn();
 
@@ -232,6 +241,8 @@ describe('DiffusionServerManager', () => {
       vram: 8 * 1024 ** 3,
     });
     mockIsServerResponding.mockResolvedValue(false); // Port is available
+    mockIsPortBindable.mockResolvedValue(true);
+    mockFindFreePort.mockResolvedValue(49999);
 
     // Mock process spawn (track at describe level for cleanup)
     mockProcess = new EventEmitter() as any;
@@ -285,6 +296,15 @@ describe('DiffusionServerManager', () => {
       // Verify HTTP server created
       expect(mockCreateServer).toHaveBeenCalled();
       expect(mockHttpServer.listen).toHaveBeenCalledWith(8081, expect.any(Function));
+    });
+
+    it("should resolve port 'auto' exactly once via findFreePort", async () => {
+      const info = await diffusionServer.start({ ...mockConfig, port: 'auto' });
+
+      expect(mockFindFreePort).toHaveBeenCalledTimes(1);
+      expect(info.port).toBe(49999);
+      // The HTTP server binds the SAME resolved port (no double resolution)
+      expect(mockHttpServer.listen).toHaveBeenCalledWith(49999, expect.any(Function));
     });
 
     it('should start with custom GPU layers and threads', async () => {

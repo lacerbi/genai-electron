@@ -26,6 +26,7 @@ import {
   DIFFUSION_COMPONENT_ORDER,
 } from '../config/defaults.js';
 import { deleteFile } from '../utils/file-utils.js';
+import { findFreePort } from '../process/port-utils.js';
 import { ServerError, ModelNotFoundError, InsufficientResourcesError } from '../errors/index.js';
 import type {
   DiffusionServerConfig,
@@ -205,8 +206,11 @@ export class DiffusionServerManager extends ServerManager {
       // 3. Ensure binary is downloaded (pass model info for real functionality testing)
       this.binaryPath = await this.ensureBinary(modelInfo, config.forceValidation);
 
-      // 4. Check if port is in use
-      const port = config.port || DEFAULT_PORTS.diffusion;
+      // 4. Resolve the port ONCE ('auto' → OS-assigned free port), then check it.
+      // createHTTPServer receives the resolved number — resolving twice would
+      // probe one port and bind another.
+      const port =
+        config.port === 'auto' ? await findFreePort() : (config.port ?? DEFAULT_PORTS.diffusion);
       await this.checkPortAvailability(port);
 
       // 5. Initialize log manager
@@ -216,7 +220,7 @@ export class DiffusionServerManager extends ServerManager {
       );
 
       // 6. Create HTTP server
-      await this.createHTTPServer(config);
+      await this.createHTTPServer(port);
 
       this._port = port;
       this._startedAt = new Date();
@@ -387,12 +391,10 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Create HTTP server with async generation endpoints
    *
-   * @param config - Server configuration
+   * @param port - Resolved port number to listen on
    * @private
    */
-  private async createHTTPServer(config: DiffusionServerConfig): Promise<void> {
-    const port = config.port || DEFAULT_PORTS.diffusion;
-
+  private async createHTTPServer(port: number): Promise<void> {
     this.httpServer = http.createServer(async (req, res) => {
       // Enable CORS
       res.setHeader('Access-Control-Allow-Origin', '*');
