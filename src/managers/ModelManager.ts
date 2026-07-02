@@ -14,6 +14,7 @@ import type {
   DiffusionModelComponents,
   DiffusionComponentInfo,
   DiffusionComponentRole,
+  ShardInfo,
 } from '../types/index.js';
 import { ModelNotFoundError, DownloadError } from '../errors/index.js';
 import { storageManager } from './StorageManager.js';
@@ -163,6 +164,19 @@ export class ModelManager {
 
     // Determine filename from URL
     const filename = this.extractFilename(downloadURL, sourceFile);
+
+    // Multi-shard GGUF: explicit shardFiles or auto-detected -00001-of-0000N naming
+    const extraShardFiles = this.resolveShardFilenames(filename, config);
+    if (extraShardFiles.length > 0) {
+      return this.downloadShardedModel(
+        config,
+        downloadURL,
+        sourceRepo,
+        sourceFile,
+        filename,
+        extraShardFiles
+      );
+    }
 
     // Get destination path
     const destinationPath = storageManager.getModelPath(config.type, filename);
@@ -514,6 +528,277 @@ export class ModelManager {
     };
 
     // Save metadata
+    await storageManager.saveModelMetadata(modelInfo);
+
+    return modelInfo;
+  }
+
+  /**
+   * Resolve the list of ADDITIONAL shard filenames (beyond the primary file)
+   * for a multi-shard GGUF download.
+   *
+   * Explicit config.shardFiles wins; otherwise standard shard naming
+   * (name-00001-of-0000N.gguf) is auto-detected and siblings are derived.
+   * Returns [] for regular single-file models.
+   *
+   * @throws {DownloadError} If the primary file is a non-first shard
+   * @private
+   */
+  private resolveShardFilenames(primaryFilename: string, config: DownloadConfig): string[] {
+    if (config.shardFiles && config.shardFiles.length > 0) {
+      return config.shardFiles;
+    }
+
+    const match = /^(.*)-(\d{5})-of-(\d{5})\.gguf$/i.exec(primaryFilename);
+    if (!match) {
+      return [];
+    }
+
+    const shardIndex = parseInt(match[2]!, 10);
+    const shardTotal = parseInt(match[3]!, 10);
+
+    if (shardTotal <= 1) {
+      return []; // -00001-of-00001: single file despite the shard naming
+    }
+
+    if (shardIndex !== 1) {
+      throw new DownloadError(
+        `Multi-shard model download must point at the FIRST shard (got shard ${shardIndex} of ${shardTotal}): ${primaryFilename}`,
+        {
+          suggestion: `Use the -00001-of-${match[3]} file; the remaining shards are downloaded automatically`,
+        }
+      );
+    }
+
+    // Preserve the original casing of "-of-0000N.gguf" when deriving siblings
+    const prefix = match[1]!;
+    const suffix = primaryFilename.slice(prefix.length + 1 + 5); // "-of-0000N.gguf"
+    const siblings: string[] = [];
+    for (let i = 2; i <= shardTotal; i++) {
+      siblings.push(`${prefix}-${String(i).padStart(5, '0')}${suffix}`);
+    }
+    return siblings;
+  }
+
+  /**
+   * Resolve an additional shard entry to its download URL.
+   *
+   * Full http(s) URLs are used as-is; bare filenames are resolved next to
+   * the primary file (same HuggingFace repo path, or same URL directory).
+   *
+   * @private
+   */
+  private resolveShardURL(shardEntry: string, config: DownloadConfig, primaryURL: string): string {
+    if (/^https?:\/\//i.test(shardEntry)) {
+      return shardEntry;
+    }
+    if (config.source === 'huggingface') {
+      // Preserve any directory prefix inside the repo (file: 'subdir/model-...')
+      const hfFile = config.file!.includes('/')
+        ? config.file!.replace(/[^/]+$/, shardEntry)
+        : shardEntry;
+      return getHuggingFaceURL(config.repo!, hfFile);
+    }
+    return primaryURL.slice(0, primaryURL.lastIndexOf('/') + 1) + shardEntry;
+  }
+
+  /**
+   * Download a multi-shard GGUF model into a per-model subdirectory.
+   *
+   * All shards are downloaded sequentially with aggregate progress.
+   * ModelInfo.path points at the first shard (llama-server auto-discovers
+   * the siblings); ModelInfo.size is the aggregate across shards.
+   *
+   * @private
+   */
+  private async downloadShardedModel(
+    config: DownloadConfig,
+    primaryURL: string,
+    sourceRepo: string | undefined,
+    sourceFile: string | undefined,
+    primaryFilename: string,
+    extraShardFiles: string[]
+  ): Promise<ModelInfo> {
+    const modelId = this.generateModelId(config.name);
+
+    // Idempotency guard: prevent silent metadata overwrite
+    try {
+      await storageManager.loadModelMetadata(config.type, modelId);
+      throw new DownloadError(`Model already exists: ${modelId}`, { modelId });
+    } catch (error) {
+      if (error instanceof DownloadError) throw error;
+      // FileSystemError means metadata doesn't exist — proceed with download
+    }
+
+    const modelDir = getModelDirectory(config.type, modelId);
+    await mkdir(modelDir, { recursive: true });
+
+    interface ShardItem {
+      url: string;
+      filename: string;
+      destination: string;
+    }
+
+    const shardItems: ShardItem[] = [
+      {
+        url: primaryURL,
+        filename: primaryFilename,
+        destination: path.join(modelDir, sanitizeFilename(primaryFilename)),
+      },
+    ];
+    for (const entry of extraShardFiles) {
+      const url = this.resolveShardURL(entry, config, primaryURL);
+      const shardFilename = this.extractFilename(
+        url,
+        /^https?:\/\//i.test(entry) ? undefined : entry
+      );
+      shardItems.push({
+        url,
+        filename: shardFilename,
+        destination: path.join(modelDir, sanitizeFilename(shardFilename)),
+      });
+    }
+
+    // Refuse to overwrite any existing shard file
+    for (const item of shardItems) {
+      if (await fileExists(item.destination)) {
+        throw new DownloadError(`Model file already exists: ${item.filename}`, {
+          path: item.destination,
+        });
+      }
+    }
+
+    // Fetch GGUF metadata from the FIRST shard (the header lives there);
+    // fatal on failure, mirroring the single-file download path
+    let ggufMetadata: GGUFMetadata | undefined;
+    try {
+      const parsedGGUF = await fetchGGUFMetadata(primaryURL);
+      ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      throw new DownloadError(`Failed to fetch GGUF metadata before download: ${errorMessage}`, {
+        url: primaryURL,
+        originalError: error,
+        suggestion:
+          'Verify the URL points to a valid GGUF file. Check network connectivity if the error persists.',
+      });
+    }
+
+    // Pre-fetch shard sizes for aggregate progress (10s timeout each; non-fatal)
+    const itemSizes: number[] = [];
+    await Promise.all(
+      shardItems.map(async (item, index) => {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10_000);
+          const response = await fetch(item.url, { method: 'HEAD', signal: controller.signal });
+          clearTimeout(timeout);
+          itemSizes[index] = parseInt(response.headers.get('content-length') || '0', 10);
+        } catch {
+          itemSizes[index] = 0; // Unknown size, adjusted when the GET arrives
+        }
+      })
+    );
+    let totalBytes = itemSizes.reduce((sum, s) => sum + s, 0);
+
+    // Download shards sequentially with aggregate progress
+    const downloadedPaths: string[] = [];
+    let completedBytes = 0;
+
+    try {
+      for (let i = 0; i < shardItems.length; i++) {
+        const item = shardItems[i]!;
+
+        const wrappedProgress = config.onProgress
+          ? (downloaded: number, itemTotal: number) => {
+              if (itemSizes[i] === 0 && itemTotal > 0) {
+                itemSizes[i] = itemTotal;
+                totalBytes = itemSizes.reduce((sum, s) => sum + s, 0);
+              }
+              const aggregateDownloaded = completedBytes + downloaded;
+              const clampedTotal = Math.max(totalBytes, aggregateDownloaded);
+              config.onProgress!(aggregateDownloaded, clampedTotal);
+            }
+          : undefined;
+
+        await this.downloader.download({
+          url: item.url,
+          destination: item.destination,
+          onProgress: wrappedProgress,
+        });
+        downloadedPaths.push(item.destination);
+        completedBytes += await getFileSize(item.destination);
+      }
+
+      // Verify the provided checksum against the FIRST shard
+      if (config.checksum) {
+        const calculatedChecksum = await calculateSHA256(shardItems[0]!.destination);
+        const expectedChecksum = config.checksum.replace(/^sha256:/, '');
+        if (calculatedChecksum !== expectedChecksum) {
+          throw new DownloadError('Checksum verification failed', {
+            expected: expectedChecksum,
+            actual: calculatedChecksum,
+          });
+        }
+      }
+    } catch (error) {
+      // Clean up files downloaded in this attempt, then the dir if empty
+      for (const filePath of downloadedPaths) {
+        try {
+          await deleteFile(filePath);
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+      try {
+        await rmdir(modelDir);
+      } catch {
+        // Directory not empty or doesn't exist — ignore
+      }
+
+      if (error instanceof DownloadError) {
+        throw error;
+      }
+      throw new DownloadError('Multi-shard download failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    // Build the shard list (all shards, in order, first = primary)
+    const shards: ShardInfo[] = [];
+    let aggregateSize = 0;
+    for (let i = 0; i < shardItems.length; i++) {
+      const item = shardItems[i]!;
+      const fileSize = await getFileSize(item.destination);
+      aggregateSize += fileSize;
+      const shard: ShardInfo = { path: item.destination, size: fileSize };
+      if (i === 0 && config.checksum) {
+        shard.checksum = formatChecksum(config.checksum.replace(/^sha256:/, ''));
+      }
+      shards.push(shard);
+    }
+
+    const modelInfo: ModelInfo = {
+      id: modelId,
+      name: config.name,
+      type: config.type,
+      size: aggregateSize,
+      path: shardItems[0]!.destination,
+      downloadedAt: new Date().toISOString(),
+      source: {
+        type: config.source,
+        url: primaryURL,
+        repo: sourceRepo,
+        file: sourceFile,
+      },
+      checksum: config.checksum
+        ? formatChecksum(config.checksum.replace(/^sha256:/, ''))
+        : undefined,
+      supportsReasoning: detectReasoningSupport(primaryFilename),
+      ggufMetadata,
+      shards,
+    };
+
     await storageManager.saveModelMetadata(modelInfo);
 
     return modelInfo;

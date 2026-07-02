@@ -632,6 +632,149 @@ describe('ModelManager', () => {
     });
   });
 
+  describe('multi-shard GGUF downloads', () => {
+    const createHeadResponse = (contentLength: number) =>
+      ({
+        headers: {
+          get: (name: string) => (name === 'content-length' ? String(contentLength) : null),
+        },
+      }) as unknown as Response;
+
+    const shardedConfig: DownloadConfig = {
+      source: 'huggingface',
+      repo: 'org/Big-GGUF',
+      file: 'big-model-00001-of-00003.gguf',
+      name: 'Big Model',
+      type: 'llm',
+    };
+
+    let fetchSpy: jest.Spied<typeof globalThis.fetch>;
+
+    beforeEach(() => {
+      mockDownload.mockResolvedValue(undefined);
+      mockFileExists.mockResolvedValue(false);
+      mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+      // Idempotency guard: model doesn't exist yet
+      mockStorageManager.loadModelMetadata.mockRejectedValue(new Error('not found'));
+      mockGetHuggingFaceURL.mockImplementation(
+        (repo: string, file: string) => `https://huggingface.co/${repo}/resolve/main/${file}`
+      );
+      mockGetFileSize.mockResolvedValue(1000);
+      fetchSpy = jest
+        .spyOn(globalThis, 'fetch')
+        .mockImplementation(async () => createHeadResponse(1000));
+    });
+
+    afterEach(() => {
+      fetchSpy.mockRestore();
+    });
+
+    it('should auto-detect shard naming and download all siblings', async () => {
+      const model = await modelManager.downloadModel(shardedConfig);
+
+      expect(mockDownload).toHaveBeenCalledTimes(3);
+      const urls = mockDownload.mock.calls.map((c: any) => c[0].url);
+      expect(urls[0]).toContain('big-model-00001-of-00003.gguf');
+      expect(urls[1]).toContain('big-model-00002-of-00003.gguf');
+      expect(urls[2]).toContain('big-model-00003-of-00003.gguf');
+
+      // All shards land in the per-model subdirectory (normalize Windows separators)
+      for (const call of mockDownload.mock.calls) {
+        expect(String((call as any)[0].destination).replace(/\\/g, '/')).toContain('/big-model/');
+      }
+      expect(mockMkdir).toHaveBeenCalledWith(expect.stringContaining('big-model'), {
+        recursive: true,
+      });
+
+      // path = first shard; shards lists all; size is the aggregate
+      expect(model.path).toContain('big-model-00001-of-00003.gguf');
+      expect(model.shards).toHaveLength(3);
+      expect(model.size).toBe(3000);
+
+      // GGUF metadata fetched once, from the first shard only
+      expect(ggufMockState.fetchGGUFMetadataCallCount).toBe(1);
+
+      expect(mockStorageManager.saveModelMetadata).toHaveBeenCalledWith(
+        expect.objectContaining({ shards: expect.arrayContaining([expect.any(Object)]) })
+      );
+    });
+
+    it('should treat -00001-of-00001 as a regular single file', async () => {
+      const model = await modelManager.downloadModel({
+        ...shardedConfig,
+        file: 'small-00001-of-00001.gguf',
+        name: 'Small Model',
+      });
+
+      expect(mockDownload).toHaveBeenCalledTimes(1);
+      expect(model.shards).toBeUndefined();
+    });
+
+    it('should reject a non-first shard as the primary file', async () => {
+      await expect(
+        modelManager.downloadModel({ ...shardedConfig, file: 'big-model-00002-of-00003.gguf' })
+      ).rejects.toThrow(/FIRST shard/);
+
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it('should honor explicit shardFiles (filenames and full URLs)', async () => {
+      await modelManager.downloadModel({
+        source: 'url',
+        url: 'https://example.com/models/weird-a.gguf',
+        name: 'Weird Model',
+        type: 'llm',
+        shardFiles: ['weird-b.gguf', 'https://cdn.example.com/weird-c.gguf'],
+      });
+
+      expect(mockDownload).toHaveBeenCalledTimes(3);
+      const urls = mockDownload.mock.calls.map((c: any) => c[0].url);
+      expect(urls[1]).toBe('https://example.com/models/weird-b.gguf');
+      expect(urls[2]).toBe('https://cdn.example.com/weird-c.gguf');
+    });
+
+    it('should clean up downloaded shards when a later shard fails', async () => {
+      mockDownload
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(new Error('network error'));
+
+      await expect(modelManager.downloadModel(shardedConfig)).rejects.toThrow(DownloadError);
+
+      expect(mockDeleteFile).toHaveBeenCalledWith(
+        expect.stringContaining('big-model-00001-of-00003.gguf')
+      );
+      expect(mockRmdir).toHaveBeenCalled();
+    });
+
+    it('should report aggregate progress across shards', async () => {
+      const progressCalls: Array<[number, number]> = [];
+      mockDownload.mockImplementation(async (opts: any) => {
+        opts.onProgress?.(500, 1000);
+      });
+
+      await modelManager.downloadModel({
+        ...shardedConfig,
+        onProgress: (d: number, t: number) => progressCalls.push([d, t]),
+      });
+
+      // HEAD sizes: 3 × 1000 = 3000 total; each shard reports 500 mid-download
+      expect(progressCalls[0]).toEqual([500, 3000]);
+      expect(progressCalls[1]).toEqual([1500, 3000]);
+      expect(progressCalls[2]).toEqual([2500, 3000]);
+    });
+
+    it('should preserve original casing when deriving sibling names', async () => {
+      await modelManager.downloadModel({
+        ...shardedConfig,
+        file: 'BIG-00001-OF-00002.GGUF',
+        name: 'Caps Model',
+      });
+
+      const urls = mockDownload.mock.calls.map((c: any) => c[0].url);
+      expect(urls[1]).toContain('BIG-00002-OF-00002.GGUF');
+    });
+  });
+
   describe('downloadMultiComponentModel()', () => {
     // Helper: create a mock HEAD response with content-length
     const createHeadResponse = (contentLength: number) =>

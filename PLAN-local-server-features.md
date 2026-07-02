@@ -110,17 +110,17 @@ Each phase is a PR-sized, independently green unit (`npm run build` 0 errors + `
 **Goal**: big models (`...-00001-of-0000N.gguf`) download and launch.
 
 **Work**:
-1. [ ] **Auto-detection**: in `ModelManager.downloadModel`, when the resolved filename matches `/-(\d{5})-of-(\d{5})\.gguf$/i`, derive all sibling shard names automatically (HF source: same repo; URL source: same base URL with substituted filename). Explicit `DownloadConfig.shardFiles?: string[]` overrides/supplements for non-standard naming (gmbench's `model_extra_files` equivalent).
-2. [ ] **Storage**: sharded models live in a per-model subdirectory (reuse `getModelDirectory`, `paths.ts:83`); `ModelInfo.path` = first shard; new `ModelInfo.shards?: Array<{ path: string; size: number; checksum?: string }>`; `ModelInfo.size` = aggregate. The metadata sidecar stays at `models/{type}/{modelId}.json` (`getModelMetadataPath`, `paths.ts:100`), **outside** the subdirectory — same as multi-component; only shard files live inside. Do **not** overload the role-keyed diffusion `components` machinery — shards are ordered pieces of one model, not roles.
-3. [ ] **Download flow**: sequential shard downloads with aggregate progress (HEAD pre-fetch for totals) and partial-failure cleanup — mirror the multi-component patterns (`ModelManager.ts:262-520`). GGUF metadata from the first shard only (header lives there). `detectReasoningSupport` on the primary filename.
-4. [ ] **StorageManager**: `deleteModelFiles`, `verifyModelIntegrity`, `getStorageUsed` gain a `shards` branch mirroring the existing `components` branches (`StorageManager.ts:193-267, 351-406, 420-450`).
-5. [ ] `buildCommandLineArgs` needs no change (`-m` gets `modelInfo.path` = first shard; siblings adjacent).
-6. [ ] New `ShardInfo`-style type exported from `src/index.ts` types block.
+1. [x] **Auto-detection**: in `ModelManager.downloadModel`, when the resolved filename matches `/-(\d{5})-of-(\d{5})\.gguf$/i`, derive all sibling shard names automatically (HF source: same repo; URL source: same base URL with substituted filename). Explicit `DownloadConfig.shardFiles?: string[]` overrides/supplements for non-standard naming (gmbench's `model_extra_files` equivalent).
+2. [x] **Storage**: sharded models live in a per-model subdirectory (reuse `getModelDirectory`, `paths.ts:83`); `ModelInfo.path` = first shard; new `ModelInfo.shards?: Array<{ path: string; size: number; checksum?: string }>`; `ModelInfo.size` = aggregate. The metadata sidecar stays at `models/{type}/{modelId}.json` (`getModelMetadataPath`, `paths.ts:100`), **outside** the subdirectory — same as multi-component; only shard files live inside. Do **not** overload the role-keyed diffusion `components` machinery — shards are ordered pieces of one model, not roles.
+3. [x] **Download flow**: sequential shard downloads with aggregate progress (HEAD pre-fetch for totals) and partial-failure cleanup — mirror the multi-component patterns (`ModelManager.ts:262-520`). GGUF metadata from the first shard only (header lives there). `detectReasoningSupport` on the primary filename.
+4. [x] **StorageManager**: `deleteModelFiles`, `verifyModelIntegrity`, `getStorageUsed` gain a `shards` branch mirroring the existing `components` branches (`StorageManager.ts:193-267, 351-406, 420-450`).
+5. [x] `buildCommandLineArgs` needs no change (`-m` gets `modelInfo.path` = first shard; siblings adjacent).
+6. [x] New `ShardInfo`-style type exported from `src/index.ts` types block.
 
 **Tests**: `ModelManager.test.ts` — auto-derivation from the shard pattern, explicit `shardFiles`, aggregate progress, partial-failure cleanup; `StorageManager.test.ts` — delete/verify/storage-used with shards; a case asserting `ModelInfo.path` points at shard 1.
 
 **Verification**:
-- [ ] `npm test` green; unit coverage for the pattern-derivation edge cases (single-shard match `00001-of-00001`, mixed case).
+- [x] `npm test` green (451/451); pattern edge cases covered (single-shard 00001-of-00001, uppercase names preserved, non-first-shard rejection, explicit shardFiles with URLs, aggregate progress, failure cleanup).
 
 ### Phase 4: Lifecycle niceties
 

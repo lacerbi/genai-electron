@@ -267,9 +267,12 @@ export type {
   DiffusionComponentInfo,
   DiffusionModelComponents,
   DiffusionComponentDownload,
+  ShardInfo,
   // Server types
   ServerStatus,
   HealthStatus,
+  KVCacheType,
+  FlashAttentionSetting,
   ServerConfig,
   ServerInfo,
   LlamaServerConfig,

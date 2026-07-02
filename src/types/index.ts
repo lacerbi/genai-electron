@@ -26,12 +26,15 @@ export type {
   DiffusionComponentInfo,
   DiffusionModelComponents,
   DiffusionComponentDownload,
+  ShardInfo,
 } from './models.js';
 
 // Server types
 export type {
   ServerStatus,
   HealthStatus,
+  KVCacheType,
+  FlashAttentionSetting,
   ServerConfig,
   ServerInfo,
   LlamaServerConfig,
