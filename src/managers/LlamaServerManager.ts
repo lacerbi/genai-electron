@@ -21,8 +21,14 @@ import type {
   ModelInfo,
 } from '../types/index.js';
 import { ServerError, InsufficientResourcesError } from '../errors/index.js';
-import { BINARY_VERSIONS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
+import { BINARY_VERSIONS, DEFAULT_PORTS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
 import { fileExists } from '../utils/file-utils.js';
+import { debugLog } from '../utils/debug-log.js';
+
+/**
+ * Internal config shape after the port has been resolved to a concrete number
+ */
+type ResolvedLlamaServerConfig = LlamaServerConfig & { port: number };
 
 /**
  * LlamaServerManager class
@@ -72,6 +78,8 @@ export class LlamaServerManager extends ServerManager {
     'batchSize',
     'useMmap',
     'useMlock',
+    'startupTimeout',
+    'jinja',
   ]);
 
   private processManager: ProcessManager;
@@ -126,6 +134,10 @@ export class LlamaServerManager extends ServerManager {
 
     this.setStatus('starting');
 
+    // Resolve the port once, up front — every later step (availability check,
+    // health polling, CLI args, saved config for restart) uses this value.
+    const resolvedPort = config.port ?? DEFAULT_PORTS.llama;
+
     try {
       // 1. Validate model exists
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
@@ -151,10 +163,13 @@ export class LlamaServerManager extends ServerManager {
       this.binaryPath = await this.ensureBinary(modelInfo.path, config.forceValidation);
 
       // 4. Check if port is in use
-      await this.checkPortAvailability(config.port);
+      await this.checkPortAvailability(resolvedPort);
 
       // 5. Auto-configure if needed
-      const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo);
+      const finalConfig = await this.autoConfigureIfNeeded(
+        { ...config, port: resolvedPort },
+        modelInfo
+      );
 
       // 6. Save final configuration (AFTER auto-configuration)
       this._config = finalConfig;
@@ -204,7 +219,10 @@ export class LlamaServerManager extends ServerManager {
       );
 
       // 10. Wait for server to be healthy
-      await waitForHealthy(finalConfig.port, DEFAULT_TIMEOUTS.serverStart);
+      await waitForHealthy(
+        finalConfig.port,
+        finalConfig.startupTimeout ?? DEFAULT_TIMEOUTS.serverStart
+      );
 
       this._startedAt = new Date();
       this.setStatus('running');
@@ -344,14 +362,13 @@ export class LlamaServerManager extends ServerManager {
    * @private
    */
   private async autoConfigureIfNeeded(
-    config: ServerConfig,
+    config: ServerConfig & { port: number },
     modelInfo: any
-  ): Promise<LlamaServerConfig> {
-    console.log('[LlamaServer] autoConfigureIfNeeded called');
-    console.log('[LlamaServer] Input config:', JSON.stringify(config, null, 2));
+  ): Promise<ResolvedLlamaServerConfig> {
+    debugLog('[LlamaServer] autoConfigureIfNeeded input:', JSON.stringify(config));
 
     const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo);
-    console.log('[LlamaServer] Optimal config:', JSON.stringify(optimalConfig, null, 2));
+    debugLog('[LlamaServer] Optimal config:', JSON.stringify(optimalConfig));
 
     const finalConfig = {
       ...config,
@@ -360,17 +377,9 @@ export class LlamaServerManager extends ServerManager {
       gpuLayers: config.gpuLayers ?? optimalConfig.gpuLayers,
       parallelRequests: config.parallelRequests ?? optimalConfig.parallelRequests,
       flashAttention: config.flashAttention ?? optimalConfig.flashAttention,
-    } as LlamaServerConfig;
+    } as ResolvedLlamaServerConfig;
 
-    console.log('[LlamaServer] Final config:', JSON.stringify(finalConfig, null, 2));
-    console.log('[LlamaServer] gpuLayers decision:');
-    console.log('  - config.gpuLayers:', config.gpuLayers);
-    console.log('  - typeof:', typeof config.gpuLayers);
-    console.log('  - is undefined?:', config.gpuLayers === undefined);
-    console.log('  - is null?:', config.gpuLayers === null);
-    console.log('  - is 0?:', config.gpuLayers === 0);
-    console.log('  - optimalConfig.gpuLayers:', optimalConfig.gpuLayers);
-    console.log('  - final value:', finalConfig.gpuLayers);
+    debugLog('[LlamaServer] Final config:', JSON.stringify(finalConfig));
 
     return finalConfig;
   }
@@ -378,25 +387,25 @@ export class LlamaServerManager extends ServerManager {
   /**
    * Build command-line arguments for llama-server
    *
-   * Automatically adds --jinja --reasoning-format deepseek flags
-   * for models that support reasoning (based on supportsReasoning flag).
+   * --jinja is passed unconditionally (unless config.jinja === false): the
+   * model's embedded chat template is required for chat_template_kwargs
+   * features (e.g. genai-lite's reasoning toggle on hybrid models). Reasoning
+   * extraction itself is left to the server default (--reasoning-format auto).
    *
-   * @param config - Server configuration
-   * @param modelInfo - Model information (includes path and supportsReasoning)
+   * @param config - Server configuration (port already resolved)
+   * @param modelInfo - Model information (includes path)
    * @returns Array of command-line arguments
    * @private
    */
-  private buildCommandLineArgs(config: LlamaServerConfig, modelInfo: ModelInfo): string[] {
+  private buildCommandLineArgs(config: ResolvedLlamaServerConfig, modelInfo: ModelInfo): string[] {
     const args: string[] = [];
 
     // Model path
     args.push('-m', modelInfo.path);
 
-    // Reasoning support flags (must come before other options)
-    // These enable extraction of <think>...</think> tags for models like Qwen3, DeepSeek-R1
-    if (modelInfo.supportsReasoning) {
+    // Use the model's embedded Jinja chat template (default: on)
+    if (config.jinja !== false) {
       args.push('--jinja');
-      args.push('--reasoning-format', 'deepseek');
     }
 
     // Port
@@ -429,6 +438,31 @@ export class LlamaServerManager extends ServerManager {
     // Flash attention
     if (config.flashAttention) {
       args.push('--flash-attn');
+    }
+
+    // Model alias reported by the API (see LlamaServerConfig.modelAlias warning)
+    if (config.modelAlias !== undefined) {
+      args.push('--alias', config.modelAlias);
+    }
+
+    // Logical batch size
+    if (config.batchSize !== undefined) {
+      args.push('-b', String(config.batchSize));
+    }
+
+    // Continuous batching is the server default; only the opt-out is emitted
+    if (config.continuousBatching === false) {
+      args.push('--no-cont-batching');
+    }
+
+    // mmap is the server default; only the opt-out is emitted
+    if (config.useMmap === false) {
+      args.push('--no-mmap');
+    }
+
+    // Lock model in memory
+    if (config.useMlock === true) {
+      args.push('--mlock');
     }
 
     return args;

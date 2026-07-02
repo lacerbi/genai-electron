@@ -294,6 +294,25 @@ describe('LlamaServerManager', () => {
       expect(args).toContain('4');
     });
 
+    it('should default the port to 8080 when omitted', async () => {
+      const { port: _omitted, ...configWithoutPort } = mockConfig;
+
+      const info = await llamaServer.start(configWithoutPort);
+
+      expect(info.port).toBe(8080);
+      expect(mockWaitForHealthy).toHaveBeenCalledWith(8080, expect.any(Number));
+      const args = mockProcessSpawn.mock.calls[0][1] as string[];
+      const portIndex = args.indexOf('--port');
+      expect(portIndex).toBeGreaterThan(-1);
+      expect(args[portIndex + 1]).toBe('8080');
+    });
+
+    it('should thread startupTimeout into the health check', async () => {
+      await llamaServer.start({ ...mockConfig, startupTimeout: 300000 });
+
+      expect(mockWaitForHealthy).toHaveBeenCalledWith(8080, 300000);
+    });
+
     it('should download binary if not exists', async () => {
       // The BinaryManager.ensureBinary() method handles downloading
       // It returns the path to the binary after downloading
@@ -340,6 +359,74 @@ describe('LlamaServerManager', () => {
       await llamaServer.start(mockConfig);
 
       expect(startedHandler).toHaveBeenCalled();
+    });
+  });
+
+  describe('command-line flag emission', () => {
+    const spawnArgs = (): string[] => mockProcessSpawn.mock.calls[0][1] as string[];
+
+    it('should always pass --jinja and never --reasoning-format', async () => {
+      await llamaServer.start(mockConfig);
+
+      const args = spawnArgs();
+      expect(args).toContain('--jinja');
+      expect(args).not.toContain('--reasoning-format');
+    });
+
+    it('should omit --jinja when jinja is false', async () => {
+      await llamaServer.start({ ...mockConfig, jinja: false });
+
+      expect(spawnArgs()).not.toContain('--jinja');
+    });
+
+    it('should pass --alias when modelAlias is set', async () => {
+      await llamaServer.start({ ...mockConfig, modelAlias: 'my-model' });
+
+      const args = spawnArgs();
+      const aliasIndex = args.indexOf('--alias');
+      expect(aliasIndex).toBeGreaterThan(-1);
+      expect(args[aliasIndex + 1]).toBe('my-model');
+    });
+
+    it('should pass -b when batchSize is set', async () => {
+      await llamaServer.start({ ...mockConfig, batchSize: 512 });
+
+      const args = spawnArgs();
+      const batchIndex = args.indexOf('-b');
+      expect(batchIndex).toBeGreaterThan(-1);
+      expect(args[batchIndex + 1]).toBe('512');
+    });
+
+    it('should pass --no-cont-batching only when continuousBatching is false', async () => {
+      await llamaServer.start({ ...mockConfig, continuousBatching: false });
+      expect(spawnArgs()).toContain('--no-cont-batching');
+    });
+
+    it('should pass --no-mmap only when useMmap is false', async () => {
+      await llamaServer.start({ ...mockConfig, useMmap: false });
+      expect(spawnArgs()).toContain('--no-mmap');
+    });
+
+    it('should pass --mlock only when useMlock is true', async () => {
+      await llamaServer.start({ ...mockConfig, useMlock: true });
+      expect(spawnArgs()).toContain('--mlock');
+    });
+
+    it('should not emit optional flags when their fields are unset', async () => {
+      await llamaServer.start(mockConfig);
+
+      const args = spawnArgs();
+      for (const flag of ['--alias', '-b', '--no-cont-batching', '--no-mmap', '--mlock']) {
+        expect(args).not.toContain(flag);
+      }
+    });
+
+    it('should not emit --no-cont-batching or --no-mmap when set to true', async () => {
+      await llamaServer.start({ ...mockConfig, continuousBatching: true, useMmap: true });
+
+      const args = spawnArgs();
+      expect(args).not.toContain('--no-cont-batching');
+      expect(args).not.toContain('--no-mmap');
     });
   });
 

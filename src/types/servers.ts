@@ -20,8 +20,12 @@ export interface ServerConfig {
   /** Model ID to load */
   modelId: string;
 
-  /** Port to listen on */
-  port: number;
+  /**
+   * Port to listen on
+   * Optional — defaults to DEFAULT_PORTS.llama (8080) for LlamaServerManager
+   * and DEFAULT_PORTS.diffusion (8081) for DiffusionServerManager.
+   */
+  port?: number;
 
   /** Number of CPU threads (auto-detected if not specified) */
   threads?: number;
@@ -44,6 +48,13 @@ export interface ServerConfig {
    * Set to true to re-run Phase 1 & Phase 2 tests (e.g., after driver updates)
    */
   forceValidation?: boolean;
+
+  /**
+   * Maximum time to wait for the server to become healthy after spawn (milliseconds)
+   * Default: DEFAULT_TIMEOUTS.serverStart (120000 = 2 minutes).
+   * Cold loads of large models (10-20 GB GGUFs, slow disks) may need more.
+   */
+  startupTimeout?: number;
 }
 
 /**
@@ -77,20 +88,40 @@ export interface ServerInfo {
  * Extends base ServerConfig with llama.cpp-specific options
  */
 export interface LlamaServerConfig extends ServerConfig {
-  /** Model alias (for API identification) */
+  /**
+   * Model alias reported by the server's API (--alias)
+   *
+   * WARNING: clients such as genai-lite detect the model family (sampling
+   * defaults, reasoning capabilities) from the model name the server reports.
+   * Setting an alias masks the GGUF filename and can break that detection —
+   * leave unset unless you have a specific reason.
+   */
   modelAlias?: string;
 
-  /** Enable continuous batching */
+  /**
+   * Continuous batching (llama-server default: enabled)
+   * Set to false to disable via --no-cont-batching; true/undefined emit nothing.
+   */
   continuousBatching?: boolean;
 
-  /** Batch size */
+  /** Logical batch size (-b) */
   batchSize?: number;
 
-  /** Enable mmap for model loading */
+  /**
+   * Memory-map the model file (llama-server default: enabled)
+   * Set to false to disable via --no-mmap; true/undefined emit nothing.
+   */
   useMmap?: boolean;
 
-  /** Lock model in memory (prevents swapping) */
+  /** Lock model in memory to prevent swapping (--mlock) */
   useMlock?: boolean;
+
+  /**
+   * Use the model's embedded Jinja chat template (--jinja)
+   * Default: true (required for chat_template_kwargs features such as
+   * genai-lite's reasoning toggle on hybrid models). Set to false to disable.
+   */
+  jinja?: boolean;
 }
 
 /**

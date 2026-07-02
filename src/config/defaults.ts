@@ -21,8 +21,8 @@ export const DEFAULT_PORTS = {
 export const DEFAULT_TIMEOUTS = {
   /** Download timeout */
   download: 300000, // 5 minutes
-  /** Server start timeout */
-  serverStart: 60000, // 1 minute
+  /** Server start timeout (covers cold model loads of 10-20 GB GGUFs; override per-start via ServerConfig.startupTimeout) */
+  serverStart: 120000, // 2 minutes
   /** Server stop timeout */
   serverStop: 10000, // 10 seconds
   /** Health check timeout */

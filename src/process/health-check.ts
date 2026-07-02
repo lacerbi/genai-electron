@@ -23,7 +23,9 @@ export interface HealthCheckResponse {
 /**
  * Check server health at the given port
  *
- * Makes a GET request to http://localhost:{port}/health and parses the response.
+ * Makes a GET request to http://127.0.0.1:{port}/health and parses the response.
+ * Uses 127.0.0.1 rather than localhost: on Windows, localhost resolves to ::1 first
+ * and llama-server binds IPv4 loopback only, costing ~2s IPv6 fallback per request.
  *
  * @param port - Server port to check
  * @param timeout - Request timeout in milliseconds (default: 5000)
@@ -42,7 +44,7 @@ export async function checkHealth(port: number, timeout = 5000): Promise<HealthC
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const response = await fetch(`http://localhost:${port}/health`, {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
       signal: controller.signal,
       headers: {
         Accept: 'application/json',
@@ -188,7 +190,7 @@ export async function isServerResponding(port: number, timeout = 2000): Promise<
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const response = await fetch(`http://localhost:${port}/health`, {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
       signal: controller.signal,
     });
     clearTimeout(timeoutId);

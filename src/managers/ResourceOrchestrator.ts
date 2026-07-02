@@ -14,6 +14,7 @@ import type { DiffusionServerManager } from './DiffusionServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import type { ServerConfig, ImageGenerationConfig, ImageGenerationResult } from '../types/index.js';
 import { ServerError } from '../errors/index.js';
+import { debugLog } from '../utils/debug-log.js';
 
 /**
  * Saved LLM state for restoration
@@ -114,12 +115,12 @@ export class ResourceOrchestrator {
    * ```
    */
   async orchestrateImageGeneration(config: ImageGenerationConfig): Promise<ImageGenerationResult> {
-    console.log('[Orchestrator] orchestrateImageGeneration called');
+    debugLog('[Orchestrator] orchestrateImageGeneration called');
 
     // If a previous generation's reload is still in progress, wait for it
     // to finish before potentially offloading again (prevents VRAM contention)
     if (this.pendingReload) {
-      console.log('[Orchestrator] Awaiting pending LLM reload from previous generation...');
+      debugLog('[Orchestrator] Awaiting pending LLM reload from previous generation...');
       await this.pendingReload;
       this.pendingReload = null;
     }
@@ -128,35 +129,35 @@ export class ResourceOrchestrator {
     const needsOffload = await this.needsOffloadForImage();
     const llamaIsRunning = this.llamaServer.isRunning();
 
-    console.log('[Orchestrator] needsOffload:', needsOffload);
-    console.log('[Orchestrator] llamaServer.isRunning():', llamaIsRunning);
+    debugLog('[Orchestrator] needsOffload:', needsOffload);
+    debugLog('[Orchestrator] llamaServer.isRunning():', llamaIsRunning);
 
     if (needsOffload && llamaIsRunning) {
-      console.log('[Orchestrator] ⚠️  Resources constrained - offloading LLM before generation');
+      debugLog('[Orchestrator] ⚠️  Resources constrained - offloading LLM before generation');
       // Save LLM state and offload
       await this.offloadLLM();
 
       let result: ImageGenerationResult;
       try {
         // Generate image directly (bypassing orchestrator to avoid recursion)
-        console.log('[Orchestrator] Generating image with LLM offloaded...');
+        debugLog('[Orchestrator] Generating image with LLM offloaded...');
         result = await this.diffusionServer.executeImageGeneration(config);
       } catch (error) {
         // Image generation failed — still reload LLM in background, then rethrow
-        console.log('[Orchestrator] Image generation failed, reloading LLM in background...');
+        debugLog('[Orchestrator] Image generation failed, reloading LLM in background...');
         this.fireAndForgetReload();
         throw error;
       }
 
       // Image ready — return immediately, reload LLM in background
-      console.log('[Orchestrator] Image ready, reloading LLM in background...');
+      debugLog('[Orchestrator] Image ready, reloading LLM in background...');
       this.fireAndForgetReload();
       return result;
     } else {
       if (!needsOffload) {
-        console.log('[Orchestrator] ✅ Sufficient resources - generating directly without offload');
+        debugLog('[Orchestrator] ✅ Sufficient resources - generating directly without offload');
       } else {
-        console.log('[Orchestrator] ✅ LLM not running - generating directly');
+        debugLog('[Orchestrator] ✅ LLM not running - generating directly');
       }
       // Enough resources, generate directly (bypassing orchestrator to avoid recursion)
       return await this.diffusionServer.executeImageGeneration(config);
@@ -175,7 +176,7 @@ export class ResourceOrchestrator {
    * @private
    */
   private async needsOffloadForImage(): Promise<boolean> {
-    console.log('[Orchestrator] Checking if offload needed...');
+    debugLog('[Orchestrator] Checking if offload needed...');
 
     const memory = this.systemInfo.getMemoryInfo();
     const capabilities = await this.systemInfo.detect();
@@ -187,7 +188,7 @@ export class ResourceOrchestrator {
     // Determine bottleneck resource
     const isGPUSystem = capabilities.gpu.available && capabilities.gpu.vram;
 
-    console.log('[Orchestrator] System type:', isGPUSystem ? 'GPU' : 'CPU-only');
+    debugLog('[Orchestrator] System type:', isGPUSystem ? 'GPU' : 'CPU-only');
 
     if (isGPUSystem) {
       // VRAM is the bottleneck
@@ -195,13 +196,13 @@ export class ResourceOrchestrator {
       const vramNeeded = (llamaUsage.vram || 0) + (diffusionUsage.vram || 0);
       const threshold = totalVRAM * 0.75;
 
-      console.log('[Orchestrator] VRAM Analysis:');
-      console.log('  - LLM VRAM usage:', (llamaUsage.vram || 0) / 1024 ** 3, 'GB');
-      console.log('  - Diffusion VRAM usage:', (diffusionUsage.vram || 0) / 1024 ** 3, 'GB');
-      console.log('  - Total VRAM needed:', vramNeeded / 1024 ** 3, 'GB');
-      console.log('  - Total VRAM available:', totalVRAM / 1024 ** 3, 'GB');
-      console.log('  - Threshold (75%):', threshold / 1024 ** 3, 'GB');
-      console.log('  - Offload needed:', vramNeeded > threshold);
+      debugLog('[Orchestrator] VRAM Analysis:');
+      debugLog('  - LLM VRAM usage:', (llamaUsage.vram || 0) / 1024 ** 3, 'GB');
+      debugLog('  - Diffusion VRAM usage:', (diffusionUsage.vram || 0) / 1024 ** 3, 'GB');
+      debugLog('  - Total VRAM needed:', vramNeeded / 1024 ** 3, 'GB');
+      debugLog('  - Total VRAM available:', totalVRAM / 1024 ** 3, 'GB');
+      debugLog('  - Threshold (75%):', threshold / 1024 ** 3, 'GB');
+      debugLog('  - Offload needed:', vramNeeded > threshold);
 
       // Need offload if combined VRAM usage > 75% of total
       return vramNeeded > threshold;
@@ -210,13 +211,13 @@ export class ResourceOrchestrator {
       const ramNeeded = llamaUsage.ram + diffusionUsage.ram;
       const threshold = memory.available * 0.75;
 
-      console.log('[Orchestrator] RAM Analysis:');
-      console.log('  - LLM RAM usage:', llamaUsage.ram / 1024 ** 3, 'GB');
-      console.log('  - Diffusion RAM usage:', diffusionUsage.ram / 1024 ** 3, 'GB');
-      console.log('  - Total RAM needed:', ramNeeded / 1024 ** 3, 'GB');
-      console.log('  - Available RAM:', memory.available / 1024 ** 3, 'GB');
-      console.log('  - Threshold (75%):', threshold / 1024 ** 3, 'GB');
-      console.log('  - Offload needed:', ramNeeded > threshold);
+      debugLog('[Orchestrator] RAM Analysis:');
+      debugLog('  - LLM RAM usage:', llamaUsage.ram / 1024 ** 3, 'GB');
+      debugLog('  - Diffusion RAM usage:', diffusionUsage.ram / 1024 ** 3, 'GB');
+      debugLog('  - Total RAM needed:', ramNeeded / 1024 ** 3, 'GB');
+      debugLog('  - Available RAM:', memory.available / 1024 ** 3, 'GB');
+      debugLog('  - Threshold (75%):', threshold / 1024 ** 3, 'GB');
+      debugLog('  - Offload needed:', ramNeeded > threshold);
 
       // Need offload if combined RAM usage > 75% of available
       return ramNeeded > threshold;
@@ -238,13 +239,13 @@ export class ResourceOrchestrator {
    */
   private async estimateLLMUsage(): Promise<ResourceRequirements> {
     if (!this.llamaServer.isRunning()) {
-      console.log('[Orchestrator] LLM not running - usage: 0');
+      debugLog('[Orchestrator] LLM not running - usage: 0');
       return { ram: 0, vram: 0 };
     }
 
     const config = this.llamaServer.getConfig();
     if (!config) {
-      console.log('[Orchestrator] LLM config not found - usage: 0');
+      debugLog('[Orchestrator] LLM config not found - usage: 0');
       return { ram: 0, vram: 0 };
     }
 
@@ -255,9 +256,9 @@ export class ResourceOrchestrator {
       // Get actual layer count from GGUF metadata (or fallback to estimation)
       const totalLayers = await this.modelManager.getModelLayerCount(config.modelId);
 
-      console.log('[Orchestrator] LLM model:', config.modelId);
-      console.log('[Orchestrator] LLM model size:', modelInfo.size / 1024 ** 3, 'GB');
-      console.log('[Orchestrator] LLM GPU layers:', gpuLayers, '/', totalLayers);
+      debugLog('[Orchestrator] LLM model:', config.modelId);
+      debugLog('[Orchestrator] LLM model size:', modelInfo.size / 1024 ** 3, 'GB');
+      debugLog('[Orchestrator] LLM GPU layers:', gpuLayers, '/', totalLayers);
 
       if (gpuLayers > 0) {
         // Mixed GPU/CPU
@@ -266,7 +267,7 @@ export class ResourceOrchestrator {
           ram: modelInfo.size * (1 - gpuRatio) * 1.2,
           vram: modelInfo.size * gpuRatio * 1.2,
         };
-        console.log('[Orchestrator] LLM usage (mixed):', {
+        debugLog('[Orchestrator] LLM usage (mixed):', {
           ram: `${result.ram / 1024 ** 3} GB`,
           vram: `${result.vram / 1024 ** 3} GB`,
         });
@@ -277,7 +278,7 @@ export class ResourceOrchestrator {
           ram: modelInfo.size * 1.2,
           vram: 0,
         };
-        console.log('[Orchestrator] LLM usage (CPU-only):', {
+        debugLog('[Orchestrator] LLM usage (CPU-only):', {
           ram: `${result.ram / 1024 ** 3} GB`,
           vram: '0 GB',
         });
@@ -285,7 +286,7 @@ export class ResourceOrchestrator {
       }
     } catch (error) {
       // If we can't get model info, return conservative estimate
-      console.log('[Orchestrator] Failed to get LLM model info:', error);
+      debugLog('[Orchestrator] Failed to get LLM model info:', error);
       return { ram: 0, vram: 0 };
     }
   }
@@ -306,14 +307,14 @@ export class ResourceOrchestrator {
     if (!config) {
       // Default estimate for typical SDXL model (6-7GB)
       const defaultSize = 6.5 * 1024 * 1024 * 1024; // 6.5GB in bytes
-      console.log('[Orchestrator] Diffusion config not found - using default estimate: 6.5GB');
+      debugLog('[Orchestrator] Diffusion config not found - using default estimate: 6.5GB');
       return { ram: defaultSize * 1.2, vram: defaultSize * 1.2 };
     }
 
     try {
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
-      console.log('[Orchestrator] Diffusion model:', config.modelId);
-      console.log('[Orchestrator] Diffusion model size:', modelInfo.size / 1024 ** 3, 'GB');
+      debugLog('[Orchestrator] Diffusion model:', config.modelId);
+      debugLog('[Orchestrator] Diffusion model size:', modelInfo.size / 1024 ** 3, 'GB');
 
       // Diffusion models typically need similar VRAM/RAM as their size
       const usage = modelInfo.size * 1.2;
@@ -321,13 +322,13 @@ export class ResourceOrchestrator {
         ram: usage,
         vram: usage,
       };
-      console.log('[Orchestrator] Diffusion usage:', usage / 1024 ** 3, 'GB (both RAM and VRAM)');
+      debugLog('[Orchestrator] Diffusion usage:', usage / 1024 ** 3, 'GB (both RAM and VRAM)');
       return result;
     } catch (error) {
       // If we can't get model info, return conservative estimate
-      console.log('[Orchestrator] Failed to get diffusion model info:', error);
+      debugLog('[Orchestrator] Failed to get diffusion model info:', error);
       const defaultSize = 6.5 * 1024 * 1024 * 1024;
-      console.log('[Orchestrator] Using default estimate: 6.5GB');
+      debugLog('[Orchestrator] Using default estimate: 6.5GB');
       return { ram: defaultSize * 1.2, vram: defaultSize * 1.2 };
     }
   }
@@ -341,10 +342,10 @@ export class ResourceOrchestrator {
    * @private
    */
   private async offloadLLM(): Promise<void> {
-    console.log('[Orchestrator] offloadLLM called');
+    debugLog('[Orchestrator] offloadLLM called');
 
     if (!this.llamaServer.isRunning()) {
-      console.log('[Orchestrator] LLM not running - nothing to offload');
+      debugLog('[Orchestrator] LLM not running - nothing to offload');
       return;
     }
 
@@ -354,7 +355,7 @@ export class ResourceOrchestrator {
       throw new ServerError('Cannot offload LLM: no configuration found');
     }
 
-    console.log('[Orchestrator] Saving LLM state:', {
+    debugLog('[Orchestrator] Saving LLM state:', {
       modelId: config.modelId,
       port: config.port,
       gpuLayers: config.gpuLayers,
@@ -367,9 +368,9 @@ export class ResourceOrchestrator {
     };
 
     // Stop LLM server gracefully
-    console.log('[Orchestrator] Stopping LLM server...');
+    debugLog('[Orchestrator] Stopping LLM server...');
     await this.llamaServer.stop();
-    console.log('[Orchestrator] ✅ LLM server stopped successfully');
+    debugLog('[Orchestrator] ✅ LLM server stopped successfully');
   }
 
   /**
@@ -381,10 +382,10 @@ export class ResourceOrchestrator {
    * @private
    */
   private async reloadLLM(): Promise<void> {
-    console.log('[Orchestrator] reloadLLM called');
+    debugLog('[Orchestrator] reloadLLM called');
 
     if (!this.savedLLMState || !this.savedLLMState.wasRunning) {
-      console.log('[Orchestrator] No saved LLM state - nothing to reload');
+      debugLog('[Orchestrator] No saved LLM state - nothing to reload');
       return;
     }
 
@@ -392,12 +393,12 @@ export class ResourceOrchestrator {
 
     // First attempt
     try {
-      console.log('[Orchestrator] Restarting LLM with saved config:', {
+      debugLog('[Orchestrator] Restarting LLM with saved config:', {
         modelId: savedConfig.modelId,
         port: savedConfig.port,
       });
       await this.llamaServer.start(savedConfig);
-      console.log('[Orchestrator] ✅ LLM server restarted successfully');
+      debugLog('[Orchestrator] ✅ LLM server restarted successfully');
       this.savedLLMState = undefined;
       return;
     } catch (firstError) {
@@ -406,13 +407,13 @@ export class ResourceOrchestrator {
 
     // Retry after delay (allows OS memory reclamation)
     try {
-      console.log(
+      debugLog(
         `[Orchestrator] Retrying reload after ${ResourceOrchestrator.RELOAD_RETRY_DELAY_MS}ms...`
       );
       await this.delay(ResourceOrchestrator.RELOAD_RETRY_DELAY_MS);
       this.systemInfo.clearCache();
       await this.llamaServer.start(savedConfig);
-      console.log('[Orchestrator] ✅ LLM server restarted on retry');
+      debugLog('[Orchestrator] ✅ LLM server restarted on retry');
       this.savedLLMState = undefined;
     } catch (retryError) {
       // Log error but don't throw - image generation succeeded

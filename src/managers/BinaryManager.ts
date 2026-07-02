@@ -693,7 +693,7 @@ export class BinaryManager {
         try {
           const controller = new AbortController();
           const fetchTimer = setTimeout(() => controller.abort(), 2000);
-          const response = await fetch(`http://localhost:${testPort}/health`, {
+          const response = await fetch(`http://127.0.0.1:${testPort}/health`, {
             signal: controller.signal,
           });
           clearTimeout(fetchTimer);
@@ -723,7 +723,7 @@ export class BinaryManager {
       // Send a test completion request to exercise GPU inference
       const controller = new AbortController();
       const fetchTimer = setTimeout(() => controller.abort(), 5000);
-      const completionResponse = await fetch(`http://localhost:${testPort}/completion`, {
+      const completionResponse = await fetch(`http://127.0.0.1:${testPort}/completion`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: '2+2=', n_predict: 4 }),
