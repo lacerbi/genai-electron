@@ -21,6 +21,9 @@ const TestChat: React.FC<TestChatProps> = ({ serverRunning }) => {
   const [maxTokens, setMaxTokens] = useState(800);
   const [temperature, setTemperature] = useState(0.7);
   const [timeout, setTimeout] = useState(60);
+  // Request-side reasoning toggle: sends settings.reasoning.enabled so hybrid
+  // models (Gemma 4, Qwen 3.5) actually think — requires genai-lite >= 0.9
+  const [reasoningEnabled, setReasoningEnabled] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -46,6 +49,7 @@ const TestChat: React.FC<TestChatProps> = ({ serverRunning }) => {
       const result = await window.api.server.testMessage(message, {
         maxTokens,
         temperature,
+        ...(reasoningEnabled ? { reasoning: { enabled: true } } : {}),
       });
 
       // Handle the response from genai-lite
@@ -187,6 +191,22 @@ const TestChat: React.FC<TestChatProps> = ({ serverRunning }) => {
                 step="10"
                 value={timeout}
                 onChange={(e) => setTimeout(parseInt(e.target.value, 10))}
+                disabled={loading}
+              />
+            </div>
+
+            <div className="setting-group">
+              <label htmlFor="reasoningEnabled">
+                Enable Reasoning:
+                <span className="setting-hint">
+                  Ask hybrid models (Gemma 4, Qwen 3.5) to think before answering
+                </span>
+              </label>
+              <input
+                id="reasoningEnabled"
+                type="checkbox"
+                checked={reasoningEnabled}
+                onChange={(e) => setReasoningEnabled(e.target.checked)}
                 disabled={loading}
               />
             </div>

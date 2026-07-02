@@ -18,7 +18,9 @@ interface LlamaServerConfigForm {
   gpuLayers: number;
   threads: number;
   parallelRequests: number;
-  flashAttention: boolean;
+  flashAttention: 'on' | 'off' | 'auto';
+  cacheTypeK: 'f16' | 'q8_0' | 'q4_0';
+  cacheTypeV: 'f16' | 'q8_0' | 'q4_0';
 }
 
 const LlamaServerControl: React.FC = () => {
@@ -34,7 +36,9 @@ const LlamaServerControl: React.FC = () => {
     gpuLayers: 0,
     threads: 4,
     parallelRequests: 4,
-    flashAttention: false,
+    flashAttention: 'auto',
+    cacheTypeK: 'f16',
+    cacheTypeV: 'f16',
   });
 
   const [startLoading, setStartLoading] = useState(false);

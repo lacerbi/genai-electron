@@ -328,6 +328,18 @@ export class DiffusionServerManager extends ServerManager {
    * @param id - Generation ID (from POST /v1/images/generations)
    * @throws {ServerError} If the generation ID is unknown
    */
+  /**
+   * Get the registry ID of the async generation currently being processed
+   *
+   * Useful for cancelling the in-flight generation when the ID is otherwise
+   * only known to the HTTP client that started it (e.g. genai-lite).
+   *
+   * @returns Generation ID, or undefined when idle
+   */
+  getActiveGenerationId(): string | undefined {
+    return this.activeGeneration?.id;
+  }
+
   async cancelImageGeneration(id: string): Promise<void> {
     const state = this.registry.get(id);
     if (!state) {

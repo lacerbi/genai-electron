@@ -189,6 +189,19 @@ const DiffusionServerControl: React.FC = () => {
     }
   };
 
+  const handleCancelGeneration = async () => {
+    try {
+      await window.api.diffusion.cancel();
+      setGenerateError('Generation cancelled');
+    } catch (err) {
+      setGenerateError(`Cancel failed: ${(err as Error).message}`);
+    }
+    // Note: with genai-lite <= 0.9.0 the awaiting generateImage promise only
+    // settles at its own client timeout; the sd-cli process is killed now.
+    setGenerating(false);
+    setGenerationProgress(null);
+  };
+
   // Match selected model to a preset for recommended settings
   const matchedPreset = MODEL_PRESETS.find((p) => selectedModel.startsWith(p.id));
 
@@ -583,6 +596,11 @@ const DiffusionServerControl: React.FC = () => {
                 'Generate Image'
               )}
             </ActionButton>
+            {generating && (
+              <ActionButton onClick={handleCancelGeneration} variant="danger">
+                Cancel
+              </ActionButton>
+            )}
           </div>
         </Card>
       )}

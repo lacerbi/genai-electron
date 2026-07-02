@@ -162,13 +162,13 @@ Each phase is a PR-sized, independently green unit (`npm run build` 0 errors + `
 
 **Goal**: the combined genai-electron 0.6 + genai-lite 0.9 story, verified end-to-end.
 
-**Gate**: genai-lite 0.9.0 published to npm (use local `npm link`/`file:` only for pre-publish testing; do not commit a local path). Prerequisite per CLAUDE.md: refresh the local genai-lite reference docs (`.ath_materials/genai-lite-docs/` — currently absent in this checkout) with the v0.9.0 docs and read `llm-service.md`/`llamacpp-integration.md` before wiring the toggle.
+**Gate** (checked: NOT met on 2026-07-03, latest npm = 0.8.3): genai-lite 0.9.0 published to npm (use local `npm link`/`file:` only for pre-publish testing; do not commit a local path). Prerequisite per CLAUDE.md: refresh the local genai-lite reference docs (`.ath_materials/genai-lite-docs/` — currently absent in this checkout) with the v0.9.0 docs and read `llm-service.md`/`llamacpp-integration.md` before wiring the toggle.
 
 **Work**:
-1. [ ] `examples/electron-control-panel/package.json`: `genai-lite` → `^0.9.0`; app version 0.3.0 → 0.4.0.
-2. [ ] **Reasoning toggle** in `TestChat.tsx`: checkbox in the settings panel (`:135-193`); send `reasoning: { enabled }` in the settings object (`:46-49`) — passes through the opaque `server:testMessage` IPC unchanged. The existing reasoning display (`:210-223`) then lights up.
-3. [ ] **New server options in the config form**: `flashAttention` becomes a tri-state select (on/off/auto); add `cacheTypeK`/`cacheTypeV` selects (f16/q8_0/q4_0). Update the **duplicated** `LlamaServerConfigForm` interface in both `LlamaServerControl.tsx:14-22` and `LlamaServerConfig.tsx:9-17`, plus the defaults object (`LlamaServerControl.tsx:30-38`). No IPC changes (config forwarded opaquely).
-4. [ ] **Cancel button** for image generation in `DiffusionServerControl`, wired through a new `diffusion:cancel` IPC handler → `diffusionServer.cancelImageGeneration(id)` (+ preload allowlist entry).
+1. [!] BLOCKED (partially done) — app version bumped 0.3.0 → 0.4.0; `genai-lite` stays `^0.5.1` because **0.9.0 is not on npm yet** (latest: 0.8.3, checked 2026-07-03). Bump to `^0.9.0` as a fast-follow when published (plan Risks anticipated this). All other Phase 6 code is version-agnostic pass-through and is in place.
+2. [x] **Reasoning toggle** in `TestChat.tsx`: checkbox in the settings panel (`:135-193`); send `reasoning: { enabled }` in the settings object (`:46-49`) — passes through the opaque `server:testMessage` IPC unchanged. The existing reasoning display (`:210-223`) then lights up.
+3. [x] **New server options in the config form**: `flashAttention` becomes a tri-state select (on/off/auto); add `cacheTypeK`/`cacheTypeV` selects (f16/q8_0/q4_0). Update the **duplicated** `LlamaServerConfigForm` interface in both `LlamaServerControl.tsx:14-22` and `LlamaServerConfig.tsx:9-17`, plus the defaults object (`LlamaServerControl.tsx:30-38`). No IPC changes (config forwarded opaquely).
+4. [x] **Cancel button** for image generation in `DiffusionServerControl`, wired through a new `diffusion:cancel` IPC handler → `diffusionServer.cancelImageGeneration(id)` (+ preload allowlist entry).
 
 **Verification**:
 - [!] GPU-deferred — Manual walkthrough on this machine (the README's First-Run flow + new features): hybrid GGUF (Gemma 4 or Qwen 3.5 from gmbench's model dir) with reasoning toggle on/off — clean content, populated reasoning panel, no `<think>`/channel-marker leakage; KV-quant start visible in server log; image generation cancelled mid-run frees the process and the UI recovers.

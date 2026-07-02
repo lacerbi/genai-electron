@@ -50,6 +50,7 @@ contextBridge.exposeInMainWorld('api', {
     clearLogs: () => ipcRenderer.invoke('diffusion:clearLogs'),
     generateImage: (config: unknown, port?: number) =>
       ipcRenderer.invoke('diffusion:generate', config, port),
+    cancel: () => ipcRenderer.invoke('diffusion:cancel'),
   },
 
   // Resource Orchestrator APIs (Phase 2)
