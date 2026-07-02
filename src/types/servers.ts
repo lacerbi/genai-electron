@@ -14,6 +14,19 @@ export type ServerStatus = 'stopped' | 'starting' | 'running' | 'stopping' | 'cr
 export type HealthStatus = 'ok' | 'loading' | 'error' | 'unknown';
 
 /**
+ * KV-cache quantization type for llama-server --cache-type-k/--cache-type-v
+ * (llama-server default: f16)
+ */
+export type KVCacheType = 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'q5_0' | 'q5_1' | 'iq4_nl';
+
+/**
+ * Flash attention setting: llama-server tri-state, plus boolean for
+ * backwards compatibility (true → 'on', false → 'off').
+ * When unset, nothing is emitted and the server decides ('auto').
+ */
+export type FlashAttentionSetting = boolean | 'on' | 'off' | 'auto';
+
+/**
  * Base server configuration
  */
 export interface ServerConfig {
@@ -39,8 +52,19 @@ export interface ServerConfig {
   /** Number of parallel request slots */
   parallelRequests?: number;
 
-  /** Enable flash attention (if supported) */
-  flashAttention?: boolean;
+  /**
+   * Flash attention ('on' | 'off' | 'auto'; boolean accepted for
+   * backwards compatibility: true → 'on', false → 'off').
+   * Default: unset → server decides ('auto').
+   */
+  flashAttention?: FlashAttentionSetting;
+
+  /**
+   * Host/interface the server binds to (--host)
+   * Default: unset → llama-server's default (127.0.0.1, loopback only).
+   * Health checks target this host (0.0.0.0/:: are checked via 127.0.0.1).
+   */
+  host?: string;
 
   /**
    * Force binary validation even if cached validation exists
@@ -122,6 +146,54 @@ export interface LlamaServerConfig extends ServerConfig {
    * genai-lite's reasoning toggle on hybrid models). Set to false to disable.
    */
   jinja?: boolean;
+
+  /**
+   * KV-cache quantization for keys (--cache-type-k)
+   * e.g. 'q8_0' — significant VRAM savings on long contexts. Default: unset (f16).
+   */
+  cacheTypeK?: KVCacheType;
+
+  /**
+   * KV-cache quantization for values (--cache-type-v)
+   * NOTE: quantized V-cache requires flash attention ON. When set to a quantized
+   * type with flashAttention unset, flash attention is auto-upgraded to 'on';
+   * combining it with flashAttention: 'off'/false throws at start().
+   */
+  cacheTypeV?: KVCacheType;
+
+  /**
+   * Tensor buffer-type overrides (-ot / --override-tensor)
+   * e.g. 'exps=CPU' keeps MoE expert weights on CPU to fit large MoE models in VRAM.
+   */
+  overrideTensors?: string;
+
+  /**
+   * Maximum CPU-side prompt/KV cache in MiB (--cache-ram)
+   * Pairs with overrideTensors for MoE-offload setups. -1 = no limit, 0 = disable.
+   */
+  cacheRam?: number;
+
+  /** Keep ALL MoE expert weights on CPU (--cpu-moe) — ergonomic alternative to overrideTensors */
+  cpuMoe?: boolean;
+
+  /** Keep the first N layers' MoE expert weights on CPU (--n-cpu-moe N) */
+  nCpuMoe?: number;
+
+  /**
+   * Reasoning-content extraction format (--reasoning-format)
+   * Default: unset → server default ('auto'). Set 'none' to leave thoughts
+   * inline in message.content, or 'deepseek' to force reasoning_content parsing.
+   */
+  reasoningFormat?: 'auto' | 'deepseek' | 'deepseek-legacy' | 'none';
+
+  /**
+   * llama-server auto-fit of unset parameters to device memory (-fit)
+   * Default: 'off' — genai-electron computes explicit values via its own
+   * auto-configuration, and auto-fit has hung on some GPUs. Setting 'on'
+   * delegates to llama-server instead: genai-electron then skips its own
+   * gpuLayers/contextSize auto-configuration for unset fields.
+   */
+  fit?: 'on' | 'off';
 }
 
 /**

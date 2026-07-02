@@ -11,7 +11,7 @@ import { ServerManager } from './ServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
-import { checkHealth, waitForHealthy } from '../process/health-check.js';
+import { checkHealth, waitForHealthy, normalizeHealthHost } from '../process/health-check.js';
 import { parseLlamaCppLogLevel, stripLlamaCppFormatting } from '../process/llama-log-parser.js';
 import type {
   ServerConfig,
@@ -80,12 +80,23 @@ export class LlamaServerManager extends ServerManager {
     'useMlock',
     'startupTimeout',
     'jinja',
+    'host',
+    'cacheTypeK',
+    'cacheTypeV',
+    'overrideTensors',
+    'cacheRam',
+    'cpuMoe',
+    'nCpuMoe',
+    'reasoningFormat',
+    'fit',
   ]);
 
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
   private binaryPath?: string;
+  /** Host used for health checks (config.host normalized; 0.0.0.0/:: → 127.0.0.1) */
+  private healthHost = '127.0.0.1';
 
   /**
    * Create a new LlamaServerManager
@@ -171,6 +182,28 @@ export class LlamaServerManager extends ServerManager {
         modelInfo
       );
 
+      // 5b. Quantized V-cache requires flash attention ON (llama.cpp runtime constraint)
+      const quantizedVCache =
+        finalConfig.cacheTypeV !== undefined &&
+        finalConfig.cacheTypeV !== 'f16' &&
+        finalConfig.cacheTypeV !== 'bf16';
+      if (quantizedVCache) {
+        if (finalConfig.flashAttention === undefined || finalConfig.flashAttention === 'auto') {
+          debugLog('[LlamaServer] cacheTypeV is quantized - forcing flashAttention on');
+          finalConfig.flashAttention = 'on';
+        } else if (finalConfig.flashAttention === false || finalConfig.flashAttention === 'off') {
+          throw new ServerError(
+            `Quantized V-cache (cacheTypeV: '${finalConfig.cacheTypeV}') requires flash attention`,
+            {
+              suggestion:
+                "Set flashAttention to 'on' (or leave it unset) when using a quantized cacheTypeV, or use cacheTypeV: 'f16'",
+            }
+          );
+        }
+      }
+
+      this.healthHost = normalizeHealthHost(finalConfig.host);
+
       // 6. Save final configuration (AFTER auto-configuration)
       this._config = finalConfig;
 
@@ -221,7 +254,10 @@ export class LlamaServerManager extends ServerManager {
       // 10. Wait for server to be healthy
       await waitForHealthy(
         finalConfig.port,
-        finalConfig.startupTimeout ?? DEFAULT_TIMEOUTS.serverStart
+        finalConfig.startupTimeout ?? DEFAULT_TIMEOUTS.serverStart,
+        undefined,
+        undefined,
+        this.healthHost
       );
 
       this._startedAt = new Date();
@@ -301,7 +337,7 @@ export class LlamaServerManager extends ServerManager {
     }
 
     try {
-      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck);
+      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck, this.healthHost);
       return health.status === 'ok';
     } catch {
       return false;
@@ -319,7 +355,7 @@ export class LlamaServerManager extends ServerManager {
     }
 
     try {
-      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck);
+      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck, this.healthHost);
       return health.status;
     } catch {
       return 'unknown';
@@ -370,11 +406,15 @@ export class LlamaServerManager extends ServerManager {
     const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo);
     debugLog('[LlamaServer] Optimal config:', JSON.stringify(optimalConfig));
 
+    // With fit: 'on', llama-server's own auto-fit sizes unset memory-related
+    // fields — leave gpuLayers/contextSize unset instead of filling them here.
+    const delegateToFit = (config as LlamaServerConfig).fit === 'on';
+
     const finalConfig = {
       ...config,
       threads: config.threads ?? optimalConfig.threads,
-      contextSize: config.contextSize ?? optimalConfig.contextSize,
-      gpuLayers: config.gpuLayers ?? optimalConfig.gpuLayers,
+      contextSize: config.contextSize ?? (delegateToFit ? undefined : optimalConfig.contextSize),
+      gpuLayers: config.gpuLayers ?? (delegateToFit ? undefined : optimalConfig.gpuLayers),
       parallelRequests: config.parallelRequests ?? optimalConfig.parallelRequests,
       flashAttention: config.flashAttention ?? optimalConfig.flashAttention,
     } as ResolvedLlamaServerConfig;
@@ -404,8 +444,17 @@ export class LlamaServerManager extends ServerManager {
     args.push('-m', modelInfo.path);
 
     // Use the model's embedded Jinja chat template (default: on)
+    // --jinja is the b9860 server default; both flags are passed explicitly to
+    // pin behavior regardless of the binary's own default.
     if (config.jinja !== false) {
       args.push('--jinja');
+    } else {
+      args.push('--no-jinja');
+    }
+
+    // Host binding (server default: 127.0.0.1)
+    if (config.host !== undefined) {
+      args.push('--host', config.host);
     }
 
     // Port
@@ -425,8 +474,9 @@ export class LlamaServerManager extends ServerManager {
     // Without this flag, llama-server caps at contextSize/4 by default
     args.push('-n', '-1');
 
-    // GPU layers
-    if (config.gpuLayers !== undefined && config.gpuLayers > 0) {
+    // GPU layers — emitted even for 0: the b9860 server default is auto-offload,
+    // so omitting -ngl for a CPU-only config would silently offload to GPU
+    if (config.gpuLayers !== undefined) {
       args.push('-ngl', String(config.gpuLayers));
     }
 
@@ -435,9 +485,48 @@ export class LlamaServerManager extends ServerManager {
       args.push('-np', String(config.parallelRequests));
     }
 
-    // Flash attention
-    if (config.flashAttention) {
-      args.push('--flash-attn');
+    // Flash attention tri-state (boolean accepted: true → on, false → off);
+    // unset → omit and let the server decide ('auto')
+    if (config.flashAttention !== undefined) {
+      const fa =
+        config.flashAttention === true
+          ? 'on'
+          : config.flashAttention === false
+            ? 'off'
+            : config.flashAttention;
+      args.push('-fa', fa);
+    }
+
+    // Auto-fit of unset args to device memory. Default OFF: genai-electron
+    // passes explicit values from its own auto-configuration, and auto-fit
+    // has hung on some GPUs. fit: 'on' delegates sizing to llama-server.
+    args.push('-fit', config.fit ?? 'off');
+
+    // KV-cache quantization
+    if (config.cacheTypeK !== undefined) {
+      args.push('--cache-type-k', config.cacheTypeK);
+    }
+    if (config.cacheTypeV !== undefined) {
+      args.push('--cache-type-v', config.cacheTypeV);
+    }
+
+    // MoE / tensor placement
+    if (config.overrideTensors !== undefined) {
+      args.push('-ot', config.overrideTensors);
+    }
+    if (config.cacheRam !== undefined) {
+      args.push('--cache-ram', String(config.cacheRam));
+    }
+    if (config.cpuMoe === true) {
+      args.push('--cpu-moe');
+    }
+    if (config.nCpuMoe !== undefined) {
+      args.push('--n-cpu-moe', String(config.nCpuMoe));
+    }
+
+    // Reasoning-content extraction (server default: auto)
+    if (config.reasoningFormat !== undefined) {
+      args.push('--reasoning-format', config.reasoningFormat);
     }
 
     // Model alias reported by the API (see LlamaServerConfig.modelAlias warning)

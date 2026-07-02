@@ -39,12 +39,16 @@ export interface HealthCheckResponse {
  * }
  * ```
  */
-export async function checkHealth(port: number, timeout = 5000): Promise<HealthCheckResponse> {
+export async function checkHealth(
+  port: number,
+  timeout = 5000,
+  host = '127.0.0.1'
+): Promise<HealthCheckResponse> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+    const response = await fetch(`http://${host}:${port}/health`, {
       signal: controller.signal,
       headers: {
         Accept: 'application/json',
@@ -112,9 +116,10 @@ export async function checkHealth(port: number, timeout = 5000): Promise<HealthC
  */
 export async function waitForHealthy(
   port: number,
-  timeout = 60000,
+  timeout = 120000,
   initialDelay = 100,
-  maxDelay = 2000
+  maxDelay = 2000,
+  host = '127.0.0.1'
 ): Promise<void> {
   const startTime = Date.now();
   let delay = initialDelay;
@@ -124,7 +129,7 @@ export async function waitForHealthy(
     attempt++;
 
     try {
-      const health = await checkHealth(port, 5000);
+      const health = await checkHealth(port, 5000, host);
 
       if (health.status === 'ok') {
         return; // Success!
@@ -185,12 +190,16 @@ export async function waitForHealthy(
  * }
  * ```
  */
-export async function isServerResponding(port: number, timeout = 2000): Promise<boolean> {
+export async function isServerResponding(
+  port: number,
+  timeout = 2000,
+  host = '127.0.0.1'
+): Promise<boolean> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+    const response = await fetch(`http://${host}:${port}/health`, {
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
@@ -199,4 +208,21 @@ export async function isServerResponding(port: number, timeout = 2000): Promise<
     clearTimeout(timeoutId);
     return false;
   }
+}
+
+/**
+ * Normalize a configured bind host into a host suitable for health checks
+ *
+ * Wildcard binds (0.0.0.0, ::) are reachable via loopback, so health checks
+ * target 127.0.0.1 for them; undefined/empty falls back to 127.0.0.1
+ * (llama-server's own default bind).
+ *
+ * @param host - Configured bind host (ServerConfig.host)
+ * @returns Host to use in health-check URLs
+ */
+export function normalizeHealthHost(host?: string): string {
+  if (host === undefined || host === '' || host === '0.0.0.0' || host === '::') {
+    return '127.0.0.1';
+  }
+  return host;
 }
