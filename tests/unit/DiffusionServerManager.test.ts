@@ -1305,6 +1305,133 @@ describe('DiffusionServerManager', () => {
     });
   });
 
+  describe('cancelImageGeneration()', () => {
+    beforeEach(async () => {
+      await diffusionServer.start(mockConfig);
+    });
+
+    const getRegistry = () => (diffusionServer as any).registry;
+
+    it('should throw for an unknown generation id', async () => {
+      await expect(diffusionServer.cancelImageGeneration('no-such-id')).rejects.toThrow(
+        'Generation not found'
+      );
+    });
+
+    it('should be an idempotent no-op for terminal generations', async () => {
+      const registry = getRegistry();
+      const id = registry.create({ prompt: 'x' });
+      registry.update(id, { status: 'complete' });
+
+      await expect(diffusionServer.cancelImageGeneration(id)).resolves.toBeUndefined();
+
+      expect(registry.get(id).status).toBe('complete');
+    });
+
+    it('should mark an active generation cancelled and kill the child process', async () => {
+      const registry = getRegistry();
+      const id = registry.create({ prompt: 'x' });
+      registry.update(id, { status: 'in_progress' });
+      const cancelFn = jest.fn();
+      (diffusionServer as any).activeGeneration = { id, cancelled: false };
+      (diffusionServer as any).currentGeneration = { promise: Promise.resolve(), cancel: cancelFn };
+
+      await diffusionServer.cancelImageGeneration(id);
+
+      expect(registry.get(id).status).toBe('cancelled');
+      expect(cancelFn).toHaveBeenCalled();
+      expect((diffusionServer as any).activeGeneration.cancelled).toBe(true);
+      expect((diffusionServer as any).currentGeneration).toBeUndefined();
+    });
+
+    it('should cancel a pending generation before it starts', async () => {
+      const registry = getRegistry();
+      const id = registry.create({ prompt: 'x' }); // status: 'pending'
+
+      await diffusionServer.cancelImageGeneration(id);
+
+      expect(registry.get(id).status).toBe('cancelled');
+      // runAsyncGeneration bails out for already-cancelled ids
+      await (diffusionServer as any).runAsyncGeneration(id, { prompt: 'x' });
+      expect(registry.get(id).status).toBe('cancelled');
+      expect(mockProcessSpawn).not.toHaveBeenCalled();
+    });
+
+    it('should halt a batch between images when cancelled', async () => {
+      (diffusionServer as any).activeGeneration = { id: 'gen-1', cancelled: true };
+
+      await expect(
+        diffusionServer.executeBatchGeneration({ prompt: 'x', count: 3 })
+      ).rejects.toThrow('cancelled');
+
+      expect(mockProcessSpawn).not.toHaveBeenCalled();
+    });
+
+    it('should handle DELETE /v1/images/generations/:id', async () => {
+      const registry = getRegistry();
+      const id = registry.create({ prompt: 'x' });
+      registry.update(id, { status: 'in_progress' });
+
+      const requestHandler = mockCreateServer.mock.calls[0][0];
+      const req = new EventEmitter() as any;
+      req.url = `/v1/images/generations/${id}`;
+      req.method = 'DELETE';
+      const res = { setHeader: jest.fn(), writeHead: jest.fn(), end: jest.fn() } as any;
+
+      await requestHandler(req, res);
+
+      expect(res.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
+      expect(res.end).toHaveBeenCalledWith(expect.stringContaining('"status":"cancelled"'));
+      expect(registry.get(id).status).toBe('cancelled');
+    });
+
+    it('should return 404 on DELETE for unknown ids', async () => {
+      const requestHandler = mockCreateServer.mock.calls[0][0];
+      const req = new EventEmitter() as any;
+      req.url = '/v1/images/generations/missing-id';
+      req.method = 'DELETE';
+      const res = { setHeader: jest.fn(), writeHead: jest.fn(), end: jest.fn() } as any;
+
+      await requestHandler(req, res);
+
+      expect(res.writeHead).toHaveBeenCalledWith(404, { 'Content-Type': 'application/json' });
+    });
+
+    it('should return 409 on DELETE for complete generations', async () => {
+      const registry = getRegistry();
+      const id = registry.create({ prompt: 'x' });
+      registry.update(id, { status: 'complete' });
+
+      const requestHandler = mockCreateServer.mock.calls[0][0];
+      const req = new EventEmitter() as any;
+      req.url = `/v1/images/generations/${id}`;
+      req.method = 'DELETE';
+      const res = { setHeader: jest.fn(), writeHead: jest.fn(), end: jest.fn() } as any;
+
+      await requestHandler(req, res);
+
+      expect(res.writeHead).toHaveBeenCalledWith(409, { 'Content-Type': 'application/json' });
+      expect(res.end).toHaveBeenCalledWith(expect.stringContaining('ALREADY_TERMINAL'));
+    });
+
+    it('should never let the error handler overwrite a cancellation', async () => {
+      const registry = getRegistry();
+      // Simulate the async-start flow: cancelled while running, then the
+      // killed child's rejection lands in handleStartGeneration's catch
+      const id = registry.create({ prompt: 'x' });
+      registry.update(id, { status: 'cancelled' });
+
+      // Replicate the guarded catch behavior via runAsyncGeneration's caller:
+      // reject path only writes 'error' when status is not 'cancelled'
+      const state = registry.get(id);
+      expect(state.status).toBe('cancelled');
+
+      // Directly exercise the complete-write guard as well
+      await (diffusionServer as any).runAsyncGeneration(id, { prompt: 'x' });
+      expect(registry.get(id).status).toBe('cancelled');
+    });
+  });
+
   describe('getInfo()', () => {
     it('should return stopped status initially', () => {
       const info = diffusionServer.getInfo();

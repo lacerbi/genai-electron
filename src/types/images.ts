@@ -210,8 +210,12 @@ export interface DiffusionServerInfo {
 
 /**
  * Generation status for async API
+ *
+ * Note: 'cancelled' is terminal. genai-lite clients older than the version
+ * that recognizes it poll until their own client-side timeout when a
+ * generation is cancelled from another code path.
  */
-export type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error';
+export type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error' | 'cancelled';
 
 /**
  * Generation state for async API registry

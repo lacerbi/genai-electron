@@ -119,8 +119,9 @@ export class GenerationRegistry {
     let cleaned = 0;
 
     for (const [id, state] of this.generations.entries()) {
-      // Only clean up terminal states (complete/error)
-      const isTerminal = state.status === 'complete' || state.status === 'error';
+      // Only clean up terminal states (complete/error/cancelled)
+      const isTerminal =
+        state.status === 'complete' || state.status === 'error' || state.status === 'cancelled';
       if (isTerminal && now - state.updatedAt > maxAgeMs) {
         this.generations.delete(id);
         cleaned++;

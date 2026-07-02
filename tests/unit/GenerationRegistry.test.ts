@@ -268,6 +268,21 @@ describe('GenerationRegistry', () => {
       expect(registry.get(id)).toBeNull();
     });
 
+    it('should remove old cancelled generations (terminal state)', async () => {
+      const config: ImageGenerationConfig = { prompt: 'test' };
+      const id = registry.create(config);
+
+      registry.update(id, { status: 'cancelled' });
+
+      // Wait for generation to age beyond TTL (50ms)
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const cleaned = registry.cleanup(50);
+
+      expect(cleaned).toBe(1);
+      expect(registry.get(id)).toBeNull();
+    });
+
     it('should remove old errored generations', async () => {
       const config: ImageGenerationConfig = { prompt: 'test' };
       const id = registry.create(config);

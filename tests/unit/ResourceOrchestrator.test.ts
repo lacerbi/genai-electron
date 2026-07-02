@@ -320,6 +320,42 @@ describe('ResourceOrchestrator', () => {
       expect(mockLlamaServer.start).toHaveBeenCalled();
     });
 
+    it('should reload LLM when an orchestrated generation is cancelled', async () => {
+      mockLlamaServer.isRunning.mockReturnValue(true);
+      mockLlamaServer.getConfig.mockReturnValue({
+        modelId: 'llama-2-7b',
+        port: 8080,
+        gpuLayers: 35,
+      });
+
+      // Small VRAM to trigger offload
+      mockSystemInfo.detect.mockResolvedValue({
+        cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+        memory: { total: 16 * 1024 ** 3, available: 12 * 1024 ** 3, used: 4 * 1024 ** 3 },
+        gpu: { available: true, type: 'nvidia', vram: 6 * 1024 ** 3 },
+        platform: 'linux',
+        recommendations: {
+          maxModelSize: '7B',
+          recommendedQuantization: ['Q4_K_M'],
+          threads: 7,
+          gpuLayers: 35,
+        },
+      });
+
+      // Cancellation surfaces as a rejection from the killed sd-cli process
+      mockDiffusionServer.executeImageGeneration.mockRejectedValue(
+        new Error('Image generation cancelled')
+      );
+
+      await expect(orchestrator.orchestrateImageGeneration(imageConfig)).rejects.toThrow(
+        'cancelled'
+      );
+
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).toHaveBeenCalled();
+    });
+
     it('should handle LLM reload failure gracefully after retry', async () => {
       jest.useFakeTimers();
 
