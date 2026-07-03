@@ -39,7 +39,7 @@ export const KV_CACHE_BYTES_PER_ELEMENT: Record<KVCacheType, number> = {
  * Rounding stays proportional to scale (roughly within 6% of the value)
  * while producing "round" context sizes at every magnitude.
  */
-export const CONTEXT_GRANULARITY_LADDER: ReadonlyArray<readonly [number, number]> = [
+export const CONTEXT_GRANULARITY_LADDER: readonly (readonly [number, number])[] = [
   [2048, 128],
   [4096, 256],
   [8192, 512],
