@@ -372,6 +372,7 @@ DiffusionServerManager extends `EventEmitter`:
 - `'started'` - Server started successfully (receives `DiffusionServerInfo`)
 - `'stopped'` - Server stopped
 - `'binary-log'` - Binary download/validation progress (receives `{ message, level }`)
+- `'binary-progress'` - Structured provisioning progress (receives `BinaryProgressEvent`: phase + file + throttled whole-percent download progress) — build progress UIs from this instead of parsing log messages
 
 **Note:** DiffusionServerManager does not emit a `'crashed'` event because it does not maintain a persistent process — stable-diffusion.cpp is spawned on-demand for each generation. Generation failures are reported via the returned promise or HTTP error responses.
 

@@ -1,7 +1,11 @@
 # ISSUE: Structured progress event for binary provisioning (downloads currently parseable only from log strings)
 
 Created: 2026-07-03
-Status: OPEN
+Status: RESOLVED (2026-07-03, on main — ships with the next release) — 'binary-progress'
+event implemented as proposed (+ whole-percent convenience field): throttled at the
+source, phase transitions for downloading/verifying/extracting/testing, dependency
+downloads labeled by description, forwarded by both server managers. 'binary-log'
+unchanged. See genai-electron-docs/llm-server.md#binary-progress.
 Package: genai-electron (filed from palimpsest-engine loading-UI work)
 
 ## Problem

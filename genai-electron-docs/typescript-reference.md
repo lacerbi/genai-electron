@@ -436,6 +436,20 @@ interface HealthCheckResponse {
 }
 ```
 
+### BinaryProgressEvent
+
+Structured provisioning progress (`'binary-progress'` event). Download events are throttled to whole-percent changes; phase transitions emit one event each.
+
+```typescript
+interface BinaryProgressEvent {
+  phase: 'downloading' | 'extracting' | 'verifying' | 'testing';
+  file: string; // 'binary' or a dependency description (e.g. 'CUDA runtime')
+  downloaded?: number; // bytes (downloading)
+  total?: number; // bytes (downloading)
+  percent?: number; // whole number (downloading)
+}
+```
+
 ### Port & Health Utilities
 
 Low-level helpers used by the server managers (also exported for advanced use).

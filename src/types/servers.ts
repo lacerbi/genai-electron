@@ -261,7 +261,8 @@ export type ServerEvent =
   | 'restarted'
   | 'health-check-ok'
   | 'health-check-failed'
-  | 'binary-log';
+  | 'binary-log'
+  | 'binary-progress';
 
 /**
  * Server event data
@@ -290,4 +291,28 @@ export interface BinaryLogEvent {
 
   /** Log level */
   level: 'info' | 'warn' | 'error';
+}
+
+/**
+ * Structured progress for binary provisioning ('binary-progress' event)
+ *
+ * Machine-readable companion to 'binary-log': download progress is throttled
+ * to whole-percent changes at the source, and each phase transition emits one
+ * event. Build progress UIs from this instead of parsing log strings.
+ */
+export interface BinaryProgressEvent {
+  /** Provisioning phase */
+  phase: 'downloading' | 'extracting' | 'verifying' | 'testing';
+
+  /** What is being provisioned: 'binary' or a dependency description */
+  file: string;
+
+  /** Bytes downloaded so far (phase === 'downloading') */
+  downloaded?: number;
+
+  /** Total bytes, when known (phase === 'downloading') */
+  total?: number;
+
+  /** Whole-number download percentage convenience (phase === 'downloading') */
+  percent?: number;
 }

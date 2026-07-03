@@ -515,6 +515,13 @@ For detailed historical information:
 
 ---
 
+## Unreleased (on main, ships with the next release)
+
+- **`'binary-progress'` event** (2026-07-03): structured companion to `'binary-log'` for binary-provisioning UIs — `BinaryProgressEvent { phase: downloading|extracting|verifying|testing, file, downloaded?, total?, percent? }`, throttled to whole-percent changes at the source, one event per phase transition, emitted by both server managers. Resolves `docs/dev/issues/ISSUE-binary-progress-event.md` (palimpsest drops its log-regex + chunk throttle). `'binary-log'` unchanged.
+- Orchestrator MoE-estimate test coverage (review finding 5b, PR #32).
+
+---
+
 ## v0.8.0: MoE-Aware Auto-Configuration (2026-07-03)
 
 **Goal/Problem:** Adaptive sizing (v0.7) treated the whole model file as GPU-resident, so MoE models with `--cpu-moe` got floor-level context and hint-less MoE got slow dense partial offload (`docs/dev/issues/ISSUE-moe-aware-auto-config.md`, filed by palimpsest-engine). Apps resorted to filename heuristics to detect MoE.

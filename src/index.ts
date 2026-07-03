@@ -291,6 +291,7 @@ export type {
   ServerEvent,
   ServerEventData,
   BinaryLogEvent,
+  BinaryProgressEvent,
   OptimalConfigHints,
   // Image generation types (Phase 2)
   ImageSampler,

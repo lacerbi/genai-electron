@@ -41,6 +41,7 @@ export type {
   ServerEvent,
   ServerEventData,
   BinaryLogEvent,
+  BinaryProgressEvent,
   OptimalConfigHints,
 } from './servers.js';
 
