@@ -84,8 +84,10 @@ Discovered during live smoke (first run FAILED with NaN + RAM gate):
   **contextSize 16384** (vs the 4096 floor the issue reported), server healthy and
   /props-confirmed — i.e. the 12.5 GiB model loaded and served on an 8 GiB-class GPU +
   23 GiB-RAM machine. The final generation round-trip was interrupted by a manual stop
-  of the background task (memory-tight machine); request-path behavior is covered by
-  the v0.7 smoke and unit tests. Dense regression: covered by the unchanged
+  of the background task, then completed in a dedicated e2e run post-release:
+  131 tokens at ~12.2 tok/s on the auto-configured --cpu-moe server (experts on CPU),
+  final answer exact ("MOE-OK") with Gemma 4's thinking cleanly separated into
+  reasoning_content — the --jinja reasoning contract holds on MoE; warm start 7.9 s. Dense regression: covered by the unchanged
   getOptimalConfig dense test matrix (529 tests).
 
 Status: COMPLETE (2026-07-03)
