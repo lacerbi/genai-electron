@@ -1,13 +1,8 @@
 /// <reference types="vite/client" />
 
-// Declare window.api from preload
-import type { WindowAPI } from '../main/preload';
-
-declare global {
-  interface Window {
-    api: WindowAPI;
-  }
-}
+// window.api is declared (with the richer app-side types) in ./types/api.ts.
+// Do NOT re-declare it here from the preload type — two divergent declarations
+// of the same global property silently weaken type-checking.
 
 // Electron Forge Vite plugin globals (used by Electron Forge, not directly in code)
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

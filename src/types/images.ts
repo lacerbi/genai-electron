@@ -120,7 +120,11 @@ export interface DiffusionServerConfig {
   /** Number of CPU threads (auto-detected if not specified) */
   threads?: number;
 
-  /** Number of GPU layers to offload (auto-detected if not specified, 0 = CPU-only) */
+  /**
+   * Accepted for config-shape compatibility but NOT passed to sd.cpp —
+   * stable-diffusion.cpp has no GPU-layers flag; GPU offload is automatic
+   * (use clipOnCpu/vaeOnCpu/offloadToCpu to manage VRAM instead)
+   */
   gpuLayers?: number;
 
   /**

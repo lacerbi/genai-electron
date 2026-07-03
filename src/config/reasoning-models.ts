@@ -2,8 +2,11 @@
  * Reasoning model detection for llama.cpp
  *
  * This module provides utilities to detect reasoning-capable GGUF models
- * based on filename patterns. When detected, genai-electron automatically
- * adds --jinja --reasoning-format deepseek flags to llama-server.
+ * based on filename patterns. The result is stored as informational
+ * metadata on ModelInfo.supportsReasoning (useful for app UIs); it does
+ * NOT change how llama-server is launched — --jinja is always passed and
+ * reasoning extraction follows --reasoning-format (server default 'auto',
+ * overridable via LlamaServerConfig.reasoningFormat).
  *
  * @module config/reasoning-models
  */
@@ -12,15 +15,13 @@
  * Known patterns for reasoning-capable models
  *
  * These patterns are matched case-insensitively against GGUF filenames.
- * If a match is found, the model is assumed to support reasoning via
- * llama.cpp's --reasoning-format deepseek feature.
  *
  * Supported model families:
  * - qwen3: Qwen 3 family (0.6B, 1.7B, 4B, 8B, 14B, 30B - all variants)
  * - deepseek-r1: DeepSeek R1 reasoning models (8B, 32B, distilled variants)
  * - gpt-oss: OpenAI's open-source reasoning model
  *
- * All these models use <think>...</think> tags for reasoning output.
+ * These models emit <think>...</think>-style reasoning output.
  */
 export const REASONING_MODEL_PATTERNS: readonly string[] = [
   'qwen3', // Qwen 3 series - all sizes

@@ -104,7 +104,7 @@ export class LlamaServerManager extends ServerManager {
   private healthHost = '127.0.0.1';
   /** Duration of the last successful start, spawn → healthy (ms) */
   private _loadTimeMs?: number;
-  /** Consecutive auto-restart attempts since the last manual start */
+  /** Total auto-restart attempts since the last MANUAL start (lifetime budget, not consecutive) */
   private restartAttempts = 0;
   /** Pending auto-restart timer (crash backoff) */
   private restartTimer?: NodeJS.Timeout;
@@ -116,6 +116,8 @@ export class LlamaServerManager extends ServerManager {
   private consecutiveHealthFailures = 0;
   /** Set when the watchdog kills a hung process, so handleExit treats it as a crash */
   private watchdogKill = false;
+  /** Reentrancy guard: true while a watchdog health check is in flight */
+  private watchdogCheckInFlight = false;
 
   /**
    * Create a new LlamaServerManager
@@ -176,6 +178,7 @@ export class LlamaServerManager extends ServerManager {
     // 'auto' binds port 0 to get an OS-assigned free port.
     const resolvedPort =
       config.port === 'auto' ? await findFreePort() : (config.port ?? DEFAULT_PORTS.llama);
+    this.healthHost = normalizeHealthHost(config.host);
 
     try {
       // 1. Validate model exists
@@ -201,8 +204,8 @@ export class LlamaServerManager extends ServerManager {
       // 3. Ensure binary is downloaded (pass model path for real functionality testing)
       this.binaryPath = await this.ensureBinary(modelInfo.path, config.forceValidation);
 
-      // 4. Check if port is in use
-      await this.checkPortAvailability(resolvedPort);
+      // 4. Check if port is in use (on the host the server will bind)
+      await this.checkPortAvailability(resolvedPort, undefined, this.healthHost);
 
       // 4b. Occupancy safety rail: detect other llama-servers that could
       // double-load VRAM (default 'warn'; 'strict' throws; 'off' skips)
@@ -236,8 +239,6 @@ export class LlamaServerManager extends ServerManager {
           );
         }
       }
-
-      this.healthHost = normalizeHealthHost(finalConfig.host);
 
       // 6. Save final configuration (AFTER auto-configuration)
       this._config = finalConfig;
@@ -754,6 +755,11 @@ export class LlamaServerManager extends ServerManager {
 
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined;
+      // Bail if the world changed during the backoff (manual start/stop):
+      // only a still-crashed server should be auto-restarted
+      if (this._status !== 'crashed') {
+        return;
+      }
       this.isAutoRestarting = true;
       this.start(this._config!)
         .then((info) => {
@@ -819,42 +825,60 @@ export class LlamaServerManager extends ServerManager {
       return;
     }
 
-    let healthy = false;
-    try {
-      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck, this.healthHost);
-      healthy = health.status === 'ok';
-    } catch {
-      healthy = false;
-    }
-
-    if (healthy) {
-      this.consecutiveHealthFailures = 0;
-      this.emitEvent('health-check-ok', this.getInfo());
+    // Reentrancy guard: a hung server makes checkHealth take up to its full
+    // timeout, which can exceed healthCheckInterval — overlapping ticks would
+    // inflate the failure count and issue repeated kills
+    if (this.watchdogCheckInFlight) {
       return;
     }
+    this.watchdogCheckInFlight = true;
 
-    this.consecutiveHealthFailures++;
-    this.emitEvent('health-check-failed', {
-      consecutiveFailures: this.consecutiveHealthFailures,
-      serverInfo: this.getInfo(),
-    });
-
-    if (this.consecutiveHealthFailures >= 3 && this._pid) {
-      this.logManager
-        ?.write(
-          `Watchdog: ${this.consecutiveHealthFailures} consecutive health-check failures - killing hung process`,
-          'error'
-        )
-        .catch(() => void 0);
-      this.teardownWatchdog();
-      // Mark so handleExit treats the (signal-terminated) exit as a crash,
-      // feeding auto-restart when enabled
-      this.watchdogKill = true;
+    try {
+      let healthy = false;
       try {
-        await this.processManager.kill(this._pid, DEFAULT_TIMEOUTS.serverStop);
+        const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck, this.healthHost);
+        healthy = health.status === 'ok';
       } catch {
-        this.watchdogKill = false;
+        healthy = false;
       }
+
+      // The world may have changed while the check was in flight (stop(),
+      // crash): never emit events or kill for a server that is gone
+      if (this._status !== 'running' || this._pid === undefined) {
+        return;
+      }
+
+      if (healthy) {
+        this.consecutiveHealthFailures = 0;
+        this.emitEvent('health-check-ok', this.getInfo());
+        return;
+      }
+
+      this.consecutiveHealthFailures++;
+      this.emitEvent('health-check-failed', {
+        consecutiveFailures: this.consecutiveHealthFailures,
+        serverInfo: this.getInfo(),
+      });
+
+      if (this.consecutiveHealthFailures >= 3) {
+        this.logManager
+          ?.write(
+            `Watchdog: ${this.consecutiveHealthFailures} consecutive health-check failures - killing hung process`,
+            'error'
+          )
+          .catch(() => void 0);
+        this.teardownWatchdog();
+        // Mark so handleExit treats the (signal-terminated) exit as a crash,
+        // feeding auto-restart when enabled
+        this.watchdogKill = true;
+        try {
+          await this.processManager.kill(this._pid, DEFAULT_TIMEOUTS.serverStop);
+        } catch {
+          this.watchdogKill = false;
+        }
+      }
+    } finally {
+      this.watchdogCheckInFlight = false;
     }
   }
 

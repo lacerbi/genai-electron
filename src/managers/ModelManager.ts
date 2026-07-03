@@ -165,15 +165,19 @@ export class ModelManager {
     // Determine filename from URL
     const filename = this.extractFilename(downloadURL, sourceFile);
 
-    // Multi-shard GGUF: explicit shardFiles or auto-detected -00001-of-0000N naming
-    const extraShardFiles = this.resolveShardFilenames(filename, config);
+    // Multi-shard GGUF: explicit shardFiles or auto-detected -00001-of-0000N naming.
+    // Detection uses the plain BASENAME: extractFilename() sanitizes away any
+    // repo sub-directory separators (Q4_K_M/model-...), which would corrupt
+    // sibling derivation and the sub-directory-preserving URL resolution.
+    const shardBasename = sourceFile ? (sourceFile.split('/').pop() ?? filename) : filename;
+    const extraShardFiles = this.resolveShardFilenames(shardBasename, config);
     if (extraShardFiles.length > 0) {
       return this.downloadShardedModel(
         config,
         downloadURL,
         sourceRepo,
         sourceFile,
-        filename,
+        shardBasename,
         extraShardFiles
       );
     }
@@ -570,6 +574,16 @@ export class ModelManager {
       );
     }
 
+    // Sanity cap: real sharded GGUFs are a handful of files; an absurd total
+    // would fan out thousands of HEAD requests before the first 404
+    const MAX_SHARDS = 500;
+    if (shardTotal > MAX_SHARDS) {
+      throw new DownloadError(
+        `Implausible shard count ${shardTotal} in filename: ${primaryFilename} (max supported: ${MAX_SHARDS})`,
+        { suggestion: 'Check the filename, or list the shards explicitly via shardFiles' }
+      );
+    }
+
     // Preserve the original casing of "-of-0000N.gguf" when deriving siblings
     const prefix = match[1]!;
     const suffix = primaryFilename.slice(prefix.length + 1 + 5); // "-of-0000N.gguf"
@@ -593,13 +607,21 @@ export class ModelManager {
       return shardEntry;
     }
     if (config.source === 'huggingface') {
-      // Preserve any directory prefix inside the repo (file: 'subdir/model-...')
+      // Preserve any directory prefix inside the repo (file: 'subdir/model-...');
+      // function replacement avoids '$'-pattern interpretation in filenames
       const hfFile = config.file!.includes('/')
-        ? config.file!.replace(/[^/]+$/, shardEntry)
+        ? config.file!.replace(/[^/]+$/, () => shardEntry)
         : shardEntry;
       return getHuggingFaceURL(config.repo!, hfFile);
     }
-    return primaryURL.slice(0, primaryURL.lastIndexOf('/') + 1) + shardEntry;
+    // Replace the last path segment, preserving any query string
+    try {
+      const url = new URL(primaryURL);
+      url.pathname = url.pathname.slice(0, url.pathname.lastIndexOf('/') + 1) + shardEntry;
+      return url.toString();
+    } catch {
+      return primaryURL.slice(0, primaryURL.lastIndexOf('/') + 1) + shardEntry;
+    }
   }
 
   /**
@@ -631,7 +653,6 @@ export class ModelManager {
     }
 
     const modelDir = getModelDirectory(config.type, modelId);
-    await mkdir(modelDir, { recursive: true });
 
     interface ShardItem {
       url: string;
@@ -700,6 +721,10 @@ export class ModelManager {
       })
     );
     let totalBytes = itemSizes.reduce((sum, s) => sum + s, 0);
+
+    // Create the model subdirectory only once all pre-flight checks passed
+    // (an earlier mkdir would leave an empty directory behind on failure)
+    await mkdir(modelDir, { recursive: true });
 
     // Download shards sequentially with aggregate progress
     const downloadedPaths: string[] = [];

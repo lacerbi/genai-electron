@@ -23,10 +23,10 @@ import { diffusionServer, DiffusionServerManager } from 'genai-electron';
 
 Starts HTTP wrapper. Auto-downloads binary on first run.
 
-**Config:** `modelId` (required), `port` (8081; also accepts `'auto'` to pick a free OS-assigned port — the resolved value is on `DiffusionServerInfo.port`), `threads`, `gpuLayers`, `forceValidation`, `clipOnCpu`, `vaeOnCpu`, `batchSize`, `offloadToCpu`, `diffusionFlashAttention`.
+**Config:** `modelId` (required), `port` (8081; also accepts `'auto'` to pick a free OS-assigned port — the resolved value is on `DiffusionServerInfo.port`), `threads`, `gpuLayers` (accepted but not passed to sd.cpp — GPU offload is automatic), `forceValidation`, `clipOnCpu`, `vaeOnCpu`, `batchSize`, `offloadToCpu`, `diffusionFlashAttention`.
 
 ```typescript
-await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081, threads: 8, gpuLayers: 35 });
+await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081, threads: 8 });
 
 // Start Flux 2 Klein — same API, automatic component handling
 await diffusionServer.start({

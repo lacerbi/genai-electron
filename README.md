@@ -75,8 +75,8 @@ See **[electron-control-panel](examples/electron-control-panel/)** for a full-fe
 ## Platform Support
 
 - **macOS**: 11+ (Intel, Apple Silicon with Metal)
-- **Windows**: 10+ (64-bit, CPU and CUDA)
-- **Linux**: Ubuntu 20.04+, Debian 11+, Fedora 35+ (CPU, CUDA, ROCm)
+- **Windows**: 10+ (64-bit; CUDA, Vulkan, CPU)
+- **Linux**: Ubuntu 20.04+, Debian 11+, Fedora 35+ (Vulkan, CPU — no CUDA prebuilt upstream; build from source for CUDA)
 
 ## License
 

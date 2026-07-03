@@ -143,15 +143,23 @@ export class DiffusionServerManager extends ServerManager {
     this.systemInfo = systemInfo;
 
     // Initialize generation registry for async API
-    this.registry = new GenerationRegistry({
-      maxResultAgeMs: parseInt(process.env.IMAGE_RESULT_TTL_MS || '300000', 10), // 5 minutes default
-      cleanupIntervalMs: parseInt(process.env.IMAGE_CLEANUP_INTERVAL_MS || '60000', 10), // 1 minute default
-    });
+    this.registry = this.createRegistry();
 
     // Create orchestrator if llamaServer is provided (enables automatic resource management)
     if (llamaServer) {
       this.orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, this, modelManager);
     }
+  }
+
+  /**
+   * Create a fresh generation registry (TTLs configurable via env vars)
+   * @private
+   */
+  private createRegistry(): GenerationRegistry {
+    return new GenerationRegistry({
+      maxResultAgeMs: parseInt(process.env.IMAGE_RESULT_TTL_MS || '300000', 10), // 5 minutes default
+      cleanupIntervalMs: parseInt(process.env.IMAGE_CLEANUP_INTERVAL_MS || '60000', 10), // 1 minute default
+    });
   }
 
   /**
@@ -185,6 +193,12 @@ export class DiffusionServerManager extends ServerManager {
     this.setStatus('starting');
     // DiffusionServerConfig has optional port (resolved later), so cast via unknown
     this._config = config as unknown as typeof this._config;
+
+    // A prior stop() destroyed the registry's cleanup timer — start with a
+    // fresh registry so terminal results (incl. cancelled ones holding image
+    // data) keep getting garbage-collected across stop/start cycles
+    this.registry.destroy();
+    this.registry = this.createRegistry();
 
     try {
       // 1. Validate model exists and is correct type
@@ -313,6 +327,18 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
+   * Get the registry ID of the async generation currently being processed
+   *
+   * Useful for cancelling the in-flight generation when the ID is otherwise
+   * only known to the HTTP client that started it (e.g. genai-lite).
+   *
+   * @returns Generation ID, or undefined when idle
+   */
+  getActiveGenerationId(): string | undefined {
+    return this.activeGeneration?.id;
+  }
+
+  /**
    * Cancel an in-flight async generation by its registry ID
    *
    * Marks the generation 'cancelled' in the registry, halts the batch loop
@@ -328,18 +354,6 @@ export class DiffusionServerManager extends ServerManager {
    * @param id - Generation ID (from POST /v1/images/generations)
    * @throws {ServerError} If the generation ID is unknown
    */
-  /**
-   * Get the registry ID of the async generation currently being processed
-   *
-   * Useful for cancelling the in-flight generation when the ID is otherwise
-   * only known to the HTTP client that started it (e.g. genai-lite).
-   *
-   * @returns Generation ID, or undefined when idle
-   */
-  getActiveGenerationId(): string | undefined {
-    return this.activeGeneration?.id;
-  }
-
   async cancelImageGeneration(id: string): Promise<void> {
     const state = this.registry.get(id);
     if (!state) {

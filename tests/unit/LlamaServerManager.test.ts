@@ -229,6 +229,11 @@ describe('LlamaServerManager', () => {
     mockProcess.kill = jest.fn();
 
     mockProcessSpawn.mockImplementation((path, args, callbacks) => {
+      // Fresh wiring per spawn: drop listeners left by a previous spawn on the
+      // shared emitter (a restart would otherwise double-fire handleExit)
+      mockProcess.removeAllListeners('exit');
+      mockProcess.stdout.removeAllListeners('data');
+      mockProcess.stderr.removeAllListeners('data');
       // Wire up the callbacks
       if (callbacks?.onExit) {
         mockProcess.on('exit', callbacks.onExit);

@@ -763,6 +763,39 @@ describe('ModelManager', () => {
       expect(progressCalls[2]).toEqual([2500, 3000]);
     });
 
+    it('should preserve repo sub-directories when deriving HF shard siblings', async () => {
+      await modelManager.downloadModel({
+        ...shardedConfig,
+        file: 'Q4_K_M/big-model-00001-of-00003.gguf',
+        name: 'Subdir Model',
+      });
+
+      const urls = mockDownload.mock.calls.map((c: any) => c[0].url);
+      expect(urls[0]).toBe(
+        'https://huggingface.co/org/Big-GGUF/resolve/main/Q4_K_M/big-model-00001-of-00003.gguf'
+      );
+      expect(urls[1]).toBe(
+        'https://huggingface.co/org/Big-GGUF/resolve/main/Q4_K_M/big-model-00002-of-00003.gguf'
+      );
+      expect(urls[2]).toBe(
+        'https://huggingface.co/org/Big-GGUF/resolve/main/Q4_K_M/big-model-00003-of-00003.gguf'
+      );
+      // Local destinations use the plain basename (no directory smushing)
+      for (const call of mockDownload.mock.calls) {
+        const dest = String((call as any)[0].destination).replace(/\\/g, '/');
+        expect(dest).toMatch(/\/big-model-0000\d-of-00003\.gguf$/);
+        expect(dest).not.toContain('Q4_K_M');
+      }
+    });
+
+    it('should reject an implausible shard count', async () => {
+      await expect(
+        modelManager.downloadModel({ ...shardedConfig, file: 'big-00001-of-99999.gguf' })
+      ).rejects.toThrow(/Implausible shard count/);
+
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
     it('should preserve original casing when deriving sibling names', async () => {
       await modelManager.downloadModel({
         ...shardedConfig,

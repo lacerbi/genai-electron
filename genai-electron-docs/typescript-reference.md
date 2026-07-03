@@ -329,7 +329,7 @@ interface ServerConfig {
 
 ### DiffusionServerInfo
 
-Extends `ServerInfo` with additional diffusion-specific fields.
+Standalone interface mirroring `ServerInfo` fields (adds `busy`; has no `loadTimeMs`).
 
 ```typescript
 interface DiffusionServerInfo {
@@ -407,7 +407,7 @@ type ServerEvent =
 interface ServerEventData {
   event: ServerEvent;
   serverInfo: ServerInfo;
-  crashData?: { code: number | null; signal: NodeJS.Signals | null };
+  error?: Error;
   timestamp: string;
 }
 ```

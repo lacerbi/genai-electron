@@ -471,7 +471,7 @@ For detailed historical information:
 
 ## v0.6.0: Local-Server Launch Contract, Multi-Shard Models & Reliability (2026-07-03)
 
-**Goal:** Port gmbench's battle-tested llama-server knowledge into the library and pair with genai-lite v0.9.0 (reasoning toggle needs an always-`--jinja` server). Plan: `docs/dev/plans/PLAN-local-server-features.md`.
+**Goal:** Port gmbench's battle-tested llama-server knowledge into the library and pair with genai-lite v0.9.0 (reasoning toggle needs an always-`--jinja` server). Plan: `PLAN-local-server-features.md` (repo root; moves to `docs/dev/plans/` when the deferred GPU verifications complete).
 
 **Core Features:**
 - llama.cpp pinned b7956 → b9860 (checksums from the releases-API digests; Linux x64 CUDA prebuilts discontinued upstream → Vulkan → CPU chain); fixed a latent macOS/Linux install bug (nested `llama-<tag>/` tar layouts now flattened)

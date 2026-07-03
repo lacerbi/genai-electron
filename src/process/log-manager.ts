@@ -67,6 +67,12 @@ export class LogManager {
   private maxArchives: number;
   /** Approximate current log-file size, tracked to avoid a stat per write */
   private approxSize = 0;
+  /**
+   * Serializes writes: callers (server stdout/stderr handlers) fire-and-forget,
+   * and the rotate-check + append must not interleave or the size bookkeeping
+   * races and rotation can run multiple times concurrently.
+   */
+  private writeChain: Promise<void> = Promise.resolve();
 
   /**
    * Create a LogManager instance
@@ -118,6 +124,18 @@ export class LogManager {
    * @throws {FileSystemError} If write fails
    */
   async write(message: string, level: LogLevel = 'info'): Promise<void> {
+    // Chain onto the previous write so rotate-check + append are atomic per
+    // entry even when callers don't await (server output floods lines)
+    const task = this.writeChain.then(() => this.performWrite(message, level));
+    this.writeChain = task.catch(() => void 0); // keep the chain alive on failure
+    return task;
+  }
+
+  /**
+   * Perform a single serialized write (rotate check + append)
+   * @private
+   */
+  private async performWrite(message: string, level: LogLevel): Promise<void> {
     try {
       const entry = this.formatEntry({ timestamp: new Date().toISOString(), level, message });
       const line = `${entry}\n`;

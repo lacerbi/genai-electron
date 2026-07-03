@@ -425,7 +425,7 @@ await llamaServer.start({ modelId: 'my-model', host: '0.0.0.0' }); // LAN-access
 
 ```typescript
 await llamaServer.start({ modelId: 'my-model', port: 'auto' });
-const info = llamaServer.getStatus();
+const info = llamaServer.getInfo();
 console.log('Listening on', info.port);
 ```
 
