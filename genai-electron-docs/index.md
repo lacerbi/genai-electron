@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.6.0 (Local-Server Launch Contract, Multi-Shard Models & Reliability)
+> **Version**: 0.6.1 (Local-Server Launch Contract, Multi-Shard Models & Reliability)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.

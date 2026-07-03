@@ -1,6 +1,6 @@
 {
   "name": "genai-electron",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Electron-specific library for managing local AI model servers and resources",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -68,6 +68,6 @@
   "dependencies": {
     "@huggingface/gguf": "^0.3.2",
     "adm-zip": "^0.5.16",
-    "tar": "^7.5.7"
+    "tar": "^7.5.19"
   }
 }
