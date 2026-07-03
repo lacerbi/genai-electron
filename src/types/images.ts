@@ -16,7 +16,10 @@ export type ImageSampler =
   | 'dpm++2s_a'
   | 'dpm++2m'
   | 'dpm++2mv2'
-  | 'lcm';
+  | 'lcm'
+  | 'er_sde'
+  | 'euler_cfg_pp'
+  | 'euler_a_cfg_pp';
 
 /**
  * Image generation progress stage

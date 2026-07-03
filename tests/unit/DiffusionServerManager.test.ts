@@ -855,6 +855,42 @@ describe('DiffusionServerManager', () => {
         expect(diffusionTransition!.pct).toBeLessThan(10);
       });
 
+      it('should not treat byte-progress bars (MB/s) as sampling-step progress', async () => {
+        const mockImageBuffer = Buffer.from('fake-image-data');
+        mockReadFile.mockResolvedValue(mockImageBuffer);
+        mockDeleteFile.mockResolvedValue(undefined);
+
+        const progressCallback = jest.fn();
+
+        const resultPromise = diffusionServer.generateImage({
+          ...imageConfig,
+          onProgress: progressCallback,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        spawnedProcess.stdout.emit('data', 'loading tensors from /models/sdxl.gguf\n');
+        spawnedProcess.stdout.emit(
+          'data',
+          'stable-diffusion.cpp:2121 - generating image: 1/1 - seed 12345\n'
+        );
+
+        // A pipe-decorated byte-progress bar (sd.cpp prints these while loading
+        // tensors) carries a bytes-rate unit and must not register as steps
+        spawnedProcess.stdout.emit('data', '  |#####     | 3/10 - 12.30MB/s\n');
+        // A real sampling bar still parses
+        spawnedProcess.stdout.emit('data', '  |=====     | 2/4 - 2.00it/s\n');
+
+        spawnedProcess.stdout.emit('data', 'decoding 1 latents\n');
+        spawnedProcess.stdout.emit('data', 'decode_first_stage completed\n');
+
+        spawnedProcess.emit('exit', 0, null);
+        await resultPromise;
+
+        expect(progressCallback).not.toHaveBeenCalledWith(3, 10, 'diffusion', expect.any(Number));
+        expect(progressCallback).toHaveBeenCalledWith(2, 4, 'diffusion', expect.any(Number));
+      });
+
       it('should infer VAE calibration when decode_first_stage completed is missing', async () => {
         const mockImageBuffer = Buffer.from('fake-image-data');
         mockReadFile.mockResolvedValue(mockImageBuffer);

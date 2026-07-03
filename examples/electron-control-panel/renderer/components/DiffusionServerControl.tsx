@@ -572,6 +572,9 @@ const DiffusionServerControl: React.FC = () => {
               <option value="dpm++2m">DPM++ 2M</option>
               <option value="dpm++2mv2">DPM++ 2Mv2</option>
               <option value="lcm">LCM</option>
+              <option value="er_sde">ER-SDE</option>
+              <option value="euler_cfg_pp">Euler CFG++</option>
+              <option value="euler_a_cfg_pp">Euler A CFG++</option>
             </select>
           </div>
 

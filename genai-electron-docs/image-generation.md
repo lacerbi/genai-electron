@@ -306,7 +306,7 @@ const result = await diffusionServer.generateImage({
 
 ### Available Samplers
 
-`euler_a` (default), `euler`, `heun` (slower, better quality), `dpm2`, `dpm++2s_a`, `dpm++2m` (good quality), `dpm++2mv2`, `lcm` (very fast).
+`euler_a` (default), `euler`, `heun` (slower, better quality), `dpm2`, `dpm++2s_a`, `dpm++2m` (good quality), `dpm++2mv2`, `lcm` (very fast), `er_sde`, `euler_cfg_pp`, `euler_a_cfg_pp` (CFG++ variants).
 
 ---
 

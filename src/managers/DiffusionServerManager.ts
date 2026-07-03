@@ -1338,8 +1338,9 @@ export class DiffusionServerManager extends ServerManager {
       }
     }
 
-    // Parse progress bar: "| X/Y -"
-    const progressMatch = data.match(/\|\s*(\d+)\/(\d+)\s*-/);
+    // Parse step progress bar: "| X/Y - Z.ZZit/s" — the it-rate unit is required
+    // so byte-progress bars ("# X/Y - Z.ZZMB/s", tensor loading) can't register as steps
+    const progressMatch = data.match(/\|\s*(\d+)\/(\d+)\s*-\s*[\d.]+\s*(?:it\/s|s\/it)/);
     if (progressMatch && progressMatch[1] && progressMatch[2]) {
       const current = parseInt(progressMatch[1], 10);
       const total = parseInt(progressMatch[2], 10);
