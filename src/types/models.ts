@@ -117,14 +117,35 @@ export interface GGUFMetadata {
   /** Context length (maximum sequence length) */
   context_length?: number;
 
-  /** Number of attention heads */
-  attention_head_count?: number;
+  /**
+   * Number of attention heads. Architectures with per-layer heterogeneous
+   * attention (e.g. Gemma 4's alternating full/sliding-window layers) store
+   * a per-layer array — use the metadata helpers, which normalize via mean.
+   */
+  attention_head_count?: number | number[];
 
-  /** Number of KV heads (GQA models have fewer than attention_head_count) */
-  attention_head_count_kv?: number;
+  /** Number of KV heads (GQA); per-layer array on heterogeneous-attention models */
+  attention_head_count_kv?: number | number[];
 
-  /** Per-head key dimension (set when it differs from embedding_length / head_count) */
-  attention_key_length?: number;
+  /** Per-head key dimension; per-layer array on heterogeneous-attention models */
+  attention_key_length?: number | number[];
+
+  /** Number of MoE experts (0/undefined for dense models) */
+  expert_count?: number;
+
+  /** Number of experts activated per token (MoE) */
+  expert_used_count?: number;
+
+  /** Per-expert feed-forward dimension (MoE) */
+  expert_feed_forward_length?: number;
+
+  /**
+   * Measured byte size of the expert weight tensors (`_exps` tensors, the set
+   * llama.cpp's --cpu-moe / -ot exps=CPU moves to CPU), computed from GGUF
+   * tensor offsets at download time. Quant-agnostic and exact; the dense trunk
+   * that stays on GPU under --cpu-moe is approximately size - expert_weights_bytes.
+   */
+  expert_weights_bytes?: number;
 
   /** Embedding dimension length */
   embedding_length?: number;

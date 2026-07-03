@@ -11,6 +11,38 @@ import type { MemoryInfo, GPUInfo } from '../types/index.js';
 const execAsync = promisify(exec);
 
 /**
+ * Cached Windows "Available Bytes" (free + standby + modified-ready).
+ * os.freemem() on Windows reports only the free list and excludes the standby
+ * cache, so a 64 GB machine under load can report ~1-2 GB "free" while tens
+ * of GB are instantly reclaimable — starving RAM-feasibility checks.
+ */
+let cachedWindowsAvailable: { bytes: number; timestamp: number } | null = null;
+const WINDOWS_AVAILABLE_TTL_MS = 60000;
+
+/**
+ * Refresh the standby-aware available-memory reading (Windows only; no-op
+ * elsewhere). Called from SystemInfo.detect() so the synchronous
+ * getMemoryInfo() has a fresh value by the time sizing decisions run.
+ */
+export async function refreshAvailableMemory(): Promise<void> {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  try {
+    const { stdout } = await execAsync(
+      'powershell -NoProfile -Command "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableBytes"',
+      { timeout: 10000 }
+    );
+    const bytes = parseInt(stdout.trim(), 10);
+    if (Number.isFinite(bytes) && bytes > 0) {
+      cachedWindowsAvailable = { bytes, timestamp: Date.now() };
+    }
+  } catch {
+    // Fall back to os.freemem() readings
+  }
+}
+
+/**
  * Get system memory information
  *
  * @returns Memory information in bytes
@@ -23,7 +55,17 @@ const execAsync = promisify(exec);
  */
 export function getMemoryInfo(): MemoryInfo {
   const total = os.totalmem();
-  const available = os.freemem();
+  let available = os.freemem();
+
+  // Windows: prefer the standby-aware reading when fresh (see above)
+  if (
+    process.platform === 'win32' &&
+    cachedWindowsAvailable &&
+    Date.now() - cachedWindowsAvailable.timestamp < WINDOWS_AVAILABLE_TTL_MS
+  ) {
+    available = Math.max(available, cachedWindowsAvailable.bytes);
+  }
+
   const used = total - available;
 
   return {

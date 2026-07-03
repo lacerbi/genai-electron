@@ -273,6 +273,52 @@ describe('SystemInfo', () => {
     });
   });
 
+  describe('canRunModel() — MoE', () => {
+    beforeEach(async () => {
+      mockExec.mockImplementation((cmd: string, callback: Function) => {
+        callback(null, '', '');
+      });
+      await systemInfo.detect();
+    });
+
+    const moeModel = (totalSize: number, expertBytes: number) => ({
+      id: 'moe',
+      name: 'MoE',
+      type: 'llm' as const,
+      size: totalSize,
+      path: '/moe.gguf',
+      downloadedAt: new Date().toISOString(),
+      source: { type: 'url' as const, url: 'http://test.com' },
+      ggufMetadata: {
+        architecture: 'gemma4',
+        block_count: 30,
+        attention_head_count: 16,
+        attention_head_count_kv: 8,
+        attention_key_length: 128,
+        context_length: 262144,
+        expert_count: 128,
+        expert_weights_bytes: expertBytes,
+      },
+    });
+
+    it('allows a big MoE whose trunk fits committed RAM (experts mmap-gated)', async () => {
+      // 12.5 GiB model / 10 GiB experts on a 24 GiB-total, 8 GiB-free machine:
+      // committed requirement is trunk-only (~3.5 GiB <= 8 free), experts
+      // 10 <= 24 x 0.6 = 14.4 — the pre-0.8 whole-file gate (15 GiB) would reject
+      mockTotalmem.mockReturnValue(24 * 1024 ** 3);
+      await systemInfo.detect(true); // refresh cached capabilities with the new total
+      const result = await systemInfo.canRunModel(moeModel(12.5 * 1024 ** 3, 10 * 1024 ** 3));
+      expect(result.possible).toBe(true);
+    });
+
+    it('rejects MoE experts above the total-RAM fraction', async () => {
+      // 20 GiB of experts on a 16 GiB machine
+      const result = await systemInfo.canRunModel(moeModel(24 * 1024 ** 3, 20 * 1024 ** 3));
+      expect(result.possible).toBe(false);
+      expect(result.reason).toContain('expert');
+    });
+  });
+
   describe('getOptimalConfig()', () => {
     beforeEach(async () => {
       mockExec.mockImplementation((cmd: string, callback: Function) => {
@@ -465,6 +511,164 @@ describe('SystemInfo', () => {
 
       expect(config.contextSize).toBe(16384);
       expect(config.gpuLayers).toBe(36); // still fits fully alongside 16K of KV
+    });
+
+    describe('MoE-aware sizing', () => {
+      // Modeled on gemma-4-26B-A4B UD quant: 12.5 GiB file, ~10 GiB experts,
+      // ~2.4 GiB trunk, 30 layers — far too big for the mocked 10 GiB GPU
+      // as a dense model, comfortable as trunk-on-GPU + experts-in-RAM.
+      const makeMoE = (
+        overrides: Partial<import('../../src/types/index.js').ModelInfo> = {},
+        meta: Partial<
+          NonNullable<import('../../src/types/index.js').ModelInfo['ggufMetadata']>
+        > = {}
+      ) =>
+        makeModel(
+          { size: 12.5 * 1024 ** 3, ...overrides },
+          {
+            architecture: 'gemma4',
+            block_count: 30,
+            attention_head_count: 16,
+            attention_head_count_kv: 8,
+            attention_key_length: 128,
+            context_length: 262144,
+            expert_count: 128,
+            expert_used_count: 8,
+            expert_feed_forward_length: 704,
+            expert_weights_bytes: 10 * 1024 ** 3,
+            ...meta,
+          }
+        );
+
+      it('auto-recommends cpuMoe when the trunk fits but full weights do not', async () => {
+        // Experts gate against TOTAL RAM (mmap'd, sparsely activated):
+        // 10 GiB experts need total >= ~16.8 GiB — use a 64 GiB machine
+        mockTotalmem.mockReturnValue(64 * 1024 ** 3);
+        mockFreemem.mockReturnValue(24 * 1024 ** 3);
+
+        const config = await systemInfo.getOptimalConfig(makeMoE());
+
+        expect(config.cpuMoe).toBe(true);
+        expect(config.gpuLayers).toBe(30);
+        // ctx from (budget - trunk x 1.1) / q8 bpt — far beyond the floor
+        expect(config.contextSize!).toBeGreaterThan(16384);
+        expect(config.cacheTypeK).toBe('q8_0');
+      });
+
+      it('respects an explicit cpuMoe: false opt-out (dense sizing, no recommendation)', async () => {
+        mockTotalmem.mockReturnValue(64 * 1024 ** 3);
+        mockFreemem.mockReturnValue(24 * 1024 ** 3);
+
+        const config = await systemInfo.getOptimalConfig(makeMoE(), { cpuMoe: false });
+
+        expect(config.cpuMoe).toBeUndefined();
+        // Dense math: partial offload, NOT a trunk-sized context
+        expect(config.gpuLayers!).toBeLessThan(30);
+      });
+
+      it('does not recommend cpuMoe when experts do not fit RAM (dense partial fallback)', async () => {
+        // Default 16 GiB TOTAL RAM: 10 GiB of experts exceed the 60% cap
+        const config = await systemInfo.getOptimalConfig(makeMoE());
+
+        expect(config.cpuMoe).toBeUndefined();
+        expect(config.gpuLayers!).toBeLessThan(30);
+      });
+
+      it('keeps plain full offload when the whole MoE fits in VRAM', async () => {
+        // Small MoE: 4 GiB file, 3 GiB experts — fits the budget whole
+        const config = await systemInfo.getOptimalConfig(
+          makeMoE({ size: 4 * 1024 ** 3 }, { expert_weights_bytes: 3 * 1024 ** 3 })
+        );
+
+        expect(config.cpuMoe).toBeUndefined();
+        expect(config.gpuLayers).toBe(30);
+      });
+
+      it('sizes context from the trunk when cpuMoe is hinted (palimpsest case)', async () => {
+        const config = await systemInfo.getOptimalConfig(makeMoE(), {
+          cpuMoe: true,
+          gpuLayers: 999,
+        });
+
+        expect(config.gpuLayers).toBe(999); // hint respected verbatim
+        // Without the trunk split this would clamp to the 4096 floor
+        expect(config.contextSize!).toBeGreaterThan(16384);
+        expect(config.cpuMoe).toBeUndefined(); // caller already owns the field
+      });
+
+      it("treats overrideTensors 'exps=CPU' exactly like cpuMoe", async () => {
+        const withCpuMoe = await systemInfo.getOptimalConfig(makeMoE(), {
+          cpuMoe: true,
+          gpuLayers: 30,
+        });
+        const withOt = await systemInfo.getOptimalConfig(makeMoE(), {
+          overrideTensors: 'exps=CPU',
+          gpuLayers: 30,
+        });
+
+        expect(withOt.contextSize).toBe(withCpuMoe.contextSize);
+      });
+
+      it('sizes conservatively (dense) for custom overrideTensors patterns', async () => {
+        const config = await systemInfo.getOptimalConfig(makeMoE(), {
+          overrideTensors: 'blk\.[0-9]+\.ffn=CPU',
+          gpuLayers: 30,
+        });
+
+        // Dense math: the full 12.5 GiB "on GPU" exceeds budget -> floor context
+        expect(config.contextSize).toBe(4096);
+      });
+
+      it('does NOT auto-recommend from the parameter-count heuristic (measured bytes only)', async () => {
+        mockTotalmem.mockReturnValue(64 * 1024 ** 3);
+        mockFreemem.mockReturnValue(24 * 1024 ** 3);
+        const heuristicOnly = makeMoE(
+          {},
+          {
+            expert_weights_bytes: undefined,
+            raw: { 'general.parameter_count': 26_000_000_000 },
+            embedding_length: 2816,
+          }
+        );
+
+        // Auto tier requires MEASURED expert bytes — heuristic could
+        // underestimate the trunk and overcommit VRAM
+        const auto = await systemInfo.getOptimalConfig(heuristicOnly);
+        expect(auto.cpuMoe).toBeUndefined();
+
+        // But hint-driven sizing uses the heuristic as best-effort:
+        // expertParams = 3 x 2816 x 704 x 128 x 30 ~ 22.8B of 26B -> ~88% experts
+        const hinted = await systemInfo.getOptimalConfig(heuristicOnly, {
+          cpuMoe: true,
+          gpuLayers: 30,
+        });
+        expect(hinted.contextSize!).toBeGreaterThan(4096);
+      });
+
+      it('reserves proportional expert RAM for an nCpuMoe hint', async () => {
+        // nCpuMoe: 15 of 30 layers -> half the experts (5 GiB) on CPU.
+        // Trunk-adjusted GPU weights: (12.5 - 5) x 1.1 = 8.25 GiB > 8.28 budget
+        // barely -> partial offload, but with far more layers than dense math
+        const half = await systemInfo.getOptimalConfig(makeMoE(), { nCpuMoe: 15 });
+        const dense = await systemInfo.getOptimalConfig(makeMoE(), {
+          overrideTensors: 'custom=CPU',
+        });
+
+        expect(half.gpuLayers!).toBeGreaterThan(dense.gpuLayers!);
+      });
+
+      it('packs partial offload around the trunk when cpuMoe is hinted but trunk exceeds VRAM', async () => {
+        // Trunk = 24 - 10 = 14 GiB x 1.1 > 8.28 GiB budget -> partial offload
+        // of the trunk with experts already on CPU
+        const config = await systemInfo.getOptimalConfig(
+          makeMoE({ size: 24 * 1024 ** 3 }, { expert_weights_bytes: 10 * 1024 ** 3 }),
+          { cpuMoe: true }
+        );
+
+        expect(config.gpuLayers!).toBeGreaterThan(0);
+        expect(config.gpuLayers!).toBeLessThan(30);
+        expect(config.contextSize!).toBeGreaterThanOrEqual(4096);
+      });
     });
 
     it('sizes context from RAM on CPU-only systems and keeps f16', async () => {

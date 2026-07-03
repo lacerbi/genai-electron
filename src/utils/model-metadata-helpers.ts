@@ -131,9 +131,10 @@ export function getArchitectureWithFallback(modelInfo: ModelInfo): string {
  * ```
  */
 export function getAttentionHeadCountWithFallback(modelInfo: ModelInfo): number {
-  // Try GGUF metadata first (accurate)
-  if (modelInfo.ggufMetadata?.attention_head_count) {
-    return modelInfo.ggufMetadata.attention_head_count;
+  // Try GGUF metadata first (accurate); per-layer arrays normalize via mean
+  const typed = toScalarMean(modelInfo.ggufMetadata?.attention_head_count);
+  if (typed) {
+    return typed;
   }
 
   // Fallback: Estimate based on model size
@@ -155,6 +156,27 @@ export function getAttentionHeadCountWithFallback(modelInfo: ModelInfo): number 
 }
 
 /**
+ * Normalize a GGUF numeric field that may be a per-layer array
+ *
+ * Heterogeneous-attention architectures (e.g. Gemma 4: full-attention layers
+ * with 8 KV heads alternating with sliding-window layers with 2) store
+ * per-layer arrays. The MEAN keeps summed per-layer KV totals exact:
+ * sum(perLayer) === layers x mean.
+ *
+ * @returns Positive scalar, or undefined when the value is unusable
+ */
+function toScalarMean(value: unknown): number | undefined {
+  if (typeof value === 'number' && value > 0) {
+    return value;
+  }
+  if (Array.isArray(value) && value.length > 0 && value.every((v) => typeof v === 'number')) {
+    const mean = value.reduce((a, b) => a + b, 0) / value.length;
+    return mean > 0 ? mean : undefined;
+  }
+  return undefined;
+}
+
+/**
  * Get KV-head count (GQA) with fallback
  *
  * Priority:
@@ -168,14 +190,15 @@ export function getAttentionHeadCountWithFallback(modelInfo: ModelInfo): number 
  */
 export function getKVHeadCountWithFallback(modelInfo: ModelInfo): number {
   const meta = modelInfo.ggufMetadata;
-  if (meta?.attention_head_count_kv) {
-    return meta.attention_head_count_kv;
+  const typed = toScalarMean(meta?.attention_head_count_kv);
+  if (typed) {
+    return typed;
   }
 
   const arch = meta?.architecture;
   if (arch && meta?.raw) {
-    const value = meta.raw[`${arch}.attention.head_count_kv`];
-    if (typeof value === 'number' && value > 0) {
+    const value = toScalarMean(meta.raw[`${arch}.attention.head_count_kv`]);
+    if (value) {
       return value;
     }
   }
@@ -197,14 +220,15 @@ export function getKVHeadCountWithFallback(modelInfo: ModelInfo): number {
  */
 export function getHeadDimensionWithFallback(modelInfo: ModelInfo): number {
   const meta = modelInfo.ggufMetadata;
-  if (meta?.attention_key_length) {
-    return meta.attention_key_length;
+  const typed = toScalarMean(meta?.attention_key_length);
+  if (typed) {
+    return typed;
   }
 
   const arch = meta?.architecture;
   if (arch && meta?.raw) {
-    const value = meta.raw[`${arch}.attention.key_length`];
-    if (typeof value === 'number' && value > 0) {
+    const value = toScalarMean(meta.raw[`${arch}.attention.key_length`]);
+    if (value) {
       return value;
     }
   }
@@ -246,6 +270,69 @@ export function getEmbeddingLengthWithFallback(modelInfo: ModelInfo): number {
     // 7B and smaller
     return 4096;
   }
+}
+
+/**
+ * Get MoE expert count with fallback (0 = dense model)
+ *
+ * Priority: typed field → raw metadata lookup → 0.
+ */
+export function getExpertCountWithFallback(modelInfo: ModelInfo): number {
+  const meta = modelInfo.ggufMetadata;
+  if (meta?.expert_count) {
+    return meta.expert_count;
+  }
+
+  const arch = meta?.architecture;
+  if (arch && meta?.raw) {
+    const value = meta.raw[`${arch}.expert_count`];
+    if (typeof value === 'number' && value > 0) {
+      return value;
+    }
+  }
+
+  return 0;
+}
+
+/**
+ * Get the byte size of MoE expert weights, with fallback estimation
+ *
+ * Priority:
+ * 1. Measured `expert_weights_bytes` (exact, from GGUF tensor offsets)
+ * 2. Parameter-count heuristic: expertParams / totalParams × file size, using
+ *    `general.parameter_count` and expert dims from metadata
+ * 3. undefined — caller should treat the model as dense (conservative)
+ *
+ * @param modelInfo - Model information
+ * @returns Expert weight bytes, or undefined when not estimable / dense
+ */
+export function getExpertWeightsBytesWithFallback(modelInfo: ModelInfo): number | undefined {
+  const meta = modelInfo.ggufMetadata;
+  if (meta?.expert_weights_bytes && meta.expert_weights_bytes > 0) {
+    return meta.expert_weights_bytes;
+  }
+
+  const expertCount = getExpertCountWithFallback(modelInfo);
+  if (expertCount <= 0) {
+    return undefined;
+  }
+
+  // Heuristic: 3 projection matrices (gate/up/down) per expert per layer
+  const expertFF =
+    meta?.expert_feed_forward_length ??
+    (meta?.architecture && meta.raw
+      ? (meta.raw[`${meta.architecture}.expert_feed_forward_length`] as number | undefined)
+      : undefined);
+  const totalParams = meta?.raw?.['general.parameter_count'] as number | undefined;
+  if (!expertFF || !totalParams || totalParams <= 0) {
+    return undefined;
+  }
+
+  const layers = getLayerCountWithFallback(modelInfo);
+  const embedding = getEmbeddingLengthWithFallback(modelInfo);
+  const expertParams = 3 * embedding * expertFF * expertCount * layers;
+  const fraction = Math.min(0.95, expertParams / totalParams);
+  return fraction > 0 ? Math.round(modelInfo.size * fraction) : undefined;
 }
 
 /**
