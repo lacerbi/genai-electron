@@ -154,7 +154,7 @@ Returns the registry ID of the async generation currently being processed, or `u
 getActiveGenerationId(): string | undefined
 ```
 
-> **genai-lite polling caveat:** genai-lite clients **below v0.9.2** only treat `complete` and `error` as terminal statuses — if a generation is cancelled out-of-band, they keep polling until their own client-side timeout (~120 s). genai-lite ≥ 0.9.2 recognizes `'cancelled'` as terminal and stops immediately (surfacing an abort error).
+> **genai-lite polling caveat:** genai-lite clients **below v0.9.2** only treat `complete` and `error` as terminal statuses — if a generation is cancelled out-of-band, they keep polling until their own client-side timeout (~120 s). genai-lite ≥ 0.9.2 recognizes `'cancelled'` as terminal and stops immediately (surfacing an abort error). genai-lite ≥ 0.10.0 additionally supports request-side cancellation — `generateImage(request, { signal })` sends this DELETE itself on caller abort (and on its own ~120 s poll timeout, freeing the GPU), so out-of-band cancellation is only needed for older clients or non-genai-lite pollers.
 
 ---
 

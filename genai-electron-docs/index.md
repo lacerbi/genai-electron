@@ -358,9 +358,9 @@ No additional code needed - it just works! See [Resource Orchestration](resource
 **Repository**: [genai-electron on GitHub](https://github.com/lacerbi/genai-electron)
 
 **Related Projects**:
-- **genai-lite** (v0.9.0): Lightweight API abstraction layer for AI providers (cloud and local)
+- **genai-lite** (≥ 0.9): Lightweight API abstraction layer for AI providers (cloud and local)
   - Repository: https://github.com/lacerbi/genai-lite
-  - **Version pairing**: genai-lite ≥ 0.9 pairs with genai-electron ≥ 0.6 — the reasoning request toggle and the `'cancelled'` generation status require that pairing. 
+  - **Version pairing**: genai-lite ≥ 0.9 pairs with genai-electron ≥ 0.6 — the reasoning request toggle and the `'cancelled'` generation status require that pairing. genai-lite ≥ 0.10 additionally uses genai-electron's `DELETE /v1/images/generations/:id` for request-side image cancellation (`generateImage(request, { signal })`, plus cancel-on-timeout).
 
 **Examples**:
 - `examples/electron-control-panel/` - Full-featured Electron app showcasing all library features

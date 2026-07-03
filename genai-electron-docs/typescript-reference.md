@@ -535,7 +535,7 @@ Types for HTTP API async image generation (polling pattern).
 
 ### GenerationStatus
 
-`'cancelled'` is a terminal status (added in v0.6.0). Note: genai-lite pollers older than the version that recognizes it treat only `'complete'`/`'error'` as terminal, so an out-of-band cancellation leaves those clients polling until their own client-side timeout.
+`'cancelled'` is a terminal status (added in v0.6.0). Note: genai-lite pollers below 0.9.2 treat only `'complete'`/`'error'` as terminal, so an out-of-band cancellation leaves those clients polling until their own client-side timeout; genai-lite ≥ 0.9.2 stops immediately, and ≥ 0.10.0 can issue the cancellation itself (AbortSignal → `DELETE /v1/images/generations/:id`).
 
 ```typescript
 type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error' | 'cancelled';

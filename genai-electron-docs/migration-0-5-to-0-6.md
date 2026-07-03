@@ -500,7 +500,7 @@ DELETE /v1/images/generations/:id
 
 ### genai-lite Client Caveat
 
-`GenerationStatus` gains the terminal state `'cancelled'`. **genai-lite ≤ 0.9.0 pollers only treat `complete` / `error` as terminal** — if a generation is cancelled out-of-band (e.g. from your app's own Cancel button rather than through the poller), those older clients keep polling until their own client-side timeout (~120 s) before giving up. A follow-up is filed in genai-lite; until then, prefer cancelling through the same client that started the generation, or expect the delayed timeout on older genai-lite versions.
+`GenerationStatus` gains the terminal state `'cancelled'`. **genai-lite ≤ 0.9.0 pollers only treat `complete` / `error` as terminal** — if a generation is cancelled out-of-band (e.g. from your app's own Cancel button rather than through the poller), those older clients keep polling until their own client-side timeout (~120 s) before giving up. *(Since resolved: genai-lite 0.9.2 treats `'cancelled'` as terminal, and genai-lite 0.10.0 sends the DELETE itself via `generateImage(request, { signal })` — the caveat now applies only to genai-lite ≤ 0.9.0.)*
 
 ---
 
