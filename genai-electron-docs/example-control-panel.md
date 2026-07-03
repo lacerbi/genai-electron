@@ -715,7 +715,7 @@ const result = await window.api.server.testMessage(message, {
 });
 ```
 
-The example app pins genai-lite `^0.9.0`, so the request toggle is fully functional: it sends `reasoning: { enabled: true }` and genai-lite forwards `chat_template_kwargs.enable_thinking` to the (always `--jinja`) server.
+The example app pins genai-lite `^0.11.0` (caret on 0.x pins the minor, so bump this floor deliberately on genai-lite releases), so the request toggle is fully functional: it sends `reasoning: { enabled: true }` and genai-lite forwards `chat_template_kwargs.enable_thinking` to the (always `--jinja`) server. The 0.11 line also fixes llama.cpp abort/timeout error classification (previously surfaced as `UNKNOWN_ERROR`) and adds image cancellation, per-request image timeouts, and `retryAfterMs` on failure envelopes.
 
 ---
 

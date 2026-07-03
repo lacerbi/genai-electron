@@ -361,7 +361,7 @@ No additional code needed - it just works! See [Resource Orchestration](resource
 **Related Projects**:
 - **genai-lite** (≥ 0.9): Lightweight API abstraction layer for AI providers (cloud and local)
   - Repository: https://github.com/lacerbi/genai-lite
-  - **Version pairing**: genai-lite ≥ 0.9 pairs with genai-electron ≥ 0.6 — the reasoning request toggle and the `'cancelled'` generation status require that pairing. genai-lite ≥ 0.10 additionally uses genai-electron's `DELETE /v1/images/generations/:id` for request-side image cancellation (`generateImage(request, { signal })`, plus cancel-on-timeout).
+  - **Version pairing**: genai-lite ≥ 0.9 pairs with genai-electron ≥ 0.6 — the reasoning request toggle and the `'cancelled'` generation status require that pairing. genai-lite ≥ 0.10 additionally uses genai-electron's `DELETE /v1/images/generations/:id` for request-side image cancellation (`generateImage(request, { signal })`, plus cancel-on-timeout). genai-lite ≥ 0.11 adds a per-request timeout override (`generateImage(request, { timeoutMs })`, default 120 s) and automatic retries for cloud image providers — but it **never auto-retries genai-electron** (a blind retry would start a second GPU generation), so apps that want retry-on-busy behavior against this server must implement it themselves (e.g. on `RATE_LIMIT_EXCEEDED`/`SERVER_BUSY`).
 
 **Examples**:
 - `examples/electron-control-panel/` - Full-featured Electron app showcasing all library features
