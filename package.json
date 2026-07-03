@@ -10,6 +10,7 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run clean && npm run build && npm test",
     "build:watch": "tsc --watch",
     "test": "cross-env NODE_OPTIONS=--experimental-vm-modules jest",
     "test:watch": "cross-env NODE_OPTIONS=--experimental-vm-modules jest --watch",
@@ -18,8 +19,7 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "clean": "rimraf dist coverage",
-    "prepublishOnly": "npm run clean && npm run build && npm test"
+    "clean": "rimraf dist coverage"
   },
   "keywords": [
     "electron",
