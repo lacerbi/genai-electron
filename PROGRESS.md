@@ -293,6 +293,12 @@ Key design decisions that inform future development:
 - Ensure all examples in README.md are current
 - Maintain genai-electron-docs/ with Phase 2 features
 
+**Maintenance (noticed 2026-07-03, during the genai-lite 0.11 pairing update):**
+- `examples/electron-control-panel` has pre-existing `npm audit` findings in its
+  dev tooling (electron ≤ 39.8.4, tar ≤ 7.5.15, brace-expansion < 1.1.13) —
+  unrelated to genai-lite; run `npm audit fix` there and bump electron/forge
+  when convenient
+
 ### Phase 3 Planned Features
 
 **Enhanced Download Management:**
