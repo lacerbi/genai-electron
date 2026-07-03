@@ -222,6 +222,8 @@ This is documented in the electron-control-panel example for reference.
 
 **Note**: CI will fail if any of these checks fail. Run them locally before pushing.
 
+**Release workflow** (agreed 2026-07-03): fixes/features accumulate **unreleased** — on a batch branch, or on main under a PROGRESS "Unreleased" section — with no version bump, tag, npm publish, or (when batching on a branch) even PRs, until the user explicitly says to release. Then: one release PR (version strings, migration guide, PROGRESS entry) → merge → tag → GitHub release → the user runs `npm publish` (guarded by `prepublishOnly`). New ISSUE files appearing at the repo root are proposals to READ and confirm with the user before acting on.
+
 **When Adding New Features**:
 1. Check if it's planned in DESIGN.md (phases 2-5)
 2. Update PROGRESS.md with concise summary of changes

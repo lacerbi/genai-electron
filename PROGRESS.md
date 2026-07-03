@@ -490,11 +490,13 @@ For detailed historical information:
 
 **Released:** v0.6.1 published to npm (2026-07-03; 0.6.0 was tagged but never published — the audit patch superseded it). GitHub Release on tag `v0.6.1`.
 
-**Follow-ups (agreed, not yet started):**
+**Follow-ups (agreed, not yet started; updated 2026-07-03 post-v0.9.0):**
+- **palimpsest-engine integration** (downstream, next natural step) — consume v0.8/0.9: drop the MoE filename regex (`/-a\d+b/i`) + manual `cpuMoe`/`gpuLayers: 999`/pinned-context path (v0.8 auto-config covers it), and the `binary-log` percent regex + throttle (subscribe to `'binary-progress'`, v0.9).
 - **stable-diffusion.cpp bump** — pin `master-504-636d3cb` is ~242 releases behind (`master-746-2574f59` as of 2026-07-02). Needs its own plan: sd-cli flag surface may have changed; re-validate diffusion per platform. (Plan Open Question 1, resolved as separate follow-up.)
 - **Example-app toolchain chore** — Electron Forge devDependency chain carries npm-audit highs fixable only via major bumps (electron 35→43 + Forge majors). Dev-only, outside the published package and CI's root-only audit gate.
+- **Example app: forward `'binary-progress'` over IPC** — the control panel still forwards only `'binary-log'`; wire the structured event through preload/renderer for a real progress bar (small; pairs with the toolchain chore).
 - **ROCm/HIP binary variants** — upstream now ships `win-hip-radeon` + `ubuntu-rocm` prebuilts; blocked on Windows AMD GPU detection (DESIGN Phase 4).
-- **genai-lite**: `GenaiElectronImageAdapter` should treat `'cancelled'` as terminal — filed and committed in that repo (`docs/ISSUE-cancelled-generation-status.md`).
+- ~~genai-lite `'cancelled'` terminal status~~ — RESOLVED in genai-lite v0.9.2.
 
 ---
 
