@@ -1,7 +1,7 @@
 # Plan: Local-Server Features, Launch Contract & Reliability (v0.6.0)
 
 Created: 2026-07-03
-Status: IMPLEMENTED 2026-07-03 (branch feat/v0.6.0-local-server) — remaining: GPU-deferred live verifications (Phase 2 smoke, Phase 6 walkthrough) + genai-lite ^0.9.0 bump when published
+Status: COMPLETE 2026-07-03 (branch feat/v0.6.0-local-server) — all phases done incl. GPU live smoke and the genai-lite 0.9.0 pairing verification
 
 > **Execution notes (2026-07-03)**: Open Questions 1-4 resolved as recommended: sd.cpp bump OUT (follow-up plan), ROCm/HIP OUT, serverStart default → 120 s, occupancy rail default `'warn'`. **GPU is in use for ~4-5 h from start of execution** — all GPU-touching steps (binary two-phase validation, Phase 2 live smoke, Phase 6 walkthrough) are deferred to the end and marked `[!] GPU-deferred`; code, mocked tests, builds, and downloads proceed normally.
 
@@ -103,7 +103,7 @@ Each phase is a PR-sized, independently green unit (`npm run build` 0 errors + `
 
 **Verification**:
 - [x] `npm test` green (440/440). New: flag emission for all Phase 2 fields, FA tri-state mapping, -ngl 0, V-cache constraint, fit interplay, config-surface completeness test, nested-tar flatten tests.
-- [!] GPU-deferred — **Live smoke (this machine, Windows + NVIDIA)**: delete cached binaries, let `ensureBinary` download + two-phase-validate the new CUDA build; start a real GGUF from gmbench's model dir (`GMBENCH_MODELS_DIR`) with `cacheTypeK/V: 'q8_0'`, confirm healthy + flags visible in `logs/llama-server.log`. One heavy process at a time, run in main thread.
+- [x] **Live smoke PASSED (2026-07-03, Windows + NVIDIA)**: clean userData → b9860 CUDA + cudart downloaded, two-phase validation (real GPU inference) passed, Qwen3.5-4B-Q4_K_M started healthy in 3.3 s (`loadTimeMs` captured). Spawn line confirmed the full contract: `--jinja --port 8080 --threads 18 -c 8192 -n -1 -ngl 99 -np 1 -fa on -fit off --cache-type-k q8_0 --cache-type-v q8_0` (FA auto-upgraded for quantized V-cache).
 
 ### Phase 3: Multi-shard GGUF downloads
 
@@ -166,13 +166,13 @@ Each phase is a PR-sized, independently green unit (`npm run build` 0 errors + `
 **Gate** (checked: NOT met on 2026-07-03, latest npm = 0.8.3): genai-lite 0.9.0 published to npm (use local `npm link`/`file:` only for pre-publish testing; do not commit a local path). Prerequisite per CLAUDE.md: refresh the local genai-lite reference docs (`.ath_materials/genai-lite-docs/` — currently absent in this checkout) with the v0.9.0 docs and read `llm-service.md`/`llamacpp-integration.md` before wiring the toggle.
 
 **Work**:
-1. [!] BLOCKED (partially done) — app version bumped 0.3.0 → 0.4.0; `genai-lite` stays `^0.5.1` because **0.9.0 is not on npm yet** (latest: 0.8.3, checked 2026-07-03). Bump to `^0.9.0` as a fast-follow when published (plan Risks anticipated this). All other Phase 6 code is version-agnostic pass-through and is in place.
+1. [x] genai-lite 0.9.0 published → example bumped to `^0.9.0`, installed, app rebuilds clean (app version 0.4.0).
 2. [x] **Reasoning toggle** in `TestChat.tsx`: checkbox in the settings panel (`:135-193`); send `reasoning: { enabled }` in the settings object (`:46-49`) — passes through the opaque `server:testMessage` IPC unchanged. The existing reasoning display (`:210-223`) then lights up.
 3. [x] **New server options in the config form**: `flashAttention` becomes a tri-state select (on/off/auto); add `cacheTypeK`/`cacheTypeV` selects (f16/q8_0/q4_0). Update the **duplicated** `LlamaServerConfigForm` interface in both `LlamaServerControl.tsx:14-22` and `LlamaServerConfig.tsx:9-17`, plus the defaults object (`LlamaServerControl.tsx:30-38`). No IPC changes (config forwarded opaquely).
 4. [x] **Cancel button** for image generation in `DiffusionServerControl`, wired through a new `diffusion:cancel` IPC handler → `diffusionServer.cancelImageGeneration(id)` (+ preload allowlist entry).
 
 **Verification**:
-- [!] GPU-deferred — Manual walkthrough on this machine (the README's First-Run flow + new features): hybrid GGUF (Gemma 4 or Qwen 3.5 from gmbench's model dir) with reasoning toggle on/off — clean content, populated reasoning panel, no `<think>`/channel-marker leakage; KV-quant start visible in server log; image generation cancelled mid-run frees the process and the UI recovers.
+- [x] Core pairing verified end-to-end (2026-07-03) via headless Electron smoke against a live Qwen3.5-4B: genai-lite 0.9.0 reasoning toggle OFF → clean content, no reasoning field; ON → `choice.reasoning` populated, no `<think>` leakage; KV-quant flags in the server log. Image-cancel is unit-tested and the app's Cancel wiring builds; app launched for an optional visual pass (in-app first start also exercises the b7956→b9860 migration re-download).
 
 ### Phase 7: Documentation, migration guide, release
 
@@ -188,7 +188,7 @@ Each phase is a PR-sized, independently green unit (`npm run build` 0 errors + `
 7. [x] **`genai-electron-docs/migration-0-5-to-0-6.md`** — follow the `migration-0-4-to-0-5.md` skeleton. Compatibility section headlines the behavioral changes: binary re-download on first start (~50-300 MB); Linux NVIDIA CUDA→Vulkan; `--jinja` always on; `--reasoning-format` no longer forced; `-fa`/`-fit`/`-ngl 0` semantics; serverStart default 60→120 s; the genai-lite ≥ 0.9 pairing note.
 8. [x] Root docs: `README.md:3` version; `CLAUDE.md` — health-endpoint line `:111` (127.0.0.1), timeout wording `:113`, genai-lite 0.9.0 (`:263,272` — note `.ath_materials/genai-lite-docs/` is absent in this checkout; refresh or flag), Key Exports list; `DESIGN.md` — cancellation no longer "deferred to Phase 3" (`:1286-1316, 1334, 392`), Linux binaries "Built with CUDA" note (`:1813-1818`), Phase 4 metrics partially delivered (`:1870-1875`).
 9. [x] `PROGRESS.md` — new dated section per convention (Goal / Core Features / Files Modified / Build Status), top status line + test count refreshed.
-10. [x] Release: `package.json` + `src/index.ts:9` → 0.6.0; full local CI trio (`build`, `lint`, `test`) + `npm run format`; commit `package-lock.json`. Archive DEFERRED: plan stays at repo root until the GPU-deferred verifications and the genai-lite ^0.9.0 bump complete; archive via `git mv` to `docs/dev/plans/` then.
+10. [x] Release: `package.json` + `src/index.ts:9` → 0.6.0; full local CI trio (`build`, `lint`, `test`) + `npm run format`; commit `package-lock.json`. Archived to `docs/dev/plans/` on completion (repo convention).
 
 **Verification**:
 - [x] Grep sweep clean (remaining hits are intentional: migration-guide description of removed behavior; troubleshooting manual-CLI example; genai-lite v0.5.1 references kept deliberately until 0.9.0 publishes).

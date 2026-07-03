@@ -715,7 +715,7 @@ const result = await window.api.server.testMessage(message, {
 });
 ```
 
-Since the example app still pins genai-lite `^0.5.1` (0.9.0 is a fast-follow, not yet on npm), the request toggle is wired in the UI but only takes effect once the genai-lite dependency is bumped.
+The example app pins genai-lite `^0.9.0`, so the request toggle is fully functional: it sends `reasoning: { enabled: true }` and genai-lite forwards `chat_template_kwargs.enable_thinking` to the (always `--jinja`) server.
 
 ---
 

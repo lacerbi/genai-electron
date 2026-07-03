@@ -262,17 +262,17 @@ This is documented in the electron-control-panel example for reference.
 
 ## Related Projects
 
-**genai-lite** (v0.5.1): Lightweight API abstraction layer for AI providers (cloud and local)
+**genai-lite** (v0.9.0): Lightweight API abstraction layer for AI providers (cloud and local)
 - genai-electron starts servers, genai-lite talks to those servers
 - Clean separation: runtime management vs API abstraction
 - Repository: https://github.com/lacerbi/genai-lite
-- Pairing: genai-electron ≥ 0.6 pairs with genai-lite ≥ 0.9 (v0.9.0 pairing planned — see PLAN-local-model-features.md in genai-lite); the reasoning toggle needs the server started with `--jinja`, now always on here
+- Pairing: genai-electron ≥ 0.6 pairs with genai-lite ≥ 0.9; the reasoning toggle needs the server started with `--jinja`, now always on here
 
 ## genai-lite Documentation Reference
 
 **IMPORTANT**: When implementing features that integrate with genai-lite (LLMService, ImageService), **read the relevant documentation first** to ensure correct API usage.
 
-**Documentation Location**: `.ath_materials/genai-lite-docs/` (v0.5.1 reference docs) (refresh to v0.9.0 docs when published)
+**Documentation Location**: `.ath_materials/genai-lite-docs/` (refresh with the published v0.9.0 reference docs)
 
 **Key Documentation Files**:
 - **`index.md`** - Overview, installation, quick starts (LLM and image generation)

@@ -7,7 +7,7 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 486/486 passing (20 suites)
+- **Tests:** ✅ 488/488 passing (20 suites)
 - **Branch:** `feat/v0.6.0-local-server`
 - **Last Updated:** 2026-07-03
 
@@ -471,7 +471,7 @@ For detailed historical information:
 
 ## v0.6.0: Local-Server Launch Contract, Multi-Shard Models & Reliability (2026-07-03)
 
-**Goal:** Port gmbench's battle-tested llama-server knowledge into the library and pair with genai-lite v0.9.0 (reasoning toggle needs an always-`--jinja` server). Plan: `PLAN-local-server-features.md` (repo root; moves to `docs/dev/plans/` when the deferred GPU verifications complete).
+**Goal:** Port gmbench's battle-tested llama-server knowledge into the library and pair with genai-lite v0.9.0 (reasoning toggle needs an always-`--jinja` server). Plan: `docs/dev/plans/PLAN-local-server-features.md`.
 
 **Core Features:**
 - llama.cpp pinned b7956 → b9860 (checksums from the releases-API digests; Linux x64 CUDA prebuilts discontinued upstream → Vulkan → CPU chain); fixed a latent macOS/Linux install bug (nested `llama-<tag>/` tar layouts now flattened)
@@ -482,7 +482,7 @@ For detailed historical information:
 - Multi-shard GGUF downloads (`-00001-of-0000N` auto-detection, `shardFiles` override, aggregate progress, `ModelInfo.shards`)
 - Diffusion cancellation: `cancelImageGeneration(id)`, `getActiveGenerationId()`, `DELETE /v1/images/generations/:id`, terminal `'cancelled'` status (genai-lite ≤ 0.9.0 caveat documented; follow-up filed in genai-lite)
 - Debug traces gated behind `GENAI_ELECTRON_DEBUG`
-- Example app v0.4.0: reasoning request toggle, flash-attention/KV-cache form controls, image-generation Cancel button (genai-lite bump to ^0.9.0 pending its npm publish)
+- Example app v0.4.0: reasoning request toggle, flash-attention/KV-cache form controls, image-generation Cancel button (genai-lite ^0.9.0; pairing live-verified: reasoning toggle end-to-end against Qwen3.5-4B on the b9860 server)
 
 **Files Modified:** `src/config/defaults.ts`, `src/types/{servers,models,images,index}.ts`, `src/managers/{LlamaServerManager,DiffusionServerManager,ModelManager,StorageManager,BinaryManager,ServerManager,ResourceOrchestrator,GenerationRegistry}.ts`, `src/process/{health-check,log-manager,port-utils}.ts`, `src/utils/debug-log.ts`, `src/index.ts`, example app (TestChat, LlamaServerConfig/Control, DiffusionServerControl, preload, ipc-handlers), docs (`genai-electron-docs/*`, `migration-0-5-to-0-6.md`, `docs/dev/UPDATING-BINARIES.md`)
 
