@@ -8,7 +8,7 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 514/514 passing (21 suites)
-- **Branch:** `feat/v0.6.0-local-server`
+- **Branch:** `main`
 - **Last Updated:** 2026-07-03 (v0.6.1: security patch — npm audit clean, tar minimum ^7.5.19)
 
 ---
@@ -511,4 +511,4 @@ For detailed historical information:
 
 **Files Modified:** `src/utils/kv-cache-math.ts` (new), `src/utils/model-metadata-helpers.ts`, `src/system/SystemInfo.ts`, `src/managers/{LlamaServerManager,ModelManager,ResourceOrchestrator}.ts`, `src/config/defaults.ts`, `src/types/{models,servers,index}.ts`, `src/index.ts`, docs (`system-detection`, `llm-server`, `typescript-reference`, `image-generation`, `migration-0-6-to-0-7.md`)
 
-**Build Status:** ✅ 0 TypeScript errors / 506/506 tests passing (21 suites); live GPU smoke: pure auto-config on Qwen3.5-4B → full offload, auto q8_0 KV + FA, context ≫ 4096, >4K-token prompt round-trips without truncation
+**Build Status:** ✅ 0 TypeScript errors / 514/514 tests passing (21 suites); v0.7.1 adds the progressive context-granularity ladder (128→4096 steps by magnitude, `floorContextToGranularity` exported; amends unpublished v0.7.0 — publish 0.7.1). Live GPU smoke: pure auto-config on Qwen3.5-4B → full offload, auto q8_0 KV + FA, context 58368 (→ 57344 with the ladder), 8130-token prompt round-trips without truncation
