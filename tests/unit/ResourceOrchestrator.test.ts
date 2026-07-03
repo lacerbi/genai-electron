@@ -22,6 +22,7 @@ jest.unstable_mockModule('../../src/system/SystemInfo.js', () => ({
 // Mock ModelManager
 const mockModelManager = {
   getModelInfo: jest.fn(),
+  getModelLayerCount: jest.fn(),
 };
 
 jest.unstable_mockModule('../../src/managers/ModelManager.js', () => ({
@@ -101,6 +102,12 @@ describe('ResourceOrchestrator', () => {
       if (modelId === 'llama-2-7b') return Promise.resolve(llmModelInfo);
       if (modelId === 'sdxl-turbo') return Promise.resolve(diffusionModelInfo);
       return Promise.reject(new Error('Model not found'));
+    });
+    // Default: layer count unavailable → estimateLLMUsage falls back to its
+    // conservative default estimates (the pre-existing behavior these tests
+    // were written against). MoE tests below override this.
+    mockModelManager.getModelLayerCount.mockImplementation(() => {
+      throw new Error('layer count not mocked');
     });
 
     mockLlamaServer.isRunning.mockReturnValue(false);
@@ -607,6 +614,81 @@ describe('ResourceOrchestrator', () => {
       const needsOffload = await orchestrator.wouldNeedOffload();
 
       expect(needsOffload).toBe(true);
+    });
+  });
+
+  describe('estimateLLMUsage() — MoE split', () => {
+    const GiB = 1024 ** 3;
+    const moeModelInfo = {
+      ...llmModelInfo,
+      id: 'moe-26b',
+      size: 12 * GiB,
+      // No block_count: KV term stays 0, isolating the weights arithmetic
+      ggufMetadata: { expert_count: 128, expert_weights_bytes: 10 * GiB },
+    };
+    type UsageProbe = { estimateLLMUsage(): Promise<{ ram: number; vram?: number }> };
+    const estimate = () => (orchestrator as unknown as UsageProbe).estimateLLMUsage();
+
+    beforeEach(() => {
+      mockLlamaServer.isRunning.mockReturnValue(true);
+      mockModelManager.getModelInfo.mockResolvedValue(moeModelInfo);
+      mockModelManager.getModelLayerCount.mockResolvedValue(30);
+    });
+
+    it('moves expert bytes from VRAM to RAM under cpuMoe', async () => {
+      mockLlamaServer.getConfig.mockReturnValue({
+        modelId: 'moe-26b',
+        port: 8080,
+        gpuLayers: 30,
+        cpuMoe: true,
+      });
+
+      const usage = await estimate();
+
+      // Trunk (12 - 10 = 2 GiB) x 1.2 on GPU; experts (10 GiB) x 1.2 in RAM
+      expect(usage.vram!).toBeCloseTo(2 * GiB * 1.2, -8);
+      expect(usage.ram).toBeCloseTo(10 * GiB * 1.2, -8);
+    });
+
+    it("treats overrideTensors 'exps=CPU' like cpuMoe", async () => {
+      mockLlamaServer.getConfig.mockReturnValue({
+        modelId: 'moe-26b',
+        port: 8080,
+        gpuLayers: 30,
+        overrideTensors: 'exps=CPU',
+      });
+
+      const usage = await estimate();
+
+      expect(usage.vram!).toBeCloseTo(2 * GiB * 1.2, -8);
+      expect(usage.ram).toBeCloseTo(10 * GiB * 1.2, -8);
+    });
+
+    it('splits expert bytes proportionally under nCpuMoe', async () => {
+      mockLlamaServer.getConfig.mockReturnValue({
+        modelId: 'moe-26b',
+        port: 8080,
+        gpuLayers: 30,
+        nCpuMoe: 15, // half the 30 layers → 5 GiB of experts on CPU
+      });
+
+      const usage = await estimate();
+
+      expect(usage.vram!).toBeCloseTo((12 - 5) * GiB * 1.2, -8);
+      expect(usage.ram).toBeCloseTo(5 * GiB * 1.2, -8);
+    });
+
+    it('keeps all weights on VRAM without MoE offload flags (control)', async () => {
+      mockLlamaServer.getConfig.mockReturnValue({
+        modelId: 'moe-26b',
+        port: 8080,
+        gpuLayers: 30,
+      });
+
+      const usage = await estimate();
+
+      expect(usage.vram!).toBeCloseTo(12 * GiB * 1.2, -8);
+      expect(usage.ram).toBeCloseTo(0, -8);
     });
   });
 
