@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.7.0
+ * @version 0.7.1
  * @license MIT
  *
  * @example
@@ -204,7 +204,12 @@ export {
   normalizeHealthHost,
 } from './process/health-check.js';
 export { findFreePort, isPortBindable } from './process/port-utils.js';
-export { estimateKVBytesPerToken, KV_CACHE_BYTES_PER_ELEMENT } from './utils/kv-cache-math.js';
+export {
+  estimateKVBytesPerToken,
+  floorContextToGranularity,
+  KV_CACHE_BYTES_PER_ELEMENT,
+  CONTEXT_GRANULARITY_LADDER,
+} from './utils/kv-cache-math.js';
 export { getCPUInfo, getRecommendedThreads } from './system/cpu-detect.js';
 export { getMemoryInfo, estimateVRAM } from './system/memory-detect.js';
 export { detectGPU } from './system/gpu-detect.js';

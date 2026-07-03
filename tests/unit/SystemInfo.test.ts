@@ -417,9 +417,9 @@ describe('SystemInfo', () => {
       expect(config.cacheTypeK).toBe('q8_0');
       expect(config.cacheTypeV).toBe('q8_0');
       expect(config.flashAttention).toBe('on');
-      // Context far beyond the old 4096 constant, rounded to 1024
+      // Context far beyond the old 4096 constant; >32768 bracket rounds to 4096
       expect(config.contextSize!).toBeGreaterThan(32768);
-      expect(config.contextSize! % 1024).toBe(0);
+      expect(config.contextSize! % 4096).toBe(0);
       expect(config.contextSize!).toBeLessThanOrEqual(262144);
     });
 
@@ -479,7 +479,8 @@ describe('SystemInfo', () => {
       expect(config.cacheTypeK).toBeUndefined();
       // 8 GiB free - 2.88 weights - 2 margin = ~3.1 GiB / 144 KiB per token
       expect(config.contextSize!).toBeGreaterThan(4096);
-      expect(config.contextSize! % 1024).toBe(0);
+      // 16384-32768 bracket rounds to 2048
+      expect(config.contextSize! % 2048).toBe(0);
     });
   });
 

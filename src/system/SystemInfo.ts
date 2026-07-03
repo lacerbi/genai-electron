@@ -21,7 +21,7 @@ import {
   getContextLengthWithFallback,
   hasGGUFMetadata,
 } from '../utils/model-metadata-helpers.js';
-import { estimateKVBytesPerToken } from '../utils/kv-cache-math.js';
+import { estimateKVBytesPerToken, floorContextToGranularity } from '../utils/kv-cache-math.js';
 
 /**
  * System information singleton
@@ -281,9 +281,9 @@ export class SystemInfo {
     // --- KV-aware sizing ---
     const floor = KV_SIZING.floorContextTokens;
     const clampCtx = (tokens: number): number => {
-      const rounded =
-        Math.floor(tokens / KV_SIZING.contextGranularityTokens) *
-        KV_SIZING.contextGranularityTokens;
+      // Progressive granularity: fine steps at small contexts, multiples of
+      // 4096 at large ones (see CONTEXT_GRANULARITY_LADDER)
+      const rounded = floorContextToGranularity(tokens);
       return Math.max(floor, Math.min(modelCtx, rounded));
     };
 

@@ -4,6 +4,7 @@
 
 import {
   estimateKVBytesPerToken,
+  floorContextToGranularity,
   KV_CACHE_BYTES_PER_ELEMENT,
 } from '../../src/utils/kv-cache-math.js';
 import type { ModelInfo } from '../../src/types/index.js';
@@ -89,6 +90,26 @@ describe('kv-cache-math', () => {
 
     const mixed = estimateKVBytesPerToken(model, 'f16', 'q4_0');
     expect(mixed).toBe(10 * 4 * 64 * (2 + 18 / 32));
+  });
+
+  describe('floorContextToGranularity()', () => {
+    it.each([
+      [1500, 1408], // <=2048: multiples of 128
+      [3000, 2816], // <=4096: multiples of 256
+      [5000, 4608], // <=8192: multiples of 512
+      [8300, 8192], // <=16384: multiples of 1024
+      [20000, 18432], // <=32768: multiples of 2048
+      [58368, 57344], // above: multiples of 4096
+      [100000, 98304],
+    ])('floors %d to %d', (input, expected) => {
+      expect(floorContextToGranularity(input)).toBe(expected);
+    });
+
+    it('keeps exact ladder boundaries unchanged', () => {
+      for (const exact of [2048, 4096, 8192, 16384, 32768]) {
+        expect(floorContextToGranularity(exact)).toBe(exact);
+      }
+    });
   });
 
   it('produces a finite positive estimate without any metadata (size fallback)', () => {

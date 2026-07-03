@@ -35,6 +35,44 @@ export const KV_CACHE_BYTES_PER_ELEMENT: Record<KVCacheType, number> = {
 };
 
 /**
+ * Progressive context-size granularity ladder: [upper bound, granularity].
+ * Rounding stays proportional to scale (roughly within 6% of the value)
+ * while producing "round" context sizes at every magnitude.
+ */
+export const CONTEXT_GRANULARITY_LADDER: ReadonlyArray<readonly [number, number]> = [
+  [2048, 128],
+  [4096, 256],
+  [8192, 512],
+  [16384, 1024],
+  [32768, 2048],
+  [Infinity, 4096],
+];
+
+/**
+ * Floor a context-token count to the progressive granularity ladder
+ *
+ * ≤2048 → multiples of 128, ≤4096 → 256, ≤8192 → 512, ≤16384 → 1024,
+ * ≤32768 → 2048, above → 4096.
+ *
+ * @param tokens - Raw context-token count
+ * @returns Token count floored to the ladder granularity for its magnitude
+ *
+ * @example
+ * ```typescript
+ * floorContextToGranularity(58368); // 57344 (multiple of 4096)
+ * floorContextToGranularity(5000);  // 4608  (multiple of 512)
+ * ```
+ */
+export function floorContextToGranularity(tokens: number): number {
+  for (const [upperBound, granularity] of CONTEXT_GRANULARITY_LADDER) {
+    if (tokens <= upperBound) {
+      return Math.floor(tokens / granularity) * granularity;
+    }
+  }
+  return Math.floor(tokens); // Unreachable (ladder ends at Infinity)
+}
+
+/**
  * Estimate the KV-cache cost of ONE context token, in bytes
  *
  * Formula: layers x kvHeads x headDim x (bytes(K) + bytes(V)).

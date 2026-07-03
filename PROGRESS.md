@@ -1,13 +1,13 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.6.0 — llama.cpp b9860 launch contract, multi-shard GGUFs, lifecycle reliability, diffusion cancellation (2026-07-03)
+> **Current Status**: v0.7.1 — adaptive context sizing & KV-aware auto-configuration with progressive context granularity (2026-07-03)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 506/506 passing (21 suites)
+- **Tests:** ✅ 514/514 passing (21 suites)
 - **Branch:** `feat/v0.6.0-local-server`
 - **Last Updated:** 2026-07-03 (v0.6.1: security patch — npm audit clean, tar minimum ^7.5.19)
 

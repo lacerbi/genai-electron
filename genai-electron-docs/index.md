@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.7.0 (Adaptive Context Sizing & KV-Aware Auto-Configuration)
+> **Version**: 0.7.1 (Adaptive Context Sizing & KV-Aware Auto-Configuration)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.

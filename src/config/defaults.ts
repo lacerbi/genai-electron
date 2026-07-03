@@ -55,8 +55,6 @@ export const KV_SIZING = {
   osRamMarginBytes: 2 * 1024 ** 3,
   /** Minimum VRAM reserved for KV when partially offloading */
   minPartialReserveBytes: 1.5 * 1024 ** 3,
-  /** Context recommendations are rounded down to this granularity */
-  contextGranularityTokens: 1024,
 } as const;
 
 /**
