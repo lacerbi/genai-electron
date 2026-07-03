@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.6.1 (Local-Server Launch Contract, Multi-Shard Models & Reliability)
+> **Version**: 0.7.0 (Adaptive Context Sizing & KV-Aware Auto-Configuration)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.6.x to v0.7.0](migration-0-6-to-0-7.md)** - Adaptive context sizing, automatic q8_0 KV quantization, full-offload preference
 - **[Migrating from v0.5.x to v0.6.0](migration-0-5-to-0-6.md)** - Optional/`'auto'` ports, always-on `--jinja`, multi-shard models, generation cancellation
 - **[Migrating from v0.4.x to v0.5.0](migration-0-4-to-0-5.md)** - Multi-component models, presets, Flux 2 Klein
 

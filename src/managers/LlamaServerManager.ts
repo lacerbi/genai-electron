@@ -461,12 +461,21 @@ export class LlamaServerManager extends ServerManager {
   ): Promise<ResolvedLlamaServerConfig> {
     debugLog('[LlamaServer] autoConfigureIfNeeded input:', JSON.stringify(config));
 
-    const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo);
+    const llamaConfig = config as LlamaServerConfig & { port: number };
+    const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo, {
+      contextSize: llamaConfig.contextSize,
+      gpuLayers: llamaConfig.gpuLayers,
+      parallelRequests: llamaConfig.parallelRequests,
+      flashAttention: llamaConfig.flashAttention,
+      cacheTypeK: llamaConfig.cacheTypeK,
+      cacheTypeV: llamaConfig.cacheTypeV,
+    });
     debugLog('[LlamaServer] Optimal config:', JSON.stringify(optimalConfig));
 
     // With fit: 'on', llama-server's own auto-fit sizes unset memory-related
-    // fields — leave gpuLayers/contextSize unset instead of filling them here.
-    const delegateToFit = (config as LlamaServerConfig).fit === 'on';
+    // fields — leave gpuLayers/contextSize/cache recommendations unset instead
+    // of filling them here.
+    const delegateToFit = llamaConfig.fit === 'on';
 
     const finalConfig = {
       ...config,
@@ -474,7 +483,10 @@ export class LlamaServerManager extends ServerManager {
       contextSize: config.contextSize ?? (delegateToFit ? undefined : optimalConfig.contextSize),
       gpuLayers: config.gpuLayers ?? (delegateToFit ? undefined : optimalConfig.gpuLayers),
       parallelRequests: config.parallelRequests ?? optimalConfig.parallelRequests,
-      flashAttention: config.flashAttention ?? optimalConfig.flashAttention,
+      flashAttention:
+        config.flashAttention ?? (delegateToFit ? undefined : optimalConfig.flashAttention),
+      cacheTypeK: llamaConfig.cacheTypeK ?? (delegateToFit ? undefined : optimalConfig.cacheTypeK),
+      cacheTypeV: llamaConfig.cacheTypeV ?? (delegateToFit ? undefined : optimalConfig.cacheTypeV),
     } as ResolvedLlamaServerConfig;
 
     debugLog('[LlamaServer] Final config:', JSON.stringify(finalConfig));

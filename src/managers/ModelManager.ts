@@ -1051,6 +1051,12 @@ export class ModelManager {
       attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as
         | number
         | undefined,
+      attention_head_count_kv: getArchField(parsedGGUF.metadata, 'attention.head_count_kv') as
+        | number
+        | undefined,
+      attention_key_length: getArchField(parsedGGUF.metadata, 'attention.key_length') as
+        | number
+        | undefined,
       embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
       feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as
         | number

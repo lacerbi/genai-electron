@@ -7,7 +7,7 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 488/488 passing (20 suites)
+- **Tests:** ✅ 506/506 passing (21 suites)
 - **Branch:** `feat/v0.6.0-local-server`
 - **Last Updated:** 2026-07-03 (v0.6.1: security patch — npm audit clean, tar minimum ^7.5.19)
 
@@ -495,3 +495,20 @@ For detailed historical information:
 - **Example-app toolchain chore** — Electron Forge devDependency chain carries npm-audit highs fixable only via major bumps (electron 35→43 + Forge majors). Dev-only, outside the published package and CI's root-only audit gate.
 - **ROCm/HIP binary variants** — upstream now ships `win-hip-radeon` + `ubuntu-rocm` prebuilts; blocked on Windows AMD GPU detection (DESIGN Phase 4).
 - **genai-lite**: `GenaiElectronImageAdapter` should treat `'cancelled'` as terminal — filed and committed in that repo (`docs/ISSUE-cancelled-generation-status.md`).
+
+---
+
+## v0.7.0: Adaptive Context Sizing & KV-Aware Auto-Configuration (2026-07-03)
+
+**Goal/Problem:** `recommendContextSize` was a stub returning a constant 4096, so every auto-configured server ran a ≤4K context regardless of hardware — silently truncating long prompts (hit by palimpsest-engine; `docs/dev/issues/ISSUE-context-size-recommendation.md`). The flat 2 GB KV reserve in layer packing could also push almost-fitting models into partial offload.
+
+**Core Features:**
+- Real KV-cache arithmetic (`estimateKVBytesPerToken`, GQA-aware via `attention.head_count_kv`; new GGUF fields extracted, raw-metadata fallback for older downloads)
+- `getOptimalConfig(modelInfo, hints?)`: full-GPU-offload-preferring layer packing (KV reserve flexes down to the 4096-token floor), context sized from leftover VRAM/RAM with **no artificial ceiling** (capped by the model's own context_length), rounded to 1024
+- **Automatic q8_0 KV quantization by default** (+ flash attention on) unless f16 at the model's full native context fits — opt out via explicit `cacheTypeK/V: 'f16'` or `flashAttention: 'off'`; pinned hints (contextSize/gpuLayers/cache types) shape the remaining recommendations
+- KV-aware `canRunModel` and ResourceOrchestrator usage estimates; legacy behavior preserved exactly for models without GGUF metadata
+- New exports: `estimateKVBytesPerToken`, `KV_CACHE_BYTES_PER_ELEMENT`, `KV_SIZING`, `OptimalConfigHints`
+
+**Files Modified:** `src/utils/kv-cache-math.ts` (new), `src/utils/model-metadata-helpers.ts`, `src/system/SystemInfo.ts`, `src/managers/{LlamaServerManager,ModelManager,ResourceOrchestrator}.ts`, `src/config/defaults.ts`, `src/types/{models,servers,index}.ts`, `src/index.ts`, docs (`system-detection`, `llm-server`, `typescript-reference`, `image-generation`, `migration-0-6-to-0-7.md`)
+
+**Build Status:** ✅ 0 TypeScript errors / 506/506 tests passing (21 suites); live GPU smoke: pure auto-config on Qwen3.5-4B → full offload, auto q8_0 KV + FA, context ≫ 4096, >4K-token prompt round-trips without truncation

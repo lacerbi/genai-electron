@@ -155,6 +155,66 @@ export function getAttentionHeadCountWithFallback(modelInfo: ModelInfo): number 
 }
 
 /**
+ * Get KV-head count (GQA) with fallback
+ *
+ * Priority:
+ * 1. Typed GGUF field (attention_head_count_kv)
+ * 2. Raw metadata lookup (models downloaded before this field was extracted)
+ * 3. Full attention head count — the MHA assumption, which OVERESTIMATES the
+ *    KV cost of GQA models and is therefore a safe (conservative) fallback
+ *
+ * @param modelInfo - Model information
+ * @returns KV-head count (actual or conservative fallback)
+ */
+export function getKVHeadCountWithFallback(modelInfo: ModelInfo): number {
+  const meta = modelInfo.ggufMetadata;
+  if (meta?.attention_head_count_kv) {
+    return meta.attention_head_count_kv;
+  }
+
+  const arch = meta?.architecture;
+  if (arch && meta?.raw) {
+    const value = meta.raw[`${arch}.attention.head_count_kv`];
+    if (typeof value === 'number' && value > 0) {
+      return value;
+    }
+  }
+
+  return getAttentionHeadCountWithFallback(modelInfo);
+}
+
+/**
+ * Get per-head key dimension with fallback
+ *
+ * Priority:
+ * 1. Typed GGUF field (attention_key_length — set when it differs from the
+ *    conventional embedding_length / head_count, e.g. some Gemma models)
+ * 2. Raw metadata lookup
+ * 3. embedding_length / attention_head_count
+ *
+ * @param modelInfo - Model information
+ * @returns Head dimension in elements
+ */
+export function getHeadDimensionWithFallback(modelInfo: ModelInfo): number {
+  const meta = modelInfo.ggufMetadata;
+  if (meta?.attention_key_length) {
+    return meta.attention_key_length;
+  }
+
+  const arch = meta?.architecture;
+  if (arch && meta?.raw) {
+    const value = meta.raw[`${arch}.attention.key_length`];
+    if (typeof value === 'number' && value > 0) {
+      return value;
+    }
+  }
+
+  return Math.round(
+    getEmbeddingLengthWithFallback(modelInfo) / getAttentionHeadCountWithFallback(modelInfo)
+  );
+}
+
+/**
  * Get embedding length from model info with fallback to estimation
  *
  * Priority:

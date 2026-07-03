@@ -7,17 +7,21 @@ import type {
   SystemCapabilities,
   SystemRecommendations,
   ModelInfo,
-  ServerConfig,
+  LlamaServerConfig,
+  KVCacheType,
+  OptimalConfigHints,
 } from '../types/index.js';
 import { getCPUInfo, getRecommendedThreads } from './cpu-detect.js';
 import { getMemoryInfo, estimateVRAM } from './memory-detect.js';
 import { detectGPU, calculateGPULayers } from './gpu-detect.js';
 import { getPlatform } from '../utils/platform-utils.js';
-import { RECOMMENDED_QUANTIZATIONS } from '../config/defaults.js';
+import { RECOMMENDED_QUANTIZATIONS, KV_SIZING } from '../config/defaults.js';
 import {
   getLayerCountWithFallback,
   getContextLengthWithFallback,
+  hasGGUFMetadata,
 } from '../utils/model-metadata-helpers.js';
+import { estimateKVBytesPerToken } from '../utils/kv-cache-math.js';
 
 /**
  * System information singleton
@@ -181,15 +185,23 @@ export class SystemInfo {
   }> {
     const capabilities = await this.detect();
 
-    // When GPU layers are specified, only the CPU portion needs to fit in RAM
+    // Floor-context KV cost (real arithmetic when GGUF metadata is present;
+    // models without metadata keep the legacy weights-only estimate)
+    const kvFloorBytes =
+      hasGGUFMetadata(modelInfo) && modelInfo.ggufMetadata?.block_count
+        ? KV_SIZING.floorContextTokens * estimateKVBytesPerToken(modelInfo)
+        : 0;
+
+    // When GPU layers are specified, only the CPU portion (weights + its KV
+    // share) needs to fit in RAM
     const gpuLayers = options?.gpuLayers;
     let requiredMemory: number;
     if (gpuLayers && gpuLayers > 0) {
       const totalLayers = options?.totalLayers ?? getLayerCountWithFallback(modelInfo);
       const cpuRatio = Math.max(0, 1 - gpuLayers / totalLayers);
-      requiredMemory = modelInfo.size * cpuRatio * 1.2;
+      requiredMemory = (modelInfo.size * 1.2 + kvFloorBytes) * cpuRatio;
     } else {
-      requiredMemory = modelInfo.size * 1.2; // 20% overhead
+      requiredMemory = modelInfo.size * 1.2 + kvFloorBytes; // 20% overhead + KV floor
     }
 
     // Get fresh memory info (not cached) for accurate availability check
@@ -237,32 +249,134 @@ export class SystemInfo {
    * console.log(`Use ${config.threads} threads and ${config.gpuLayers} GPU layers`);
    * ```
    */
-  public async getOptimalConfig(modelInfo: ModelInfo): Promise<Partial<ServerConfig>> {
+  public async getOptimalConfig(
+    modelInfo: ModelInfo,
+    hints: OptimalConfigHints = {}
+  ): Promise<Partial<LlamaServerConfig>> {
     const capabilities = await this.detect();
 
-    // Get fresh memory info (not cached) for accurate context size calculation
+    // Get fresh memory info (not cached) for accurate sizing
     const currentMemory = this.getMemoryInfo();
 
-    // Use GGUF context length if available, otherwise fall back to recommendation
-    const contextLength = getContextLengthWithFallback(modelInfo);
-    const contextSize = Math.min(
-      contextLength,
-      this.recommendContextSize(currentMemory.available, modelInfo.size)
-    );
-
-    const config: Partial<ServerConfig> = {
+    const config: Partial<LlamaServerConfig> = {
       threads: getRecommendedThreads(capabilities.cpu.cores),
-      contextSize,
-      parallelRequests: this.recommendParallelRequests(capabilities.cpu.cores),
+      parallelRequests: hints.parallelRequests ?? this.recommendParallelRequests(),
     };
 
-    // Add GPU layers if GPU is available
-    if (capabilities.gpu.available && capabilities.gpu.vram) {
-      // Use actual layer count from GGUF metadata (or fallback to estimation)
-      const actualLayers = getLayerCountWithFallback(modelInfo);
-      config.gpuLayers = calculateGPULayers(actualLayers, capabilities.gpu.vram, modelInfo.size);
+    const modelCtx = getContextLengthWithFallback(modelInfo);
+    const totalLayers = getLayerCountWithFallback(modelInfo);
+    const gpu = capabilities.gpu;
+    const hasVRAM = gpu.available && !!gpu.vram;
+
+    // Legacy path when GGUF metadata is missing: previous behavior exactly
+    // (fixed 4096 context, flat-reserve layer packing, no cache recommendation)
+    if (!hasGGUFMetadata(modelInfo) || !modelInfo.ggufMetadata?.block_count) {
+      config.contextSize = hints.contextSize ?? Math.min(modelCtx, KV_SIZING.floorContextTokens);
+      config.gpuLayers =
+        hints.gpuLayers ??
+        (hasVRAM ? calculateGPULayers(totalLayers, gpu.vram!, modelInfo.size) : 0);
+      return config;
+    }
+
+    // --- KV-aware sizing ---
+    const floor = KV_SIZING.floorContextTokens;
+    const clampCtx = (tokens: number): number => {
+      const rounded =
+        Math.floor(tokens / KV_SIZING.contextGranularityTokens) *
+        KV_SIZING.contextGranularityTokens;
+      return Math.max(floor, Math.min(modelCtx, rounded));
+    };
+
+    const weightsGPU = modelInfo.size * KV_SIZING.gpuWeightsOverhead;
+    const vramBudget = hasVRAM
+      ? Math.max(0, (gpu.vramAvailable ?? gpu.vram!) - KV_SIZING.computeBufferBytes)
+      : 0;
+    const cpuContext = (bytesPerToken: number): number =>
+      clampCtx(
+        (currentMemory.available -
+          modelInfo.size * KV_SIZING.cpuWeightsOverhead -
+          KV_SIZING.osRamMarginBytes) /
+          bytesPerToken
+      );
+
+    // 1. Choose KV cache types. Default policy: q8_0 (small quality loss,
+    // ~2x cheaper KV) unless f16 KV at the model's FULL native context fits
+    // alongside fully-offloaded weights ("abundant headroom"). Explicit user
+    // cache types always win; explicit flashAttention off suppresses
+    // quantization (quantized V requires flash attention); CPU-only stays f16.
+    const userPinnedCacheType = hints.cacheTypeK !== undefined || hints.cacheTypeV !== undefined;
+    const flashAttentionOff = hints.flashAttention === 'off' || hints.flashAttention === false;
+    let cacheTypeK: KVCacheType = hints.cacheTypeK ?? 'f16';
+    let cacheTypeV: KVCacheType = hints.cacheTypeV ?? 'f16';
+    let autoQuantized = false;
+
+    if (!userPinnedCacheType && !flashAttentionOff && hasVRAM && vramBudget > 0) {
+      const bptF16 = estimateKVBytesPerToken(modelInfo, 'f16', 'f16');
+      const abundantHeadroom = weightsGPU + modelCtx * bptF16 <= vramBudget;
+      if (!abundantHeadroom) {
+        cacheTypeK = 'q8_0';
+        cacheTypeV = 'q8_0';
+        autoQuantized = true;
+      }
+    }
+
+    const bpt = estimateKVBytesPerToken(modelInfo, cacheTypeK, cacheTypeV);
+
+    // 2. Offload + context. Full GPU offload is the prize: the KV reserve
+    // flexes down to the floor-context cost to win it; when full offload is
+    // impossible, fall back to packing layers around a KV reserve.
+    let gpuLayers: number;
+    let contextTokens: number;
+
+    if (hasVRAM && vramBudget > 0) {
+      const pinnedCtx = hints.contextSize;
+      const requiredKV = (pinnedCtx ?? floor) * bpt;
+      const fullOffloadFits = weightsGPU + requiredKV <= vramBudget;
+
+      if (hints.gpuLayers !== undefined ? hints.gpuLayers >= totalLayers : fullOffloadFits) {
+        // Full offload: all leftover VRAM becomes context budget
+        gpuLayers = hints.gpuLayers ?? totalLayers;
+        contextTokens = pinnedCtx ?? clampCtx((vramBudget - weightsGPU) / bpt);
+      } else {
+        // Partial offload: reserve KV (at least the floor's worth), pack layers
+        const reserve = Math.max(requiredKV, KV_SIZING.minPartialReserveBytes);
+        const perLayer = weightsGPU / totalLayers;
+        gpuLayers =
+          hints.gpuLayers ??
+          Math.min(totalLayers, Math.max(0, Math.floor((vramBudget - reserve) / perLayer)));
+
+        if (gpuLayers <= 0) {
+          gpuLayers = 0;
+          contextTokens = pinnedCtx ?? cpuContext(bpt);
+        } else {
+          // Context bounded by BOTH the GPU-side KV share and the RAM-side share
+          const gpuShare = gpuLayers / totalLayers;
+          const cpuShare = 1 - gpuShare;
+          const gpuKVBudget = Math.max(0, vramBudget - gpuLayers * perLayer);
+          const ramKVBudget = Math.max(
+            0,
+            currentMemory.available -
+              modelInfo.size * cpuShare * KV_SIZING.cpuWeightsOverhead -
+              KV_SIZING.osRamMarginBytes
+          );
+          const byGPU = gpuShare > 0 ? gpuKVBudget / (bpt * gpuShare) : Infinity;
+          const byRAM = cpuShare > 0 ? ramKVBudget / (bpt * cpuShare) : Infinity;
+          contextTokens = pinnedCtx ?? clampCtx(Math.min(byGPU, byRAM));
+        }
+      }
     } else {
-      config.gpuLayers = 0; // CPU-only
+      gpuLayers = hints.gpuLayers ?? 0;
+      contextTokens = hints.contextSize ?? cpuContext(bpt);
+    }
+
+    config.contextSize = contextTokens;
+    config.gpuLayers = gpuLayers;
+    if (autoQuantized) {
+      config.cacheTypeK = cacheTypeK;
+      config.cacheTypeV = cacheTypeV;
+      // Quantized V-cache requires flash attention; make the recommendation
+      // self-consistent (LlamaServerManager enforces the same constraint)
+      config.flashAttention = 'on';
     }
 
     return config;
@@ -313,28 +427,6 @@ export class SystemInfo {
   }
 
   /**
-   * Recommend context size based on available memory
-   *
-   * IMPORTANT: This is a placeholder implementation that uses llama.cpp's default (4096).
-   * The previous RAM-based calculation was overly conservative and didn't consider VRAM.
-   *
-   * TODO: Implement proper VRAM-aware context size calculation:
-   * - For GPU inference, calculate based on available VRAM (not RAM)
-   * - Consider KV cache size: approximately 1-2MB per token depending on model architecture
-   * - Account for model layers already loaded in VRAM
-   * - Leave adequate VRAM buffer for inference operations
-   * - For CPU-only inference, consider RAM but with better estimates
-   *
-   * For now, we use llama.cpp's default which provides good balance for most use cases.
-   * Users can override via the `contextSize` parameter in ServerConfig if needed.
-   */
-  private recommendContextSize(_availableRAM: number, _modelSize: number): number {
-    // Use llama.cpp's default context size
-    // This provides good performance for most models without being overly conservative
-    return 4096;
-  }
-
-  /**
    * Recommend parallel request slots
    *
    * Returns 1 for single-user Electron apps. The KV cache is shared across all parallel
@@ -344,10 +436,9 @@ export class SystemInfo {
    * Multi-user server deployments should explicitly set parallelRequests based on expected
    * concurrent load rather than relying on this auto-configuration.
    *
-   * @param _cpuCores - Number of CPU cores (unused, kept for interface consistency)
    * @returns Recommended number of parallel request slots (always 1 for single-user apps)
    */
-  private recommendParallelRequests(_cpuCores: number): number {
+  private recommendParallelRequests(): number {
     // Always return 1 for single-user Electron apps
     // The previous CPU-based logic (8 for 16+ cores) was designed for multi-user servers
     // and caused issues where KV cache was split across slots, limiting per-request tokens

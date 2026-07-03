@@ -12,7 +12,13 @@ import { SystemInfo } from '../system/SystemInfo.js';
 import type { LlamaServerManager } from './LlamaServerManager.js';
 import type { DiffusionServerManager } from './DiffusionServerManager.js';
 import { ModelManager } from './ModelManager.js';
-import type { ServerConfig, ImageGenerationConfig, ImageGenerationResult } from '../types/index.js';
+import type {
+  ServerConfig,
+  LlamaServerConfig,
+  ImageGenerationConfig,
+  ImageGenerationResult,
+} from '../types/index.js';
+import { estimateKVBytesPerToken } from '../utils/kv-cache-math.js';
 import { ServerError } from '../errors/index.js';
 import { debugLog } from '../utils/debug-log.js';
 
@@ -256,16 +262,25 @@ export class ResourceOrchestrator {
       // Get actual layer count from GGUF metadata (or fallback to estimation)
       const totalLayers = await this.modelManager.getModelLayerCount(config.modelId);
 
+      // Real KV-cache cost for the configured context (0 without metadata,
+      // matching the legacy weights-only estimate)
+      const llamaConfig = config as LlamaServerConfig;
+      const kvBytes = modelInfo.ggufMetadata?.block_count
+        ? (llamaConfig.contextSize ?? 4096) *
+          estimateKVBytesPerToken(modelInfo, llamaConfig.cacheTypeK, llamaConfig.cacheTypeV)
+        : 0;
+
       debugLog('[Orchestrator] LLM model:', config.modelId);
       debugLog('[Orchestrator] LLM model size:', modelInfo.size / 1024 ** 3, 'GB');
       debugLog('[Orchestrator] LLM GPU layers:', gpuLayers, '/', totalLayers);
+      debugLog('[Orchestrator] LLM KV cache:', kvBytes / 1024 ** 3, 'GB');
 
       if (gpuLayers > 0) {
-        // Mixed GPU/CPU
+        // Mixed GPU/CPU: KV follows the layer split
         const gpuRatio = Math.min(gpuLayers / totalLayers, 1.0);
         const result = {
-          ram: modelInfo.size * (1 - gpuRatio) * 1.2,
-          vram: modelInfo.size * gpuRatio * 1.2,
+          ram: (modelInfo.size * 1.2 + kvBytes) * (1 - gpuRatio),
+          vram: (modelInfo.size * 1.2 + kvBytes) * gpuRatio,
         };
         debugLog('[Orchestrator] LLM usage (mixed):', {
           ram: `${result.ram / 1024 ** 3} GB`,
@@ -275,7 +290,7 @@ export class ResourceOrchestrator {
       } else {
         // CPU only
         const result = {
-          ram: modelInfo.size * 1.2,
+          ram: modelInfo.size * 1.2 + kvBytes,
           vram: 0,
         };
         debugLog('[Orchestrator] LLM usage (CPU-only):', {

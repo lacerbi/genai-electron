@@ -193,7 +193,7 @@ interface LlamaServerConfig extends ServerConfig {
 
 `KVCacheType` is `'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'q5_0' | 'q5_1' | 'iq4_nl'`, and `FlashAttentionSetting` is `boolean | 'on' | 'off' | 'auto'`. See [TypeScript Reference](typescript-reference.md) for the full definitions.
 
-When `threads` and `gpuLayers` are not specified, the library auto-configures based on system capabilities and model metadata.
+When `threads`, `gpuLayers`, `contextSize`, or the KV-cache fields are not specified, the library auto-configures based on system capabilities and GGUF metadata (v0.7.0 adaptive sizing): full GPU offload is preferred, the context recommendation comes from real KV-cache arithmetic (no artificial ceiling — capped only by the model's own context length), and **q8_0 KV quantization + flash attention are auto-selected by default** unless f16 KV at the model's full native context comfortably fits. Opt out of auto-quantization with `cacheTypeK/V: 'f16'` or `flashAttention: 'off'`; an explicit `contextSize` is always respected verbatim. Models without GGUF metadata keep the legacy behavior (fixed 4096 context). See [System Detection](system-detection.md) for the full algorithm.
 
 **About `port` and `'auto'`:**
 `port` is optional and defaults to 8080. Pass `'auto'` to have the OS assign a free port — useful when 8080 may already be taken. The resolved numeric port is reported on `ServerInfo.port` (from `getInfo()`) and on `getPort()`. Reliability features such as auto-restart reuse the resolved port rather than re-running `'auto'`.

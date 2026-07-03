@@ -151,6 +151,8 @@ interface GGUFMetadata {
   block_count?: number;
   context_length?: number;
   attention_head_count?: number;
+  attention_head_count_kv?: number; // KV heads (GQA); fewer than head_count on modern models
+  attention_key_length?: number; // per-head key dim, when != embedding_length / head_count
   embedding_length?: number;
   feed_forward_length?: number;
   vocab_size?: number;
@@ -611,6 +613,22 @@ interface LogRotationOptions {
 ---
 
 ## Resource Types
+
+### OptimalConfigHints
+
+Fields the caller has already pinned when asking `systemInfo.getOptimalConfig(modelInfo, hints?)` for recommendations. Pinned values are respected verbatim and inform the sizing of the remaining dimensions; explicit cache types or `flashAttention: 'off'` suppress automatic KV quantization.
+
+```typescript
+type OptimalConfigHints = Partial<
+  Pick<
+    LlamaServerConfig,
+    'contextSize' | 'gpuLayers' | 'parallelRequests' | 'flashAttention' | 'cacheTypeK' | 'cacheTypeV'
+  >
+>;
+```
+
+`getOptimalConfig` returns `Promise<Partial<LlamaServerConfig>>` (may include auto-selected `cacheTypeK`/`cacheTypeV`/`flashAttention`). The KV arithmetic is exported as `estimateKVBytesPerToken(modelInfo, cacheTypeK?, cacheTypeV?)`.
+
 
 ### SavedLLMState
 

@@ -120,6 +120,12 @@ export interface GGUFMetadata {
   /** Number of attention heads */
   attention_head_count?: number;
 
+  /** Number of KV heads (GQA models have fewer than attention_head_count) */
+  attention_head_count_kv?: number;
+
+  /** Per-head key dimension (set when it differs from embedding_length / head_count) */
+  attention_key_length?: number;
+
   /** Embedding dimension length */
   embedding_length?: number;
 

@@ -338,6 +338,149 @@ describe('SystemInfo', () => {
 
       expect(config.gpuLayers).toBe(0);
     });
+
+    it('should keep the legacy 4096 context for models without GGUF metadata', async () => {
+      const config = await systemInfo.getOptimalConfig({
+        id: 'test-model',
+        name: 'Test Model',
+        type: 'llm',
+        size: 4 * 1024 * 1024 * 1024,
+        path: '/test/path',
+        downloadedAt: new Date().toISOString(),
+        source: { type: 'url', url: 'http://test.com' },
+      });
+
+      expect(config.contextSize).toBe(4096);
+      expect(config.cacheTypeK).toBeUndefined();
+      expect(config.cacheTypeV).toBeUndefined();
+    });
+  });
+
+  describe('getOptimalConfig() — KV-aware sizing', () => {
+    // RTX 3080 mock from the shared beforeEach: 10 GiB total, ~9.28 GiB free
+    const makeModel = (
+      overrides: Partial<import('../../src/types/index.js').ModelInfo> = {},
+      meta: Partial<NonNullable<import('../../src/types/index.js').ModelInfo['ggufMetadata']>> = {}
+    ): import('../../src/types/index.js').ModelInfo => ({
+      id: 'kv-model',
+      name: 'KV Model',
+      type: 'llm',
+      size: 2.4 * 1024 ** 3,
+      path: '/test/kv.gguf',
+      downloadedAt: new Date().toISOString(),
+      source: { type: 'url', url: 'http://test.com' },
+      ggufMetadata: {
+        architecture: 'qwen3',
+        block_count: 36,
+        attention_head_count: 32,
+        attention_head_count_kv: 8,
+        attention_key_length: 128,
+        embedding_length: 4096,
+        context_length: 262144,
+        ...meta,
+      },
+      ...overrides,
+    });
+
+    const gpuCapabilities = {
+      cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+      memory: { total: 16 * 1024 ** 3, available: 8 * 1024 ** 3, used: 8 * 1024 ** 3 },
+      gpu: {
+        available: true,
+        type: 'nvidia' as const,
+        name: 'RTX 3080',
+        vram: 10 * 1024 ** 3,
+        vramAvailable: 9.28 * 1024 ** 3,
+        cuda: true,
+      },
+      platform: 'linux' as const,
+      recommendations: {
+        maxModelSize: '13B',
+        recommendedQuantization: ['Q4_K_M'],
+        threads: 7,
+        gpuAcceleration: true,
+      },
+    };
+
+    beforeEach(() => {
+      // Deterministic capabilities (exec-based GPU detection doesn't survive
+      // promisify with a plain mocked exec)
+      jest.spyOn(systemInfo, 'detect').mockResolvedValue(gpuCapabilities as never);
+    });
+
+    it('auto-selects q8_0 KV + flash attention for a long-context model and grows context', async () => {
+      const config = await systemInfo.getOptimalConfig(makeModel());
+
+      // Full offload (2.4 GB model easily fits)
+      expect(config.gpuLayers).toBe(36);
+      // q8_0 chosen: f16 KV at 256K native context is nowhere near fitting
+      expect(config.cacheTypeK).toBe('q8_0');
+      expect(config.cacheTypeV).toBe('q8_0');
+      expect(config.flashAttention).toBe('on');
+      // Context far beyond the old 4096 constant, rounded to 1024
+      expect(config.contextSize!).toBeGreaterThan(32768);
+      expect(config.contextSize! % 1024).toBe(0);
+      expect(config.contextSize!).toBeLessThanOrEqual(262144);
+    });
+
+    it('keeps f16 KV when headroom is abundant (small native context)', async () => {
+      const config = await systemInfo.getOptimalConfig(makeModel({}, { context_length: 4096 }));
+
+      expect(config.gpuLayers).toBe(36);
+      expect(config.cacheTypeK).toBeUndefined();
+      expect(config.cacheTypeV).toBeUndefined();
+      expect(config.flashAttention).toBeUndefined();
+      expect(config.contextSize).toBe(4096); // capped by the model itself
+    });
+
+    it('respects explicit cache-type hints (no auto-quantization)', async () => {
+      const config = await systemInfo.getOptimalConfig(makeModel(), { cacheTypeK: 'f16' });
+
+      expect(config.cacheTypeK).toBeUndefined(); // caller already owns the field
+      expect(config.cacheTypeV).toBeUndefined();
+      expect(config.flashAttention).toBeUndefined();
+      expect(config.contextSize!).toBeGreaterThanOrEqual(4096);
+    });
+
+    it('suppresses auto-quantization when flash attention is explicitly off', async () => {
+      const config = await systemInfo.getOptimalConfig(makeModel(), { flashAttention: 'off' });
+
+      expect(config.cacheTypeK).toBeUndefined();
+      expect(config.cacheTypeV).toBeUndefined();
+      expect(config.flashAttention).toBeUndefined();
+    });
+
+    it('partially offloads oversized models and falls back toward the context floor', async () => {
+      const big = makeModel({ size: 12 * 1024 ** 3 }, { block_count: 48, context_length: 131072 });
+      const config = await systemInfo.getOptimalConfig(big);
+
+      expect(config.gpuLayers!).toBeGreaterThan(0);
+      expect(config.gpuLayers!).toBeLessThan(48);
+      // RAM side is the binding constraint on this 16 GB mock machine
+      expect(config.contextSize).toBe(4096);
+    });
+
+    it('respects a pinned contextSize and sizes layers around its KV cost', async () => {
+      const config = await systemInfo.getOptimalConfig(makeModel(), { contextSize: 16384 });
+
+      expect(config.contextSize).toBe(16384);
+      expect(config.gpuLayers).toBe(36); // still fits fully alongside 16K of KV
+    });
+
+    it('sizes context from RAM on CPU-only systems and keeps f16', async () => {
+      jest.spyOn(systemInfo, 'detect').mockResolvedValue({
+        ...gpuCapabilities,
+        gpu: { available: false },
+      } as never);
+
+      const config = await systemInfo.getOptimalConfig(makeModel());
+
+      expect(config.gpuLayers).toBe(0);
+      expect(config.cacheTypeK).toBeUndefined();
+      // 8 GiB free - 2.88 weights - 2 margin = ~3.1 GiB / 144 KiB per token
+      expect(config.contextSize!).toBeGreaterThan(4096);
+      expect(config.contextSize! % 1024).toBe(0);
+    });
   });
 
   describe('Platform-specific detection', () => {
