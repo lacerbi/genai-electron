@@ -455,9 +455,28 @@ export class BinaryManager {
       const works = await this.testBinary(extractedBinaryPath);
 
       if (works) {
-        // Copy ALL extracted files to binaries directory
-        // This includes the .exe AND all required DLLs (from dependencies)
-        await copyDirectory(extractDir, PATHS.binaries[type]);
+        // Copy ALL files that sit next to the binary to the binaries directory
+        // (the .exe/.so AND all required shared libraries). Unix tar.gz releases
+        // nest everything under a top-level llama-<tag>/ directory, so copying
+        // the extract root verbatim would strand the binary in a subdirectory
+        // that finalBinaryPath/chmod/spawn never look at — flatten instead.
+        const extractedBinaryDir = path.dirname(extractedBinaryPath);
+        await copyDirectory(extractedBinaryDir, PATHS.binaries[type]);
+
+        // Dependencies (e.g. CUDA runtime DLLs) are extracted at the extract
+        // root; when the main archive was nested they are not in the binary's
+        // directory, so copy root-level files as well.
+        if (path.resolve(extractedBinaryDir) !== path.resolve(extractDir)) {
+          const rootEntries = await fs.readdir(extractDir, { withFileTypes: true });
+          for (const entry of rootEntries) {
+            if (entry.isFile()) {
+              await fs.copyFile(
+                path.join(extractDir, entry.name),
+                path.join(PATHS.binaries[type], entry.name)
+              );
+            }
+          }
+        }
 
         // Make executable (Unix-like systems)
         if (process.platform !== 'win32') {
@@ -693,7 +712,7 @@ export class BinaryManager {
         try {
           const controller = new AbortController();
           const fetchTimer = setTimeout(() => controller.abort(), 2000);
-          const response = await fetch(`http://localhost:${testPort}/health`, {
+          const response = await fetch(`http://127.0.0.1:${testPort}/health`, {
             signal: controller.signal,
           });
           clearTimeout(fetchTimer);
@@ -723,7 +742,7 @@ export class BinaryManager {
       // Send a test completion request to exercise GPU inference
       const controller = new AbortController();
       const fetchTimer = setTimeout(() => controller.abort(), 5000);
-      const completionResponse = await fetch(`http://localhost:${testPort}/completion`, {
+      const completionResponse = await fetch(`http://127.0.0.1:${testPort}/completion`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ prompt: '2+2=', n_predict: 4 }),

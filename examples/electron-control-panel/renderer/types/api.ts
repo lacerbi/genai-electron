@@ -143,6 +143,7 @@ export interface WindowAPI {
     logs: (limit: number) => Promise<LogEntry[]>;
     clearLogs: () => Promise<void>;
     generateImage: (config: ImageGenerationConfig, port?: number) => Promise<ImageGenerationResult>;
+    cancel: () => Promise<{ cancelled: boolean }>;
   };
   resources: {
     wouldNeedOffload: () => Promise<boolean>;

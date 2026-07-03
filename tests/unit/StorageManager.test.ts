@@ -332,6 +332,82 @@ describe('StorageManager', () => {
     });
   });
 
+  describe('multi-shard model support', () => {
+    const shardedModelInfo: ModelInfo = {
+      id: 'big-model',
+      name: 'Big Model',
+      type: 'llm',
+      size: 3000,
+      path: '/test/models/llm/big-model/big-00001-of-00003.gguf',
+      downloadedAt: '2026-07-03T10:00:00Z',
+      source: { type: 'url', url: 'https://example.com/big-00001-of-00003.gguf' },
+      shards: [
+        {
+          path: '/test/models/llm/big-model/big-00001-of-00003.gguf',
+          size: 1000,
+          checksum: 'sha256:abc123',
+        },
+        { path: '/test/models/llm/big-model/big-00002-of-00003.gguf', size: 1000 },
+        { path: '/test/models/llm/big-model/big-00003-of-00003.gguf', size: 1000 },
+      ],
+    };
+
+    let mockDeleteFile: jest.Mock;
+
+    beforeEach(async () => {
+      const fileUtils = await import('../../src/utils/file-utils.js');
+      mockDeleteFile = fileUtils.deleteFile as jest.Mock;
+
+      mockFileExists.mockResolvedValue(true);
+      mockReadFile.mockResolvedValue(JSON.stringify(shardedModelInfo));
+      mockRmdir.mockResolvedValue(undefined);
+      mockReaddir.mockResolvedValue(['big-model.json']);
+    });
+
+    it('deleteModelFiles removes every shard, the metadata, and the subdirectory', async () => {
+      await storageManager.deleteModelFiles('llm', 'big-model');
+
+      // 3 shards + 1 metadata file
+      expect(mockDeleteFile).toHaveBeenCalledTimes(4);
+      for (const shard of shardedModelInfo.shards!) {
+        expect(mockDeleteFile).toHaveBeenCalledWith(shard.path);
+      }
+      expect(mockDeleteFile).toHaveBeenCalledWith(expect.stringContaining('big-model.json'));
+      expect(mockRmdir).toHaveBeenCalledWith('/test/models/llm/big-model');
+    });
+
+    it('verifyModelIntegrity checks every shard and the recorded checksums', async () => {
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      const result = await storageManager.verifyModelIntegrity('llm', 'big-model');
+
+      expect(result).toBe(true);
+      // Only the first shard has a recorded checksum
+      expect(mockCalculateChecksum).toHaveBeenCalledTimes(1);
+      // But every shard's existence is checked
+      for (const shard of shardedModelInfo.shards!) {
+        expect(mockFileExists).toHaveBeenCalledWith(shard.path);
+      }
+    });
+
+    it('verifyModelIntegrity throws when a shard file is missing', async () => {
+      mockCalculateChecksum.mockResolvedValue('abc123'); // shard 1 checksum passes
+      mockFileExists.mockImplementation(async (p: unknown) => !String(p).includes('00002'));
+
+      await expect(storageManager.verifyModelIntegrity('llm', 'big-model')).rejects.toThrow(
+        /Shard file not found/
+      );
+    });
+
+    it('getStorageUsed sums the shard sizes', async () => {
+      mockReaddir.mockResolvedValue(['big-model.json']);
+
+      const used = await storageManager.getStorageUsed('llm');
+
+      expect(used).toBe(3000);
+    });
+  });
+
   describe('deleteModelFiles() with multi-component metadata', () => {
     const multiComponentModelInfo: ModelInfo = {
       id: 'flux-2-klein',

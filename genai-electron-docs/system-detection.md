@@ -244,9 +244,9 @@ console.log('Context Size:', config.contextSize);
 console.log('Parallel Requests:', config.parallelRequests);
 
 // Use the config to start the server
+// (port is optional now — omit it to default to 8080, or pass 'auto')
 await llamaServer.start({
   modelId: modelInfo.id,
-  port: 8080,
   ...config
 });
 ```

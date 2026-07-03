@@ -26,6 +26,7 @@ import {
   DIFFUSION_COMPONENT_ORDER,
 } from '../config/defaults.js';
 import { deleteFile } from '../utils/file-utils.js';
+import { findFreePort } from '../process/port-utils.js';
 import { ServerError, ModelNotFoundError, InsufficientResourcesError } from '../errors/index.js';
 import type {
   DiffusionServerConfig,
@@ -96,6 +97,13 @@ export class DiffusionServerManager extends ServerManager {
     promise: Promise<ImageGenerationResult>;
     cancel: () => void;
   };
+  /**
+   * Registry-tracked generation currently being processed by
+   * runAsyncGeneration. The `cancelled` flag is checked between batch
+   * iterations, so cancellation also works in the gap when no sd-cli
+   * child process is alive.
+   */
+  private activeGeneration?: { id: string; cancelled: boolean };
   private currentModelInfo?: ModelInfo;
 
   // Time estimates for progress calculation (self-calibrating)
@@ -135,15 +143,23 @@ export class DiffusionServerManager extends ServerManager {
     this.systemInfo = systemInfo;
 
     // Initialize generation registry for async API
-    this.registry = new GenerationRegistry({
-      maxResultAgeMs: parseInt(process.env.IMAGE_RESULT_TTL_MS || '300000', 10), // 5 minutes default
-      cleanupIntervalMs: parseInt(process.env.IMAGE_CLEANUP_INTERVAL_MS || '60000', 10), // 1 minute default
-    });
+    this.registry = this.createRegistry();
 
     // Create orchestrator if llamaServer is provided (enables automatic resource management)
     if (llamaServer) {
       this.orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, this, modelManager);
     }
+  }
+
+  /**
+   * Create a fresh generation registry (TTLs configurable via env vars)
+   * @private
+   */
+  private createRegistry(): GenerationRegistry {
+    return new GenerationRegistry({
+      maxResultAgeMs: parseInt(process.env.IMAGE_RESULT_TTL_MS || '300000', 10), // 5 minutes default
+      cleanupIntervalMs: parseInt(process.env.IMAGE_CLEANUP_INTERVAL_MS || '60000', 10), // 1 minute default
+    });
   }
 
   /**
@@ -178,6 +194,12 @@ export class DiffusionServerManager extends ServerManager {
     // DiffusionServerConfig has optional port (resolved later), so cast via unknown
     this._config = config as unknown as typeof this._config;
 
+    // A prior stop() destroyed the registry's cleanup timer — start with a
+    // fresh registry so terminal results (incl. cancelled ones holding image
+    // data) keep getting garbage-collected across stop/start cycles
+    this.registry.destroy();
+    this.registry = this.createRegistry();
+
     try {
       // 1. Validate model exists and is correct type
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
@@ -205,8 +227,11 @@ export class DiffusionServerManager extends ServerManager {
       // 3. Ensure binary is downloaded (pass model info for real functionality testing)
       this.binaryPath = await this.ensureBinary(modelInfo, config.forceValidation);
 
-      // 4. Check if port is in use
-      const port = config.port || DEFAULT_PORTS.diffusion;
+      // 4. Resolve the port ONCE ('auto' → OS-assigned free port), then check it.
+      // createHTTPServer receives the resolved number — resolving twice would
+      // probe one port and bind another.
+      const port =
+        config.port === 'auto' ? await findFreePort() : (config.port ?? DEFAULT_PORTS.diffusion);
       await this.checkPortAvailability(port);
 
       // 5. Initialize log manager
@@ -216,7 +241,7 @@ export class DiffusionServerManager extends ServerManager {
       );
 
       // 6. Create HTTP server
-      await this.createHTTPServer(config);
+      await this.createHTTPServer(port);
 
       this._port = port;
       this._startedAt = new Date();
@@ -261,7 +286,10 @@ export class DiffusionServerManager extends ServerManager {
         await this.logManager.write('Stopping diffusion server...', 'info');
       }
 
-      // Cancel any ongoing generation
+      // Cancel any ongoing generation (incl. halting a batch between images)
+      if (this.activeGeneration) {
+        this.activeGeneration.cancelled = true;
+      }
       if (this.currentGeneration) {
         this.currentGeneration.cancel();
         this.currentGeneration = undefined;
@@ -299,12 +327,66 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
+   * Get the registry ID of the async generation currently being processed
+   *
+   * Useful for cancelling the in-flight generation when the ID is otherwise
+   * only known to the HTTP client that started it (e.g. genai-lite).
+   *
+   * @returns Generation ID, or undefined when idle
+   */
+  getActiveGenerationId(): string | undefined {
+    return this.activeGeneration?.id;
+  }
+
+  /**
+   * Cancel an in-flight async generation by its registry ID
+   *
+   * Marks the generation 'cancelled' in the registry, halts the batch loop
+   * (also between images), and kills the running sd-cli process if any.
+   * Idempotent: cancelling an already-terminal generation is a no-op.
+   *
+   * Only generations started through the async HTTP API (or runAsyncGeneration)
+   * have IDs; direct generateImage() calls are cancelled by stop().
+   *
+   * Compatibility note: genai-lite clients that don't yet recognize the
+   * 'cancelled' status keep polling until their own client-side timeout.
+   *
+   * @param id - Generation ID (from POST /v1/images/generations)
+   * @throws {ServerError} If the generation ID is unknown
+   */
+  async cancelImageGeneration(id: string): Promise<void> {
+    const state = this.registry.get(id);
+    if (!state) {
+      throw new ServerError(`Generation not found: ${id}`, {
+        code: 'GENERATION_NOT_FOUND',
+        suggestion: 'The generation may have expired from the registry or the ID is wrong',
+      });
+    }
+
+    if (state.status === 'complete' || state.status === 'error' || state.status === 'cancelled') {
+      return; // Terminal — nothing to cancel (idempotent)
+    }
+
+    // Mark cancelled FIRST so the in-flight promise's rejection/completion
+    // handlers see the status and never overwrite it
+    this.registry.update(id, { status: 'cancelled' });
+
+    if (this.activeGeneration?.id === id) {
+      this.activeGeneration.cancelled = true;
+      this.currentGeneration?.cancel();
+      this.currentGeneration = undefined;
+    }
+
+    await this.logManager?.write(`Generation ${id} cancelled`, 'info');
+  }
+
+  /**
    * Generate an image
    *
    * Spawns stable-diffusion.cpp executable with the provided configuration.
-   *
-   * Note: Cancellation API (cancelImageGeneration) is deferred to Phase 3.
-   * For Phase 2, once started, generation runs to completion or error.
+   * For cancellable generations, use the async HTTP API and
+   * cancelImageGeneration(); direct calls run to completion or error
+   * (or are cancelled by stop()).
    *
    * @param config - Image generation configuration
    * @returns Generated image result
@@ -387,12 +469,10 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Create HTTP server with async generation endpoints
    *
-   * @param config - Server configuration
+   * @param port - Resolved port number to listen on
    * @private
    */
-  private async createHTTPServer(config: DiffusionServerConfig): Promise<void> {
-    const port = config.port || DEFAULT_PORTS.diffusion;
-
+  private async createHTTPServer(port: number): Promise<void> {
     this.httpServer = http.createServer(async (req, res) => {
       // Enable CORS
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -424,6 +504,12 @@ export class DiffusionServerManager extends ServerManager {
         if (getMatch && getMatch[1] && req.method === 'GET') {
           const generationId = getMatch[1];
           await this.handleGetGeneration(generationId, res);
+          return;
+        }
+
+        // Cancel generation (DELETE /v1/images/generations/:id)
+        if (getMatch && getMatch[1] && req.method === 'DELETE') {
+          await this.handleCancelGeneration(getMatch[1], res);
           return;
         }
 
@@ -508,6 +594,12 @@ export class DiffusionServerManager extends ServerManager {
 
     // Start generation asynchronously (don't await)
     this.runAsyncGeneration(id, imageConfig).catch((error) => {
+      // Never overwrite a cancellation: the rejection of a killed sd-cli
+      // process lands here after cancelImageGeneration set 'cancelled'
+      const state = this.registry.get(id);
+      if (!state || state.status === 'cancelled') {
+        return;
+      }
       this.registry.update(id, {
         status: 'error',
         error: {
@@ -566,11 +658,51 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
+   * Handle DELETE /v1/images/generations/:id - Cancel generation
+   * @private
+   */
+  private async handleCancelGeneration(id: string, res: http.ServerResponse): Promise<void> {
+    const state = this.registry.get(id);
+
+    if (!state) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'Generation not found', code: 'NOT_FOUND' } }));
+      return;
+    }
+
+    if (state.status === 'complete' || state.status === 'error') {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: {
+            message: `Generation is already ${state.status} and cannot be cancelled`,
+            code: 'ALREADY_TERMINAL',
+          },
+        })
+      );
+      return;
+    }
+
+    // 'cancelled' falls through: cancelling twice is idempotent
+    await this.cancelImageGeneration(id);
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ id, status: 'cancelled' }));
+  }
+
+  /**
    * Run async generation and update registry
    * @private
    */
   private async runAsyncGeneration(id: string, config: ImageGenerationConfig): Promise<void> {
     const startTime = Date.now();
+
+    // A cancel may have landed between create and this call
+    if (this.registry.get(id)?.status === 'cancelled') {
+      return;
+    }
+
+    this.activeGeneration = { id, cancelled: false };
 
     // Update to in_progress
     this.registry.update(id, { status: 'in_progress' });
@@ -597,39 +729,49 @@ export class DiffusionServerManager extends ServerManager {
       },
     };
 
-    // Generate images (batch or single, with orchestration if available)
-    const count = config.count || 1;
-    let results: ImageGenerationResult[];
+    try {
+      // Generate images (batch or single, with orchestration if available)
+      const count = config.count || 1;
+      let results: ImageGenerationResult[];
 
-    if (count > 1) {
-      // Batch generation (orchestration not yet supported for batch)
-      results = await this.executeBatchGeneration(wrappedConfig);
-    } else {
-      // Single image: use orchestrator if available (same logic as public generateImage method)
-      if (this.orchestrator) {
-        results = [await this.orchestrator.orchestrateImageGeneration(wrappedConfig)];
+      if (count > 1) {
+        // Batch generation (orchestration not yet supported for batch)
+        results = await this.executeBatchGeneration(wrappedConfig);
       } else {
-        results = [await this.executeImageGeneration(wrappedConfig)];
+        // Single image: use orchestrator if available (same logic as public generateImage method)
+        if (this.orchestrator) {
+          results = [await this.orchestrator.orchestrateImageGeneration(wrappedConfig)];
+        } else {
+          results = [await this.executeImageGeneration(wrappedConfig)];
+        }
       }
+
+      // Never overwrite a cancellation that landed just before completion;
+      // partial results of a cancelled generation are discarded
+      if (this.registry.get(id)?.status === 'cancelled') {
+        return;
+      }
+
+      // Convert results to base64 for JSON response
+      const images = results.map((result) => ({
+        image: result.image.toString('base64'),
+        seed: result.seed,
+        width: result.width,
+        height: result.height,
+      }));
+
+      // Update registry with complete result
+      this.registry.update(id, {
+        status: 'complete',
+        result: {
+          images,
+          format: 'png',
+          timeTaken: Date.now() - startTime,
+        },
+      });
+    } finally {
+      this.activeGeneration = undefined;
     }
-
-    // Convert results to base64 for JSON response
-    const images = results.map((result) => ({
-      image: result.image.toString('base64'),
-      seed: result.seed,
-      width: result.width,
-      height: result.height,
-    }));
-
-    // Update registry with complete result
-    this.registry.update(id, {
-      status: 'complete',
-      result: {
-        images,
-        format: 'png',
-        timeTaken: Date.now() - startTime,
-      },
-    });
   }
 
   /**
@@ -835,6 +977,12 @@ export class DiffusionServerManager extends ServerManager {
     const images: ImageGenerationResult[] = [];
 
     for (let i = 0; i < count; i++) {
+      // Honor cancellation between images: currentGeneration is undefined in
+      // this gap, so the flag is the only way a cancel can halt the batch
+      if (this.activeGeneration?.cancelled) {
+        throw new Error('Image generation cancelled');
+      }
+
       // Calculate seed for this image
       // If user provided a non-negative seed, use seed+i for variations
       // Otherwise, generate a fresh random seed for each image

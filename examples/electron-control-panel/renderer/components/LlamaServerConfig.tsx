@@ -6,6 +6,8 @@ interface ModelInfo {
   name: string;
 }
 
+type KVCacheTypeOption = 'f16' | 'q8_0' | 'q4_0';
+
 interface LlamaServerConfigForm {
   modelId: string;
   port: number;
@@ -13,7 +15,9 @@ interface LlamaServerConfigForm {
   gpuLayers: number;
   threads: number;
   parallelRequests: number;
-  flashAttention: boolean;
+  flashAttention: 'on' | 'off' | 'auto';
+  cacheTypeK: KVCacheTypeOption;
+  cacheTypeV: KVCacheTypeOption;
 }
 
 interface LlamaServerConfigProps {
@@ -152,18 +156,57 @@ const LlamaServerConfig: React.FC<LlamaServerConfigProps> = ({
           />
         </div>
 
-        <div className="config-group config-checkbox">
-          <input
-            type="checkbox"
-            id="flashAttention"
-            checked={config.flashAttention}
-            onChange={(e) => handleChange('flashAttention', e.target.checked)}
-            disabled={autoConfig}
-          />
+        <div className="config-group">
           <label htmlFor="flashAttention">
             Flash Attention
-            <span className="config-hint">Enable flash attention for better performance</span>
+            <span className="config-hint">
+              auto lets llama-server decide; quantized V-cache requires on
+            </span>
           </label>
+          <select
+            id="flashAttention"
+            value={config.flashAttention}
+            onChange={(e) => handleChange('flashAttention', e.target.value)}
+            disabled={autoConfig}
+          >
+            <option value="auto">auto</option>
+            <option value="on">on</option>
+            <option value="off">off</option>
+          </select>
+        </div>
+
+        <div className="config-group">
+          <label htmlFor="cacheTypeK">
+            KV Cache Type (K)
+            <span className="config-hint">q8_0 saves VRAM on long contexts</span>
+          </label>
+          <select
+            id="cacheTypeK"
+            value={config.cacheTypeK}
+            onChange={(e) => handleChange('cacheTypeK', e.target.value)}
+            disabled={autoConfig}
+          >
+            <option value="f16">f16 (default)</option>
+            <option value="q8_0">q8_0</option>
+            <option value="q4_0">q4_0</option>
+          </select>
+        </div>
+
+        <div className="config-group">
+          <label htmlFor="cacheTypeV">
+            KV Cache Type (V)
+            <span className="config-hint">Quantized values require Flash Attention on</span>
+          </label>
+          <select
+            id="cacheTypeV"
+            value={config.cacheTypeV}
+            onChange={(e) => handleChange('cacheTypeV', e.target.value)}
+            disabled={autoConfig}
+          >
+            <option value="f16">f16 (default)</option>
+            <option value="q8_0">q8_0</option>
+            <option value="q4_0">q4_0</option>
+          </select>
         </div>
       </div>
     </div>

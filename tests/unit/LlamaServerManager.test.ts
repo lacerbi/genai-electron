@@ -72,6 +72,17 @@ jest.unstable_mockModule('../../src/process/health-check.js', () => ({
   checkHealth: mockCheckHealth,
   waitForHealthy: mockWaitForHealthy,
   isServerResponding: mockIsServerResponding,
+  normalizeHealthHost: (host?: string) =>
+    host === undefined || host === '' || host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host,
+}));
+
+// Mock port-utils (never bind real sockets in unit tests)
+const mockFindFreePort = jest.fn(async () => 49152);
+const mockIsPortBindable = jest.fn(async () => true);
+
+jest.unstable_mockModule('../../src/process/port-utils.js', () => ({
+  findFreePort: mockFindFreePort,
+  isPortBindable: mockIsPortBindable,
 }));
 
 // Mock LogManager - create instance that's accessible in tests
@@ -207,6 +218,8 @@ describe('LlamaServerManager', () => {
     mockFileExists.mockResolvedValue(true); // Binary exists
     mockWaitForHealthy.mockResolvedValue(undefined);
     mockIsServerResponding.mockResolvedValue(false); // Port not in use by default
+    mockIsPortBindable.mockResolvedValue(true); // Port bindable by default
+    mockFindFreePort.mockResolvedValue(49152);
 
     // Mock process spawn - need to capture callbacks to trigger events (track at describe level for cleanup)
     mockProcess = new EventEmitter() as any;
@@ -216,6 +229,11 @@ describe('LlamaServerManager', () => {
     mockProcess.kill = jest.fn();
 
     mockProcessSpawn.mockImplementation((path, args, callbacks) => {
+      // Fresh wiring per spawn: drop listeners left by a previous spawn on the
+      // shared emitter (a restart would otherwise double-fire handleExit)
+      mockProcess.removeAllListeners('exit');
+      mockProcess.stdout.removeAllListeners('data');
+      mockProcess.stderr.removeAllListeners('data');
       // Wire up the callbacks
       if (callbacks?.onExit) {
         mockProcess.on('exit', callbacks.onExit);
@@ -273,7 +291,13 @@ describe('LlamaServerManager', () => {
       expect(mockProcessSpawn).toHaveBeenCalled();
 
       // Verify health check
-      expect(mockWaitForHealthy).toHaveBeenCalledWith(8080, expect.any(Number));
+      expect(mockWaitForHealthy).toHaveBeenCalledWith(
+        8080,
+        expect.any(Number),
+        undefined,
+        undefined,
+        '127.0.0.1'
+      );
     });
 
     it('should start server with custom config', async () => {
@@ -292,6 +316,37 @@ describe('LlamaServerManager', () => {
       const args = spawnCall[1] as string[];
       expect(args).toContain('--threads');
       expect(args).toContain('4');
+    });
+
+    it('should default the port to 8080 when omitted', async () => {
+      const { port: _omitted, ...configWithoutPort } = mockConfig;
+
+      const info = await llamaServer.start(configWithoutPort);
+
+      expect(info.port).toBe(8080);
+      expect(mockWaitForHealthy).toHaveBeenCalledWith(
+        8080,
+        expect.any(Number),
+        undefined,
+        undefined,
+        '127.0.0.1'
+      );
+      const args = mockProcessSpawn.mock.calls[0][1] as string[];
+      const portIndex = args.indexOf('--port');
+      expect(portIndex).toBeGreaterThan(-1);
+      expect(args[portIndex + 1]).toBe('8080');
+    });
+
+    it('should thread startupTimeout into the health check', async () => {
+      await llamaServer.start({ ...mockConfig, startupTimeout: 300000 });
+
+      expect(mockWaitForHealthy).toHaveBeenCalledWith(
+        8080,
+        300000,
+        undefined,
+        undefined,
+        '127.0.0.1'
+      );
     });
 
     it('should download binary if not exists', async () => {
@@ -340,6 +395,390 @@ describe('LlamaServerManager', () => {
       await llamaServer.start(mockConfig);
 
       expect(startedHandler).toHaveBeenCalled();
+    });
+  });
+
+  describe('command-line flag emission', () => {
+    const spawnArgs = (): string[] => mockProcessSpawn.mock.calls[0][1] as string[];
+
+    it('should always pass --jinja and never --reasoning-format', async () => {
+      await llamaServer.start(mockConfig);
+
+      const args = spawnArgs();
+      expect(args).toContain('--jinja');
+      expect(args).not.toContain('--reasoning-format');
+    });
+
+    it('should pass --no-jinja when jinja is false', async () => {
+      await llamaServer.start({ ...mockConfig, jinja: false });
+
+      const args = spawnArgs();
+      expect(args).not.toContain('--jinja');
+      expect(args).toContain('--no-jinja');
+    });
+
+    it('should pass --alias when modelAlias is set', async () => {
+      await llamaServer.start({ ...mockConfig, modelAlias: 'my-model' });
+
+      const args = spawnArgs();
+      const aliasIndex = args.indexOf('--alias');
+      expect(aliasIndex).toBeGreaterThan(-1);
+      expect(args[aliasIndex + 1]).toBe('my-model');
+    });
+
+    it('should pass -b when batchSize is set', async () => {
+      await llamaServer.start({ ...mockConfig, batchSize: 512 });
+
+      const args = spawnArgs();
+      const batchIndex = args.indexOf('-b');
+      expect(batchIndex).toBeGreaterThan(-1);
+      expect(args[batchIndex + 1]).toBe('512');
+    });
+
+    it('should pass --no-cont-batching only when continuousBatching is false', async () => {
+      await llamaServer.start({ ...mockConfig, continuousBatching: false });
+      expect(spawnArgs()).toContain('--no-cont-batching');
+    });
+
+    it('should pass --no-mmap only when useMmap is false', async () => {
+      await llamaServer.start({ ...mockConfig, useMmap: false });
+      expect(spawnArgs()).toContain('--no-mmap');
+    });
+
+    it('should pass --mlock only when useMlock is true', async () => {
+      await llamaServer.start({ ...mockConfig, useMlock: true });
+      expect(spawnArgs()).toContain('--mlock');
+    });
+
+    it('should not emit optional flags when their fields are unset', async () => {
+      await llamaServer.start(mockConfig);
+
+      const args = spawnArgs();
+      for (const flag of ['--alias', '-b', '--no-cont-batching', '--no-mmap', '--mlock']) {
+        expect(args).not.toContain(flag);
+      }
+    });
+
+    it('should not emit --no-cont-batching or --no-mmap when set to true', async () => {
+      await llamaServer.start({ ...mockConfig, continuousBatching: true, useMmap: true });
+
+      const args = spawnArgs();
+      expect(args).not.toContain('--no-cont-batching');
+      expect(args).not.toContain('--no-mmap');
+    });
+
+    const flagValue = (args: string[], flag: string): string | undefined => {
+      const i = args.indexOf(flag);
+      return i === -1 ? undefined : args[i + 1];
+    };
+
+    it('should map flashAttention booleans and strings onto -fa', async () => {
+      await llamaServer.start({ ...mockConfig, flashAttention: true });
+      expect(flagValue(spawnArgs(), '-fa')).toBe('on');
+
+      await llamaServer.stop();
+      mockProcessSpawn.mockClear();
+      await llamaServer.start({ ...mockConfig, flashAttention: false });
+      expect(flagValue(spawnArgs(), '-fa')).toBe('off');
+
+      await llamaServer.stop();
+      mockProcessSpawn.mockClear();
+      await llamaServer.start({ ...mockConfig, flashAttention: 'auto' });
+      expect(flagValue(spawnArgs(), '-fa')).toBe('auto');
+    });
+
+    it('should omit -fa when flashAttention is unset (server decides)', async () => {
+      await llamaServer.start(mockConfig);
+      expect(spawnArgs()).not.toContain('-fa');
+    });
+
+    it('should pass -fit off by default and honor fit: on', async () => {
+      await llamaServer.start(mockConfig);
+      expect(flagValue(spawnArgs(), '-fit')).toBe('off');
+
+      await llamaServer.stop();
+      mockProcessSpawn.mockClear();
+      await llamaServer.start({ ...mockConfig, fit: 'on' });
+      expect(flagValue(spawnArgs(), '-fit')).toBe('on');
+    });
+
+    it('should skip gpuLayers/contextSize auto-config when fit is on', async () => {
+      await llamaServer.start({ ...mockConfig, fit: 'on' });
+
+      const args = spawnArgs();
+      expect(args).not.toContain('-ngl');
+      expect(args).not.toContain('-c');
+    });
+
+    it('should emit KV-cache, MoE, reasoning-format and host flags when set', async () => {
+      await llamaServer.start({
+        ...mockConfig,
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+        flashAttention: 'on',
+        overrideTensors: 'exps=CPU',
+        cacheRam: 2048,
+        cpuMoe: true,
+        nCpuMoe: 10,
+        reasoningFormat: 'deepseek',
+        host: '0.0.0.0',
+      });
+
+      const args = spawnArgs();
+      expect(flagValue(args, '--cache-type-k')).toBe('q8_0');
+      expect(flagValue(args, '--cache-type-v')).toBe('q8_0');
+      expect(flagValue(args, '-ot')).toBe('exps=CPU');
+      expect(flagValue(args, '--cache-ram')).toBe('2048');
+      expect(args).toContain('--cpu-moe');
+      expect(flagValue(args, '--n-cpu-moe')).toBe('10');
+      expect(flagValue(args, '--reasoning-format')).toBe('deepseek');
+      expect(flagValue(args, '--host')).toBe('0.0.0.0');
+      // Wildcard bind is health-checked via loopback
+      expect(mockWaitForHealthy).toHaveBeenCalledWith(
+        8080,
+        expect.any(Number),
+        undefined,
+        undefined,
+        '127.0.0.1'
+      );
+    });
+
+    it('should auto-upgrade flash attention to on for quantized V-cache', async () => {
+      await llamaServer.start({ ...mockConfig, cacheTypeV: 'q4_0' });
+
+      expect(flagValue(spawnArgs(), '-fa')).toBe('on');
+    });
+
+    it('should reject quantized V-cache combined with flash attention off', async () => {
+      await expect(
+        llamaServer.start({ ...mockConfig, cacheTypeV: 'q8_0', flashAttention: 'off' })
+      ).rejects.toMatchObject({ code: 'SERVER_ERROR' });
+
+      llamaServer.removeAllListeners();
+    });
+
+    it('should not auto-upgrade flash attention for f16/bf16 V-cache', async () => {
+      await llamaServer.start({ ...mockConfig, cacheTypeV: 'f16' });
+
+      expect(spawnArgs()).not.toContain('-fa');
+    });
+
+    it('should accept every documented LlamaServerConfig field', async () => {
+      // Compile-enforced completeness check: Record<keyof LlamaServerConfig, ...>
+      // forces this literal to list every field; start() throws on any field
+      // missing from VALID_CONFIG_FIELDS, so a new interface field that isn't
+      // added to the allowlist fails this test at compile time or runtime.
+      const everyField: Record<keyof LlamaServerConfig, unknown> = {
+        modelId: 'test-model',
+        port: 8080,
+        threads: 4,
+        contextSize: 2048,
+        gpuLayers: 10,
+        parallelRequests: 1,
+        flashAttention: 'on',
+        forceValidation: false,
+        startupTimeout: 60000,
+        host: '127.0.0.1',
+        modelAlias: 'alias',
+        continuousBatching: true,
+        batchSize: 512,
+        useMmap: true,
+        useMlock: false,
+        jinja: true,
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+        overrideTensors: 'exps=CPU',
+        cacheRam: 1024,
+        cpuMoe: false,
+        nCpuMoe: 0,
+        reasoningFormat: 'auto',
+        fit: 'off',
+        occupancyCheck: 'off',
+        autoRestart: false,
+        maxRestarts: 3,
+        healthCheckInterval: 0,
+      };
+
+      const info = await llamaServer.start(everyField as unknown as LlamaServerConfig);
+      expect(info.status).toBe('running');
+    });
+  });
+
+  describe('lifecycle niceties (Phase 4)', () => {
+    it("should resolve port 'auto' via findFreePort", async () => {
+      const info = await llamaServer.start({ ...mockConfig, port: 'auto' });
+
+      expect(mockFindFreePort).toHaveBeenCalledTimes(1);
+      expect(info.port).toBe(49152);
+      expect(mockWaitForHealthy).toHaveBeenCalledWith(
+        49152,
+        expect.any(Number),
+        undefined,
+        undefined,
+        '127.0.0.1'
+      );
+    });
+
+    it('should record loadTimeMs on successful start', async () => {
+      const info = await llamaServer.start(mockConfig);
+
+      expect(typeof info.loadTimeMs).toBe('number');
+      expect(info.loadTimeMs).toBeGreaterThanOrEqual(0);
+    });
+
+    describe('occupancy safety rail', () => {
+      it('should warn and proceed when another llama-server is detected (default)', async () => {
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        // A llama-server on 8082: /health and /props both respond ok
+        mockFetch.mockImplementation(async (url: unknown) => ({
+          ok: String(url).includes(':8082/'),
+        }));
+
+        const info = await llamaServer.start(mockConfig);
+
+        expect(info.status).toBe('running');
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('8082'));
+        warnSpy.mockRestore();
+      });
+
+      it('should throw in strict mode', async () => {
+        mockFetch.mockImplementation(async (url: unknown) => ({
+          ok: String(url).includes(':8082/'),
+        }));
+
+        await expect(
+          llamaServer.start({ ...mockConfig, occupancyCheck: 'strict' })
+        ).rejects.toMatchObject({ code: 'SERVER_ERROR' });
+      });
+
+      it('should not flag a diffusion wrapper (health ok but /props 404)', async () => {
+        const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+        // Diffusion wrapper on 8081: /health ok, /props not found
+        mockFetch.mockImplementation(async (url: unknown) => ({
+          ok: String(url).includes(':8081/health'),
+        }));
+
+        await llamaServer.start(mockConfig);
+
+        expect(warnSpy).not.toHaveBeenCalled();
+        warnSpy.mockRestore();
+      });
+
+      it('should skip probing when occupancyCheck is off', async () => {
+        mockFetch.mockImplementation(async () => ({ ok: true }));
+
+        const info = await llamaServer.start({ ...mockConfig, occupancyCheck: 'off' });
+
+        expect(info.status).toBe('running');
+        expect(mockFetch).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('crash auto-restart', () => {
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('should auto-restart after a crash when enabled', async () => {
+        jest.useFakeTimers();
+        await llamaServer.start({ ...mockConfig, autoRestart: true, maxRestarts: 2 });
+
+        const crashedHandler = jest.fn();
+        const restartedHandler = jest.fn();
+        llamaServer.on('crashed', crashedHandler);
+        llamaServer.on('restarted', restartedHandler);
+
+        mockProcess.emit('exit', 1, null);
+
+        expect(crashedHandler).toHaveBeenCalled();
+        expect(llamaServer.getStatus()).toBe('crashed');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
+
+        // Backoff: first attempt fires after 1s
+        await jest.advanceTimersByTimeAsync(1000);
+
+        expect(restartedHandler).toHaveBeenCalled();
+        expect(llamaServer.getStatus()).toBe('running');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(2);
+      });
+
+      it('should stay crashed when the restart budget is exhausted', async () => {
+        jest.useFakeTimers();
+        await llamaServer.start({ ...mockConfig, autoRestart: true, maxRestarts: 0 });
+
+        mockProcess.emit('exit', 1, null);
+        await jest.advanceTimersByTimeAsync(60000);
+
+        expect(llamaServer.getStatus()).toBe('crashed');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
+      });
+
+      it('should not restart by default (opt-in)', async () => {
+        jest.useFakeTimers();
+        await llamaServer.start(mockConfig);
+
+        mockProcess.emit('exit', 1, null);
+        await jest.advanceTimersByTimeAsync(60000);
+
+        expect(llamaServer.getStatus()).toBe('crashed');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
+      });
+
+      it('should never restart after an intentional stop', async () => {
+        jest.useFakeTimers();
+        await llamaServer.start({ ...mockConfig, autoRestart: true });
+
+        await llamaServer.stop();
+        mockProcess.emit('exit', 0, null);
+        await jest.advanceTimersByTimeAsync(60000);
+
+        expect(llamaServer.getStatus()).toBe('stopped');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    describe('hang watchdog', () => {
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      it('should emit health-check-ok while healthy', async () => {
+        jest.useFakeTimers();
+        mockCheckHealth.mockResolvedValue({ status: 'ok' });
+        await llamaServer.start({ ...mockConfig, healthCheckInterval: 1000 });
+
+        const okHandler = jest.fn();
+        llamaServer.on('health-check-ok', okHandler);
+
+        await jest.advanceTimersByTimeAsync(2000);
+
+        expect(okHandler).toHaveBeenCalledTimes(2);
+        expect(mockProcessKill).not.toHaveBeenCalled();
+      });
+
+      it('should kill the process after 3 consecutive health failures', async () => {
+        jest.useFakeTimers();
+        mockCheckHealth.mockResolvedValue({ status: 'error' });
+        await llamaServer.start({ ...mockConfig, healthCheckInterval: 1000 });
+
+        const failHandler = jest.fn();
+        llamaServer.on('health-check-failed', failHandler);
+
+        await jest.advanceTimersByTimeAsync(3000);
+
+        expect(failHandler).toHaveBeenCalledTimes(3);
+        expect(mockProcessKill).toHaveBeenCalledWith(12345, expect.any(Number));
+      });
+
+      it('should not start the watchdog when healthCheckInterval is unset', async () => {
+        jest.useFakeTimers();
+        mockCheckHealth.mockResolvedValue({ status: 'error' });
+        await llamaServer.start(mockConfig);
+
+        await jest.advanceTimersByTimeAsync(10000);
+
+        expect(mockCheckHealth).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -436,7 +875,7 @@ describe('LlamaServerManager', () => {
       const healthy = await llamaServer.isHealthy();
 
       expect(healthy).toBe(true);
-      expect(mockCheckHealth).toHaveBeenCalledWith(8080, expect.any(Number));
+      expect(mockCheckHealth).toHaveBeenCalledWith(8080, expect.any(Number), '127.0.0.1');
     });
 
     it('should return false if server is not healthy', async () => {
@@ -658,10 +1097,11 @@ describe('LlamaServerManager', () => {
 
       const spawnCall = mockProcessSpawn.mock.calls[0];
       const args = spawnCall[1] as string[];
+      // -ngl 0 MUST be emitted explicitly: the b9860 server default is
+      // auto-offload, so omitting -ngl would silently offload to GPU
       const gpuLayersIndex = args.indexOf('-ngl');
-      if (gpuLayersIndex !== -1) {
-        expect(args[gpuLayersIndex + 1]).toBe('0');
-      }
+      expect(gpuLayersIndex).toBeGreaterThan(-1);
+      expect(args[gpuLayersIndex + 1]).toBe('0');
     });
   });
 });

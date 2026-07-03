@@ -312,6 +312,22 @@ export function registerIpcHandlers(): void {
     }
   });
 
+  // Cancel the in-flight image generation (genai-electron >= 0.6)
+  // Note: with genai-lite <= 0.9.0 the awaiting generateImage promise settles
+  // only at its client-side timeout; the sd-cli process is killed immediately.
+  ipcMain.handle('diffusion:cancel', async () => {
+    try {
+      const id = diffusionServer.getActiveGenerationId();
+      if (!id) {
+        return { cancelled: false };
+      }
+      await diffusionServer.cancelImageGeneration(id);
+      return { cancelled: true };
+    } catch (error) {
+      throw new Error(`Failed to cancel generation: ${(error as Error).message}`);
+    }
+  });
+
   // Generate image using genai-lite ImageService (with automatic orchestration)
   ipcMain.handle('diffusion:generate', async (_event, config) => {
     try {

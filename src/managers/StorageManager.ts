@@ -240,6 +240,27 @@ export class StorageManager {
       } catch {
         // Directory not empty or doesn't exist — ignore
       }
+    } else if (metadata.shards && metadata.shards.length > 0) {
+      // Multi-shard: delete every shard file, then the subdirectory if empty
+      for (const shard of metadata.shards) {
+        try {
+          const exists = await fileExists(shard.path);
+          if (exists) {
+            await deleteFile(shard.path);
+          }
+        } catch (error) {
+          throw new FileSystemError(`Failed to delete shard file: ${shard.path}`, {
+            path: shard.path,
+            error,
+          });
+        }
+      }
+      try {
+        const modelDir = path.dirname(metadata.path);
+        await rmdir(modelDir);
+      } catch {
+        // Directory not empty or doesn't exist — ignore
+      }
     } else {
       // Single-file: delete model file
       try {
@@ -380,6 +401,35 @@ export class StorageManager {
       return hasAnyChecksum;
     }
 
+    if (metadata.shards && metadata.shards.length > 0) {
+      // Multi-shard: verify each shard exists; checksums where recorded
+      let hasAnyChecksum = false;
+
+      for (const shard of metadata.shards) {
+        const exists = await fileExists(shard.path);
+        if (!exists) {
+          throw new FileSystemError(`Shard file not found: ${shard.path}`, {
+            path: shard.path,
+            modelId,
+          });
+        }
+
+        if (shard.checksum) {
+          hasAnyChecksum = true;
+          const actualChecksum = await calculateChecksum(shard.path);
+          const expected = shard.checksum.replace(/^sha256:/, '');
+          if (actualChecksum !== expected) {
+            throw new ChecksumError(`SHA256 checksum mismatch for shard: ${shard.path}`, {
+              expected,
+              actual: actualChecksum,
+            });
+          }
+        }
+      }
+
+      return hasAnyChecksum;
+    }
+
     // Single-file: original behavior
     if (!metadata.checksum) {
       return false;
@@ -432,6 +482,10 @@ export class StorageManager {
           if (metadata.components) {
             for (const comp of Object.values(metadata.components)) {
               uniqueFiles.set(comp.path, comp.size);
+            }
+          } else if (metadata.shards && metadata.shards.length > 0) {
+            for (const shard of metadata.shards) {
+              uniqueFiles.set(shard.path, shard.size);
             }
           } else {
             uniqueFiles.set(metadata.path, metadata.size);

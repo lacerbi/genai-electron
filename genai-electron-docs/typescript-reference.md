@@ -103,6 +103,19 @@ interface ModelInfo {
   supportsReasoning?: boolean;
   ggufMetadata?: GGUFMetadata;
   components?: DiffusionModelComponents;  // Component files for multi-component diffusion models. When present, `path` points to the primary diffusion_model component and `size` is the aggregate total.
+  shards?: ShardInfo[];                   // Ordered shards of a multi-shard GGUF. When present, `path` is the first shard (llama-server auto-discovers siblings) and `size` is the aggregate total.
+}
+```
+
+### ShardInfo
+
+A single shard of a multi-shard GGUF model (files split as `model-00001-of-0000N.gguf`). Distinct from multi-component diffusion models: shards are ordered pieces of **one** model, not role-keyed components.
+
+```typescript
+interface ShardInfo {
+  path: string;       // Absolute path to this shard file
+  size: number;       // Shard file size in bytes
+  checksum?: string;  // SHA256 checksum (sha256: prefix), if known
 }
 ```
 
@@ -188,6 +201,7 @@ interface DownloadConfig {
   type: ModelType;
   checksum?: string;
   onProgress?: DownloadProgressCallback;
+  shardFiles?: string[];  // Explicit sibling shards for non-standard multi-shard naming (filenames resolved next to the primary file, or full URLs). Standard `*-00001-of-0000N.gguf` names are auto-discovered.
   components?: DiffusionComponentDownload[];  // Additional component files for multi-component diffusion models
   modelDirectory?: string;  // Subdirectory name override — allows multiple variants to share a directory
   onComponentStart?: (info: {  // Called when each component download begins (multi-component only)
@@ -272,11 +286,28 @@ interface ServerInfo {
   status: ServerStatus;
   health: HealthStatus;
   pid?: number;
-  port: number;
+  port: number;                // Resolved numeric port (even when started with 'auto')
   modelId: string;
   startedAt?: string;
   error?: string;
+  loadTimeMs?: number;         // Last successful start duration, spawn → healthy (llama-server only)
 }
+```
+
+### KVCacheType
+
+KV-cache quantization type for llama-server `--cache-type-k` / `--cache-type-v` (server default: `f16`).
+
+```typescript
+type KVCacheType = 'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'q5_0' | 'q5_1' | 'iq4_nl';
+```
+
+### FlashAttentionSetting
+
+Flash attention tri-state, plus `boolean` for backwards compatibility (`true` → `'on'`, `false` → `'off'`). When unset, nothing is emitted and the server decides (`'auto'`).
+
+```typescript
+type FlashAttentionSetting = boolean | 'on' | 'off' | 'auto';
 ```
 
 ### ServerConfig
@@ -284,19 +315,21 @@ interface ServerInfo {
 ```typescript
 interface ServerConfig {
   modelId: string;
-  port: number;
+  port?: number | 'auto';           // Default: 8080 (llama) / 8081 (diffusion); 'auto' picks a free OS port
   threads?: number;
   contextSize?: number;
   gpuLayers?: number;
   parallelRequests?: number;
-  flashAttention?: boolean;
+  flashAttention?: FlashAttentionSetting;
+  host?: string;                    // Interface to bind (--host); default 127.0.0.1 (loopback only)
   forceValidation?: boolean;
+  startupTimeout?: number;          // Max ms to wait for health after spawn (default: 120000)
 }
 ```
 
 ### DiffusionServerInfo
 
-Extends `ServerInfo` with additional diffusion-specific fields.
+Standalone interface mirroring `ServerInfo` fields (adds `busy`; has no `loadTimeMs`).
 
 ```typescript
 interface DiffusionServerInfo {
@@ -316,7 +349,7 @@ interface DiffusionServerInfo {
 ```typescript
 interface DiffusionServerConfig {
   modelId: string;
-  port?: number;
+  port?: number | 'auto';            // Default: 8081; 'auto' picks a free OS port
   threads?: number;
   gpuLayers?: number;
   forceValidation?: boolean;
@@ -334,11 +367,24 @@ Extends `ServerConfig` with llama.cpp-specific options.
 
 ```typescript
 interface LlamaServerConfig extends ServerConfig {
-  modelAlias?: string;
-  continuousBatching?: boolean;
-  batchSize?: number;
-  useMmap?: boolean;
-  useMlock?: boolean;
+  modelAlias?: string;               // --alias. WARNING: masks the GGUF filename genai-lite uses for family/reasoning detection
+  continuousBatching?: boolean;      // false → --no-cont-batching (server default: enabled)
+  batchSize?: number;                // -b (logical batch size)
+  useMmap?: boolean;                 // false → --no-mmap (server default: enabled)
+  useMlock?: boolean;                // true → --mlock
+  jinja?: boolean;                   // Use embedded Jinja chat template (--jinja). Default: true; false → --no-jinja
+  cacheTypeK?: KVCacheType;          // --cache-type-k (default: unset → f16)
+  cacheTypeV?: KVCacheType;          // --cache-type-v; quantized V auto-upgrades flash attention to 'on' (throws if explicitly 'off')
+  overrideTensors?: string;          // -ot / --override-tensor, e.g. 'exps=CPU'
+  cacheRam?: number;                 // --cache-ram (MiB); -1 = no limit, 0 = disable
+  cpuMoe?: boolean;                  // --cpu-moe (keep ALL MoE experts on CPU)
+  nCpuMoe?: number;                  // --n-cpu-moe N (keep first N layers' MoE experts on CPU)
+  reasoningFormat?: 'auto' | 'deepseek' | 'deepseek-legacy' | 'none'; // --reasoning-format (default: unset → server 'auto')
+  fit?: 'on' | 'off';                // -fit; default 'off'. 'on' delegates sizing to llama-server and skips genai-electron's gpuLayers/contextSize auto-config
+  occupancyCheck?: 'warn' | 'strict' | 'off'; // Cross-app VRAM double-load guard (default: 'warn')
+  autoRestart?: boolean;             // Auto-restart after an unexpected crash (default: false)
+  maxRestarts?: number;              // Max consecutive auto-restart attempts (default: 3)
+  healthCheckInterval?: number;      // Hang-watchdog poll interval in ms (default: disabled)
 }
 ```
 
@@ -361,7 +407,7 @@ type ServerEvent =
 interface ServerEventData {
   event: ServerEvent;
   serverInfo: ServerInfo;
-  crashData?: { code: number | null; signal: NodeJS.Signals | null };
+  error?: Error;
   timestamp: string;
 }
 ```
@@ -382,6 +428,22 @@ interface HealthCheckResponse {
   status: HealthStatus;
   [key: string]: unknown;
 }
+```
+
+### Port & Health Utilities
+
+Low-level helpers used by the server managers (also exported for advanced use).
+
+```typescript
+// Resolve a free OS-assigned TCP port on the given host (used when port is 'auto').
+function findFreePort(host?: string): Promise<number>;   // host defaults to '127.0.0.1'
+
+// Test whether a specific port can be bound on the given host (catches non-HTTP occupants).
+function isPortBindable(port: number, host?: string): Promise<boolean>;  // host defaults to '127.0.0.1'
+
+// Map a bind host to the host health checks should target
+// (wildcards '0.0.0.0' / '::' → '127.0.0.1'; unset → '127.0.0.1').
+function normalizeHealthHost(host?: string): string;
 ```
 
 ---
@@ -467,8 +529,10 @@ Types for HTTP API async image generation (polling pattern).
 
 ### GenerationStatus
 
+`'cancelled'` is a terminal status (added in v0.6.0). Note: genai-lite pollers older than the version that recognizes it treat only `'complete'`/`'error'` as terminal, so an out-of-band cancellation leaves those clients polling until their own client-side timeout.
+
 ```typescript
-type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error';
+type GenerationStatus = 'pending' | 'in_progress' | 'complete' | 'error' | 'cancelled';
 ```
 
 ### GenerationState
@@ -531,6 +595,17 @@ interface LogEntry {
 
 ```typescript
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+```
+
+### LogRotationOptions
+
+Size-based log rotation settings passed to `LogManager`. Defaults come from `DEFAULT_LOG_ROTATION` (5 MB, 2 archives).
+
+```typescript
+interface LogRotationOptions {
+  maxFileSize?: number;  // Rotate when the log exceeds this many bytes (default: 5 * 1024 * 1024)
+  maxArchives?: number;  // Rotated archives to keep, e.g. server.log.1/.2 (default: 2; 0 = truncate in place)
+}
 ```
 
 ---
@@ -688,7 +763,10 @@ import {
   formatErrorForUI,
   detectReasoningSupport,
   REASONING_MODEL_PATTERNS,
-  getArchField
+  getArchField,
+  findFreePort,
+  isPortBindable,
+  normalizeHealthHost
 } from 'genai-electron';
 ```
 

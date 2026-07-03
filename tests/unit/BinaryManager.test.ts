@@ -68,6 +68,8 @@ const mockReadFile = jest.fn();
 const mockWriteFile = jest.fn();
 const mockChmod = jest.fn();
 const mockMkdir = jest.fn();
+const mockReaddir = jest.fn();
+const mockCopyFile = jest.fn();
 
 jest.unstable_mockModule('fs', () => ({
   promises: {
@@ -75,6 +77,8 @@ jest.unstable_mockModule('fs', () => ({
     writeFile: mockWriteFile,
     chmod: mockChmod,
     mkdir: mockMkdir,
+    readdir: mockReaddir,
+    copyFile: mockCopyFile,
   },
 }));
 
@@ -237,6 +241,8 @@ describe('BinaryManager', () => {
     mockWriteFile.mockResolvedValue(undefined);
     mockChmod.mockResolvedValue(undefined);
     mockMkdir.mockResolvedValue(undefined);
+    mockReaddir.mockResolvedValue([]);
+    mockCopyFile.mockResolvedValue(undefined);
     mockDownload.mockResolvedValue(undefined);
 
     // Reset spawn behavior for each test (tests will configure as needed)
@@ -279,6 +285,44 @@ describe('BinaryManager', () => {
       await binaryManager.ensureBinary();
 
       expect(mockEnsureDirectory).toHaveBeenCalledWith(MOCK_PATHS.binaries.llama);
+    });
+
+    it('should flatten archives whose binary is nested in a top-level directory', async () => {
+      // Unix tar.gz releases nest everything under llama-<tag>/ — the copy
+      // must target the directory that actually contains the binary, plus any
+      // dependency files sitting at the extract root (e.g. CUDA runtime DLLs).
+      const path = await import('path');
+      const extractDir = '/mock/binaries/llama/llama-server.exe.cuda.extract';
+      const nestedBinaryPath = `${extractDir}/llama-b9860/llama-server`;
+      mockExtractBinary.mockResolvedValue(nestedBinaryPath);
+      mockReaddir.mockResolvedValue([
+        { name: 'cudart64_12.dll', isFile: () => true, isDirectory: () => false },
+        { name: 'llama-b9860', isFile: () => false, isDirectory: () => true },
+      ]);
+
+      await binaryManager.ensureBinary();
+
+      // The nested directory (not the extract root) is copied to binaries/
+      expect(mockCopyDirectory).toHaveBeenCalledWith(
+        path.dirname(nestedBinaryPath),
+        MOCK_PATHS.binaries.llama
+      );
+      // Root-level dependency files are copied too; the nested dir is skipped
+      expect(mockCopyFile).toHaveBeenCalledWith(
+        path.join(extractDir, 'cudart64_12.dll'),
+        path.join(MOCK_PATHS.binaries.llama, 'cudart64_12.dll')
+      );
+      expect(mockCopyFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('should copy the extract root directly when the binary sits at the root', async () => {
+      const extractDir = '/mock/binaries/llama/llama-server.exe.cuda.extract';
+      mockExtractBinary.mockResolvedValue(`${extractDir}/llama-server.exe`);
+
+      await binaryManager.ensureBinary();
+
+      expect(mockCopyDirectory).toHaveBeenCalledWith(extractDir, MOCK_PATHS.binaries.llama);
+      expect(mockCopyFile).not.toHaveBeenCalled();
     });
 
     it('should return existing binary path if binary works', async () => {

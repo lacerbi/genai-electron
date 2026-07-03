@@ -39,7 +39,7 @@ describe('health-check', () => {
 
       expect(result.status).toBe('ok');
       expect(mockFetch).toHaveBeenCalledWith(
-        'http://localhost:8080/health',
+        'http://127.0.0.1:8080/health',
         expect.objectContaining({
           headers: { Accept: 'application/json' },
         })
@@ -345,7 +345,7 @@ describe('health-check', () => {
 
       expect(result).toBe(true);
       expect(mockFetch).toHaveBeenCalledWith(
-        'http://localhost:8080/health',
+        'http://127.0.0.1:8080/health',
         expect.objectContaining({
           signal: expect.any(AbortSignal),
         })

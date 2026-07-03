@@ -12,6 +12,7 @@ The `ModelManager` class handles model downloading, storage, and management for 
   - [listModels()](#listmodels)
   - [downloadModel()](#downloadmodel)
   - [Multi-Component Model Downloads](#multi-component-model-downloads)
+  - [Multi-Shard GGUF Downloads](#multi-shard-gguf-downloads)
   - [getModelInfo()](#getmodelinfo)
   - [deleteModel()](#deletemodel)
   - [verifyModel()](#verifymodel)
@@ -312,6 +313,86 @@ await modelManager.downloadModel({
   },
 });
 ```
+
+---
+
+### Multi-Shard GGUF Downloads
+
+Large GGUF models are sometimes split into several ordered files — `model-00001-of-00003.gguf`, `model-00002-of-00003.gguf`, `model-00003-of-00003.gguf`. These **shards** are pieces of a **single** model. ModelManager downloads all shards together and llama-server auto-discovers the siblings from the first shard, so you point `start()` at one model as usual.
+
+> **Shards vs. components.** Shards are ordered pieces of **one** model (`-00001-of-0000N.gguf`), tracked in `ModelInfo.shards`. Multi-component diffusion models (see above) are **different-role** files (diffusion model + text encoder + VAE) tracked in `ModelInfo.components`. The two are unrelated: a model uses one mechanism or the other, never both.
+
+**Auto-detection rule**: When the primary file name matches `*-00001-of-0000N.gguf`, all `N` sibling shards are downloaded automatically — derived from the primary's HuggingFace repo path (or URL directory). You only pass the first shard.
+
+```typescript
+const model = await modelManager.downloadModel({
+  source: 'huggingface',
+  repo: 'unsloth/Qwen3-235B-A22B-GGUF',
+  file: 'Qwen3-235B-A22B-Q4_K_M-00001-of-00003.gguf', // first shard only
+  name: 'Qwen3 235B Q4_K_M',
+  type: 'llm',
+  onProgress: (downloaded, total) => {
+    // Aggregate progress across all shards (smooth 0→100%)
+    console.log(`${((downloaded / total) * 100).toFixed(1)}%`);
+  },
+});
+
+console.log('Shards:', model.shards?.length);           // 3
+console.log('Total size:', (model.size / 1024 ** 3).toFixed(2), 'GB'); // aggregate
+console.log('Primary path:', model.path);               // → the -00001-of- shard
+```
+
+**Notes**:
+- Pointing `file`/`url` at a non-first shard (e.g. `-00002-of-00003`) throws — always start from `-00001-of-0000N`.
+- A `-00001-of-00001` file is treated as a normal single-file model (not sharded).
+
+**Explicit `shardFiles` override**:
+
+For non-standard shard names that don't match the `-00001-of-0000N` pattern, list the additional shards explicitly. Entries are filenames resolved next to the primary file (same HuggingFace repo path / same URL directory), or full `http(s)` URLs:
+
+```typescript
+const model = await modelManager.downloadModel({
+  source: 'huggingface',
+  repo: 'someorg/custom-split-GGUF',
+  file: 'model.part1.gguf',
+  name: 'Custom Split Model',
+  type: 'llm',
+  shardFiles: ['model.part2.gguf', 'model.part3.gguf'], // siblings next to the primary
+});
+```
+
+**Storage Layout**:
+
+Sharded models are stored in a per-model subdirectory, with the metadata sidecar alongside the other models:
+
+```
+userData/models/llm/
+  llama-2-7b.json                                # metadata (single-file model)
+  llama-2-7b.Q4_K_M.gguf                         # model file (single-file model)
+  qwen3-235b-q4-k-m/                             # per-model directory (sharded)
+    Qwen3-235B-A22B-Q4_K_M-00001-of-00003.gguf  # first shard (ModelInfo.path)
+    Qwen3-235B-A22B-Q4_K_M-00002-of-00003.gguf
+    Qwen3-235B-A22B-Q4_K_M-00003-of-00003.gguf
+  qwen3-235b-q4-k-m.json                          # metadata with shards[]
+```
+
+`ModelInfo.path` points at the **first** shard (llama-server discovers the rest); `ModelInfo.size` is the **aggregate** of all shards. `ModelInfo.shards` lists every shard in order:
+
+```typescript
+// ModelInfo.shards: ShardInfo[]
+{
+  shards: [
+    { path: '/path/.../-00001-of-00003.gguf', size: 15000000000, checksum: 'sha256:abc...' },
+    { path: '/path/.../-00002-of-00003.gguf', size: 15000000000 },
+    { path: '/path/.../-00003-of-00003.gguf', size: 12000000000 },
+  ]
+}
+```
+
+**Checksum, Deletion, and Verification**:
+- An optional `checksum` on the download config verifies the **first** shard only (`ShardInfo.checksum` is typically stored just for that shard).
+- `deleteModel()` removes the entire per-model shard directory and the metadata sidecar.
+- `verifyModel()` and `getStorageUsed()` account for all shards; storage usage reflects the aggregate size.
 
 ---
 
@@ -664,7 +745,7 @@ const supportsReasoning = detectReasoningSupport('Qwen3-8B-Instruct-Q4_K_M.gguf'
 console.log('Supports reasoning:', supportsReasoning);
 ```
 
-**How it works**: ModelManager detects reasoning support from filename during download, stores `supportsReasoning: true` in metadata, and LlamaServerManager automatically adds `--jinja --reasoning-format deepseek` flags when starting the server.
+**How it works**: ModelManager detects reasoning support from the filename during download and stores `supportsReasoning: true` in metadata. This flag is **informational metadata** for apps — it no longer changes how the server is launched. LlamaServerManager now always passes `--jinja` (unless you set `jinja: false`), and reasoning extraction is handled by llama-server's `--reasoning-format`, which defaults to `'auto'`. Override it per start with the `reasoningFormat` option (`'auto' | 'deepseek' | 'deepseek-legacy' | 'none'`) if needed.
 
 ---
 

@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.5.0 | **Status**: Production Ready - LLM & Image Generation
+> **Version**: 0.6.0 | **Status**: Production Ready - LLM & Image Generation, hardened server lifecycle
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 
@@ -12,6 +12,8 @@ Electron-specific library for managing local AI model servers (llama.cpp, stable
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
 - ✅ **Multi-component diffusion models** - Flux 2, SDXL split components with aggregate checksum validation
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when memory constrained
+- ✅ **Reliable server lifecycle** - Crash auto-restart, hang watchdog, automatic port selection, occupancy safety, log rotation
+- ✅ **Advanced launch control** - KV-cache quantization, flash-attention control, MoE CPU offload, multi-shard GGUF downloads, image-generation cancellation
 - ✅ **Binary management** - Automatic binary download with GPU variant testing (CUDA→Vulkan→CPU)
 - ✅ **TypeScript-first** - Full type safety, minimal runtime dependencies
 
@@ -41,13 +43,13 @@ app.whenReady().then(async () => {
     type: 'llm'
   });
 
-  // Start server with auto-config
-  await llamaServer.start({
-    modelId: 'llama-2-7b',
-    port: 8080
+  // Start server with auto-config (port is optional — defaults to 8080;
+  // pass port: 'auto' to have the OS pick a free port)
+  const info = await llamaServer.start({
+    modelId: 'llama-2-7b'
   });
 
-  console.log('Server ready on port 8080');
+  console.log(`Server ready on port ${info.port}`);
 });
 ```
 
@@ -73,8 +75,8 @@ See **[electron-control-panel](examples/electron-control-panel/)** for a full-fe
 ## Platform Support
 
 - **macOS**: 11+ (Intel, Apple Silicon with Metal)
-- **Windows**: 10+ (64-bit, CPU and CUDA)
-- **Linux**: Ubuntu 20.04+, Debian 11+, Fedora 35+ (CPU, CUDA, ROCm)
+- **Windows**: 10+ (64-bit; CUDA, Vulkan, CPU)
+- **Linux**: Ubuntu 20.04+, Debian 11+, Fedora 35+ (Vulkan, CPU — no CUDA prebuilt upstream; build from source for CUDA)
 
 ## License
 

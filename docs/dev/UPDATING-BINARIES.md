@@ -6,6 +6,12 @@ This guide explains how to update genai-electron to use a new llama.cpp release.
 
 Starting with llama.cpp **b7956**, macOS and Linux binaries use **`.tar.gz`** format instead of `.zip`. Windows binaries remain `.zip`. The codebase handles both formats automatically via `src/utils/archive-utils.ts`.
 
+## Archive Layout Notes (b9860+)
+
+- **Unix tar.gz archives nest everything under a top-level `llama-<tag>/` directory** (true since at least b7956). `BinaryManager.downloadAndTestVariant` flattens this automatically by copying the directory that actually contains the binary — do not "fix" the copy back to the extract root.
+- **Windows zips are flat**, but since ~b9860 `llama-server.exe` is a small launcher with the real code in `llama-server-impl.dll` — the exe alone is not runnable, which is why ALL extracted files are copied next to it.
+- **No Linux x64 CUDA prebuilt exists anymore** (as of b9860). The `linux-x64` variant chain is Vulkan → CPU; Linux NVIDIA users run the Vulkan build or compile from source.
+
 ## When to Update
 
 Check for new llama.cpp releases at: https://github.com/ggml-org/llama.cpp/releases
@@ -26,7 +32,22 @@ Updates are typically needed when:
 
 ## Step 1: Extract SHA256 Checksums
 
-### Method 1: Using WebFetch (Preferred)
+### Method 0: GitHub Releases API `digest` field (Preferred)
+
+The releases API exposes a per-asset `digest` field in `sha256:<hex>` format — no HTML parsing needed:
+
+```bash
+curl -s "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/bXXXX" | python -c "
+import json, sys
+r = json.load(sys.stdin)
+for a in r['assets']:
+    print(a['name'], '|', a.get('digest'))
+"
+```
+
+Use `releases/latest` to find the newest tag. Copy the hex portion (after `sha256:`) into `defaults.ts`. Spot-check at least one asset by downloading it and running `sha256sum` — a single-character transcription error produces a hard download failure for every user on that platform.
+
+### Method 1: Using WebFetch (Fallback)
 
 The releases page can be fetched programmatically:
 
@@ -144,8 +165,8 @@ Ensure ALL these variants are available in the release:
 - **Windows CUDA**: NVIDIA GPU with CUDA runtime
 - **Windows Vulkan**: Cross-vendor GPU (NVIDIA/AMD/Intel) without CUDA
 - **Windows CPU**: Final fallback
-- **Linux Ubuntu (CUDA)**: Default for Linux with NVIDIA
-- **Linux Ubuntu Vulkan**: Fallback for Linux with any GPU
+- **Linux Ubuntu Vulkan**: Default for Linux with any GPU (upstream dropped Linux CUDA prebuilts)
+- **Linux Ubuntu (CPU)**: Final fallback for Linux
 
 ### Fallback Priority
 

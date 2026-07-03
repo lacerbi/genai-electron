@@ -11,7 +11,8 @@ import { ServerManager } from './ServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
-import { checkHealth, waitForHealthy } from '../process/health-check.js';
+import { checkHealth, waitForHealthy, normalizeHealthHost } from '../process/health-check.js';
+import { findFreePort } from '../process/port-utils.js';
 import { parseLlamaCppLogLevel, stripLlamaCppFormatting } from '../process/llama-log-parser.js';
 import type {
   ServerConfig,
@@ -21,8 +22,14 @@ import type {
   ModelInfo,
 } from '../types/index.js';
 import { ServerError, InsufficientResourcesError } from '../errors/index.js';
-import { BINARY_VERSIONS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
+import { BINARY_VERSIONS, DEFAULT_PORTS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
 import { fileExists } from '../utils/file-utils.js';
+import { debugLog } from '../utils/debug-log.js';
+
+/**
+ * Internal config shape after the port has been resolved to a concrete number
+ */
+type ResolvedLlamaServerConfig = LlamaServerConfig & { port: number };
 
 /**
  * LlamaServerManager class
@@ -72,12 +79,45 @@ export class LlamaServerManager extends ServerManager {
     'batchSize',
     'useMmap',
     'useMlock',
+    'startupTimeout',
+    'jinja',
+    'host',
+    'cacheTypeK',
+    'cacheTypeV',
+    'overrideTensors',
+    'cacheRam',
+    'cpuMoe',
+    'nCpuMoe',
+    'reasoningFormat',
+    'fit',
+    'occupancyCheck',
+    'autoRestart',
+    'maxRestarts',
+    'healthCheckInterval',
   ]);
 
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
   private binaryPath?: string;
+  /** Host used for health checks (config.host normalized; 0.0.0.0/:: → 127.0.0.1) */
+  private healthHost = '127.0.0.1';
+  /** Duration of the last successful start, spawn → healthy (ms) */
+  private _loadTimeMs?: number;
+  /** Total auto-restart attempts since the last MANUAL start (lifetime budget, not consecutive) */
+  private restartAttempts = 0;
+  /** Pending auto-restart timer (crash backoff) */
+  private restartTimer?: NodeJS.Timeout;
+  /** True while an auto-restart start() call is in flight (skips counter reset) */
+  private isAutoRestarting = false;
+  /** Hang-watchdog interval timer */
+  private watchdogTimer?: NodeJS.Timeout;
+  /** Consecutive failed watchdog health checks */
+  private consecutiveHealthFailures = 0;
+  /** Set when the watchdog kills a hung process, so handleExit treats it as a crash */
+  private watchdogKill = false;
+  /** Reentrancy guard: true while a watchdog health check is in flight */
+  private watchdogCheckInFlight = false;
 
   /**
    * Create a new LlamaServerManager
@@ -124,7 +164,21 @@ export class LlamaServerManager extends ServerManager {
       'LlamaServerManager'
     );
 
+    // A manual start resets the auto-restart budget and cancels any pending
+    // auto-restart; the auto-restart path itself skips this.
+    if (!this.isAutoRestarting) {
+      this.restartAttempts = 0;
+      this.cancelPendingRestart();
+    }
+
     this.setStatus('starting');
+
+    // Resolve the port once, up front — every later step (availability check,
+    // health polling, CLI args, saved config for restart) uses this value.
+    // 'auto' binds port 0 to get an OS-assigned free port.
+    const resolvedPort =
+      config.port === 'auto' ? await findFreePort() : (config.port ?? DEFAULT_PORTS.llama);
+    this.healthHost = normalizeHealthHost(config.host);
 
     try {
       // 1. Validate model exists
@@ -150,11 +204,41 @@ export class LlamaServerManager extends ServerManager {
       // 3. Ensure binary is downloaded (pass model path for real functionality testing)
       this.binaryPath = await this.ensureBinary(modelInfo.path, config.forceValidation);
 
-      // 4. Check if port is in use
-      await this.checkPortAvailability(config.port);
+      // 4. Check if port is in use (on the host the server will bind)
+      await this.checkPortAvailability(resolvedPort, undefined, this.healthHost);
+
+      // 4b. Occupancy safety rail: detect other llama-servers that could
+      // double-load VRAM (default 'warn'; 'strict' throws; 'off' skips)
+      await this.runOccupancyCheck(
+        (config as LlamaServerConfig).occupancyCheck ?? 'warn',
+        resolvedPort
+      );
 
       // 5. Auto-configure if needed
-      const finalConfig = await this.autoConfigureIfNeeded(config, modelInfo);
+      const finalConfig = await this.autoConfigureIfNeeded(
+        { ...config, port: resolvedPort },
+        modelInfo
+      );
+
+      // 5b. Quantized V-cache requires flash attention ON (llama.cpp runtime constraint)
+      const quantizedVCache =
+        finalConfig.cacheTypeV !== undefined &&
+        finalConfig.cacheTypeV !== 'f16' &&
+        finalConfig.cacheTypeV !== 'bf16';
+      if (quantizedVCache) {
+        if (finalConfig.flashAttention === undefined || finalConfig.flashAttention === 'auto') {
+          debugLog('[LlamaServer] cacheTypeV is quantized - forcing flashAttention on');
+          finalConfig.flashAttention = 'on';
+        } else if (finalConfig.flashAttention === false || finalConfig.flashAttention === 'off') {
+          throw new ServerError(
+            `Quantized V-cache (cacheTypeV: '${finalConfig.cacheTypeV}') requires flash attention`,
+            {
+              suggestion:
+                "Set flashAttention to 'on' (or leave it unset) when using a quantized cacheTypeV, or use cacheTypeV: 'f16'",
+            }
+          );
+        }
+      }
 
       // 6. Save final configuration (AFTER auto-configuration)
       this._config = finalConfig;
@@ -188,6 +272,7 @@ export class LlamaServerManager extends ServerManager {
       );
 
       // 10. Spawn the process
+      const spawnStartedAt = Date.now();
       const { pid } = this.processManager.spawn(this.binaryPath, args, {
         onStdout: (data) => this.handleStdout(data),
         onStderr: (data) => this.handleStderr(data),
@@ -204,12 +289,25 @@ export class LlamaServerManager extends ServerManager {
       );
 
       // 10. Wait for server to be healthy
-      await waitForHealthy(finalConfig.port, DEFAULT_TIMEOUTS.serverStart);
+      await waitForHealthy(
+        finalConfig.port,
+        finalConfig.startupTimeout ?? DEFAULT_TIMEOUTS.serverStart,
+        undefined,
+        undefined,
+        this.healthHost
+      );
 
+      this._loadTimeMs = Date.now() - spawnStartedAt;
       this._startedAt = new Date();
       this.setStatus('running');
 
-      await this.logManager!.write('Server is running and healthy', 'info');
+      // Start the hang watchdog if configured
+      this.startWatchdog(finalConfig);
+
+      await this.logManager!.write(
+        `Server is running and healthy (load time: ${this._loadTimeMs}ms)`,
+        'info'
+      );
 
       // Clear system info cache so subsequent memory checks use fresh data
       this.systemInfo.clearCache();
@@ -235,6 +333,10 @@ export class LlamaServerManager extends ServerManager {
    * @throws {ServerError} If stop fails
    */
   async stop(): Promise<void> {
+    // Intentional stop always cancels any pending auto-restart and the watchdog
+    this.cancelPendingRestart();
+    this.teardownWatchdog();
+
     if (this._status === 'stopped') {
       return; // Already stopped
     }
@@ -273,6 +375,16 @@ export class LlamaServerManager extends ServerManager {
   }
 
   /**
+   * Get current server information (includes loadTimeMs of the last start)
+   */
+  override getInfo(): ServerInfo {
+    return {
+      ...super.getInfo(),
+      loadTimeMs: this._loadTimeMs,
+    };
+  }
+
+  /**
    * Check if server is healthy
    *
    * @returns True if server responds with 'ok' status
@@ -283,7 +395,7 @@ export class LlamaServerManager extends ServerManager {
     }
 
     try {
-      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck);
+      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck, this.healthHost);
       return health.status === 'ok';
     } catch {
       return false;
@@ -301,7 +413,7 @@ export class LlamaServerManager extends ServerManager {
     }
 
     try {
-      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck);
+      const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck, this.healthHost);
       return health.status;
     } catch {
       return 'unknown';
@@ -344,33 +456,28 @@ export class LlamaServerManager extends ServerManager {
    * @private
    */
   private async autoConfigureIfNeeded(
-    config: ServerConfig,
+    config: ServerConfig & { port: number },
     modelInfo: any
-  ): Promise<LlamaServerConfig> {
-    console.log('[LlamaServer] autoConfigureIfNeeded called');
-    console.log('[LlamaServer] Input config:', JSON.stringify(config, null, 2));
+  ): Promise<ResolvedLlamaServerConfig> {
+    debugLog('[LlamaServer] autoConfigureIfNeeded input:', JSON.stringify(config));
 
     const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo);
-    console.log('[LlamaServer] Optimal config:', JSON.stringify(optimalConfig, null, 2));
+    debugLog('[LlamaServer] Optimal config:', JSON.stringify(optimalConfig));
+
+    // With fit: 'on', llama-server's own auto-fit sizes unset memory-related
+    // fields — leave gpuLayers/contextSize unset instead of filling them here.
+    const delegateToFit = (config as LlamaServerConfig).fit === 'on';
 
     const finalConfig = {
       ...config,
       threads: config.threads ?? optimalConfig.threads,
-      contextSize: config.contextSize ?? optimalConfig.contextSize,
-      gpuLayers: config.gpuLayers ?? optimalConfig.gpuLayers,
+      contextSize: config.contextSize ?? (delegateToFit ? undefined : optimalConfig.contextSize),
+      gpuLayers: config.gpuLayers ?? (delegateToFit ? undefined : optimalConfig.gpuLayers),
       parallelRequests: config.parallelRequests ?? optimalConfig.parallelRequests,
       flashAttention: config.flashAttention ?? optimalConfig.flashAttention,
-    } as LlamaServerConfig;
+    } as ResolvedLlamaServerConfig;
 
-    console.log('[LlamaServer] Final config:', JSON.stringify(finalConfig, null, 2));
-    console.log('[LlamaServer] gpuLayers decision:');
-    console.log('  - config.gpuLayers:', config.gpuLayers);
-    console.log('  - typeof:', typeof config.gpuLayers);
-    console.log('  - is undefined?:', config.gpuLayers === undefined);
-    console.log('  - is null?:', config.gpuLayers === null);
-    console.log('  - is 0?:', config.gpuLayers === 0);
-    console.log('  - optimalConfig.gpuLayers:', optimalConfig.gpuLayers);
-    console.log('  - final value:', finalConfig.gpuLayers);
+    debugLog('[LlamaServer] Final config:', JSON.stringify(finalConfig));
 
     return finalConfig;
   }
@@ -378,25 +485,34 @@ export class LlamaServerManager extends ServerManager {
   /**
    * Build command-line arguments for llama-server
    *
-   * Automatically adds --jinja --reasoning-format deepseek flags
-   * for models that support reasoning (based on supportsReasoning flag).
+   * --jinja is passed unconditionally (unless config.jinja === false): the
+   * model's embedded chat template is required for chat_template_kwargs
+   * features (e.g. genai-lite's reasoning toggle on hybrid models). Reasoning
+   * extraction itself is left to the server default (--reasoning-format auto).
    *
-   * @param config - Server configuration
-   * @param modelInfo - Model information (includes path and supportsReasoning)
+   * @param config - Server configuration (port already resolved)
+   * @param modelInfo - Model information (includes path)
    * @returns Array of command-line arguments
    * @private
    */
-  private buildCommandLineArgs(config: LlamaServerConfig, modelInfo: ModelInfo): string[] {
+  private buildCommandLineArgs(config: ResolvedLlamaServerConfig, modelInfo: ModelInfo): string[] {
     const args: string[] = [];
 
     // Model path
     args.push('-m', modelInfo.path);
 
-    // Reasoning support flags (must come before other options)
-    // These enable extraction of <think>...</think> tags for models like Qwen3, DeepSeek-R1
-    if (modelInfo.supportsReasoning) {
+    // Use the model's embedded Jinja chat template (default: on)
+    // --jinja is the b9860 server default; both flags are passed explicitly to
+    // pin behavior regardless of the binary's own default.
+    if (config.jinja !== false) {
       args.push('--jinja');
-      args.push('--reasoning-format', 'deepseek');
+    } else {
+      args.push('--no-jinja');
+    }
+
+    // Host binding (server default: 127.0.0.1)
+    if (config.host !== undefined) {
+      args.push('--host', config.host);
     }
 
     // Port
@@ -416,8 +532,9 @@ export class LlamaServerManager extends ServerManager {
     // Without this flag, llama-server caps at contextSize/4 by default
     args.push('-n', '-1');
 
-    // GPU layers
-    if (config.gpuLayers !== undefined && config.gpuLayers > 0) {
+    // GPU layers — emitted even for 0: the b9860 server default is auto-offload,
+    // so omitting -ngl for a CPU-only config would silently offload to GPU
+    if (config.gpuLayers !== undefined) {
       args.push('-ngl', String(config.gpuLayers));
     }
 
@@ -426,9 +543,73 @@ export class LlamaServerManager extends ServerManager {
       args.push('-np', String(config.parallelRequests));
     }
 
-    // Flash attention
-    if (config.flashAttention) {
-      args.push('--flash-attn');
+    // Flash attention tri-state (boolean accepted: true → on, false → off);
+    // unset → omit and let the server decide ('auto')
+    if (config.flashAttention !== undefined) {
+      const fa =
+        config.flashAttention === true
+          ? 'on'
+          : config.flashAttention === false
+            ? 'off'
+            : config.flashAttention;
+      args.push('-fa', fa);
+    }
+
+    // Auto-fit of unset args to device memory. Default OFF: genai-electron
+    // passes explicit values from its own auto-configuration, and auto-fit
+    // has hung on some GPUs. fit: 'on' delegates sizing to llama-server.
+    args.push('-fit', config.fit ?? 'off');
+
+    // KV-cache quantization
+    if (config.cacheTypeK !== undefined) {
+      args.push('--cache-type-k', config.cacheTypeK);
+    }
+    if (config.cacheTypeV !== undefined) {
+      args.push('--cache-type-v', config.cacheTypeV);
+    }
+
+    // MoE / tensor placement
+    if (config.overrideTensors !== undefined) {
+      args.push('-ot', config.overrideTensors);
+    }
+    if (config.cacheRam !== undefined) {
+      args.push('--cache-ram', String(config.cacheRam));
+    }
+    if (config.cpuMoe === true) {
+      args.push('--cpu-moe');
+    }
+    if (config.nCpuMoe !== undefined) {
+      args.push('--n-cpu-moe', String(config.nCpuMoe));
+    }
+
+    // Reasoning-content extraction (server default: auto)
+    if (config.reasoningFormat !== undefined) {
+      args.push('--reasoning-format', config.reasoningFormat);
+    }
+
+    // Model alias reported by the API (see LlamaServerConfig.modelAlias warning)
+    if (config.modelAlias !== undefined) {
+      args.push('--alias', config.modelAlias);
+    }
+
+    // Logical batch size
+    if (config.batchSize !== undefined) {
+      args.push('-b', String(config.batchSize));
+    }
+
+    // Continuous batching is the server default; only the opt-out is emitted
+    if (config.continuousBatching === false) {
+      args.push('--no-cont-batching');
+    }
+
+    // mmap is the server default; only the opt-out is emitted
+    if (config.useMmap === false) {
+      args.push('--no-mmap');
+    }
+
+    // Lock model in memory
+    if (config.useMlock === true) {
+      args.push('--mlock');
     }
 
     return args;
@@ -509,6 +690,11 @@ export class LlamaServerManager extends ServerManager {
    */
   private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
     const wasRunning = this._status === 'running';
+    const killedByWatchdog = this.watchdogKill;
+    this.watchdogKill = false;
+
+    // The watchdog must not keep polling a dead process
+    this.teardownWatchdog();
 
     if (this.logManager) {
       this.logManager
@@ -517,10 +703,11 @@ export class LlamaServerManager extends ServerManager {
     }
 
     // Update status
-    if (wasRunning && code !== 0 && code !== null) {
-      // Unexpected exit = crash
+    if (wasRunning && ((code !== 0 && code !== null) || killedByWatchdog)) {
+      // Unexpected exit (or watchdog-detected hang) = crash
       this.setStatus('crashed');
       this.emitEvent('crashed', { code, signal });
+      this.scheduleAutoRestartIfEnabled();
     } else {
       this.setStatus('stopped');
     }
@@ -528,5 +715,248 @@ export class LlamaServerManager extends ServerManager {
     // Cleanup
     this._pid = undefined;
     this._port = 0;
+  }
+
+  /**
+   * Schedule an auto-restart after a crash, if enabled and budget remains
+   *
+   * The restart runs on a backoff timer (1s, 2s, 4s, ...) — never inline from
+   * the synchronous exit handler — and reuses the previously RESOLVED config
+   * (concrete port; 'auto' is not re-run). A failed attempt counts against the
+   * budget and leaves the status 'crashed'.
+   *
+   * @private
+   */
+  private scheduleAutoRestartIfEnabled(): void {
+    const config = this._config as LlamaServerConfig | undefined;
+    if (!config || config.autoRestart !== true) {
+      return;
+    }
+
+    const maxRestarts = config.maxRestarts ?? 3;
+    if (this.restartAttempts >= maxRestarts) {
+      this.logManager
+        ?.write(
+          `Auto-restart budget exhausted (${maxRestarts} attempts) - staying crashed`,
+          'error'
+        )
+        .catch(() => void 0);
+      return;
+    }
+
+    this.restartAttempts++;
+    const delay = 1000 * 2 ** (this.restartAttempts - 1);
+    this.logManager
+      ?.write(
+        `Auto-restarting in ${delay}ms (attempt ${this.restartAttempts}/${maxRestarts})`,
+        'warn'
+      )
+      .catch(() => void 0);
+
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined;
+      // Bail if the world changed during the backoff (manual start/stop):
+      // only a still-crashed server should be auto-restarted
+      if (this._status !== 'crashed') {
+        return;
+      }
+      this.isAutoRestarting = true;
+      this.start(this._config!)
+        .then((info) => {
+          this.emitEvent('restarted', info);
+        })
+        .catch((error: unknown) => {
+          // start() already reset status via handleStartupError; reflect the
+          // crash-loop state and let the next crash (if any) consume budget
+          this.setStatus('crashed');
+          this.logManager
+            ?.write(
+              `Auto-restart attempt ${this.restartAttempts} failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+              'error'
+            )
+            .catch(() => void 0);
+          // Try again if budget remains
+          this.scheduleAutoRestartIfEnabled();
+        })
+        .finally(() => {
+          this.isAutoRestarting = false;
+        });
+    }, delay);
+    this.restartTimer.unref?.();
+  }
+
+  /**
+   * Cancel a pending auto-restart timer
+   * @private
+   */
+  private cancelPendingRestart(): void {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = undefined;
+    }
+  }
+
+  /**
+   * Start the hang watchdog if healthCheckInterval is configured
+   * @private
+   */
+  private startWatchdog(config: ResolvedLlamaServerConfig): void {
+    const interval = config.healthCheckInterval;
+    if (interval === undefined || interval <= 0) {
+      return;
+    }
+
+    this.teardownWatchdog();
+    this.consecutiveHealthFailures = 0;
+    this.watchdogTimer = setInterval(() => {
+      void this.runWatchdogCheck();
+    }, interval);
+    this.watchdogTimer.unref?.();
+  }
+
+  /**
+   * Single watchdog tick: poll health, emit events, kill on 3 consecutive failures
+   * @private
+   */
+  private async runWatchdogCheck(): Promise<void> {
+    if (this._status !== 'running' || this._port === 0) {
+      return;
+    }
+
+    // Reentrancy guard: a hung server makes checkHealth take up to its full
+    // timeout, which can exceed healthCheckInterval — overlapping ticks would
+    // inflate the failure count and issue repeated kills
+    if (this.watchdogCheckInFlight) {
+      return;
+    }
+    this.watchdogCheckInFlight = true;
+
+    try {
+      let healthy = false;
+      try {
+        const health = await checkHealth(this._port, DEFAULT_TIMEOUTS.healthCheck, this.healthHost);
+        healthy = health.status === 'ok';
+      } catch {
+        healthy = false;
+      }
+
+      // The world may have changed while the check was in flight (stop(),
+      // crash): never emit events or kill for a server that is gone
+      if (this._status !== 'running' || this._pid === undefined) {
+        return;
+      }
+
+      if (healthy) {
+        this.consecutiveHealthFailures = 0;
+        this.emitEvent('health-check-ok', this.getInfo());
+        return;
+      }
+
+      this.consecutiveHealthFailures++;
+      this.emitEvent('health-check-failed', {
+        consecutiveFailures: this.consecutiveHealthFailures,
+        serverInfo: this.getInfo(),
+      });
+
+      if (this.consecutiveHealthFailures >= 3) {
+        this.logManager
+          ?.write(
+            `Watchdog: ${this.consecutiveHealthFailures} consecutive health-check failures - killing hung process`,
+            'error'
+          )
+          .catch(() => void 0);
+        this.teardownWatchdog();
+        // Mark so handleExit treats the (signal-terminated) exit as a crash,
+        // feeding auto-restart when enabled
+        this.watchdogKill = true;
+        try {
+          await this.processManager.kill(this._pid, DEFAULT_TIMEOUTS.serverStop);
+        } catch {
+          this.watchdogKill = false;
+        }
+      }
+    } finally {
+      this.watchdogCheckInFlight = false;
+    }
+  }
+
+  /**
+   * Stop the hang watchdog
+   * @private
+   */
+  private teardownWatchdog(): void {
+    if (this.watchdogTimer) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = undefined;
+    }
+  }
+
+  /**
+   * Occupancy safety rail: probe common llama-server ports for other instances
+   *
+   * Prevents accidental VRAM double-loading when another app (or a stray
+   * process) is already serving a model. Candidates are fingerprinted via
+   * GET /props — an endpoint the diffusion HTTP wrapper does NOT serve — so
+   * this app's own diffusion server on 8081 is never flagged.
+   *
+   * @private
+   */
+  private async runOccupancyCheck(mode: 'warn' | 'strict' | 'off', ownPort: number): Promise<void> {
+    if (mode === 'off') {
+      return;
+    }
+
+    const probePorts = [8080, 8081, 8082, 8083].filter((p) => p !== ownPort);
+    const results = await Promise.all(probePorts.map((p) => this.isLlamaServerAt(p)));
+    const occupied = probePorts.filter((_, i) => results[i]);
+
+    if (occupied.length === 0) {
+      return;
+    }
+
+    const message =
+      `Another llama-server appears to be running on port${occupied.length > 1 ? 's' : ''} ` +
+      `${occupied.join(', ')} - starting a second one may double-load VRAM`;
+
+    if (mode === 'strict') {
+      throw new ServerError(message, {
+        occupiedPorts: occupied,
+        suggestion:
+          "Stop the other server, or set occupancyCheck: 'warn' or 'off' to proceed anyway",
+      });
+    }
+
+    console.warn(`[genai-electron] ${message}`);
+    debugLog('[LlamaServer] occupancy check:', { occupied, mode });
+  }
+
+  /**
+   * Fingerprint a port as a llama-server: /health responds AND /props exists
+   * (the diffusion wrapper 404s /props; other HTTP servers rarely serve both)
+   *
+   * @private
+   */
+  private async isLlamaServerAt(port: number, timeout = 800): Promise<boolean> {
+    const probe = async (pathname: string): Promise<boolean> => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}${pathname}`, {
+          signal: controller.signal,
+        });
+        return response.ok;
+      } catch {
+        return false;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+
+    if (!(await probe('/health'))) {
+      return false;
+    }
+    return probe('/props');
   }
 }

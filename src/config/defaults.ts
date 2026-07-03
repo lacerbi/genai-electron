@@ -21,12 +21,22 @@ export const DEFAULT_PORTS = {
 export const DEFAULT_TIMEOUTS = {
   /** Download timeout */
   download: 300000, // 5 minutes
-  /** Server start timeout */
-  serverStart: 60000, // 1 minute
+  /** Server start timeout (covers cold model loads of 10-20 GB GGUFs; override per-start via ServerConfig.startupTimeout) */
+  serverStart: 120000, // 2 minutes
   /** Server stop timeout */
   serverStop: 10000, // 10 seconds
   /** Health check timeout */
   healthCheck: 5000, // 5 seconds
+} as const;
+
+/**
+ * Default log-rotation settings for server log files
+ */
+export const DEFAULT_LOG_ROTATION = {
+  /** Rotate when the log file exceeds this many bytes */
+  maxFileSize: 5 * 1024 * 1024, // 5 MB
+  /** Number of rotated archives to keep (server.log.1, server.log.2, ...) */
+  maxArchives: 2,
 } as const;
 
 /**
@@ -74,31 +84,37 @@ export const BINARY_VERSIONS = {
   /** llama-server (llama.cpp) configuration */
   llamaServer: {
     /** Version/commit tag */
-    version: 'b7956',
-    /** Binary variants for each platform (in priority order for fallback) */
+    version: 'b9860',
+    /**
+     * Binary variants for each platform (in priority order for fallback)
+     *
+     * Note: as of b9860 upstream no longer publishes a Linux x64 CUDA build —
+     * Linux NVIDIA users get the Vulkan variant (build from source for CUDA).
+     * Checksums come from the GitHub releases API per-asset `digest` field.
+     */
     variants: {
       'darwin-arm64': [
         {
           type: 'metal' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b7956/llama-b7956-bin-macos-arm64.tar.gz',
-          checksum: '3abe5f4ca01258759fe593331f4dc45e439b3bfaf1127b2061ed18bfa0f82960',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b9860/llama-b9860-bin-macos-arm64.tar.gz',
+          checksum: '35a2e8c3528adc71db5044e7ad7de8d8b96a4221e737958915e31538a005f1d9',
         },
       ],
       'darwin-x64': [
         {
           type: 'cpu' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b7956/llama-b7956-bin-macos-x64.tar.gz',
-          checksum: '6becaf739a2e1f58ac78da9c909eee932a25799a778ef1da3bfb6a42aeb2e7a8',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b9860/llama-b9860-bin-macos-x64.tar.gz',
+          checksum: 'd442123d5441c82b23b412a58d91e149f60723adfc20a7cc9df04a3908cb5113',
         },
       ],
       'win32-x64': [
         {
           type: 'cuda' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b7956/llama-b7956-bin-win-cuda-12.4-x64.zip',
-          checksum: '3f8d62dcb542cdeb2213ead9a51dd1c33ddd497aa85039170b2a7e1b99931f01',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b9860/llama-b9860-bin-win-cuda-12.4-x64.zip',
+          checksum: '70c433fcb55bcb0e0ff0d4a4fc5f02c11a14303445e0525b526071bccdc6c848',
           dependencies: [
             {
-              url: 'https://github.com/ggml-org/llama.cpp/releases/download/b7956/cudart-llama-bin-win-cuda-12.4-x64.zip',
+              url: 'https://github.com/ggml-org/llama.cpp/releases/download/b9860/cudart-llama-bin-win-cuda-12.4-x64.zip',
               checksum: '8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6',
               description: 'CUDA 12.4 runtime libraries required for NVIDIA GPU acceleration',
             },
@@ -106,25 +122,25 @@ export const BINARY_VERSIONS = {
         },
         {
           type: 'vulkan' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b7956/llama-b7956-bin-win-vulkan-x64.zip',
-          checksum: '7a4caccf406540a647e636f1b750c09a3bd1aeee5ff7b257b3e91551b7b7c57b',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b9860/llama-b9860-bin-win-vulkan-x64.zip',
+          checksum: 'c3f0703c8fca8fa4cbc01a347d7180fca092e889fe693268bf1192fd07350c13',
         },
         {
           type: 'cpu' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b7956/llama-b7956-bin-win-cpu-x64.zip',
-          checksum: 'a092148f651e21d60b129bd6533e16e32b96a69da3573c79d5fcbeb4c149ea36',
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b9860/llama-b9860-bin-win-cpu-x64.zip',
+          checksum: 'd33871623713345cd90b54e516ebada79039cab636e51b22c8c9feae72567837',
         },
       ],
       'linux-x64': [
         {
-          type: 'cuda' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b7956/llama-b7956-bin-ubuntu-x64.tar.gz',
-          checksum: 'a71ccffc351726f189cc3d532a414ba6130fe6814ca1f6563c9af3e7ae4de294',
+          type: 'vulkan' as BinaryVariant,
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b9860/llama-b9860-bin-ubuntu-vulkan-x64.tar.gz',
+          checksum: '4aaa4ca2ed9f608cf26cb6ba0cdad9c5b8e8f2d1e95c4f04bb3fa9a1a8c86806',
         },
         {
-          type: 'vulkan' as BinaryVariant,
-          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b7956/llama-b7956-bin-ubuntu-vulkan-x64.tar.gz',
-          checksum: '174ce7d23249b3911e7754433284ab3b7027ce8cdce7f5c040b60cc823b9b12e',
+          type: 'cpu' as BinaryVariant,
+          url: 'https://github.com/ggml-org/llama.cpp/releases/download/b9860/llama-b9860-bin-ubuntu-x64.tar.gz',
+          checksum: 'b68e8072eb88d1cc8b8e9d6ea8237aae87b34c6d8bbffda958c870e4dc949714',
         },
       ],
     },

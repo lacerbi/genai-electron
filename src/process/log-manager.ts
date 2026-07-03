@@ -10,7 +10,18 @@
 import { promises as fs } from 'fs';
 import { ensureDirectory, fileExists } from '../utils/file-utils.js';
 import { FileSystemError } from '../errors/index.js';
+import { DEFAULT_LOG_ROTATION } from '../config/defaults.js';
 import path from 'path';
+
+/**
+ * Log rotation options
+ */
+export interface LogRotationOptions {
+  /** Rotate when the log file exceeds this many bytes (default: 5 MB) */
+  maxFileSize?: number;
+  /** Number of rotated archives to keep, e.g. server.log.1/.2 (default: 2; 0 = truncate) */
+  maxArchives?: number;
+}
 
 /**
  * Log level
@@ -52,20 +63,34 @@ export interface LogEntry {
  */
 export class LogManager {
   private logPath: string;
+  private maxFileSize: number;
+  private maxArchives: number;
+  /** Approximate current log-file size, tracked to avoid a stat per write */
+  private approxSize = 0;
+  /**
+   * Serializes writes: callers (server stdout/stderr handlers) fire-and-forget,
+   * and the rotate-check + append must not interleave or the size bookkeeping
+   * races and rotation can run multiple times concurrently.
+   */
+  private writeChain: Promise<void> = Promise.resolve();
 
   /**
    * Create a LogManager instance
    *
    * @param logPath - Path to the log file
+   * @param rotation - Optional rotation settings (defaults: 5 MB, 2 archives)
    */
-  constructor(logPath: string) {
+  constructor(logPath: string, rotation?: LogRotationOptions) {
     this.logPath = logPath;
+    this.maxFileSize = rotation?.maxFileSize ?? DEFAULT_LOG_ROTATION.maxFileSize;
+    this.maxArchives = rotation?.maxArchives ?? DEFAULT_LOG_ROTATION.maxArchives;
   }
 
   /**
    * Initialize the log manager
    *
-   * Creates the log directory if it doesn't exist.
+   * Creates the log directory if it doesn't exist and reads the current
+   * log-file size (rotation bookkeeping).
    *
    * @throws {FileSystemError} If directory creation fails
    */
@@ -79,27 +104,85 @@ export class LogManager {
         { path: this.logPath, error: error instanceof Error ? error.message : String(error) }
       );
     }
+
+    try {
+      const stat = await fs.stat(this.logPath);
+      this.approxSize = stat.size;
+    } catch {
+      this.approxSize = 0; // No log file yet
+    }
   }
 
   /**
    * Write a log entry
    *
-   * Appends a formatted log entry to the log file.
+   * Appends a formatted log entry to the log file, rotating first when the
+   * file would exceed the configured maximum size.
    *
    * @param message - Log message
    * @param level - Log level (default: 'info')
    * @throws {FileSystemError} If write fails
    */
   async write(message: string, level: LogLevel = 'info'): Promise<void> {
+    // Chain onto the previous write so rotate-check + append are atomic per
+    // entry even when callers don't await (server output floods lines)
+    const task = this.writeChain.then(() => this.performWrite(message, level));
+    this.writeChain = task.catch(() => void 0); // keep the chain alive on failure
+    return task;
+  }
+
+  /**
+   * Perform a single serialized write (rotate check + append)
+   * @private
+   */
+  private async performWrite(message: string, level: LogLevel): Promise<void> {
     try {
       const entry = this.formatEntry({ timestamp: new Date().toISOString(), level, message });
-      await fs.appendFile(this.logPath, `${entry}\n`, 'utf8');
+      const line = `${entry}\n`;
+
+      if (this.maxFileSize > 0 && this.approxSize + line.length > this.maxFileSize) {
+        await this.rotate();
+      }
+
+      await fs.appendFile(this.logPath, line, 'utf8');
+      this.approxSize += line.length;
     } catch (error) {
       throw new FileSystemError(
         `Failed to write to log file: ${error instanceof Error ? error.message : 'Unknown error'}`,
         { path: this.logPath, error: error instanceof Error ? error.message : String(error) }
       );
     }
+  }
+
+  /**
+   * Rotate the log file: server.log → server.log.1 → server.log.2 → deleted
+   *
+   * Best-effort: rotation failures are swallowed (logging must never take
+   * the server down); with maxArchives = 0 the file is truncated instead.
+   *
+   * @private
+   */
+  private async rotate(): Promise<void> {
+    try {
+      if (this.maxArchives <= 0) {
+        await fs.writeFile(this.logPath, '', 'utf8');
+      } else {
+        // Shift existing archives up, dropping the oldest
+        for (let i = this.maxArchives - 1; i >= 1; i--) {
+          const from = `${this.logPath}.${i}`;
+          const to = `${this.logPath}.${i + 1}`;
+          try {
+            await fs.rename(from, to);
+          } catch {
+            // Archive doesn't exist — fine
+          }
+        }
+        await fs.rename(this.logPath, `${this.logPath}.1`);
+      }
+    } catch {
+      // Best-effort — keep appending to the current file on failure
+    }
+    this.approxSize = 0;
   }
 
   /**
@@ -142,6 +225,7 @@ export class LogManager {
   async clear(): Promise<void> {
     try {
       await fs.writeFile(this.logPath, '', 'utf8');
+      this.approxSize = 0;
     } catch (error) {
       throw new FileSystemError(
         `Failed to clear log file: ${error instanceof Error ? error.message : 'Unknown error'}`,

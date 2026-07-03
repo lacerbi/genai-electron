@@ -148,6 +148,21 @@ export interface GGUFMetadata {
 }
 
 /**
+ * A single shard of a multi-shard GGUF model
+ * (files split as model-00001-of-0000N.gguf)
+ */
+export interface ShardInfo {
+  /** Absolute path to this shard file */
+  path: string;
+
+  /** Shard file size in bytes */
+  size: number;
+
+  /** SHA256 checksum (if verified; typically only the first shard) */
+  checksum?: string;
+}
+
+/**
  * Model metadata and information
  */
 export interface ModelInfo {
@@ -176,12 +191,10 @@ export interface ModelInfo {
   checksum?: string;
 
   /**
-   * Whether this model supports reasoning/thinking capabilities
-   *
-   * When true, llama-server will be started with --jinja --reasoning-format deepseek
-   * to extract reasoning content from <think>...</think> tags.
-   *
-   * Automatically detected based on GGUF filename patterns (e.g., qwen3, deepseek-r1).
+   * Whether this model is reasoning-capable, detected from GGUF filename
+   * patterns (e.g., qwen3, deepseek-r1). Informational metadata for apps;
+   * does not change how the server is launched (reasoning extraction is
+   * handled by llama-server's --reasoning-format, default 'auto').
    */
   supportsReasoning?: boolean;
 
@@ -207,6 +220,14 @@ export interface ModelInfo {
    * and `size` is the aggregate total.
    */
   components?: DiffusionModelComponents;
+
+  /**
+   * Shard files for multi-shard GGUF models (model-00001-of-0000N.gguf).
+   * Lists ALL shards in order, including the first; `path` equals the first
+   * shard's path (llama-server auto-discovers siblings from there) and
+   * `size` is the aggregate total. Undefined for single-file models.
+   */
+  shards?: ShardInfo[];
 }
 
 /**
@@ -236,11 +257,21 @@ export interface DownloadConfig {
   /** Model type */
   type: ModelType;
 
-  /** Expected SHA256 checksum (optional, for verification) */
+  /** Expected SHA256 checksum (optional, for verification; sharded models: verifies the first shard) */
   checksum?: string;
 
   /** Progress callback function */
   onProgress?: DownloadProgressCallback;
+
+  /**
+   * Additional sibling shards for multi-shard GGUF models.
+   * Usually unnecessary: names matching model-00001-of-0000N.gguf are
+   * auto-detected and the siblings derived. Provide explicitly for
+   * non-standard shard naming — entries are filenames resolved next to
+   * the primary file (same HF repo path / same URL directory), or full
+   * http(s) URLs.
+   */
+  shardFiles?: string[];
 
   /**
    * Additional component files for multi-component diffusion models.
