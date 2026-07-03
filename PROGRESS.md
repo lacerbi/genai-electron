@@ -9,7 +9,7 @@
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 488/488 passing (20 suites)
 - **Branch:** `feat/v0.6.0-local-server`
-- **Last Updated:** 2026-07-03
+- **Last Updated:** 2026-07-03 (v0.6.1: security patch — npm audit clean, tar minimum ^7.5.19)
 
 ---
 
