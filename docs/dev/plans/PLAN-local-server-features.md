@@ -42,7 +42,7 @@ Verified against llama.cpp tag **b9860** (released 2026-07-02) via `tools/server
 - **gmbench launch contract** (`backends.py:275-307`): always `--jinja` + `-fit off`; conditionally `--cache-type-k/v`, `-ot`, `--cache-ram` from per-model config; log-to-file (never an undrained pipe — 64 KiB pipe-buffer deadlock, documented in gmbench's issue archive); terminate→wait(10s)→kill escalation; 600 s health budget for cold model loads.
 - **genai-electron dead fields** (confirmed): `modelAlias`, `continuousBatching`, `batchSize`, `useMmap`, `useMlock` pass validation (`LlamaServerManager.ts:61-75`) but are never emitted by `buildCommandLineArgs` (`:389-435`).
 - **genai-lite image adapter** (`GenaiElectronImageAdapter.ts:211-263`): polls generation status treating only `complete`/`error` as terminal — a new `'cancelled'` status hangs clients ≤ 0.9.0 until their own 120 s timeout. genai-lite 0.9.0's plan excludes image-side changes; follow-up filed there (see Phase 5).
-- **stable-diffusion.cpp**: our pin `master-504-636d3cb` is ~242 releases behind latest (`master-746-2574f59`) — Open Question 1.
+- **stable-diffusion.cpp**: our pin `master-504-636d3cb` was ~242 releases behind latest (`master-746-2574f59`) — Open Question 1. RESOLVED in the v0.10.0 batch: bumped to `master-746-2574f59` (see `PLAN-sd-cpp-bump.md`).
 
 ---
 
