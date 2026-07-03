@@ -17,7 +17,7 @@ import { ResourceOrchestrator } from './ResourceOrchestrator.js';
 import { GenerationRegistry } from './GenerationRegistry.js';
 import http from 'node:http';
 import { promises as fs } from 'node:fs';
-import { getTempPath, PATHS } from '../config/paths.js';
+import { getTempPath } from '../config/paths.js';
 import {
   BINARY_VERSIONS,
   DEFAULT_PORTS,
@@ -1052,23 +1052,15 @@ export class DiffusionServerManager extends ServerManager {
       } else {
         const headroom = gpu.vram - modelFootprint;
 
-        // CPU offloading flags (--clip-on-cpu, --vae-on-cpu, --offload-to-cpu) crash
-        // sd.cpp CUDA builds silently (build master-504-636d3cb). Disable all auto
-        // CPU offloading when the CUDA variant is installed.
-        const isCuda = await this.isInstalledVariantCuda();
-
-        autoClipOnCpu = isCuda
-          ? false
-          : headroom < DIFFUSION_VRAM_THRESHOLDS.clipOnCpuHeadroomBytes;
-        autoVaeOnCpu = isCuda ? false : headroom < DIFFUSION_VRAM_THRESHOLDS.vaeOnCpuHeadroomBytes;
-        autoOffloadToCpu = isCuda ? false : modelFootprint > gpu.vram * 0.85;
+        // CPU offloading flags apply to all backends. (They crashed sd.cpp CUDA
+        // builds up to master-504-636d3cb and were suppressed for CUDA installs;
+        // fixed upstream — re-verified live on master-746-2574f59.)
+        autoClipOnCpu = headroom < DIFFUSION_VRAM_THRESHOLDS.clipOnCpuHeadroomBytes;
+        autoVaeOnCpu = headroom < DIFFUSION_VRAM_THRESHOLDS.vaeOnCpuHeadroomBytes;
+        autoOffloadToCpu = modelFootprint > gpu.vram * 0.85;
 
         // Escalation: if vramAvailable is known and critically low, force clip-on-cpu
-        if (
-          !isCuda &&
-          gpu.vramAvailable !== undefined &&
-          gpu.vramAvailable - modelFootprint < 2 * 1024 ** 3
-        ) {
+        if (gpu.vramAvailable !== undefined && gpu.vramAvailable - modelFootprint < 2 * 1024 ** 3) {
           autoClipOnCpu = true;
         }
       }
@@ -1096,23 +1088,6 @@ export class DiffusionServerManager extends ServerManager {
     );
 
     return { clipOnCpu, vaeOnCpu, offloadToCpu, diffusionFlashAttention, batchSize };
-  }
-
-  /**
-   * Check if the installed diffusion binary is the CUDA variant.
-   * Reads the variant cache written by BinaryManager after variant selection.
-   * @returns true if the installed variant is CUDA
-   * @private
-   */
-  private async isInstalledVariantCuda(): Promise<boolean> {
-    try {
-      const variantCachePath = `${PATHS.binaries.diffusion}/.variant.json`;
-      const content = await fs.readFile(variantCachePath, 'utf-8');
-      const cache = JSON.parse(content);
-      return cache.variant === 'cuda';
-    } catch {
-      return false; // No cache or unreadable — assume not CUDA
-    }
   }
 
   /**
@@ -1305,8 +1280,9 @@ export class DiffusionServerManager extends ServerManager {
    * @private
    */
   private processStdoutForProgress(data: string, config: ImageGenerationConfig): void {
-    // Detect stage transitions
-    if (data.includes('loading tensors from')) {
+    // Detect stage transitions ('loading tensors from' up to sd.cpp master-504;
+    // 'loading model from' since master-746)
+    if (data.includes('loading tensors from') || data.includes('loading model from')) {
       this.currentStage = 'loading';
       this.loadStartTime = Date.now();
       this.reportProgress(config);
@@ -1354,6 +1330,26 @@ export class DiffusionServerManager extends ServerManager {
       } else if (this.currentStage === undefined) {
         // If stage not set yet but we're seeing progress bars, assume it's loading
         // This handles the case where progress bars arrive before stage detection
+        this.currentStage = 'loading';
+        this.loadStartTime = Date.now();
+        this.loadProgress = { current, total };
+        this.reportProgress(config);
+      }
+    }
+
+    // Byte-progress bar: "|####    | X/Y - Z.ZZMB/s" — printed while loading
+    // model/tensor data (sd.cpp master-746+). Feeds loading progress only;
+    // component reloads mid-generation must never touch step progress.
+    const byteMatch = data.match(/\|\s*(\d+)\/(\d+)\s*-\s*[\d.]+\s*(?:B|KB|MB|GB)\/s/);
+    if (byteMatch && byteMatch[1] && byteMatch[2]) {
+      const current = parseInt(byteMatch[1], 10);
+      const total = parseInt(byteMatch[2], 10);
+
+      if (this.currentStage === 'loading') {
+        this.loadProgress = { current, total };
+        this.reportProgress(config);
+      } else if (this.currentStage === undefined) {
+        // Byte bars before any stage marker mean the model is loading
         this.currentStage = 'loading';
         this.loadStartTime = Date.now();
         this.loadProgress = { current, total };

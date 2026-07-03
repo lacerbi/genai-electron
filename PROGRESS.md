@@ -1,15 +1,15 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.9.0 — structured binary-provisioning progress event (2026-07-03)
+> **Current Status**: v0.9.0 released; v0.10.0 batch (sd.cpp bump + CUDA offload guard retirement) ready for release (2026-07-04)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 539/539 passing (21 suites)
-- **Branch:** `main`
-- **Last Updated:** 2026-07-03 (v0.6.1: security patch — npm audit clean, tar minimum ^7.5.19)
+- **Tests:** ✅ 543/543 passing (21 suites)
+- **Branch:** `feat/sd-cpp-bump`
+- **Last Updated:** 2026-07-04 (v0.10.0 batch: stable-diffusion.cpp master-746-2574f59)
 
 ---
 
@@ -498,7 +498,8 @@ For detailed historical information:
 
 **Follow-ups (agreed, not yet started; updated 2026-07-03 post-v0.9.0):**
 - **palimpsest-engine integration** (downstream, next natural step) — consume v0.8/0.9: drop the MoE filename regex (`/-a\d+b/i`) + manual `cpuMoe`/`gpuLayers: 999`/pinned-context path (v0.8 auto-config covers it), and the `binary-log` percent regex + throttle (subscribe to `'binary-progress'`, v0.9).
-- **stable-diffusion.cpp bump** — pin `master-504-636d3cb` is ~242 releases behind (`master-746-2574f59` as of 2026-07-02). Needs its own plan: sd-cli flag surface may have changed; re-validate diffusion per platform. (Plan Open Question 1, resolved as separate follow-up.)
+- ~~stable-diffusion.cpp bump~~ — DONE in v0.10.0 (pin `master-746-2574f59`, full surface re-validation, live smoke on all three win32 variants; see the v0.10.0 section and `docs/dev/plans/PLAN-sd-cpp-bump.md`).
+- **Skip byte-identical dependency re-downloads** — a version-tag change invalidates the binary cache, so Windows CUDA users re-download the 563 MB cudart zip even when its checksum is unchanged across releases (it was byte-identical for the v0.10.0 bump). BinaryManager could keep dependencies whose checksum already matches an installed file.
 - **Example-app toolchain chore** — Electron Forge devDependency chain carries npm-audit highs fixable only via major bumps (electron 35→43 + Forge majors). Dev-only, outside the published package and CI's root-only audit gate.
 - **Example app: forward `'binary-progress'` over IPC** — the control panel still forwards only `'binary-log'`; wire the structured event through preload/renderer for a real progress bar (small; pairs with the toolchain chore).
 - **ROCm/HIP binary variants** — upstream now ships `win-hip-radeon` + `ubuntu-rocm` prebuilts; blocked on Windows AMD GPU detection (DESIGN Phase 4).
@@ -520,6 +521,28 @@ For detailed historical information:
 **Files Modified:** `src/utils/kv-cache-math.ts` (new), `src/utils/model-metadata-helpers.ts`, `src/system/SystemInfo.ts`, `src/managers/{LlamaServerManager,ModelManager,ResourceOrchestrator}.ts`, `src/config/defaults.ts`, `src/types/{models,servers,index}.ts`, `src/index.ts`, docs (`system-detection`, `llm-server`, `typescript-reference`, `image-generation`, `migration-0-6-to-0-7.md`)
 
 **Build Status:** ✅ 0 TypeScript errors / 514/514 tests passing (21 suites); v0.7.1 adds the progressive context-granularity ladder (128→4096 steps by magnitude, `floorContextToGranularity` exported; amends unpublished v0.7.0 — publish 0.7.1). Live GPU smoke: pure auto-config on Qwen3.5-4B → full offload, auto q8_0 KV + FA, context 58368 (→ 57344 with the ladder), 8130-token prompt round-trips without truncation
+
+---
+
+## v0.10.0 (Unreleased): stable-diffusion.cpp master-746-2574f59 + CUDA Offload Guard Retirement (2026-07-04)
+
+**Goal/Problem:** The diffusion binary pin (`master-504-636d3cb`, 2026-02-10) was 242 releases behind upstream. Bump to the latest release, re-validate the whole sd-cli surface (flags, log formats, asset scheme), and retire workarounds that no longer apply. Plan: `docs/dev/plans/PLAN-sd-cpp-bump.md`.
+
+**Core changes:**
+- **Binary pin `master-504-636d3cb` → `master-746-2574f59`** (2026-07-02; checksums from the releases-API `digest` field). CLI surface verified backward-compatible via upstream source diff: every flag we pass is unchanged; the only removal in the whole range is `--cache-preset` (unused).
+- **Windows CPU variant**: upstream consolidated the four per-ISA zips into a single `win-cpu-x64.zip` with runtime CPU dispatch (`ggml-cpu-<arch>.dll` backends, best picked at runtime) — strictly better than the old AVX2-only pin.
+- **Linux gains a Vulkan variant** ahead of CPU (new upstream asset), mirroring the llama.cpp Linux chain — Linux GPU users get acceleration instead of CPU-only.
+- **CUDA offload guard retired** (behavior change): `--clip-on-cpu`/`--vae-on-cpu`/`--offload-to-cpu` crashed sd.cpp CUDA builds silently (0xC0000005) at the old pin, so auto-detection suppressed them on CUDA installs; fixed upstream. Auto-detection is now identical on all backends — low-VRAM CUDA setups may auto-enable offload flags (explicit `false` restores the old behavior). Added the previously missing variant-aware test coverage. Upstream caveat documented: SD3.5-Large + `--clip-on-cpu` is broken on any backend (leejet/stable-diffusion.cpp#1578).
+- **Progress parsing fixed for the new build** (would have silently broken otherwise): upstream renamed the loading literal (`loading tensors from` → `loading model from`) and switched loading to `#`-style byte bars (`|####| N/M - GB/s`) that the old regex would have misread as sampling steps. The step regex now requires an it-rate unit (`it/s`/`s/it`), and a byte-bar branch feeds loading progress only. 4 new parser tests.
+- **Sampler enum** += `er_sde`, `euler_cfg_pp`, `euler_a_cfg_pp` (upstream additions); example-app sampler select + docs updated.
+- Docs: troubleshooting + image-generation offload sections rewritten for the retirement; `docs/dev/UPDATING-BINARIES.md` retitled and generalized with a stable-diffusion.cpp section (tag scheme, asset naming, digest workflow, log-format coupling) and its stale 30 s test-timeout claim fixed (actual: 120 s multi-component / 15 s single-file).
+- Folded into this batch (concurrent docs work already on main): genai-lite 0.11 pairing notes + example pin `genai-lite ^0.11.0` (`36952da`); example dev-tooling audit-findings maintenance note (`fcddb22`).
+
+**Live smoke (RTX 4060 Laptop 8 GB, driver 576.80, Windows 11):** all three win32 variants provisioned from scratch (Phase 1 `--help` + Phase 2 real 64×64 inference) and generated valid PNGs — CUDA: SDXL-Lightning 512²/20-step in 11.1 s and Flux-2-Klein multi-component (`--diffusion-model/--llm/--vae --diffusion-fa` verified in the spawn command) in 8.0 s; forced Vulkan: 34.1 s (slower per upstream perf issue #1647; correctness fine); forced CPU: 256²/4-step in 57 s with all 9 dispatch DLLs surviving install. **CUDA offload matrix all clean: clipOnCpu ✓ (14.8 s) / vaeOnCpu ✓ (22.1 s) / offloadToCpu ✓ (7.9 s, output byte-identical to baseline at the same seed) / all three ✓ (30.9 s)** — the old crash did not reproduce. New `er_sde` sampler ✓. Post-retirement auto-config live-verified: Flux on the CUDA install now auto-enables clip-on-cpu (`auto: clip=true`) and generates correctly.
+
+**Files Modified:** `src/config/defaults.ts`, `src/managers/DiffusionServerManager.ts`, `src/types/images.ts`, `tests/unit/DiffusionServerManager.test.ts`, example app (`DiffusionServerControl.tsx`), docs (`image-generation`, `troubleshooting`, `typescript-reference`, `docs/dev/UPDATING-BINARIES.md`, `docs/dev/plans/PLAN-sd-cpp-bump.md` new)
+
+**Build Status:** ✅ 0 TypeScript errors / 543/543 tests passing (21 suites)
 
 ---
 

@@ -891,6 +891,60 @@ describe('DiffusionServerManager', () => {
         expect(progressCallback).toHaveBeenCalledWith(2, 4, 'diffusion', expect.any(Number));
       });
 
+      it('should detect loading via the new "loading model from" literal and byte-bar progress', async () => {
+        const mockImageBuffer = Buffer.from('fake-image-data');
+        mockReadFile.mockResolvedValue(mockImageBuffer);
+        mockDeleteFile.mockResolvedValue(undefined);
+
+        const progressCallback = jest.fn();
+
+        const resultPromise = diffusionServer.generateImage({
+          ...imageConfig,
+          onProgress: progressCallback,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        // sd.cpp master-746+ wording and byte-progress bars during model load
+        spawnedProcess.stdout.emit('data', "loading model from 'C:\\models\\sdxl.gguf'\n");
+        spawnedProcess.stdout.emit('data', '  |#####     | 498/1680 - 1.95GB/s\n');
+        spawnedProcess.stdout.emit(
+          'data',
+          'stable-diffusion.cpp:4696 - generating image: 1/1 - seed 42\n'
+        );
+        spawnedProcess.stdout.emit('data', 'decoding 1 latents\n');
+        spawnedProcess.stdout.emit('data', 'decode_first_stage completed\n');
+
+        spawnedProcess.emit('exit', 0, null);
+        await resultPromise;
+
+        expect(progressCallback).toHaveBeenCalledWith(0, 0, 'loading', expect.any(Number));
+        expect(progressCallback).toHaveBeenCalledWith(498, 1680, 'loading', expect.any(Number));
+      });
+
+      it('should assume loading stage when byte bars arrive before any stage marker', async () => {
+        const mockImageBuffer = Buffer.from('fake-image-data');
+        mockReadFile.mockResolvedValue(mockImageBuffer);
+        mockDeleteFile.mockResolvedValue(undefined);
+
+        const progressCallback = jest.fn();
+
+        const resultPromise = diffusionServer.generateImage({
+          ...imageConfig,
+          onProgress: progressCallback,
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        spawnedProcess.stdout.emit('data', '  |##        | 100/500 - 300.00MB/s\n');
+        spawnedProcess.stdout.emit('data', 'decode_first_stage completed\n');
+
+        spawnedProcess.emit('exit', 0, null);
+        await resultPromise;
+
+        expect(progressCallback).toHaveBeenCalledWith(100, 500, 'loading', expect.any(Number));
+      });
+
       it('should infer VAE calibration when decode_first_stage completed is missing', async () => {
         const mockImageBuffer = Buffer.from('fake-image-data');
         mockReadFile.mockResolvedValue(mockImageBuffer);
@@ -1538,6 +1592,50 @@ describe('DiffusionServerManager', () => {
         spawnedProcess.stdout?.removeAllListeners?.();
         spawnedProcess.stderr?.removeAllListeners?.();
       }
+    });
+
+    it('should apply the same auto offload flags when the installed variant is CUDA', async () => {
+      // Up to sd.cpp master-504 the CPU-offload flags crashed CUDA builds and were
+      // suppressed for CUDA installs; fixed upstream (re-verified live on
+      // master-746-2574f59), so CUDA installs get identical auto-detection.
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        vram: 8 * 1024 ** 3,
+      });
+
+      mockModelManager.getModelInfo.mockResolvedValue(smallModelInfo);
+      const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
+      await server.start(mockConfig);
+
+      // Install marker says CUDA; image-output reads still return the fake PNG
+      const mockImageBuffer = Buffer.from('fake-image-data');
+      mockReadFile.mockImplementation((p: unknown) =>
+        String(p).includes('.variant.json')
+          ? Promise.resolve('{"variant":"cuda","platform":"win32-x64"}')
+          : Promise.resolve(mockImageBuffer)
+      );
+
+      spawnedProcess = new EventEmitter() as any;
+      spawnedProcess.pid = 99999;
+      spawnedProcess.stdout = new EventEmitter();
+      spawnedProcess.stderr = new EventEmitter();
+      spawnedProcess.kill = jest.fn();
+      mockProcessSpawn.mockImplementation((_bin: string, _args: string[], options: any) => {
+        if (options.onExit) spawnedProcess.on('exit', options.onExit);
+        if (options.onError) spawnedProcess.on('error', options.onError);
+        return spawnedProcess;
+      });
+
+      const resultPromise = server.generateImage({ prompt: 'test' });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      spawnedProcess.emit('exit', 0, null);
+      await resultPromise;
+
+      const args = mockProcessSpawn.mock.calls[0][1] as string[];
+      // 8 GB - 3.48 GB footprint = 4.52 GB headroom < 6 GB → clip-on-cpu, same as non-CUDA
+      expect(args).toContain('--clip-on-cpu');
+      expect(args).not.toContain('--vae-on-cpu');
     });
 
     it('should enable --clip-on-cpu on 8 GB GPU with 2.9 GB model (headroom < 6 GB)', async () => {

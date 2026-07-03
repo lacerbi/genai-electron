@@ -141,8 +141,7 @@ export interface DiffusionServerConfig {
    * Offload CLIP text encoder to CPU to reduce VRAM usage (~1-2 GB savings).
    *
    * Auto-detected if not specified: enabled when GPU VRAM headroom < 6 GB after
-   * accounting for the model footprint. Disabled for CUDA backend (crashes sd.cpp
-   * CUDA builds silently). Set explicitly to override auto-detection.
+   * accounting for the model footprint. Set explicitly to override auto-detection.
    *
    * Maps to `--clip-on-cpu` flag in stable-diffusion.cpp.
    */
@@ -153,8 +152,7 @@ export interface DiffusionServerConfig {
    *
    * Auto-detected if not specified: enabled when GPU VRAM headroom < 2 GB after
    * accounting for the model footprint. Only use when severely VRAM-constrained
-   * as CPU VAE decoding is significantly slower. Disabled for CUDA backend
-   * (crashes sd.cpp CUDA builds silently).
+   * as CPU VAE decoding is significantly slower.
    *
    * Maps to `--vae-on-cpu` flag in stable-diffusion.cpp.
    */
@@ -171,8 +169,7 @@ export interface DiffusionServerConfig {
   /**
    * Offload model weights to CPU RAM, load to VRAM on demand (--offload-to-cpu).
    *
-   * undefined = auto-detect (enabled when modelInfo.size > availableVRAM * 0.85,
-   *   but disabled for CUDA backend — crashes sd.cpp CUDA builds silently),
+   * undefined = auto-detect (enabled when modelInfo.size > availableVRAM * 0.85),
    * true = force on, false = force off.
    */
   offloadToCpu?: boolean;
