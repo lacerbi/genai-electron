@@ -224,13 +224,18 @@ Generates optimal server configuration for a specific model based on system capa
 
 **Signature**:
 ```typescript
-getOptimalConfig(modelInfo: ModelInfo): Promise<Partial<ServerConfig>>
+getOptimalConfig(
+  modelInfo: ModelInfo,
+  hints?: OptimalConfigHints  // fields you've already pinned (contextSize, gpuLayers,
+                              // cacheTypeK/V, flashAttention, parallelRequests)
+): Promise<Partial<LlamaServerConfig>>
 ```
 
 **Parameters**:
-- `modelInfo: ModelInfo` - Model to generate config for
+- `modelInfo: ModelInfo` - Model to generate config for (GGUF metadata enables the adaptive sizing below)
+- `hints?: OptimalConfigHints` - Fields the caller has already decided; they are respected verbatim and inform the sizing of the remaining ones (e.g. a pinned `contextSize` shapes the KV reserve used for GPU-layer packing; explicit cache types or `flashAttention: 'off'` suppress automatic KV quantization)
 
-**Returns**: `Promise<Partial<ServerConfig>>` - Partial server configuration (threads, gpuLayers, contextSize, etc.) meant to be spread into full `start()` call. Does not include `modelId` or `port`.
+**Returns**: `Promise<Partial<LlamaServerConfig>>` - Partial server configuration (threads, gpuLayers, contextSize, and — when auto-selected — cacheTypeK/V + flashAttention) meant to be spread into a full `start()` call. Does not include `modelId` or `port`.
 
 **Example**:
 ```typescript
@@ -251,11 +256,14 @@ await llamaServer.start({
 });
 ```
 
-**What it determines**:
+**What it determines** (v0.7.0 adaptive sizing — requires GGUF metadata; models without it get the legacy behavior: fixed 4096 context, flat 2 GB KV reserve):
 - **threads**: Based on CPU core count: 1-2 cores → all cores, 3-8 → cores - 1, 9-16 → cores - 2, 17+ → floor(cores × 0.85)
-- **gpuLayers**: Maximum layers that fit in VRAM (if GPU available), or 0 for CPU-only. Reserves 2GB of VRAM as buffer for OS/runtime overhead before calculating layer capacity.
-- **contextSize**: Currently defaults to 4096 (llama.cpp default), capped to the model's native context length from GGUF metadata. VRAM-aware dynamic context calculation is planned but not yet implemented.
+- **gpuLayers**: **Full GPU offload is preferred** — if all weights fit in VRAM alongside at least a 4096-token KV cache (plus a ~1 GB compute buffer), every layer is offloaded. Only when that's impossible are layers packed around a KV reserve (min 1.5 GB).
+- **contextSize**: Computed from real KV-cache arithmetic (`layers × kvHeads × headDim × bytes-per-element`, GQA-aware via `attention.head_count_kv`): all VRAM left after weights becomes context budget, clamped to `[4096, model's context_length]` and rounded down to 1024. **There is no artificial ceiling** — a small model on a large GPU can get a very large context (and a correspondingly large KV allocation at server startup).
+- **cacheTypeK / cacheTypeV / flashAttention**: **q8_0 KV quantization is auto-selected by default** (~2× cheaper KV, small quality loss) together with `flashAttention: 'on'`, *unless* f16 KV at the model's full native context fits alongside fully-offloaded weights (abundant headroom → stays f16, no fields emitted). Opt out by setting `cacheTypeK/V: 'f16'` explicitly or `flashAttention: 'off'`.
 - **parallelRequests**: Always 1 (single-user Electron apps)
+
+Use `estimateKVBytesPerToken(modelInfo, cacheTypeK?, cacheTypeV?)` (exported) to run the same KV arithmetic yourself.
 
 ---
 

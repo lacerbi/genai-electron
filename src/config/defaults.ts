@@ -40,6 +40,26 @@ export const DEFAULT_LOG_ROTATION = {
 } as const;
 
 /**
+ * Constants for KV-cache-aware context/offload sizing (SystemInfo.getOptimalConfig)
+ */
+export const KV_SIZING = {
+  /** Minimum recommended context (llama.cpp's historical default) */
+  floorContextTokens: 4096,
+  /** VRAM held back for llama.cpp compute/graph buffers and allocator slack */
+  computeBufferBytes: 1 * 1024 ** 3,
+  /** Weight-size multiplier for GPU-resident weights */
+  gpuWeightsOverhead: 1.1,
+  /** Weight-size multiplier for RAM-resident weights */
+  cpuWeightsOverhead: 1.2,
+  /** RAM held back for the OS and other processes in CPU sizing paths */
+  osRamMarginBytes: 2 * 1024 ** 3,
+  /** Minimum VRAM reserved for KV when partially offloading */
+  minPartialReserveBytes: 1.5 * 1024 ** 3,
+  /** Context recommendations are rounded down to this granularity */
+  contextGranularityTokens: 1024,
+} as const;
+
+/**
  * Binary variant type
  */
 export type BinaryVariant = 'cuda' | 'vulkan' | 'metal' | 'cpu';

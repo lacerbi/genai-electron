@@ -1103,5 +1103,84 @@ describe('LlamaServerManager', () => {
       expect(gpuLayersIndex).toBeGreaterThan(-1);
       expect(args[gpuLayersIndex + 1]).toBe('0');
     });
+
+    it('should forward user config as hints to getOptimalConfig', async () => {
+      await llamaServer.start({
+        ...mockConfig,
+        contextSize: 16384,
+        cacheTypeK: 'f16',
+        flashAttention: 'off',
+      });
+
+      expect(mockSystemInfo.getOptimalConfig).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          contextSize: 16384,
+          cacheTypeK: 'f16',
+          flashAttention: 'off',
+        })
+      );
+    });
+
+    it('should emit auto-recommended KV quantization flags', async () => {
+      mockSystemInfo.getOptimalConfig.mockResolvedValue({
+        threads: 7,
+        contextSize: 65536,
+        gpuLayers: 36,
+        parallelRequests: 1,
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+        flashAttention: 'on',
+      });
+
+      await llamaServer.start(mockConfig);
+
+      const args = mockProcessSpawn.mock.calls[0][1] as string[];
+      const val = (flag: string) => args[args.indexOf(flag) + 1];
+      expect(val('--cache-type-k')).toBe('q8_0');
+      expect(val('--cache-type-v')).toBe('q8_0');
+      expect(val('-fa')).toBe('on');
+      expect(val('-c')).toBe('65536');
+    });
+
+    it('should prefer user cache types over auto-recommendations', async () => {
+      mockSystemInfo.getOptimalConfig.mockResolvedValue({
+        threads: 7,
+        contextSize: 65536,
+        gpuLayers: 36,
+        parallelRequests: 1,
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+        flashAttention: 'on',
+      });
+
+      await llamaServer.start({ ...mockConfig, cacheTypeK: 'f16', cacheTypeV: 'f16' });
+
+      const args = mockProcessSpawn.mock.calls[0][1] as string[];
+      const val = (flag: string) => args[args.indexOf(flag) + 1];
+      expect(val('--cache-type-k')).toBe('f16');
+      expect(val('--cache-type-v')).toBe('f16');
+    });
+
+    it('should not apply auto cache recommendations when fit is on', async () => {
+      mockSystemInfo.getOptimalConfig.mockResolvedValue({
+        threads: 7,
+        contextSize: 65536,
+        gpuLayers: 36,
+        parallelRequests: 1,
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+        flashAttention: 'on',
+      });
+
+      await llamaServer.start({ ...mockConfig, fit: 'on' });
+
+      const args = mockProcessSpawn.mock.calls[0][1] as string[];
+      expect(args).not.toContain('--cache-type-k');
+      expect(args).not.toContain('--cache-type-v');
+      expect(args).not.toContain('-fa');
+      expect(args).not.toContain('-c');
+      expect(args).not.toContain('-ngl');
+    });
   });
 });

@@ -230,6 +230,25 @@ export interface LlamaServerConfig extends ServerConfig {
 }
 
 /**
+ * Hints for SystemInfo.getOptimalConfig(): fields the caller has already
+ * pinned. Pinned values are respected verbatim and inform the sizing of the
+ * remaining dimensions (e.g. a pinned contextSize shapes the KV reserve used
+ * for GPU-layer packing; explicit cache types or flashAttention: 'off'
+ * suppress automatic KV quantization).
+ */
+export type OptimalConfigHints = Partial<
+  Pick<
+    LlamaServerConfig,
+    | 'contextSize'
+    | 'gpuLayers'
+    | 'parallelRequests'
+    | 'flashAttention'
+    | 'cacheTypeK'
+    | 'cacheTypeV'
+  >
+>;
+
+/**
  * Server event types
  */
 export type ServerEvent =

@@ -41,6 +41,7 @@ export type {
   ServerEvent,
   ServerEventData,
   BinaryLogEvent,
+  OptimalConfigHints,
 } from './servers.js';
 
 // Image generation types
