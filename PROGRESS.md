@@ -7,7 +7,7 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 525/525 passing (21 suites)
+- **Tests:** ✅ 532/532 passing (21 suites)
 - **Branch:** `main`
 - **Last Updated:** 2026-07-03 (v0.6.1: security patch — npm audit clean, tar minimum ^7.5.19)
 
@@ -526,6 +526,6 @@ For detailed historical information:
 - MoE-aware ResourceOrchestrator estimates (CPU-resident experts count against RAM)
 - Hardening from live-smoke failures: per-layer `attention.head_count_kv` arrays (Gemma 4 alternating attention) normalized via mean in KV math (was NaN); Windows standby-aware available-RAM detection (PerfOS `AvailableBytes` refreshed in `detect()`; `os.freemem()` reported 1.5 GB on a box with ~11 GB reclaimable); mmap-aware expert RAM gate (60% of total RAM, trunk-only committed requirement in `canRunModel`)
 
-**Files Modified:** `src/managers/{ModelManager,LlamaServerManager,ResourceOrchestrator}.ts`, `src/system/SystemInfo.ts`, `src/utils/model-metadata-helpers.ts`, `src/types/{models,servers}.ts`, docs (`system-detection`, `llm-server`, `typescript-reference`, `migration-0-7-to-0-8.md`)
+**Files Modified:** `src/managers/{ModelManager,LlamaServerManager,ResourceOrchestrator}.ts`, `src/system/{SystemInfo,memory-detect}.ts`, `src/utils/model-metadata-helpers.ts`, `src/types/{models,servers}.ts`, `src/config/defaults.ts`, `src/index.ts`, docs (`system-detection`, `llm-server`, `typescript-reference`, `migration-0-7-to-0-8.md`)
 
-**Build Status:** ✅ 0 TypeScript errors / 525/525 tests passing (21 suites); live GPU smoke pending below
+**Build Status:** ✅ 0 TypeScript errors / 532/532 tests passing (21 suites); Opus review pass applied (sharded-MoE measurement skip → heuristic fallback; auto tier restricted to MEASURED expert bytes; orchestrator nCpuMoe split). Live GPU smoke: gemma-4-26B-A4B pure auto-config → `--cpu-moe -ngl 30 -c 16384` + q8_0 KV, healthy + /props-confirmed on an 8 GiB GPU / 23 GiB RAM machine

@@ -690,11 +690,15 @@ export class ModelManager {
     }
 
     // Fetch GGUF metadata from the FIRST shard (the header lives there);
-    // fatal on failure, mirroring the single-file download path
+    // fatal on failure, mirroring the single-file download path.
+    // tensorInfos are deliberately dropped: shard 1 contains only a fraction
+    // of the expert tensors, so measuring expert_weights_bytes from it would
+    // store a misleading partial value (the parameter-count heuristic in
+    // getExpertWeightsBytesWithFallback covers sharded MoE instead).
     let ggufMetadata: GGUFMetadata | undefined;
     try {
       const parsedGGUF = await fetchGGUFMetadata(primaryURL);
-      ggufMetadata = this.createGGUFMetadataFromParsed(parsedGGUF);
+      ggufMetadata = this.createGGUFMetadataFromParsed({ metadata: parsedGGUF.metadata });
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       throw new DownloadError(`Failed to fetch GGUF metadata before download: ${errorMessage}`, {
@@ -1299,6 +1303,13 @@ export class ModelManager {
         // TypeScript should prevent this, but handle it for safety
         throw new DownloadError(`Invalid metadata fetch strategy: ${strategy}`);
       }
+    }
+
+    // Sharded models: the parsed header covers shard 1 only, so any measured
+    // expert bytes would be a misleading partial value — drop it and let the
+    // parameter-count heuristic handle sharded MoE
+    if (ggufMetadata && modelInfo.shards && modelInfo.shards.length > 0) {
+      delete ggufMetadata.expert_weights_bytes;
     }
 
     // Update model info with new metadata

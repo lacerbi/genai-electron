@@ -1,6 +1,14 @@
 # Plan: MoE-Aware Auto-Configuration (v0.8.0)
 
 Created: 2026-07-03
+Post-review (Opus doublecheck, 6 findings, all addressed pre-merge):
+- MEDIUM sharded-MoE partial measurement → tensorInfos dropped in the sharded download
+  path AND updateModelMetadata for sharded models (heuristic fallback covers them); test.
+- nCpuMoe missing from orchestrator estimate → proportional split added.
+- Auto tier restricted to MEASURED expert bytes (heuristic = hint-driven only); test.
+- typescript-reference GGUFMetadata array types corrected; PROGRESS counts/files fixed.
+- Added tests: nCpuMoe layer packing, hinted-cpuMoe partial-trunk branch. 532/532.
+
 Status: COMPLETE (2026-07-03) — implemented, tested, live-verified (see Verification)
 Resolves: ISSUE-moe-aware-auto-config.md (filed from palimpsest-engine 0.7.1 integration)
 

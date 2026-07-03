@@ -619,23 +619,55 @@ describe('SystemInfo', () => {
         expect(config.contextSize).toBe(4096);
       });
 
-      it('falls back to the parameter-count heuristic without measured bytes', async () => {
+      it('does NOT auto-recommend from the parameter-count heuristic (measured bytes only)', async () => {
         mockTotalmem.mockReturnValue(64 * 1024 ** 3);
         mockFreemem.mockReturnValue(24 * 1024 ** 3);
-        const config = await systemInfo.getOptimalConfig(
-          makeMoE(
-            {},
-            {
-              expert_weights_bytes: undefined,
-              raw: { 'general.parameter_count': 26_000_000_000 },
-              embedding_length: 2816,
-            }
-          )
+        const heuristicOnly = makeMoE(
+          {},
+          {
+            expert_weights_bytes: undefined,
+            raw: { 'general.parameter_count': 26_000_000_000 },
+            embedding_length: 2816,
+          }
         );
 
+        // Auto tier requires MEASURED expert bytes — heuristic could
+        // underestimate the trunk and overcommit VRAM
+        const auto = await systemInfo.getOptimalConfig(heuristicOnly);
+        expect(auto.cpuMoe).toBeUndefined();
+
+        // But hint-driven sizing uses the heuristic as best-effort:
         // expertParams = 3 x 2816 x 704 x 128 x 30 ~ 22.8B of 26B -> ~88% experts
-        expect(config.cpuMoe).toBe(true);
-        expect(config.gpuLayers).toBe(30);
+        const hinted = await systemInfo.getOptimalConfig(heuristicOnly, {
+          cpuMoe: true,
+          gpuLayers: 30,
+        });
+        expect(hinted.contextSize!).toBeGreaterThan(4096);
+      });
+
+      it('reserves proportional expert RAM for an nCpuMoe hint', async () => {
+        // nCpuMoe: 15 of 30 layers -> half the experts (5 GiB) on CPU.
+        // Trunk-adjusted GPU weights: (12.5 - 5) x 1.1 = 8.25 GiB > 8.28 budget
+        // barely -> partial offload, but with far more layers than dense math
+        const half = await systemInfo.getOptimalConfig(makeMoE(), { nCpuMoe: 15 });
+        const dense = await systemInfo.getOptimalConfig(makeMoE(), {
+          overrideTensors: 'custom=CPU',
+        });
+
+        expect(half.gpuLayers!).toBeGreaterThan(dense.gpuLayers!);
+      });
+
+      it('packs partial offload around the trunk when cpuMoe is hinted but trunk exceeds VRAM', async () => {
+        // Trunk = 24 - 10 = 14 GiB x 1.1 > 8.28 GiB budget -> partial offload
+        // of the trunk with experts already on CPU
+        const config = await systemInfo.getOptimalConfig(
+          makeMoE({ size: 24 * 1024 ** 3 }, { expert_weights_bytes: 10 * 1024 ** 3 }),
+          { cpuMoe: true }
+        );
+
+        expect(config.gpuLayers!).toBeGreaterThan(0);
+        expect(config.gpuLayers!).toBeLessThan(30);
+        expect(config.contextSize!).toBeGreaterThanOrEqual(4096);
       });
     });
 

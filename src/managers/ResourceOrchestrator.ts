@@ -271,9 +271,15 @@ export class ResourceOrchestrator {
           estimateKVBytesPerToken(modelInfo, llamaConfig.cacheTypeK, llamaConfig.cacheTypeV)
         : 0;
 
-      // Under --cpu-moe (or -ot exps=CPU) the expert weights live in RAM, not VRAM
-      const moeOnCpu = llamaConfig.cpuMoe === true || llamaConfig.overrideTensors === 'exps=CPU';
-      const cpuExpertBytes = moeOnCpu ? (getExpertWeightsBytesWithFallback(modelInfo) ?? 0) : 0;
+      // Under --cpu-moe (or -ot exps=CPU) the expert weights live in RAM, not
+      // VRAM; --n-cpu-moe N moves a proportional share of the experts
+      const expertBytes = getExpertWeightsBytesWithFallback(modelInfo) ?? 0;
+      let cpuExpertBytes = 0;
+      if (llamaConfig.cpuMoe === true || llamaConfig.overrideTensors === 'exps=CPU') {
+        cpuExpertBytes = expertBytes;
+      } else if (typeof llamaConfig.nCpuMoe === 'number' && llamaConfig.nCpuMoe > 0) {
+        cpuExpertBytes = expertBytes * Math.min(1, llamaConfig.nCpuMoe / totalLayers);
+      }
       const gpuResidentWeights = modelInfo.size - cpuExpertBytes;
 
       debugLog('[Orchestrator] LLM model:', config.modelId);

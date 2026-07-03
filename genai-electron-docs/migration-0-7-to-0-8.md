@@ -37,7 +37,7 @@ interface GGUFMetadata {
 
 `OptimalConfigHints` gains `cpuMoe` / `nCpuMoe` / `overrideTensors`.
 
-New helpers exported via metadata utilities: `getExpertCountWithFallback`, `getExpertWeightsBytesWithFallback` (measured → parameter-count heuristic → undefined). Models downloaded before v0.8.0 fall back to the heuristic (needs `general.parameter_count` in stored raw metadata) or dense treatment; re-download or call `updateModelMetadata` to get exact measurements.
+New helpers exported via metadata utilities: `getExpertCountWithFallback`, `getExpertWeightsBytesWithFallback` (measured → parameter-count heuristic → undefined). The **automatic** `cpuMoe` tier acts only on *measured* bytes (a heuristic underestimate of the trunk could overcommit VRAM); hint-driven sizing (`cpuMoe: true`, `nCpuMoe`) uses the heuristic as best-effort. Sharded models skip measurement (shard 1 holds only part of the experts) and rely on the heuristic. Models downloaded before v0.8.0: re-download or call `updateModelMetadata()` to get exact measurements.
 
 ## See Also
 

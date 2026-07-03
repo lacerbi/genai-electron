@@ -383,15 +383,22 @@ export class SystemInfo {
       // pinned an offload plan, the trunk + KV fits VRAM, and the experts fit
       // the RAM budget. llama.cpp keeps attention/KV on GPU under --cpu-moe,
       // so the KV math is unchanged.
+      // Only MEASURED expert bytes qualify for the automatic tier — the
+      // parameter-count heuristic may over-attribute bytes to experts, and an
+      // auto recommendation on an underestimated trunk could overcommit VRAM
+      // at load. Hint-driven sizing (user explicitly chose cpuMoe) still uses
+      // the heuristic as best-effort.
+      const measuredExpertBytes = modelInfo.ggufMetadata?.expert_weights_bytes;
       if (
         !fullOffloadFits &&
         hints.cpuMoe === undefined && // explicit true handled above; explicit false = opt-out
         hints.nCpuMoe === undefined &&
         hints.overrideTensors === undefined &&
         hints.gpuLayers === undefined &&
-        expertBytes !== undefined &&
-        expertBytes > 0
+        measuredExpertBytes !== undefined &&
+        measuredExpertBytes > 0
       ) {
+        const expertBytes = measuredExpertBytes;
         const trunkGPU = (modelInfo.size - expertBytes) * KV_SIZING.gpuWeightsOverhead;
         // Experts are mmap'd + sparsely activated: gate against total RAM
         // (page cache), not free RAM (committed)

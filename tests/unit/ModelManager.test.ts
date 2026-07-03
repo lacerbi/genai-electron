@@ -719,6 +719,22 @@ describe('ModelManager', () => {
       fetchSpy.mockRestore();
     });
 
+    it('skips expert measurement for sharded downloads (partial shard-1 tensors)', async () => {
+      ggufMockState.tensorInfos = [
+        { name: 'blk.0.attn_q.weight', offset: 0 },
+        { name: 'blk.0.ffn_gate_exps.weight', offset: 100 },
+        { name: 'blk.1.ffn_down_exps.weight', offset: 1100 },
+        { name: 'output.weight', offset: 2100 },
+      ];
+
+      const model = await modelManager.downloadModel(shardedConfig);
+
+      // Shard 1 holds only part of the experts: measurement must be skipped
+      // (the parameter-count heuristic covers sharded MoE instead)
+      expect(model.ggufMetadata?.expert_weights_bytes).toBeUndefined();
+      expect(model.shards?.length).toBeGreaterThan(0);
+    });
+
     it('should auto-detect shard naming and download all siblings', async () => {
       const model = await modelManager.downloadModel(shardedConfig);
 
