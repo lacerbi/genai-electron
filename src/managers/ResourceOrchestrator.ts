@@ -19,6 +19,7 @@ import type {
   ImageGenerationResult,
 } from '../types/index.js';
 import { estimateKVBytesPerToken } from '../utils/kv-cache-math.js';
+import { getExpertWeightsBytesWithFallback } from '../utils/model-metadata-helpers.js';
 import { ServerError } from '../errors/index.js';
 import { debugLog } from '../utils/debug-log.js';
 
@@ -270,17 +271,23 @@ export class ResourceOrchestrator {
           estimateKVBytesPerToken(modelInfo, llamaConfig.cacheTypeK, llamaConfig.cacheTypeV)
         : 0;
 
+      // Under --cpu-moe (or -ot exps=CPU) the expert weights live in RAM, not VRAM
+      const moeOnCpu = llamaConfig.cpuMoe === true || llamaConfig.overrideTensors === 'exps=CPU';
+      const cpuExpertBytes = moeOnCpu ? (getExpertWeightsBytesWithFallback(modelInfo) ?? 0) : 0;
+      const gpuResidentWeights = modelInfo.size - cpuExpertBytes;
+
       debugLog('[Orchestrator] LLM model:', config.modelId);
       debugLog('[Orchestrator] LLM model size:', modelInfo.size / 1024 ** 3, 'GB');
       debugLog('[Orchestrator] LLM GPU layers:', gpuLayers, '/', totalLayers);
       debugLog('[Orchestrator] LLM KV cache:', kvBytes / 1024 ** 3, 'GB');
 
       if (gpuLayers > 0) {
-        // Mixed GPU/CPU: KV follows the layer split
+        // Mixed GPU/CPU: KV follows the layer split; CPU-resident experts
+        // always count against RAM
         const gpuRatio = Math.min(gpuLayers / totalLayers, 1.0);
         const result = {
-          ram: (modelInfo.size * 1.2 + kvBytes) * (1 - gpuRatio),
-          vram: (modelInfo.size * 1.2 + kvBytes) * gpuRatio,
+          ram: (gpuResidentWeights * 1.2 + kvBytes) * (1 - gpuRatio) + cpuExpertBytes * 1.2,
+          vram: (gpuResidentWeights * 1.2 + kvBytes) * gpuRatio,
         };
         debugLog('[Orchestrator] LLM usage (mixed):', {
           ram: `${result.ram / 1024 ** 3} GB`,

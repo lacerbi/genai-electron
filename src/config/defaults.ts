@@ -55,6 +55,13 @@ export const KV_SIZING = {
   osRamMarginBytes: 2 * 1024 ** 3,
   /** Minimum VRAM reserved for KV when partially offloading */
   minPartialReserveBytes: 1.5 * 1024 ** 3,
+  /**
+   * Max fraction of TOTAL RAM that CPU-resident MoE expert weights may occupy.
+   * Experts are mmap'd and sparsely activated (e.g. 8 of 128 per token), so
+   * they page through the OS cache rather than requiring committed RAM —
+   * gating them against free RAM would wrongly reject working setups.
+   */
+  moeExpertTotalRamFraction: 0.6,
 } as const;
 
 /**

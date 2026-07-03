@@ -469,6 +469,9 @@ export class LlamaServerManager extends ServerManager {
       flashAttention: llamaConfig.flashAttention,
       cacheTypeK: llamaConfig.cacheTypeK,
       cacheTypeV: llamaConfig.cacheTypeV,
+      cpuMoe: llamaConfig.cpuMoe,
+      nCpuMoe: llamaConfig.nCpuMoe,
+      overrideTensors: llamaConfig.overrideTensors,
     });
     debugLog('[LlamaServer] Optimal config:', JSON.stringify(optimalConfig));
 
@@ -487,6 +490,7 @@ export class LlamaServerManager extends ServerManager {
         config.flashAttention ?? (delegateToFit ? undefined : optimalConfig.flashAttention),
       cacheTypeK: llamaConfig.cacheTypeK ?? (delegateToFit ? undefined : optimalConfig.cacheTypeK),
       cacheTypeV: llamaConfig.cacheTypeV ?? (delegateToFit ? undefined : optimalConfig.cacheTypeV),
+      cpuMoe: llamaConfig.cpuMoe ?? (delegateToFit ? undefined : optimalConfig.cpuMoe),
     } as ResolvedLlamaServerConfig;
 
     debugLog('[LlamaServer] Final config:', JSON.stringify(finalConfig));

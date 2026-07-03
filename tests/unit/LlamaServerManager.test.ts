@@ -1162,6 +1162,33 @@ describe('LlamaServerManager', () => {
       expect(val('--cache-type-v')).toBe('f16');
     });
 
+    it('should emit --cpu-moe when auto-recommended', async () => {
+      mockSystemInfo.getOptimalConfig.mockResolvedValue({
+        threads: 7,
+        contextSize: 32768,
+        gpuLayers: 30,
+        parallelRequests: 1,
+        cpuMoe: true,
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+        flashAttention: 'on',
+      });
+
+      await llamaServer.start(mockConfig);
+
+      const args = mockProcessSpawn.mock.calls[0][1] as string[];
+      expect(args).toContain('--cpu-moe');
+    });
+
+    it('should forward MoE hints to getOptimalConfig', async () => {
+      await llamaServer.start({ ...mockConfig, cpuMoe: true, overrideTensors: 'exps=CPU' });
+
+      expect(mockSystemInfo.getOptimalConfig).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ cpuMoe: true, overrideTensors: 'exps=CPU' })
+      );
+    });
+
     it('should not apply auto cache recommendations when fit is on', async () => {
       mockSystemInfo.getOptimalConfig.mockResolvedValue({
         threads: 7,

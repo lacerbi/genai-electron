@@ -122,6 +122,7 @@ const ggufMockState = {
   fetchGGUFMetadataCallCount: 0,
   fetchGGUFMetadataShouldReject: false,
   fetchGGUFMetadataRejectError: null as Error | null,
+  tensorInfos: [] as Array<{ name: string; offset: number }>,
 };
 
 const defaultGGUFResponse = {
@@ -142,7 +143,7 @@ const defaultGGUFResponse = {
     'llama.rope.freq_base': 10000,
     'llama.attention.layer_norm_rms_epsilon': 1e-5,
   },
-  tensorInfos: [],
+  tensorInfos: [] as Array<{ name: string; offset: number }>,
 };
 
 jest.unstable_mockModule('../../src/utils/gguf-parser.js', () => ({
@@ -151,7 +152,7 @@ jest.unstable_mockModule('../../src/utils/gguf-parser.js', () => ({
     if (ggufMockState.fetchGGUFMetadataShouldReject) {
       throw ggufMockState.fetchGGUFMetadataRejectError || new Error('GGUF fetch error');
     }
-    return defaultGGUFResponse;
+    return { ...defaultGGUFResponse, tensorInfos: ggufMockState.tensorInfos };
   },
   fetchLocalGGUFMetadata: async () => defaultGGUFResponse,
   getArchField: (metadata: Record<string, unknown>, fieldPath: string) => {
@@ -200,6 +201,7 @@ describe('ModelManager', () => {
     ggufMockState.fetchGGUFMetadataCallCount = 0;
     ggufMockState.fetchGGUFMetadataShouldReject = false;
     ggufMockState.fetchGGUFMetadataRejectError = null;
+    ggufMockState.tensorInfos = [];
     // Reset paths mock state
     pathsMockState.getModelDirectoryCalls = [];
     modelManager = new ModelManager();
@@ -629,6 +631,54 @@ describe('ModelManager', () => {
         expect(error).toBeDefined();
         expect((error as Error).message).toContain('Disk read error');
       }
+    });
+  });
+
+  describe('MoE expert-weights measurement', () => {
+    it('measures _exps tensor bytes from offsets, excluding shexp and the last tensor', async () => {
+      // Offsets: dense(0-100), exps(100-1100), shexp(1100-1200), exps(1200-2200), last(2200-?)
+      ggufMockState.tensorInfos = [
+        { name: 'blk.0.attn_q.weight', offset: 0 },
+        { name: 'blk.0.ffn_gate_exps.weight', offset: 100 },
+        { name: 'blk.0.ffn_gate_shexp.weight', offset: 1100 },
+        { name: 'blk.1.ffn_down_exps.weight', offset: 1200 },
+        { name: 'blk.1.ffn_down_exps.scale', offset: 2200 }, // last: no delta, skipped
+      ];
+      mockFileExists.mockResolvedValue(false);
+      mockGetFileSize.mockResolvedValue(5000);
+      mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+      await modelManager.downloadModel({
+        source: 'url',
+        url: 'https://example.com/moe-model.gguf',
+        name: 'MoE Model',
+        type: 'llm',
+      });
+
+      const saved = mockStorageManager.saveModelMetadata.mock.calls[0][0] as any;
+      // exps deltas: (1100-100) + (2200-1200) = 2000; shexp and last excluded
+      expect(saved.ggufMetadata.expert_weights_bytes).toBe(2000);
+    });
+
+    it('leaves expert_weights_bytes undefined for dense models', async () => {
+      ggufMockState.tensorInfos = [
+        { name: 'blk.0.attn_q.weight', offset: 0 },
+        { name: 'blk.0.ffn_gate.weight', offset: 100 },
+        { name: 'output.weight', offset: 1100 },
+      ];
+      mockFileExists.mockResolvedValue(false);
+      mockGetFileSize.mockResolvedValue(5000);
+      mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+      await modelManager.downloadModel({
+        source: 'url',
+        url: 'https://example.com/dense-model.gguf',
+        name: 'Dense Model',
+        type: 'llm',
+      });
+
+      const saved = mockStorageManager.saveModelMetadata.mock.calls[0][0] as any;
+      expect(saved.ggufMetadata.expert_weights_bytes).toBeUndefined();
     });
   });
 

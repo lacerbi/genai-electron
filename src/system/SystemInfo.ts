@@ -12,13 +12,14 @@ import type {
   OptimalConfigHints,
 } from '../types/index.js';
 import { getCPUInfo, getRecommendedThreads } from './cpu-detect.js';
-import { getMemoryInfo, estimateVRAM } from './memory-detect.js';
+import { getMemoryInfo, estimateVRAM, refreshAvailableMemory } from './memory-detect.js';
 import { detectGPU, calculateGPULayers } from './gpu-detect.js';
 import { getPlatform } from '../utils/platform-utils.js';
 import { RECOMMENDED_QUANTIZATIONS, KV_SIZING } from '../config/defaults.js';
 import {
   getLayerCountWithFallback,
   getContextLengthWithFallback,
+  getExpertWeightsBytesWithFallback,
   hasGGUFMetadata,
 } from '../utils/model-metadata-helpers.js';
 import { estimateKVBytesPerToken, floorContextToGranularity } from '../utils/kv-cache-math.js';
@@ -77,7 +78,9 @@ export class SystemInfo {
       return this.cachedCapabilities;
     }
 
-    // Detect hardware
+    // Detect hardware (refresh the standby-aware Windows available-memory
+    // reading first so getMemoryInfo() reflects reclaimable RAM)
+    await refreshAvailableMemory();
     const cpu = getCPUInfo();
     const memory = getMemoryInfo();
     const gpu = await detectGPU();
@@ -192,16 +195,32 @@ export class SystemInfo {
         ? KV_SIZING.floorContextTokens * estimateKVBytesPerToken(modelInfo)
         : 0;
 
+    // MoE expert weights are mmap'd and sparsely activated — gate them against
+    // total RAM (page cache) instead of the committed-RAM requirement below
+    const expertBytes = getExpertWeightsBytesWithFallback(modelInfo) ?? 0;
+    if (
+      expertBytes > 0 &&
+      expertBytes > capabilities.memory.total * KV_SIZING.moeExpertTotalRamFraction
+    ) {
+      return {
+        possible: false,
+        reason: `Insufficient RAM for MoE expert weights: ${(expertBytes / 1024 ** 3).toFixed(1)}GB of experts exceeds ${(KV_SIZING.moeExpertTotalRamFraction * 100).toFixed(0)}% of total RAM (${(capabilities.memory.total / 1024 ** 3).toFixed(1)}GB)`,
+        suggestion: 'Try a smaller quantization of this model, or add more system RAM',
+      };
+    }
+
     // When GPU layers are specified, only the CPU portion (weights + its KV
-    // share) needs to fit in RAM
+    // share) needs to fit in RAM. Measurable MoE experts are excluded from the
+    // committed requirement (gated above via total RAM).
+    const committedSize = modelInfo.size - expertBytes;
     const gpuLayers = options?.gpuLayers;
     let requiredMemory: number;
     if (gpuLayers && gpuLayers > 0) {
       const totalLayers = options?.totalLayers ?? getLayerCountWithFallback(modelInfo);
       const cpuRatio = Math.max(0, 1 - gpuLayers / totalLayers);
-      requiredMemory = (modelInfo.size * 1.2 + kvFloorBytes) * cpuRatio;
+      requiredMemory = (committedSize * 1.2 + kvFloorBytes) * cpuRatio;
     } else {
-      requiredMemory = modelInfo.size * 1.2 + kvFloorBytes; // 20% overhead + KV floor
+      requiredMemory = committedSize * 1.2 + kvFloorBytes; // 20% overhead + KV floor
     }
 
     // Get fresh memory info (not cached) for accurate availability check
@@ -287,7 +306,32 @@ export class SystemInfo {
       return Math.max(floor, Math.min(modelCtx, rounded));
     };
 
-    const weightsGPU = modelInfo.size * KV_SIZING.gpuWeightsOverhead;
+    // MoE weight split: under --cpu-moe (or -ot exps=CPU) the expert weights
+    // live in RAM and only the dense trunk occupies VRAM. Expert bytes are
+    // measured from GGUF tensor offsets (exact) with a parameter-count
+    // heuristic fallback; dense models (or unmeasurable MoE) get undefined
+    // and the classic whole-file math.
+    const expertBytes = getExpertWeightsBytesWithFallback(modelInfo);
+    const moeHinted = hints.cpuMoe === true || hints.overrideTensors === 'exps=CPU';
+    const nCpuMoeHint =
+      typeof hints.nCpuMoe === 'number' && hints.nCpuMoe > 0
+        ? Math.min(hints.nCpuMoe, totalLayers)
+        : 0;
+    // A custom -ot pattern we can't interpret: size conservatively as dense
+    const customOverrideTensors =
+      hints.overrideTensors !== undefined && hints.overrideTensors !== 'exps=CPU';
+
+    let cpuExpertBytes = 0;
+    if (!customOverrideTensors && expertBytes && expertBytes > 0) {
+      if (moeHinted) {
+        cpuExpertBytes = expertBytes;
+      } else if (nCpuMoeHint > 0) {
+        cpuExpertBytes = expertBytes * (nCpuMoeHint / totalLayers);
+      }
+    }
+
+    let weightsGPU = (modelInfo.size - cpuExpertBytes) * KV_SIZING.gpuWeightsOverhead;
+    let recommendCpuMoe = false;
     const vramBudget = hasVRAM
       ? Math.max(0, (gpu.vramAvailable ?? gpu.vram!) - KV_SIZING.computeBufferBytes)
       : 0;
@@ -324,14 +368,42 @@ export class SystemInfo {
 
     // 2. Offload + context. Full GPU offload is the prize: the KV reserve
     // flexes down to the floor-context cost to win it; when full offload is
-    // impossible, fall back to packing layers around a KV reserve.
+    // impossible, an MoE model whose dense trunk fits gets cpuMoe (experts to
+    // RAM, trunk + KV fully on GPU); only then fall back to packing layers
+    // around a KV reserve.
     let gpuLayers: number;
     let contextTokens: number;
 
     if (hasVRAM && vramBudget > 0) {
       const pinnedCtx = hints.contextSize;
       const requiredKV = (pinnedCtx ?? floor) * bpt;
-      const fullOffloadFits = weightsGPU + requiredKV <= vramBudget;
+      let fullOffloadFits = weightsGPU + requiredKV <= vramBudget;
+
+      // Auto cpuMoe tier: full dense offload doesn't fit, the caller hasn't
+      // pinned an offload plan, the trunk + KV fits VRAM, and the experts fit
+      // the RAM budget. llama.cpp keeps attention/KV on GPU under --cpu-moe,
+      // so the KV math is unchanged.
+      if (
+        !fullOffloadFits &&
+        hints.cpuMoe === undefined && // explicit true handled above; explicit false = opt-out
+        hints.nCpuMoe === undefined &&
+        hints.overrideTensors === undefined &&
+        hints.gpuLayers === undefined &&
+        expertBytes !== undefined &&
+        expertBytes > 0
+      ) {
+        const trunkGPU = (modelInfo.size - expertBytes) * KV_SIZING.gpuWeightsOverhead;
+        // Experts are mmap'd + sparsely activated: gate against total RAM
+        // (page cache), not free RAM (committed)
+        const expertsFitRAM =
+          expertBytes <= currentMemory.total * KV_SIZING.moeExpertTotalRamFraction;
+        if (trunkGPU + requiredKV <= vramBudget && expertsFitRAM) {
+          recommendCpuMoe = true;
+          cpuExpertBytes = expertBytes;
+          weightsGPU = trunkGPU;
+          fullOffloadFits = true;
+        }
+      }
 
       if (hints.gpuLayers !== undefined ? hints.gpuLayers >= totalLayers : fullOffloadFits) {
         // Full offload: all leftover VRAM becomes context budget
@@ -353,10 +425,13 @@ export class SystemInfo {
           const gpuShare = gpuLayers / totalLayers;
           const cpuShare = 1 - gpuShare;
           const gpuKVBudget = Math.max(0, vramBudget - gpuLayers * perLayer);
+          // RAM holds the non-offloaded weight share PLUS any CPU-resident
+          // expert weights (cpuMoe / nCpuMoe hints)
+          const cpuResidentWeights = (modelInfo.size - cpuExpertBytes) * cpuShare + cpuExpertBytes;
           const ramKVBudget = Math.max(
             0,
             currentMemory.available -
-              modelInfo.size * cpuShare * KV_SIZING.cpuWeightsOverhead -
+              cpuResidentWeights * KV_SIZING.cpuWeightsOverhead -
               KV_SIZING.osRamMarginBytes
           );
           const byGPU = gpuShare > 0 ? gpuKVBudget / (bpt * gpuShare) : Infinity;
@@ -371,6 +446,9 @@ export class SystemInfo {
 
     config.contextSize = contextTokens;
     config.gpuLayers = gpuLayers;
+    if (recommendCpuMoe) {
+      config.cpuMoe = true;
+    }
     if (autoQuantized) {
       config.cacheTypeK = cacheTypeK;
       config.cacheTypeV = cacheTypeV;

@@ -245,6 +245,9 @@ export type OptimalConfigHints = Partial<
     | 'flashAttention'
     | 'cacheTypeK'
     | 'cacheTypeV'
+    | 'cpuMoe'
+    | 'nCpuMoe'
+    | 'overrideTensors'
   >
 >;
 

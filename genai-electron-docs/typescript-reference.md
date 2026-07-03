@@ -153,6 +153,10 @@ interface GGUFMetadata {
   attention_head_count?: number;
   attention_head_count_kv?: number; // KV heads (GQA); fewer than head_count on modern models
   attention_key_length?: number; // per-head key dim, when != embedding_length / head_count
+  expert_count?: number; // MoE experts (0/undefined = dense)
+  expert_used_count?: number; // experts active per token
+  expert_feed_forward_length?: number; // per-expert FF dimension
+  expert_weights_bytes?: number; // measured _exps tensor bytes (what --cpu-moe moves to RAM)
   embedding_length?: number;
   feed_forward_length?: number;
   vocab_size?: number;
@@ -622,7 +626,15 @@ Fields the caller has already pinned when asking `systemInfo.getOptimalConfig(mo
 type OptimalConfigHints = Partial<
   Pick<
     LlamaServerConfig,
-    'contextSize' | 'gpuLayers' | 'parallelRequests' | 'flashAttention' | 'cacheTypeK' | 'cacheTypeV'
+    | 'contextSize'
+    | 'gpuLayers'
+    | 'parallelRequests'
+    | 'flashAttention'
+    | 'cacheTypeK'
+    | 'cacheTypeV'
+    | 'cpuMoe'
+    | 'nCpuMoe'
+    | 'overrideTensors'
   >
 >;
 ```

@@ -1038,6 +1038,7 @@ export class ModelManager {
    */
   private createGGUFMetadataFromParsed(parsedGGUF: {
     metadata: Record<string, unknown>;
+    tensorInfos?: readonly { name: string; offset?: bigint | number }[];
   }): GGUFMetadata {
     return {
       version: parsedGGUF.metadata['version'] as number | undefined,
@@ -1050,12 +1051,15 @@ export class ModelManager {
       context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
       attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as
         | number
+        | number[]
         | undefined,
       attention_head_count_kv: getArchField(parsedGGUF.metadata, 'attention.head_count_kv') as
         | number
+        | number[]
         | undefined,
       attention_key_length: getArchField(parsedGGUF.metadata, 'attention.key_length') as
         | number
+        | number[]
         | undefined,
       embedding_length: getArchField(parsedGGUF.metadata, 'embedding_length') as number | undefined,
       feed_forward_length: getArchField(parsedGGUF.metadata, 'feed_forward_length') as
@@ -1070,8 +1074,55 @@ export class ModelManager {
         | number
         | undefined,
       rope_freq_base: getArchField(parsedGGUF.metadata, 'rope.freq_base') as number | undefined,
+      expert_count: getArchField(parsedGGUF.metadata, 'expert_count') as number | undefined,
+      expert_used_count: getArchField(parsedGGUF.metadata, 'expert_used_count') as
+        | number
+        | undefined,
+      expert_feed_forward_length: getArchField(
+        parsedGGUF.metadata,
+        'expert_feed_forward_length'
+      ) as number | undefined,
+      expert_weights_bytes: this.measureExpertWeightsBytes(parsedGGUF.tensorInfos),
       raw: this.convertToSerializableMetadata(parsedGGUF.metadata),
     };
+  }
+
+  /**
+   * Measure the byte size of MoE expert weight tensors from GGUF tensor offsets
+   *
+   * Sorts tensors by data offset and diffs consecutive offsets for exact
+   * per-tensor sizes (quant-agnostic — correct even when experts and trunk use
+   * different bit-widths, e.g. Unsloth Dynamic quants). Tensors matching
+   * `_exps.` mirror llama.cpp's --cpu-moe / -ot exps=CPU selection; shared
+   * experts (`_shexp`) do NOT match and stay counted as trunk, same as
+   * llama.cpp keeps them on GPU. The last tensor by offset has no delta and is
+   * skipped (negligible over hundreds of tensors, biases trunk high = safe).
+   *
+   * @returns Expert bytes, or undefined when not measurable / not an MoE
+   * @private
+   */
+  private measureExpertWeightsBytes(
+    tensorInfos?: readonly { name: string; offset?: bigint | number }[]
+  ): number | undefined {
+    if (!tensorInfos || tensorInfos.length < 2) {
+      return undefined;
+    }
+    if (!tensorInfos.some((t) => t.offset !== undefined)) {
+      return undefined;
+    }
+
+    const sorted = [...tensorInfos]
+      .filter((t) => t.offset !== undefined)
+      .sort((a, b) => Number(a.offset) - Number(b.offset));
+
+    let expertBytes = 0;
+    for (let i = 0; i < sorted.length - 1; i++) {
+      if (sorted[i]!.name.includes('_exps.')) {
+        expertBytes += Number(sorted[i + 1]!.offset) - Number(sorted[i]!.offset);
+      }
+    }
+
+    return expertBytes > 0 ? expertBytes : undefined;
   }
 
   /**

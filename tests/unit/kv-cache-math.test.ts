@@ -92,6 +92,24 @@ describe('kv-cache-math', () => {
     expect(mixed).toBe(10 * 4 * 64 * (2 + 18 / 32));
   });
 
+  it('normalizes per-layer head_count_kv arrays via mean (Gemma 4 style)', () => {
+    const model = baseModel({
+      architecture: 'gemma4',
+      block_count: 30,
+      attention_head_count: 16,
+      // 25 full-attention layers with 8 KV heads, 5 sliding-window with 2
+      attention_head_count_kv: [
+        8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2,
+      ],
+      attention_key_length: 512,
+      context_length: 262144,
+    });
+
+    // mean kvHeads = (25x8 + 5x2)/30 = 7 → exact summed KV cost
+    expect(estimateKVBytesPerToken(model)).toBe(30 * 7 * 512 * 4);
+    expect(Number.isFinite(estimateKVBytesPerToken(model, 'q8_0', 'q8_0'))).toBe(true);
+  });
+
   describe('floorContextToGranularity()', () => {
     it.each([
       [1500, 1408], // <=2048: multiples of 128
