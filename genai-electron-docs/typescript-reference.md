@@ -627,7 +627,7 @@ type OptimalConfigHints = Partial<
 >;
 ```
 
-`getOptimalConfig` returns `Promise<Partial<LlamaServerConfig>>` (may include auto-selected `cacheTypeK`/`cacheTypeV`/`flashAttention`). The KV arithmetic is exported as `estimateKVBytesPerToken(modelInfo, cacheTypeK?, cacheTypeV?)`.
+`getOptimalConfig` returns `Promise<Partial<LlamaServerConfig>>` (may include auto-selected `cacheTypeK`/`cacheTypeV`/`flashAttention`). The KV arithmetic is exported as `estimateKVBytesPerToken(modelInfo, cacheTypeK?, cacheTypeV?)`; context rounding as `floorContextToGranularity(tokens)` (progressive: 512-steps up to 8K, 1024 to 16K, 2048 to 32K, 4096 beyond).
 
 
 ### SavedLLMState

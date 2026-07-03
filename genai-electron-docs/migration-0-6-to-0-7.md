@@ -6,7 +6,7 @@ v0.7.0 replaces the fixed 4096-token context recommendation with **adaptive, KV-
 
 All API changes are additive and source-compatible. The behavioral changes affect **auto-configured** servers (models with GGUF metadata; models without metadata keep the exact v0.6 behavior):
 
-- **Context size is no longer pinned at 4096.** The recommendation comes from `layers × kvHeads × headDim × bytes-per-element` arithmetic against available VRAM/RAM, clamped only by the model's own `context_length` (no artificial ceiling) and rounded down to 1024. A small model on a large GPU can now get a very large context — with a correspondingly large KV allocation at server startup.
+- **Context size is no longer pinned at 4096.** The recommendation comes from `layers × kvHeads × headDim × bytes-per-element` arithmetic against available VRAM/RAM, clamped only by the model's own `context_length` (no artificial ceiling) and floored to a progressive granularity ladder (multiples of 128 up to 2K, 256 up to 4K, 512 up to 8K, 1024 up to 16K, 2048 up to 32K, 4096 beyond). A small model on a large GPU can now get a very large context — with a correspondingly large KV allocation at server startup.
 - **q8_0 KV quantization is auto-selected by default** (together with `flashAttention: 'on'`), unless f16 KV at the model's *full native context* fits alongside fully-offloaded weights. The quality impact of q8_0 KV is typically negligible; it roughly doubles the affordable context. **Opt out** with `cacheTypeK: 'f16', cacheTypeV: 'f16'` or `flashAttention: 'off'`.
 - **Full GPU offload is preferred.** The old flat 2 GB KV reserve could push a model that *almost* fit into partial offload; the reserve now flexes down to the floor-context (4096-token) cost to win full offload, since partial offload is a large performance cliff.
 - **VRAM/RAM usage estimates are KV-aware.** `canRunModel()` includes the floor-context KV cost, and the ResourceOrchestrator's offload decisions account for the configured context's KV — expect slightly more conservative co-running decisions with large contexts.
@@ -55,6 +55,7 @@ Both fields are extracted for newly downloaded models; models downloaded earlier
 ## New Exports
 
 - `estimateKVBytesPerToken(modelInfo, cacheTypeK?, cacheTypeV?)` — per-token KV cost in bytes
+- `floorContextToGranularity(tokens)` + `CONTEXT_GRANULARITY_LADDER` — the progressive context rounding
 - `KV_CACHE_BYTES_PER_ELEMENT` — bytes-per-element map matching llama.cpp's block layouts
 - `KV_SIZING` — the sizing constants (floor context, compute buffer, margins)
 - `OptimalConfigHints` (type)
@@ -65,7 +66,7 @@ Both fields are extracted for newly downloaded models; models downloaded earlier
 2. **Full offload** if `weights × 1.1 + 4096-token KV ≤ (available VRAM − 1 GB compute buffer)` → all layers on GPU, and all leftover VRAM becomes context budget.
 3. **Partial offload** otherwise: reserve `max(floor KV, 1.5 GB)`, pack layers, bound context by both the GPU reserve share and available RAM.
 4. **CPU-only**: context from `available RAM − weights × 1.2 − 2 GB`.
-5. Clamp to `[4096, model context_length]`, round down to 1024.
+5. Clamp to `[4096, model context_length]`, floor to the progressive granularity ladder (`floorContextToGranularity`, exported).
 
 ## See Also
 
