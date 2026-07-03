@@ -487,3 +487,11 @@ For detailed historical information:
 **Files Modified:** `src/config/defaults.ts`, `src/types/{servers,models,images,index}.ts`, `src/managers/{LlamaServerManager,DiffusionServerManager,ModelManager,StorageManager,BinaryManager,ServerManager,ResourceOrchestrator,GenerationRegistry}.ts`, `src/process/{health-check,log-manager,port-utils}.ts`, `src/utils/debug-log.ts`, `src/index.ts`, example app (TestChat, LlamaServerConfig/Control, DiffusionServerControl, preload, ipc-handlers), docs (`genai-electron-docs/*`, `migration-0-5-to-0-6.md`, `docs/dev/UPDATING-BINARIES.md`)
 
 **Build Status:** ✅ 0 TypeScript errors / 486/486 tests passing (20 suites)
+
+**Released:** v0.6.1 published to npm (2026-07-03; 0.6.0 was tagged but never published — the audit patch superseded it). GitHub Release on tag `v0.6.1`.
+
+**Follow-ups (agreed, not yet started):**
+- **stable-diffusion.cpp bump** — pin `master-504-636d3cb` is ~242 releases behind (`master-746-2574f59` as of 2026-07-02). Needs its own plan: sd-cli flag surface may have changed; re-validate diffusion per platform. (Plan Open Question 1, resolved as separate follow-up.)
+- **Example-app toolchain chore** — Electron Forge devDependency chain carries npm-audit highs fixable only via major bumps (electron 35→43 + Forge majors). Dev-only, outside the published package and CI's root-only audit gate.
+- **ROCm/HIP binary variants** — upstream now ships `win-hip-radeon` + `ubuntu-rocm` prebuilts; blocked on Windows AMD GPU detection (DESIGN Phase 4).
+- **genai-lite**: `GenaiElectronImageAdapter` should treat `'cancelled'` as terminal — filed and committed in that repo (`docs/ISSUE-cancelled-generation-status.md`).
