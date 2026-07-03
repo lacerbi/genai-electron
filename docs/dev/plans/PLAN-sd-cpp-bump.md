@@ -139,9 +139,9 @@ Bump the pinned stable-diffusion.cpp binaries by 242 releases (2026-02-10 → 20
 4. [ ] On user go-ahead: release PR mechanics — `package.json` version 0.10.0, migration note if the guard was retired (behavior change), merge → tag `v0.10.0` → GitHub release; **user runs `npm publish`** (guarded by `prepublishOnly`)
 
 **Verification**:
-- [ ] CI green on the PR
-- [ ] PROGRESS entry includes live-smoke evidence and the 36952da fold-in
-- [ ] No version bump/tag until the user explicitly says release
+- [x] CI green on the PR (all 6 checks: Code Quality, Package Validation, Security Audit, Node 22 tests on macos/ubuntu/windows)
+- [x] PROGRESS entry includes live-smoke evidence and the 36952da fold-in
+- [x] No version bump/tag until the user explicitly says release (respected — step 4 awaits go-ahead)
 
 ## Documentation (consolidated)
 - `genai-electron-docs/troubleshooting.md` — CUDA offload section rewrite/refresh + tag references (Phase 4)
