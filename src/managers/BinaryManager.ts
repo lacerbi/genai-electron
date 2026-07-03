@@ -11,6 +11,7 @@ import { Downloader } from '../download/Downloader.js';
 import { PATHS, getBinaryPath } from '../config/paths.js';
 import { type BinaryVariantConfig, type BinaryDependency } from '../config/defaults.js';
 import { BinaryError } from '../errors/index.js';
+import type { BinaryProgressEvent } from '../types/index.js';
 import {
   fileExists,
   ensureDirectory,
@@ -62,6 +63,12 @@ export interface BinaryManagerConfig {
   variants: readonly BinaryVariantConfig[];
   /** Optional logger function */
   log?: (message: string, level?: 'info' | 'warn' | 'error') => void;
+  /**
+   * Optional structured progress callback ('binary-progress' event source).
+   * Download progress is throttled to whole-percent changes; phase
+   * transitions (extracting/verifying/testing) emit one event each.
+   */
+  onProgress?: (event: BinaryProgressEvent) => void;
   /**
    * Optional path to a test model for real functionality testing.
    * If provided, tests will run actual inference to verify CUDA/GPU functionality.
@@ -361,14 +368,28 @@ export class BinaryManager {
 
       try {
         // Download dependency
+        let lastDepPercent = -1;
         await downloader.download({
           url: dep.url,
           destination: depArchivePath,
           onProgress: (downloaded, total) => {
             const percent = ((downloaded / total) * 100).toFixed(1);
             this.log(`Downloading ${depName}: ${percent}%`, 'info');
+            const wholePercent = Math.floor((downloaded / total) * 100);
+            if (wholePercent !== lastDepPercent) {
+              lastDepPercent = wholePercent;
+              this.progress({
+                phase: 'downloading',
+                file: depName,
+                downloaded,
+                total,
+                percent: wholePercent,
+              });
+            }
           },
         });
+
+        this.progress({ phase: 'verifying', file: depName });
 
         // Verify checksum
         const actualChecksum = await calculateChecksum(depArchivePath);
@@ -383,6 +404,7 @@ export class BinaryManager {
 
         // Extract dependency to same directory as main binary
         // This ensures DLLs are in the same directory as the executable
+        this.progress({ phase: 'extracting', file: depName });
         await extractArchive(depArchivePath, extractDir);
 
         // Cleanup dependency ZIP
@@ -423,14 +445,28 @@ export class BinaryManager {
       }
 
       // Download main binary archive
+      let lastPercent = -1;
       await downloader.download({
         url: variant.url,
         destination: archivePath,
         onProgress: (downloaded, total) => {
           const percent = ((downloaded / total) * 100).toFixed(1);
           this.log(`Downloading ${variant.type} binary: ${percent}%`, 'info');
+          const wholePercent = Math.floor((downloaded / total) * 100);
+          if (wholePercent !== lastPercent) {
+            lastPercent = wholePercent;
+            this.progress({
+              phase: 'downloading',
+              file: 'binary',
+              downloaded,
+              total,
+              percent: wholePercent,
+            });
+          }
         },
       });
+
+      this.progress({ phase: 'verifying', file: 'binary' });
 
       // Verify checksum
       const actualChecksum = await calculateChecksum(archivePath);
@@ -449,9 +485,11 @@ export class BinaryManager {
           : ['sd-cli.exe', 'sd-cli', 'sd.exe', 'sd'];
 
       // Extract main binary archive to same directory as dependencies
+      this.progress({ phase: 'extracting', file: 'binary' });
       const extractedBinaryPath = await extractBinary(archivePath, extractDir, binaryNamesToSearch);
 
       // Test if binary works (has required drivers, etc.)
+      this.progress({ phase: 'testing', file: 'binary' });
       const works = await this.testBinary(extractedBinaryPath);
 
       if (works) {
@@ -901,5 +939,13 @@ export class BinaryManager {
     if (this.config.log) {
       this.config.log(message, level);
     }
+  }
+
+  /**
+   * Emit a structured provisioning progress event (no-op without a callback)
+   * @private
+   */
+  private progress(event: BinaryProgressEvent): void {
+    this.config.onProgress?.(event);
   }
 }

@@ -483,6 +483,101 @@ describe('BinaryManager', () => {
     });
   });
 
+  describe('binary-progress events', () => {
+    it('throttles download progress to whole-percent changes and emits phase transitions', async () => {
+      const progressEvents: Array<Record<string, unknown>> = [];
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cpuVariant],
+        log: mockLogger,
+        onProgress: (e) => progressEvents.push(e as unknown as Record<string, unknown>),
+      });
+
+      // Simulate chunky download: multiple callbacks inside the same percent
+      mockDownload.mockImplementation(async (opts: any) => {
+        const total = 1000;
+        for (const downloaded of [1, 2, 3, 251, 252, 503, 1000]) {
+          opts.onProgress?.(downloaded, total);
+        }
+      });
+      mockDetectGPU.mockResolvedValue({ available: false });
+
+      await manager.ensureBinary();
+
+      const downloading = progressEvents.filter((e) => e.phase === 'downloading');
+      // 1,2,3 -> 0%; 251,252 -> 25%; 503 -> 50%; 1000 -> 100% => 4 events
+      expect(downloading.map((e) => e.percent)).toEqual([0, 25, 50, 100]);
+      expect(downloading[0]).toMatchObject({ file: 'binary', downloaded: 1, total: 1000 });
+
+      const phases = progressEvents.map((e) => `${e.phase}:${e.file}`);
+      expect(phases).toContain('verifying:binary');
+      expect(phases).toContain('extracting:binary');
+      expect(phases).toContain('testing:binary');
+      // Order: all downloading events precede verifying -> extracting -> testing
+      expect(phases.indexOf('verifying:binary')).toBeGreaterThan(
+        phases.lastIndexOf('downloading:binary')
+      );
+      expect(phases.indexOf('extracting:binary')).toBeGreaterThan(
+        phases.indexOf('verifying:binary')
+      );
+      expect(phases.indexOf('testing:binary')).toBeGreaterThan(phases.indexOf('extracting:binary'));
+    });
+
+    it('labels dependency downloads with the dependency description', async () => {
+      const progressEvents: Array<Record<string, unknown>> = [];
+      const depVariant: BinaryVariantConfig = {
+        type: 'cuda',
+        url: 'https://example.com/llama-cuda.zip',
+        checksum: 'abc123cuda',
+        dependencies: [
+          {
+            url: 'https://example.com/cudart.zip',
+            checksum: 'depchecksum',
+            description: 'CUDA runtime',
+          },
+        ],
+      };
+      mockCalculateChecksum.mockImplementation(async (path: string) => {
+        if (path.includes('.dep0')) return 'depchecksum';
+        return 'abc123cuda';
+      });
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [depVariant],
+        log: mockLogger,
+        onProgress: (e) => progressEvents.push(e as unknown as Record<string, unknown>),
+      });
+
+      mockDownload.mockImplementation(async (opts: any) => {
+        opts.onProgress?.(500, 1000);
+        opts.onProgress?.(1000, 1000);
+      });
+
+      await manager.ensureBinary();
+
+      const depEvents = progressEvents.filter((e) => e.file === 'CUDA runtime');
+      expect(depEvents.map((e) => `${e.phase}:${e.percent ?? ''}`)).toEqual([
+        'downloading:50',
+        'downloading:100',
+        'verifying:',
+        'extracting:',
+      ]);
+    });
+
+    it('emits nothing without an onProgress callback (no throw)', async () => {
+      mockDownload.mockImplementation(async (opts: any) => {
+        opts.onProgress?.(1000, 1000);
+      });
+      mockDetectGPU.mockResolvedValue({ available: false });
+
+      await expect(binaryManager.ensureBinary()).resolves.toBeDefined();
+    });
+  });
+
   describe('downloadAndTestVariant()', () => {
     it('should cleanup on download failure', async () => {
       // Make download fail for ALL variants

@@ -479,6 +479,20 @@ llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 
 });
 ```
 
+### 'binary-progress'
+
+Structured companion to `'binary-log'` for progress UIs — no log-string parsing needed. Download events are throttled to whole-percent changes at the source; each phase transition (`downloading` → `verifying` → `extracting` → `testing`) emits one event. Dependency downloads (e.g. the CUDA runtime) carry their description in `file`; the main binary uses `'binary'`.
+
+```typescript
+llamaServer.on('binary-progress', (event: BinaryProgressEvent) => {
+  if (event.phase === 'downloading') {
+    progressBar.update(event.percent!, { label: event.file });
+  } else {
+    statusLine.set(`${event.phase} ${event.file}...`);
+  }
+});
+```
+
 **Example**:
 ```typescript
 llamaServer.on('started', () => console.log('✅ Server started'));
