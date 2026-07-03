@@ -1,13 +1,13 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.8.0 — MoE-aware auto-configuration (2026-07-03)
+> **Current Status**: v0.9.0 — structured binary-provisioning progress event (2026-07-03)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 536/536 passing (21 suites)
+- **Tests:** ✅ 539/539 passing (21 suites)
 - **Branch:** `main`
 - **Last Updated:** 2026-07-03 (v0.6.1: security patch — npm audit clean, tar minimum ^7.5.19)
 
@@ -515,10 +515,12 @@ For detailed historical information:
 
 ---
 
-## Unreleased (on main, ships with the next release)
+## v0.9.0: Structured Binary-Provisioning Progress (2026-07-03)
 
-- **`'binary-progress'` event** (2026-07-03): structured companion to `'binary-log'` for binary-provisioning UIs — `BinaryProgressEvent { phase: downloading|extracting|verifying|testing, file, downloaded?, total?, percent? }`, throttled to whole-percent changes at the source, one event per phase transition, emitted by both server managers. Resolves `docs/dev/issues/ISSUE-binary-progress-event.md` (palimpsest drops its log-regex + chunk throttle). `'binary-log'` unchanged.
-- Orchestrator MoE-estimate test coverage (review finding 5b, PR #32).
+- **`'binary-progress'` event**: structured companion to `'binary-log'` for binary-provisioning UIs — `BinaryProgressEvent { phase: downloading|extracting|verifying|testing, file, downloaded?, total?, percent? }`, throttled to whole-percent changes at the source, one event per phase transition, emitted by both server managers. Resolves `docs/dev/issues/ISSUE-binary-progress-event.md` (palimpsest drops its log-regex + chunk throttle). `'binary-log'` unchanged.
+- Orchestrator MoE-estimate test coverage (v0.8.0 review finding 5b, PR #32).
+
+**Build Status:** ✅ 0 TypeScript errors / 539/539 tests passing (21 suites)
 
 ---
 
