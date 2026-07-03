@@ -7,7 +7,7 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 532/532 passing (21 suites)
+- **Tests:** ✅ 536/536 passing (21 suites)
 - **Branch:** `main`
 - **Last Updated:** 2026-07-03 (v0.6.1: security patch — npm audit clean, tar minimum ^7.5.19)
 
