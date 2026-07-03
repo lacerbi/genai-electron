@@ -272,7 +272,7 @@ This is documented in the electron-control-panel example for reference.
 
 **IMPORTANT**: When implementing features that integrate with genai-lite (LLMService, ImageService), **read the relevant documentation first** to ensure correct API usage.
 
-**Documentation Location**: `.ath_materials/genai-lite-docs/` (refresh with the published v0.9.0 reference docs)
+**Documentation Location**: `.ath_materials/genai-lite-docs/` (v0.9.0 reference docs)
 
 **Key Documentation Files**:
 - **`index.md`** - Overview, installation, quick starts (LLM and image generation)
