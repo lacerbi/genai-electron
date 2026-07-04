@@ -51,6 +51,8 @@ contextBridge.exposeInMainWorld('api', {
     generateImage: (config: unknown, port?: number) =>
       ipcRenderer.invoke('diffusion:generate', config, port),
     cancel: () => ipcRenderer.invoke('diffusion:cancel'),
+    calibrate: (config: unknown) => ipcRenderer.invoke('diffusion:calibrate', config),
+    calibrateCancel: () => ipcRenderer.invoke('diffusion:calibrateCancel'),
   },
 
   // Resource Orchestrator APIs (Phase 2)
@@ -85,6 +87,7 @@ contextBridge.exposeInMainWorld('api', {
       'diffusion:crashed',
       'diffusion:binary-log',
       'diffusion:progress',
+      'diffusion:calibration-progress',
     ];
 
     if (validChannels.includes(channel)) {
@@ -140,6 +143,8 @@ export type WindowAPI = {
     logs: (limit: number) => Promise<unknown[]>;
     clearLogs: () => Promise<void>;
     generateImage: (config: unknown, port?: number) => Promise<unknown>;
+    calibrate: (config: unknown) => Promise<unknown>;
+    calibrateCancel: () => Promise<{ cancelling: boolean }>;
   };
   resources: {
     wouldNeedOffload: () => Promise<boolean>;

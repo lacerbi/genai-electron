@@ -10,8 +10,8 @@ Source: `ISSUE-diffusion-offload-calibration.md` (repo root) + design discussion
 - [x] Phase 2: `calibrate()` implementation
 - [x] Phase 3: Tests (20 new; 563/563 total, 22 suites)
 - [x] Phase 4: Documentation + housekeeping
-- [~] Phase 5: Example-app wiring
-- [ ] Phase 6: Live smoke
+- [x] Phase 5: Example-app wiring
+- [~] Phase 6: Live smoke
 - [ ] Final `/doublecheck`
 
 ## Summary
@@ -415,13 +415,19 @@ render a progress bar + result table; display `recommended` and let the user app
 form's Auto/On/Off overrides.
 
 **Tracking (Phase 5):**
-- [ ] IPC handler + preload wiring (`diffusion:calibrate`, cancel path)
-- [ ] `'calibration-progress'` forwarded over IPC
-- [ ] Calibrate button + progress bar + result table in DiffusionServerControl
-- [ ] Apply-recommended → Auto/On/Off override controls
+- [x] IPC handler + preload wiring (`diffusion:calibrate` + `diffusion:calibrateCancel`;
+  main holds the AbortController and converts CALIBRATION_ABORTED into `{aborted, runs}`)
+- [x] `'calibration-progress'` forwarded over IPC (genai-api.ts, mirrors binary-log pattern)
+- [x] Calibrate button + progress bar + result table in DiffusionServerControl (card shown
+  while the server is stopped; benchmarks the Generate form's current size/steps; Start
+  disabled during sweeps)
+- [x] Apply-recommended → flags stored (label stripped) and spread into the next start()
+  (with a visible "on next start" hint + Clear; the app had no per-flag Auto/On/Off controls,
+  so apply-to-start-config is the equivalent)
 
 **Verification:**
-- [ ] Example app builds; manual click-through.
+- [x] Example app builds (tsc + vite, 0 errors); manual click-through folded into Phase 6
+  live smoke.
 
 ### Phase 6: Live smoke (this machine)
 

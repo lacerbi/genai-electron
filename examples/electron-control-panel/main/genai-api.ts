@@ -95,6 +95,14 @@ export function setupServerEventForwarding(): void {
       }
     }
   );
+
+  // Offload-calibration sweep progress (same payload as calibrate()'s onProgress)
+  diffusionServer.on('calibration-progress', (data: unknown) => {
+    const mainWindow = BrowserWindow.getAllWindows()[0];
+    if (mainWindow) {
+      mainWindow.webContents.send('diffusion:calibration-progress', data);
+    }
+  });
 }
 
 /**
