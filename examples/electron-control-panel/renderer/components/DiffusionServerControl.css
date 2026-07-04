@@ -314,3 +314,39 @@
   background: rgba(33, 150, 243, 0.3);
   border-color: #2196f3;
 }
+
+/* Offload calibration results */
+.calibration-results {
+  margin-top: 16px;
+}
+
+.calibration-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin-bottom: 12px;
+  color: #fff;
+}
+
+.calibration-table th,
+.calibration-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid #3a3a3c;
+}
+
+.calibration-table th {
+  color: #8e8e93;
+  font-weight: 500;
+}
+
+.calibration-status-ok {
+  color: #2ecc71;
+  font-weight: 600;
+}
+
+.calibration-status-oom,
+.calibration-status-error {
+  color: #e74c3c;
+  font-weight: 600;
+}

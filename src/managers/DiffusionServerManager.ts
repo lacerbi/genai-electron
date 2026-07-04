@@ -24,15 +24,29 @@ import {
   DIFFUSION_VRAM_THRESHOLDS,
   DIFFUSION_COMPONENT_FLAGS,
   DIFFUSION_COMPONENT_ORDER,
+  DIFFUSION_CALIBRATION_DEFAULTS,
 } from '../config/defaults.js';
 import { deleteFile } from '../utils/file-utils.js';
+import { debugLog } from '../utils/debug-log.js';
 import { findFreePort } from '../process/port-utils.js';
-import { ServerError, ModelNotFoundError, InsufficientResourcesError } from '../errors/index.js';
+import {
+  GenaiElectronError,
+  ServerError,
+  ModelNotFoundError,
+  InsufficientResourcesError,
+} from '../errors/index.js';
 import type {
+  CalibrationRun,
+  CalibrationSize,
+  DiffusionCalibrationConfig,
+  DiffusionCalibrationProgress,
+  DiffusionCalibrationReport,
+  DiffusionOffloadCombo,
   DiffusionServerConfig,
   DiffusionServerInfo,
   ImageGenerationConfig,
   ImageGenerationResult,
+  ImageSampler,
   ModelInfo,
   ServerInfo,
 } from '../types/index.js';
@@ -105,6 +119,18 @@ export class DiffusionServerManager extends ServerManager {
    */
   private activeGeneration?: { id: string; cancelled: boolean };
   private currentModelInfo?: ModelInfo;
+  /**
+   * Flags resolved by the most recent computeDiffusionOptimizations() call.
+   * Read by calibrate() after each run to report what auto-detection picked.
+   */
+  private lastResolvedOptimizations?: {
+    clipOnCpu: boolean;
+    vaeOnCpu: boolean;
+    offloadToCpu: boolean;
+    diffusionFlashAttention: boolean;
+  };
+  /** True while an offload-calibration sweep is running (server stays 'stopped') */
+  private calibrating = false;
 
   // Time estimates for progress calculation (self-calibrating)
   private modelLoadTime = 2000; // Fixed cost in ms
@@ -180,6 +206,12 @@ export class DiffusionServerManager extends ServerManager {
     if (this._status === 'running') {
       throw new ServerError('Server is already running', {
         suggestion: 'Stop the server first with stop()',
+      });
+    }
+
+    if (this.calibrating) {
+      throw new ServerError('Cannot start server while offload calibration is in progress', {
+        suggestion: 'Wait for calibrate() to finish, or abort it via its AbortSignal',
       });
     }
 
@@ -378,6 +410,556 @@ export class DiffusionServerManager extends ServerManager {
     }
 
     await this.logManager?.write(`Generation ${id} cancelled`, 'info');
+  }
+
+  /**
+   * Benchmark CPU-offload flag combinations on this machine (offload calibration)
+   *
+   * Runs a sweep of real generations across the given sizes × combos and returns
+   * a report with per-run timings, per-stage splits, OOM/error classification,
+   * and the fastest working combo per size. The optimum depends on the whole
+   * system (driver behaviour, PCIe/RAM bandwidth, CPU speed, OS) and the flags
+   * interact — measuring on the target machine is the only reliable way to pick.
+   *
+   * Contract:
+   * - The server must be STOPPED and is left stopped afterwards; start() throws
+   *   while a calibration is in flight.
+   * - When constructed with a llamaServer, a running LLM is offloaded once for
+   *   the whole sweep and restored afterwards. Otherwise stop the LLM yourself
+   *   before calibrating.
+   * - Combos that fail are recorded ('oom'/'error') and never abort the sweep.
+   * - Progress is delivered via config.onProgress and 'calibration-progress'
+   *   events (same payload); first-run binary provisioning happens during the
+   *   'preparing' phase and reports via 'binary-progress'.
+   * - Aborting via config.signal rejects with a ServerError whose
+   *   details.code === 'CALIBRATION_ABORTED' and details.runs = partial runs.
+   *
+   * @param config - Calibration configuration (modelId required)
+   * @returns Calibration report — the caller persists/applies the recommendation
+   * @throws {ServerError} If the server is running, a calibration is already in
+   *   flight, sizes are invalid, or the sweep is aborted
+   * @throws {ModelNotFoundError} If the model doesn't exist or is not a diffusion model
+   * @throws {InsufficientResourcesError} If the system cannot run the model
+   *
+   * @example
+   * ```typescript
+   * const report = await diffusionServer.calibrate({
+   *   modelId: 'flux-2-klein',
+   *   sizes: [{ width: 768, height: 768 }],
+   *   steps: 4, // your app's real step count
+   *   onProgress: (p) => console.log(`${p.phase} ${Math.round(p.overallPercent)}%`),
+   * });
+   * const best = report.recommended['768x768'];
+   * // Persist `best` and pass its flags to future start() calls
+   * ```
+   */
+  async calibrate(config: DiffusionCalibrationConfig): Promise<DiffusionCalibrationReport> {
+    if (this._status !== 'stopped') {
+      throw new ServerError('Cannot calibrate while the server is running', {
+        suggestion: 'Stop the server with stop() before calibrating',
+      });
+    }
+    if (this.calibrating) {
+      throw new ServerError('Calibration is already in progress', {
+        suggestion: 'Wait for the current calibrate() call to finish',
+      });
+    }
+
+    const defaults = DIFFUSION_CALIBRATION_DEFAULTS;
+    const sizes = config.sizes && config.sizes.length > 0 ? config.sizes : [...defaults.sizes];
+    for (const size of sizes) {
+      if (
+        !Number.isInteger(size.width) ||
+        !Number.isInteger(size.height) ||
+        size.width <= 0 ||
+        size.height <= 0 ||
+        size.width % 64 !== 0 ||
+        size.height % 64 !== 0
+      ) {
+        throw new ServerError(
+          `Invalid calibration size ${size.width}x${size.height}: dimensions must be positive multiples of 64`,
+          { suggestion: 'Use sd.cpp-compatible dimensions, e.g. 512x512, 768x768, 512x1024' }
+        );
+      }
+    }
+    const samples = Math.max(1, Math.floor(config.samples ?? defaults.samples));
+    const steps = config.steps ?? defaults.steps;
+    const seed = config.seed ?? defaults.seed;
+    const sampler = config.sampler ?? defaults.sampler;
+    const prompt = config.prompt ?? defaults.prompt;
+
+    const runs: CalibrationRun[] = [];
+    if (config.signal?.aborted) {
+      throw this.calibrationAbortError(runs);
+    }
+
+    this.calibrating = true;
+
+    // Instance state executeImageGeneration depends on — restored in finally
+    const savedConfig = this._config;
+    const savedModelInfo = this.currentModelInfo;
+    const savedBinaryPath = this.binaryPath;
+
+    const abortListener = (): void => {
+      this.currentGeneration?.cancel();
+    };
+    config.signal?.addEventListener('abort', abortListener);
+
+    // Hoisted for the finally block ('restoring-llm'/'done' emits)
+    let emitFn: ((p: DiffusionCalibrationProgress) => void) | undefined;
+    let comboCountForProgress = 0;
+    let lastOverallPercent = 0;
+    let succeeded = false;
+
+    try {
+      // --- Setup (phase 'preparing') ---
+      const modelInfo = await this.modelManager.getModelInfo(config.modelId);
+      if (modelInfo.type !== 'diffusion') {
+        throw new ModelNotFoundError(
+          `Model ${config.modelId} is not a diffusion model (type: ${modelInfo.type})`
+        );
+      }
+
+      // Combo list (SD3.5-Large filter applied up-front so progress counts are accurate).
+      // Per-sweep copies: report.runs[].combo / recommended hand these objects to the
+      // caller, so never share references with DIFFUSION_CALIBRATION_DEFAULTS.combos.
+      const requestedCombos = (
+        config.combos && config.combos.length > 0 ? config.combos : defaults.combos
+      ).map((combo) => ({ ...combo }));
+      const skippedCombos: { combo: DiffusionOffloadCombo; reason: string }[] = [];
+      let combos = requestedCombos;
+      if (
+        defaults.sd35LargePattern.test(modelInfo.id) ||
+        defaults.sd35LargePattern.test(modelInfo.name)
+      ) {
+        combos = requestedCombos.filter((combo) => {
+          if (combo.clipOnCpu === true) {
+            skippedCombos.push({
+              combo,
+              reason:
+                'SD3.5-Large produces garbled output with --clip-on-cpu (leejet/stable-diffusion.cpp#1578)',
+            });
+            return false;
+          }
+          return true;
+        });
+      }
+      if (combos.length === 0) {
+        throw new ServerError('No offload combos left to benchmark after SD3.5-Large filtering', {
+          skippedCombos,
+          suggestion: 'Provide combos without clipOnCpu: true for this model',
+        });
+      }
+      comboCountForProgress = combos.length;
+
+      // Progress plumbing: units = every generation in the sweep (warmups included).
+      // Units skipped by failure handling are counted as completed so the bar
+      // still reaches 100 by folding (no stall-then-jump).
+      const totalUnits = combos.length * (1 + samples * sizes.length);
+      let completedUnits = 0;
+      const emit = (p: DiffusionCalibrationProgress): void => {
+        try {
+          config.onProgress?.(p);
+        } catch (error) {
+          debugLog('[Calibrate] onProgress callback threw:', error);
+        }
+        try {
+          this.emit('calibration-progress', p);
+        } catch (error) {
+          debugLog('[Calibrate] calibration-progress listener threw:', error);
+        }
+      };
+      emitFn = emit;
+      const overallPercent = (generationFraction = 0): number => {
+        const pct = Math.min(100, ((completedUnits + generationFraction) / totalUnits) * 100);
+        // Clamp monotonic: per-generation estimates can dip when their
+        // denominator re-calibrates mid-generation
+        lastOverallPercent = Math.max(lastOverallPercent, pct);
+        return lastOverallPercent;
+      };
+
+      emit({
+        phase: 'preparing',
+        comboIndex: 0,
+        comboCount: combos.length,
+        sizeIndex: 0,
+        sizeCount: sizes.length,
+        overallPercent: 0,
+      });
+
+      const canRun = await this.systemInfo.canRunModel(modelInfo, { checkTotalMemory: true });
+      if (!canRun.possible) {
+        const memoryInfo = this.systemInfo.getMemoryInfo();
+        throw new InsufficientResourcesError(
+          `System cannot run model: ${canRun.reason || 'Insufficient resources'}`,
+          {
+            required: `Model size: ${Math.round(modelInfo.size / 1024 / 1024 / 1024)}GB`,
+            available: `Total RAM: ${Math.round(memoryInfo.total / 1024 / 1024 / 1024)}GB`,
+            suggestion: canRun.suggestion || canRun.reason || 'Try a smaller model',
+          }
+        );
+      }
+
+      if (!this.logManager) {
+        await this.initializeLogManager('diffusion-server.log', 'Offload calibration starting');
+      }
+      // Fire-and-forget (matching executeImageGeneration): a log-write failure
+      // must never abort a sweep this expensive
+      void this.logManager
+        ?.write(
+          `Calibration: model=${config.modelId}, sizes=${sizes
+            .map((s) => `${s.width}x${s.height}`)
+            .join(',')}, combos=${combos.length}${
+            skippedCombos.length > 0 ? ` (${skippedCombos.length} skipped: SD3.5-Large)` : ''
+          }, steps=${steps}, samples=${samples}`,
+          'info'
+        )
+        .catch(() => void 0);
+
+      // Install working state. May download the binary on first run
+      // (long; reports via 'binary-progress'/'binary-log' events).
+      this.currentModelInfo = modelInfo;
+      this.binaryPath = await this.ensureBinary(modelInfo);
+      if (config.signal?.aborted) {
+        throw this.calibrationAbortError(runs);
+      }
+      const syntheticConfig: DiffusionServerConfig = { modelId: config.modelId };
+      if (config.threads !== undefined) {
+        syntheticConfig.threads = config.threads;
+      }
+      if (config.batchSize !== undefined) {
+        syntheticConfig.batchSize = config.batchSize;
+      }
+      this._config = syntheticConfig as unknown as typeof this._config;
+
+      // Offload a running LLM once for the whole sweep (measurement hygiene).
+      // waitForReload() first: a background reload from a prior orchestrated
+      // generation would otherwise read as not-running and come back mid-sweep.
+      await this.orchestrator?.waitForReload();
+      await this.orchestrator?.offloadLLM();
+
+      // --- Sweep (combo-outer, size-inner; every generation does identical work) ---
+      for (let comboIndex = 0; comboIndex < combos.length; comboIndex++) {
+        const combo = combos[comboIndex]!;
+        const baseProgress = {
+          comboIndex,
+          comboCount: combos.length,
+          combo,
+          sizeCount: sizes.length,
+        };
+
+        // Warmup at the first size (discarded; stabilizes disk cache / first-spawn overhead)
+        let warmupFailure: { status: 'oom' | 'error'; message: string } | undefined;
+        if (config.signal?.aborted) {
+          throw this.calibrationAbortError(runs);
+        }
+        emit({
+          phase: 'warmup',
+          ...baseProgress,
+          sizeIndex: 0,
+          size: sizes[0]!,
+          overallPercent: overallPercent(),
+        });
+        try {
+          await this.runCalibrationGeneration({
+            prompt,
+            size: sizes[0]!,
+            steps,
+            cfgScale: config.cfgScale,
+            seed,
+            sampler,
+            combo,
+            onGenerationProgress: (pct) =>
+              emit({
+                phase: 'warmup',
+                ...baseProgress,
+                sizeIndex: 0,
+                size: sizes[0]!,
+                generationPercent: pct,
+                overallPercent: overallPercent(pct / 100),
+              }),
+          });
+        } catch (error) {
+          if (config.signal?.aborted) {
+            throw this.calibrationAbortError(runs);
+          }
+          warmupFailure = this.classifyCalibrationFailure(error);
+        }
+        completedUnits++;
+
+        for (let sizeIndex = 0; sizeIndex < sizes.length; sizeIndex++) {
+          const size = sizes[sizeIndex]!;
+          const samplesMs: number[] = [];
+          const snapshots: { loadMs?: number; diffusionMs?: number; decodeMs?: number }[] = [];
+          let resolved: CalibrationRun['resolved'];
+          let failure: { status: 'oom' | 'error'; message: string } | undefined;
+
+          if (sizeIndex === 0 && warmupFailure) {
+            // Warmup already failed at this size — skip its timed samples.
+            // Later sizes are still attempted (failure at one size doesn't
+            // imply failure at another).
+            failure = warmupFailure;
+            completedUnits += samples;
+          } else {
+            for (let sample = 1; sample <= samples; sample++) {
+              if (config.signal?.aborted) {
+                throw this.calibrationAbortError(runs);
+              }
+              emit({
+                phase: 'sampling',
+                ...baseProgress,
+                sizeIndex,
+                size,
+                sample,
+                sampleCount: samples,
+                overallPercent: overallPercent(),
+              });
+              try {
+                const result = await this.runCalibrationGeneration({
+                  prompt,
+                  size,
+                  steps,
+                  cfgScale: config.cfgScale,
+                  seed,
+                  sampler,
+                  combo,
+                  onGenerationProgress: (pct) =>
+                    emit({
+                      phase: 'sampling',
+                      ...baseProgress,
+                      sizeIndex,
+                      size,
+                      sample,
+                      sampleCount: samples,
+                      generationPercent: pct,
+                      overallPercent: overallPercent(pct / 100),
+                    }),
+                });
+                samplesMs.push(result.timeTaken);
+                // Snapshot per sample: the stage timestamps are instance
+                // fields reset by the next generation
+                snapshots.push(this.snapshotStageMs());
+                resolved = this.lastResolvedOptimizations
+                  ? { ...this.lastResolvedOptimizations }
+                  : undefined;
+                completedUnits++;
+              } catch (error) {
+                if (config.signal?.aborted) {
+                  throw this.calibrationAbortError(runs);
+                }
+                failure = this.classifyCalibrationFailure(error);
+                // Failed sample + skipped remainder count as completed units
+                completedUnits += samples - sample + 1;
+                break;
+              }
+            }
+          }
+
+          // Bookkeeping invariant: exactly one CalibrationRun per (combo, size)
+          const run: CalibrationRun = { size, combo, status: failure ? failure.status : 'ok' };
+          if (resolved) {
+            run.resolved = resolved;
+          }
+          if (samplesMs.length > 0) {
+            run.samplesMs = samplesMs;
+          }
+          if (failure) {
+            run.error = failure.message;
+          } else {
+            const median = medianOf(samplesMs);
+            run.timeTakenMs = median;
+            // Stage split of the sample whose total is closest to the median
+            let bestIdx = 0;
+            for (let i = 1; i < samplesMs.length; i++) {
+              if (Math.abs(samplesMs[i]! - median) < Math.abs(samplesMs[bestIdx]! - median)) {
+                bestIdx = i;
+              }
+            }
+            const stage = snapshots[bestIdx];
+            if (
+              stage &&
+              (stage.loadMs !== undefined ||
+                stage.diffusionMs !== undefined ||
+                stage.decodeMs !== undefined)
+            ) {
+              run.stageMs = stage;
+            }
+          }
+          runs.push(run);
+          void this.logManager
+            ?.write(
+              `Calibration run: ${combo.label ?? JSON.stringify(combo)} @ ${size.width}x${size.height} → ${run.status}${
+                run.timeTakenMs !== undefined ? ` (${Math.round(run.timeTakenMs)} ms)` : ''
+              }${run.error ? ` — ${run.error.split('\n')[0]}` : ''}`,
+              run.status === 'ok' ? 'info' : 'warn'
+            )
+            .catch(() => void 0);
+        }
+      }
+
+      // --- Report ---
+      const recommended = pickRecommended(runs, defaults.tieTolerancePct);
+
+      const machine: DiffusionCalibrationReport['machine'] = {};
+      try {
+        const gpu = await this.systemInfo.getGPUInfo();
+        machine.gpuType = gpu.type;
+        machine.gpuName = gpu.name;
+        machine.vramBytes = gpu.vram;
+        machine.vramAvailableBytes = gpu.vramAvailable;
+      } catch {
+        // GPU info unavailable — leave the machine fingerprint empty
+      }
+
+      const report: DiffusionCalibrationReport = {
+        machine,
+        modelId: config.modelId,
+        steps,
+        sampler,
+        samples,
+        runs,
+        recommended,
+      };
+      if (skippedCombos.length > 0) {
+        report.skippedCombos = skippedCombos;
+      }
+
+      succeeded = true;
+      return report;
+    } finally {
+      config.signal?.removeEventListener('abort', abortListener);
+
+      // Restore instance state (server remains stopped)
+      this._config = savedConfig;
+      this.currentModelInfo = savedModelInfo;
+      this.binaryPath = savedBinaryPath;
+
+      // Release the manager before the awaited LLM reload: reloadLLM() is
+      // contractually never-throwing, but if that ever regressed a throw here
+      // must not leave the manager permanently locked in calibrating state
+      this.calibrating = false;
+
+      if (this.orchestrator) {
+        emitFn?.({
+          phase: 'restoring-llm',
+          comboIndex: Math.max(0, comboCountForProgress - 1),
+          comboCount: comboCountForProgress,
+          sizeIndex: Math.max(0, sizes.length - 1),
+          sizeCount: sizes.length,
+          overallPercent: succeeded ? 100 : lastOverallPercent,
+        });
+        await this.orchestrator.reloadLLM();
+      }
+
+      if (succeeded) {
+        emitFn?.({
+          phase: 'done',
+          comboIndex: Math.max(0, comboCountForProgress - 1),
+          comboCount: comboCountForProgress,
+          sizeIndex: Math.max(0, sizes.length - 1),
+          sizeCount: sizes.length,
+          overallPercent: 100,
+        });
+      }
+    }
+  }
+
+  /**
+   * Check if an offload-calibration sweep is currently running
+   *
+   * The server status stays 'stopped' during calibration; this is the
+   * dedicated signal for calibration exclusivity.
+   *
+   * @returns True while calibrate() is in flight
+   */
+  isCalibrating(): boolean {
+    return this.calibrating;
+  }
+
+  /**
+   * Build the standard calibration-abort error
+   * (top-level code is 'SERVER_ERROR'; discriminate via details.code)
+   * @private
+   */
+  private calibrationAbortError(runs: CalibrationRun[]): ServerError {
+    return new ServerError('Calibration aborted', {
+      code: 'CALIBRATION_ABORTED',
+      runs: [...runs],
+      suggestion: 'Partial results are available in error.details.runs',
+    });
+  }
+
+  /**
+   * Run one calibration generation with per-combo flag overrides
+   * @private
+   */
+  private async runCalibrationGeneration(params: {
+    prompt: string;
+    size: CalibrationSize;
+    steps: number;
+    cfgScale?: number;
+    seed: number;
+    sampler: ImageSampler;
+    combo: DiffusionOffloadCombo;
+    onGenerationProgress: (percentage: number) => void;
+  }): Promise<ImageGenerationResult> {
+    const genConfig: ImageGenerationConfig = {
+      prompt: params.prompt,
+      width: params.size.width,
+      height: params.size.height,
+      steps: params.steps,
+      seed: params.seed,
+      sampler: params.sampler,
+      onProgress: (_currentStep, _totalSteps, _stage, percentage) => {
+        if (percentage !== undefined) {
+          params.onGenerationProgress(percentage);
+        }
+      },
+    };
+    if (params.cfgScale !== undefined) {
+      genConfig.cfgScale = params.cfgScale;
+    }
+    return this.executeImageGeneration(genConfig, params.combo);
+  }
+
+  /**
+   * Snapshot per-stage durations from the last generation's timestamps
+   * @private
+   */
+  private snapshotStageMs(): { loadMs?: number; diffusionMs?: number; decodeMs?: number } {
+    const stage: { loadMs?: number; diffusionMs?: number; decodeMs?: number } = {};
+    if (this.loadStartTime && this.loadEndTime) {
+      stage.loadMs = this.loadEndTime - this.loadStartTime;
+    }
+    if (this.diffusionStartTime && this.diffusionEndTime) {
+      stage.diffusionMs = this.diffusionEndTime - this.diffusionStartTime;
+    }
+    if (this.vaeStartTime && this.vaeEndTime) {
+      stage.decodeMs = this.vaeEndTime - this.vaeStartTime;
+    }
+    return stage;
+  }
+
+  /**
+   * Classify a failed calibration generation as OOM or generic error
+   * (from the error message + captured stderr)
+   * @private
+   */
+  private classifyCalibrationFailure(error: unknown): {
+    status: 'oom' | 'error';
+    message: string;
+  } {
+    const message = error instanceof Error ? error.message : String(error);
+    let stderr = '';
+    if (error instanceof GenaiElectronError && error.details && typeof error.details === 'object') {
+      const detailStderr = (error.details as Record<string, unknown>).stderr;
+      if (typeof detailStderr === 'string') {
+        stderr = detailStderr;
+      }
+    }
+    const text = `${message}\n${stderr}`;
+    const isOom = DIFFUSION_CALIBRATION_DEFAULTS.oomPatterns.some((pattern) => pattern.test(text));
+    return { status: isOom ? 'oom' : 'error', message };
   }
 
   /**
@@ -815,11 +1397,14 @@ export class DiffusionServerManager extends ServerManager {
    * External callers should use generateImage() which includes automatic resource management.
    *
    * @param config - Image generation configuration
+   * @param flagOverrides - Per-generation offload-flag overrides (used by calibrate();
+   *   takes precedence over server config and auto-detection)
    * @returns Generated image result
    * @internal
    */
   public async executeImageGeneration(
-    config: ImageGenerationConfig
+    config: ImageGenerationConfig,
+    flagOverrides?: DiffusionOffloadCombo
   ): Promise<ImageGenerationResult> {
     const startTime = Date.now();
 
@@ -839,7 +1424,7 @@ export class DiffusionServerManager extends ServerManager {
     this.initializeProgressTracking(normalizedConfig);
 
     // Compute VRAM optimizations (fresh GPU info, respects user overrides)
-    const optimizations = await this.computeDiffusionOptimizations();
+    const optimizations = await this.computeDiffusionOptimizations(flagOverrides);
 
     // Build command-line arguments
     const args = this.buildDiffusionArgs(normalizedConfig, this.currentModelInfo, optimizations);
@@ -1021,12 +1606,14 @@ export class DiffusionServerManager extends ServerManager {
    * VRAM landscape — the orchestrator may have offloaded the LLM between start()
    * and generation.
    *
-   * User-provided overrides in DiffusionServerConfig always win via nullish coalescing.
+   * Precedence per flag: flagOverrides (per-generation, used by calibrate())
+   * → DiffusionServerConfig (user start-config) → auto-detection.
    *
+   * @param flagOverrides - Optional per-generation offload-flag overrides
    * @returns Resolved optimization flags: clipOnCpu, vaeOnCpu, batchSize
    * @private
    */
-  private async computeDiffusionOptimizations(): Promise<{
+  private async computeDiffusionOptimizations(flagOverrides?: DiffusionOffloadCombo): Promise<{
     clipOnCpu: boolean;
     vaeOnCpu: boolean;
     offloadToCpu: boolean;
@@ -1075,12 +1662,17 @@ export class DiffusionServerManager extends ServerManager {
     const hasLLMComponent = !!this.currentModelInfo?.components?.llm;
     const autoDiffusionFlashAttention = hasLLMComponent;
 
-    const clipOnCpu = serverConfig.clipOnCpu ?? autoClipOnCpu;
-    const vaeOnCpu = serverConfig.vaeOnCpu ?? autoVaeOnCpu;
-    const offloadToCpu = serverConfig.offloadToCpu ?? autoOffloadToCpu;
+    const clipOnCpu = flagOverrides?.clipOnCpu ?? serverConfig.clipOnCpu ?? autoClipOnCpu;
+    const vaeOnCpu = flagOverrides?.vaeOnCpu ?? serverConfig.vaeOnCpu ?? autoVaeOnCpu;
+    const offloadToCpu =
+      flagOverrides?.offloadToCpu ?? serverConfig.offloadToCpu ?? autoOffloadToCpu;
     const diffusionFlashAttention =
-      serverConfig.diffusionFlashAttention ?? autoDiffusionFlashAttention;
+      flagOverrides?.diffusionFlashAttention ??
+      serverConfig.diffusionFlashAttention ??
+      autoDiffusionFlashAttention;
     const batchSize = serverConfig.batchSize;
+
+    this.lastResolvedOptimizations = { clipOnCpu, vaeOnCpu, offloadToCpu, diffusionFlashAttention };
 
     await this.logManager?.write(
       `VRAM optimizations: clipOnCpu=${clipOnCpu}, vaeOnCpu=${vaeOnCpu}, offloadToCpu=${offloadToCpu}, diffusionFa=${diffusionFlashAttention}${batchSize !== undefined ? `, batchSize=${batchSize}` : ''} (auto: clip=${autoClipOnCpu}, vae=${autoVaeOnCpu}, offload=${autoOffloadToCpu}, fa=${autoDiffusionFlashAttention})`,
@@ -1522,4 +2114,71 @@ export class DiffusionServerManager extends ServerManager {
       this.vaeTimePerMegapixel = inferredTime / megapixels;
     }
   }
+}
+
+/**
+ * Median of a non-empty numeric array (mean of the middle two for even counts)
+ * @internal
+ */
+function medianOf(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/**
+ * Number of explicitly forced flags in a combo (label excluded)
+ * @internal
+ */
+function countForcedFlags(combo: DiffusionOffloadCombo): number {
+  let count = 0;
+  if (combo.clipOnCpu !== undefined) count++;
+  if (combo.vaeOnCpu !== undefined) count++;
+  if (combo.offloadToCpu !== undefined) count++;
+  if (combo.diffusionFlashAttention !== undefined) count++;
+  return count;
+}
+
+/**
+ * Pick the recommended offload combo per size from calibration runs.
+ *
+ * Per size: the fastest run with status 'ok' wins; any OK run within
+ * `tolerancePct` percent of the fastest that forces FEWER flags wins the tie
+ * (robustness preference — closer to auto). Sizes where every combo failed
+ * are absent from the result.
+ *
+ * Exported for direct unit testing; not part of the public package API.
+ * @internal
+ */
+export function pickRecommended(
+  runs: CalibrationRun[],
+  tolerancePct: number
+): Record<string, DiffusionOffloadCombo> {
+  const bySize = new Map<string, CalibrationRun[]>();
+  for (const run of runs) {
+    if (run.status !== 'ok' || run.timeTakenMs === undefined) {
+      continue;
+    }
+    const key = `${run.size.width}x${run.size.height}`;
+    const list = bySize.get(key);
+    if (list) {
+      list.push(run);
+    } else {
+      bySize.set(key, [run]);
+    }
+  }
+
+  const recommended: Record<string, DiffusionOffloadCombo> = {};
+  for (const [key, okRuns] of bySize) {
+    const fastest = okRuns.reduce((a, b) => (b.timeTakenMs! < a.timeTakenMs! ? b : a));
+    const threshold = fastest.timeTakenMs! * (1 + tolerancePct / 100);
+    const winner = okRuns
+      .filter((run) => run.timeTakenMs! <= threshold)
+      .sort(
+        (a, b) =>
+          countForcedFlags(a.combo) - countForcedFlags(b.combo) || a.timeTakenMs! - b.timeTakenMs!
+      )[0]!;
+    recommended[key] = winner.combo;
+  }
+  return recommended;
 }

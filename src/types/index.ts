@@ -56,6 +56,12 @@ export type {
   DiffusionServerInfo,
   GenerationStatus,
   GenerationState,
+  DiffusionOffloadCombo,
+  CalibrationSize,
+  DiffusionCalibrationConfig,
+  DiffusionCalibrationProgress,
+  CalibrationRun,
+  DiffusionCalibrationReport,
 } from './images.js';
 
 /**

@@ -328,6 +328,56 @@ export function registerIpcHandlers(): void {
     }
   });
 
+  // Offload calibration: benchmark clip/vae/offload flag combos on this machine.
+  // Progress reaches the renderer via the 'calibration-progress' event forwarding
+  // (see genai-api.ts); cancellation via an AbortController held here.
+  let calibrationController: AbortController | null = null;
+
+  ipcMain.handle(
+    'diffusion:calibrate',
+    async (
+      _event,
+      config: {
+        modelId: string;
+        sizes?: { width: number; height: number }[];
+        steps?: number;
+        samples?: number;
+      }
+    ) => {
+      // Guard before creating a controller: a concurrent second call would
+      // otherwise orphan the running sweep's controller in the finally below
+      if (calibrationController !== null) {
+        throw new Error('Calibration is already in progress');
+      }
+      try {
+        calibrationController = new AbortController();
+        const report = await diffusionServer.calibrate({
+          modelId: config.modelId,
+          sizes: config.sizes,
+          steps: config.steps,
+          samples: config.samples,
+          signal: calibrationController.signal,
+        });
+        return report;
+      } catch (error) {
+        const details = (error as { details?: { code?: string; runs?: unknown[] } }).details;
+        if (details?.code === 'CALIBRATION_ABORTED') {
+          // Aborted by the user — return the partial runs instead of throwing
+          return { aborted: true, runs: details.runs ?? [] };
+        }
+        throw new Error(`Calibration failed: ${(error as Error).message}`);
+      } finally {
+        calibrationController = null;
+      }
+    }
+  );
+
+  ipcMain.handle('diffusion:calibrateCancel', () => {
+    const active = calibrationController !== null;
+    calibrationController?.abort();
+    return { cancelling: active };
+  });
+
   // Generate image using genai-lite ImageService (with automatic orchestration)
   ipcMain.handle('diffusion:generate', async (_event, config) => {
     try {

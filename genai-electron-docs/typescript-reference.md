@@ -544,6 +544,115 @@ interface ImageGenerationProgress {
 }
 ```
 
+### DiffusionOffloadCombo
+
+One offload combination to benchmark during [offload calibration](image-generation.md#offload-calibration). Omitted flags = auto-detect. `label` is for UIs/reports only — strip it before spreading a combo into `start()` config.
+
+```typescript
+interface DiffusionOffloadCombo {
+  label?: string;
+  clipOnCpu?: boolean;
+  vaeOnCpu?: boolean;
+  offloadToCpu?: boolean;
+  diffusionFlashAttention?: boolean;
+}
+```
+
+### CalibrationSize
+
+Dimensions to benchmark (positive multiples of 64).
+
+```typescript
+interface CalibrationSize {
+  width: number;
+  height: number;
+}
+```
+
+### DiffusionCalibrationConfig
+
+Configuration for `diffusionServer.calibrate()`. Prefer your app's real `sizes`/`steps` — the optimum shifts with both.
+
+```typescript
+interface DiffusionCalibrationConfig {
+  modelId: string;
+  sizes?: CalibrationSize[];          // default: [{ width: 768, height: 768 }]
+  combos?: DiffusionOffloadCombo[];   // default: DIFFUSION_CALIBRATION_DEFAULTS.combos
+  steps?: number;                     // default: 4
+  cfgScale?: number;                  // default: omitted (sd.cpp default)
+  sampler?: ImageSampler;             // default: 'euler'
+  seed?: number;                      // default: 42 (fixed → identical work per combo)
+  prompt?: string;                    // default: neutral built-in prompt
+  samples?: number;                   // default: 2 (timed samples per combo × size)
+  threads?: number;                   // passthrough (match production -t)
+  batchSize?: number;                 // passthrough (match production -b)
+  onProgress?: (progress: DiffusionCalibrationProgress) => void;
+  signal?: AbortSignal;               // abort → details.code === 'CALIBRATION_ABORTED'
+}
+```
+
+### DiffusionCalibrationProgress
+
+Delivered via the `onProgress` callback and the `'calibration-progress'` event (same payload).
+
+```typescript
+interface DiffusionCalibrationProgress {
+  phase: 'preparing' | 'warmup' | 'sampling' | 'restoring-llm' | 'done';
+  comboIndex: number;                 // 0-based, into the active (post-skip) combo list
+  comboCount: number;
+  combo?: DiffusionOffloadCombo;
+  sizeIndex: number;
+  sizeCount: number;
+  size?: CalibrationSize;
+  sample?: number;                    // 1-based, timed samples only
+  sampleCount?: number;
+  generationPercent?: number;         // 0-100 within the current generation
+  overallPercent: number;             // 0-100, smooth and monotonic across the sweep
+}
+```
+
+### CalibrationRun
+
+One benchmarked (combo, size) pair.
+
+```typescript
+interface CalibrationRun {
+  size: CalibrationSize;
+  combo: DiffusionOffloadCombo;       // as requested (omitted flags = auto)
+  resolved?: {                        // what auto-detection picked for this run
+    clipOnCpu: boolean;
+    vaeOnCpu: boolean;
+    offloadToCpu: boolean;
+    diffusionFlashAttention: boolean;
+  };
+  status: 'ok' | 'oom' | 'error';
+  timeTakenMs?: number;               // median of samplesMs; only when status === 'ok'
+  stageMs?: { loadMs?: number; diffusionMs?: number; decodeMs?: number };
+  samplesMs?: number[];               // raw totals of successful samples
+  error?: string;                     // when status !== 'ok'
+}
+```
+
+### DiffusionCalibrationReport
+
+```typescript
+interface DiffusionCalibrationReport {
+  machine: {
+    gpuType?: string;
+    gpuName?: string;
+    vramBytes?: number;
+    vramAvailableBytes?: number;
+  };
+  modelId: string;
+  steps: number;                      // methodology echo (persistence keying)
+  sampler: ImageSampler;
+  samples: number;
+  runs: CalibrationRun[];
+  recommended: Record<string, DiffusionOffloadCombo>; // keyed "<width>x<height>", e.g. "768x768"
+  skippedCombos?: { combo: DiffusionOffloadCombo; reason: string }[];
+}
+```
+
 ---
 
 ## Async Generation Types
@@ -764,6 +873,25 @@ Canonical iteration order for component roles.
 ```typescript
 const DIFFUSION_COMPONENT_ORDER: readonly DiffusionComponentRole[];
 // ['diffusion_model', 'clip_l', 'clip_g', 't5xxl', 'llm', 'llm_vision', 'vae']
+```
+
+### DIFFUSION_CALIBRATION_DEFAULTS
+
+Defaults for [offload calibration](image-generation.md#offload-calibration): the curated labeled combo set (`auto`, `clip-gpu`, `clip-gpu+offload`, `offload`, `all-resident`, `max-savings`), default sizes/steps/samples/seed/sampler/prompt, the 5% tie tolerance, the SD3.5-Large id/name pattern, and the OOM stderr patterns.
+
+```typescript
+const DIFFUSION_CALIBRATION_DEFAULTS: {
+  readonly sizes: readonly CalibrationSize[];       // [{ width: 768, height: 768 }]
+  readonly combos: readonly DiffusionOffloadCombo[];
+  readonly steps: number;                           // 4
+  readonly samples: number;                         // 2
+  readonly seed: number;                            // 42
+  readonly sampler: ImageSampler;                   // 'euler'
+  readonly prompt: string;
+  readonly tieTolerancePct: number;                 // 5
+  readonly sd35LargePattern: RegExp;
+  readonly oomPatterns: readonly RegExp[];
+};
 ```
 
 ---

@@ -250,6 +250,35 @@ console.log('LLM is back online');
 - Testing: asserting on reload behavior after async orchestration
 - Sequential workflows that need both image result and LLM availability
 
+### offloadLLM()
+
+Saves the current LLM configuration and stops the server to free resources. Used internally by `orchestrateImageGeneration()` and by `diffusionServer.calibrate()` (sweep-level offload: once for the whole calibration sweep instead of per generation).
+
+**Returns:** `Promise<void>`
+
+**Behavior:**
+- No-ops when the LLM server is not running
+- Throws `ServerError` if the LLM is running but its configuration cannot be retrieved
+- Pair with `reloadLLM()` to restore; call `waitForReload()` first if a background reload may be in flight (an LLM mid-reload reads as not-running and would be missed)
+
+```typescript
+await orchestrator.waitForReload();  // settle any background reload
+await orchestrator.offloadLLM();
+// ... run VRAM-heavy work ...
+await orchestrator.reloadLLM();
+```
+
+### reloadLLM()
+
+Restarts the LLM server from the saved state, retrying once after a short delay.
+
+**Returns:** `Promise<void>`
+
+**Behavior:**
+- No-ops when there is no saved state
+- **Never throws** — failures are logged and the saved state is kept so the caller (or user) can retry manually
+- Clears the saved state on success
+
 ---
 
 ## Example Scenarios

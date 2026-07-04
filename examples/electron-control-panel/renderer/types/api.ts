@@ -20,6 +20,11 @@ import type {
   DiffusionComponentRole,
   DiffusionComponentDownload,
   DiffusionModelComponents,
+  DiffusionOffloadCombo,
+  CalibrationSize,
+  CalibrationRun,
+  DiffusionCalibrationProgress,
+  DiffusionCalibrationReport,
 } from 'genai-electron';
 
 // Re-export library types for convenience
@@ -40,7 +45,18 @@ export type {
   DiffusionComponentRole,
   DiffusionComponentDownload,
   DiffusionModelComponents,
+  DiffusionOffloadCombo,
+  CalibrationSize,
+  CalibrationRun,
+  DiffusionCalibrationProgress,
+  DiffusionCalibrationReport,
 };
+
+// App-specific: calibration IPC outcome — the full report, or partial runs when
+// the sweep was cancelled (main converts CALIBRATION_ABORTED into this shape)
+export type CalibrationOutcome =
+  | DiffusionCalibrationReport
+  | { aborted: true; runs: CalibrationRun[] };
 
 // App-specific extension: ImageGenerationResult with imageDataUrl field
 // The library returns Buffer, but the app needs data URL for display
@@ -136,6 +152,10 @@ export interface WindowAPI {
       port?: number;
       threads?: number;
       gpuLayers?: number;
+      clipOnCpu?: boolean;
+      vaeOnCpu?: boolean;
+      offloadToCpu?: boolean;
+      diffusionFlashAttention?: boolean;
     }) => Promise<void>;
     stop: () => Promise<void>;
     status: () => Promise<DiffusionServerInfo>;
@@ -144,6 +164,13 @@ export interface WindowAPI {
     clearLogs: () => Promise<void>;
     generateImage: (config: ImageGenerationConfig, port?: number) => Promise<ImageGenerationResult>;
     cancel: () => Promise<{ cancelled: boolean }>;
+    calibrate: (config: {
+      modelId: string;
+      sizes?: CalibrationSize[];
+      steps?: number;
+      samples?: number;
+    }) => Promise<CalibrationOutcome>;
+    calibrateCancel: () => Promise<{ cancelling: boolean }>;
   };
   resources: {
     wouldNeedOffload: () => Promise<boolean>;

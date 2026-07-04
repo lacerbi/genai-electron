@@ -6,6 +6,11 @@ interface DiffusionServerConfig {
   port?: number;
   threads?: number;
   gpuLayers?: number;
+  // Offload flags (e.g. applied from an offload-calibration recommendation)
+  clipOnCpu?: boolean;
+  vaeOnCpu?: boolean;
+  offloadToCpu?: boolean;
+  diffusionFlashAttention?: boolean;
 }
 
 export function useDiffusionServer() {

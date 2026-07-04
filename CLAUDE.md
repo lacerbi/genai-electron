@@ -131,6 +131,7 @@ src/
 - **Multi-Component**: `DIFFUSION_COMPONENT_FLAGS`, `DIFFUSION_COMPONENT_ORDER`, `getModelDirectory()` - Multi-file diffusion model support
 - **Port Utilities**: `findFreePort()`, `isPortBindable()` - Free-port selection and bind testing (also `port: 'auto'` on server configs)
 - **Cancellation**: `DiffusionServerManager.cancelImageGeneration()` / `getActiveGenerationId()` - Cancel in-flight async image generation (also `DELETE /v1/images/generations/:id`)
+- **Offload Calibration**: `DiffusionServerManager.calibrate()` / `isCalibrating()`, `DIFFUSION_CALIBRATION_DEFAULTS`, `'calibration-progress'` event - Benchmark CPU-offload flag combos per machine (types: `DiffusionOffloadCombo`, `CalibrationSize`, `CalibrationRun`, `DiffusionCalibration{Config,Progress,Report}`)
 - **Types**: `DiffusionComponentRole`, `DiffusionComponentInfo`, `DiffusionModelComponents`, `DiffusionComponentDownload`, `ShardInfo`, `KVCacheType`, `FlashAttentionSetting`, `LogRotationOptions`
 - **Complete list**: See `src/index.ts` for all exported utilities, types, and classes
 

@@ -3,6 +3,7 @@ import Card from './common/Card';
 import StatusIndicator from './common/StatusIndicator';
 import ActionButton from './common/ActionButton';
 import Spinner from './common/Spinner';
+import ProgressBar from './common/ProgressBar';
 import { useDiffusionServer } from './hooks/useDiffusionServer';
 import { useModels } from './hooks/useModels';
 import type {
@@ -10,6 +11,10 @@ import type {
   ImageGenerationProgress,
   ImageSampler,
   BinaryLogEvent,
+  DiffusionOffloadCombo,
+  DiffusionCalibrationProgress,
+  DiffusionCalibrationReport,
+  CalibrationRun,
 } from '../types/api';
 import { MODEL_PRESETS } from '../data/model-presets';
 import type { PresetRecommendedSettings } from '../data/model-presets';
@@ -53,6 +58,20 @@ const DiffusionServerControl: React.FC = () => {
     null
   );
 
+  // Offload calibration state
+  const [calibrating, setCalibrating] = useState(false);
+  const [calibrationProgress, setCalibrationProgress] =
+    useState<DiffusionCalibrationProgress | null>(null);
+  const [calibrationReport, setCalibrationReport] = useState<DiffusionCalibrationReport | null>(
+    null
+  );
+  const [calibrationPartialRuns, setCalibrationPartialRuns] = useState<CalibrationRun[] | null>(
+    null
+  );
+  const [calibrationError, setCalibrationError] = useState('');
+  // Flags applied from a calibration recommendation, spread into the next start()
+  const [appliedFlags, setAppliedFlags] = useState<DiffusionOffloadCombo | null>(null);
+
   // Set first model as default when models load
   useEffect(() => {
     if (models.length > 0 && !selectedModel) {
@@ -83,6 +102,19 @@ const DiffusionServerControl: React.FC = () => {
 
     return () => {
       window.api.off('diffusion:progress');
+    };
+  }, []);
+
+  // Listen for offload-calibration progress events
+  useEffect(() => {
+    const handleCalibrationProgress = (data: DiffusionCalibrationProgress) => {
+      setCalibrationProgress(data);
+    };
+
+    window.api.on('diffusion:calibration-progress', handleCalibrationProgress);
+
+    return () => {
+      window.api.off('diffusion:calibration-progress');
     };
   }, []);
 
@@ -143,6 +175,8 @@ const DiffusionServerControl: React.FC = () => {
       await start({
         modelId: selectedModel,
         port: 8081,
+        // Offload flags from an applied calibration recommendation (if any)
+        ...(appliedFlags ?? {}),
       });
     } finally {
       setStartLoading(false);
@@ -201,6 +235,71 @@ const DiffusionServerControl: React.FC = () => {
     setGenerating(false);
     setGenerationProgress(null);
   };
+
+  const handleCalibrate = async () => {
+    if (!selectedModel) return;
+    setCalibrating(true);
+    setCalibrationError('');
+    setCalibrationReport(null);
+    setCalibrationPartialRuns(null);
+    setCalibrationProgress(null);
+    try {
+      // Benchmark at the Generate form's current size/steps (the settings that
+      // will actually be used) — everything else uses library defaults
+      const outcome = await window.api.diffusion.calibrate({
+        modelId: selectedModel,
+        sizes: [{ width, height }],
+        steps,
+      });
+      if ('aborted' in outcome) {
+        setCalibrationPartialRuns(outcome.runs);
+        setCalibrationError('Calibration cancelled — partial results below');
+      } else {
+        setCalibrationReport(outcome);
+      }
+    } catch (err) {
+      setCalibrationError((err as Error).message);
+    } finally {
+      setCalibrating(false);
+      setCalibrationProgress(null);
+    }
+  };
+
+  const handleCalibrateCancel = async () => {
+    try {
+      await window.api.diffusion.calibrateCancel();
+    } catch (err) {
+      setCalibrationError(`Cancel failed: ${(err as Error).message}`);
+    }
+  };
+
+  const applyRecommendedFlags = (combo: DiffusionOffloadCombo) => {
+    // Strip the label — it is a report/UI field, not a server-config field
+    const flags: DiffusionOffloadCombo = {};
+    if (combo.clipOnCpu !== undefined) flags.clipOnCpu = combo.clipOnCpu;
+    if (combo.vaeOnCpu !== undefined) flags.vaeOnCpu = combo.vaeOnCpu;
+    if (combo.offloadToCpu !== undefined) flags.offloadToCpu = combo.offloadToCpu;
+    if (combo.diffusionFlashAttention !== undefined) {
+      flags.diffusionFlashAttention = combo.diffusionFlashAttention;
+    }
+    setAppliedFlags(flags);
+  };
+
+  const formatCombo = (combo: DiffusionOffloadCombo): string => {
+    const parts: string[] = [];
+    if (combo.clipOnCpu !== undefined) parts.push(`clip-on-cpu=${combo.clipOnCpu ? 'on' : 'off'}`);
+    if (combo.vaeOnCpu !== undefined) parts.push(`vae-on-cpu=${combo.vaeOnCpu ? 'on' : 'off'}`);
+    if (combo.offloadToCpu !== undefined) {
+      parts.push(`offload=${combo.offloadToCpu ? 'on' : 'off'}`);
+    }
+    if (combo.diffusionFlashAttention !== undefined) {
+      parts.push(`diffusion-fa=${combo.diffusionFlashAttention ? 'on' : 'off'}`);
+    }
+    return parts.length > 0 ? parts.join(', ') : 'auto (no forced flags)';
+  };
+
+  const formatStageSeconds = (ms?: number): string =>
+    ms !== undefined ? `${(ms / 1000).toFixed(1)}s` : '—';
 
   // Match selected model to a preset for recommended settings
   const matchedPreset = MODEL_PRESETS.find((p) => selectedModel.startsWith(p.id));
@@ -336,11 +435,24 @@ const DiffusionServerControl: React.FC = () => {
           </div>
         )}
 
+        {appliedFlags && (
+          <div className="settings-hint">
+            <span>Calibrated offload flags on next start: {formatCombo(appliedFlags)}</span>
+            <button
+              type="button"
+              className="apply-preset-btn"
+              onClick={() => setAppliedFlags(null)}
+            >
+              Clear
+            </button>
+          </div>
+        )}
+
         <div className="server-actions">
           {!isRunning ? (
             <ActionButton
               onClick={handleStart}
-              disabled={startLoading || !selectedModel || models.length === 0}
+              disabled={startLoading || calibrating || !selectedModel || models.length === 0}
               variant="primary"
             >
               {startLoading ? (
@@ -373,6 +485,118 @@ const DiffusionServerControl: React.FC = () => {
           </p>
         )}
       </Card>
+
+      {/* Offload Calibration (server must be stopped) */}
+      {!isRunning && (
+        <Card title="Offload Calibration">
+          {calibrationError && (
+            <div className="error-banner">
+              <strong>Calibration:</strong> {calibrationError}
+            </div>
+          )}
+
+          <p className="info-message">
+            Benchmarks CPU-offload flag combinations (clip / vae / offload) on this machine with
+            real generations and recommends the fastest one. Uses the Generate form's current
+            settings: {width}×{height} at {steps} steps. Takes a few minutes; runs while the server
+            is stopped.
+          </p>
+
+          <div className="server-actions">
+            <ActionButton
+              onClick={handleCalibrate}
+              disabled={calibrating || startLoading || !selectedModel || models.length === 0}
+              variant="primary"
+            >
+              {calibrating ? (
+                <>
+                  <Spinner size="small" />
+                  Calibrating...
+                </>
+              ) : (
+                'Calibrate Offload Settings'
+              )}
+            </ActionButton>
+            {calibrating && (
+              <ActionButton onClick={handleCalibrateCancel} variant="danger">
+                Cancel
+              </ActionButton>
+            )}
+          </div>
+
+          {calibrating && calibrationProgress && (
+            <ProgressBar
+              current={Math.round(calibrationProgress.overallPercent)}
+              total={100}
+              label={`${calibrationProgress.phase}${
+                calibrationProgress.combo?.label ? ` — ${calibrationProgress.combo.label}` : ''
+              }${
+                calibrationProgress.sample
+                  ? ` (sample ${calibrationProgress.sample}/${calibrationProgress.sampleCount})`
+                  : ''
+              }`}
+            />
+          )}
+
+          {(calibrationReport || calibrationPartialRuns) && (
+            <div className="calibration-results">
+              <table className="calibration-table">
+                <thead>
+                  <tr>
+                    <th>Combo</th>
+                    <th>Status</th>
+                    <th>Time</th>
+                    <th>Load</th>
+                    <th>Diffusion</th>
+                    <th>Decode</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(calibrationReport?.runs ?? calibrationPartialRuns ?? []).map((run, idx) => (
+                    <tr key={idx}>
+                      <td>{run.combo.label ?? formatCombo(run.combo)}</td>
+                      <td className={`calibration-status-${run.status}`}>{run.status}</td>
+                      <td>{formatStageSeconds(run.timeTakenMs)}</td>
+                      <td>{formatStageSeconds(run.stageMs?.loadMs)}</td>
+                      <td>{formatStageSeconds(run.stageMs?.diffusionMs)}</td>
+                      <td>{formatStageSeconds(run.stageMs?.decodeMs)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+
+              {calibrationReport &&
+                Object.entries(calibrationReport.recommended).map(([sizeKey, combo]) => (
+                  <div key={sizeKey} className="settings-hint">
+                    <span>
+                      Recommended for {sizeKey}:{' '}
+                      <strong>{combo.label ?? formatCombo(combo)}</strong> ({formatCombo(combo)})
+                    </span>
+                    <button
+                      type="button"
+                      className="apply-preset-btn"
+                      onClick={() => applyRecommendedFlags(combo)}
+                    >
+                      Apply
+                    </button>
+                  </div>
+                ))}
+              {calibrationReport && Object.keys(calibrationReport.recommended).length === 0 && (
+                <p className="warning-message">All combos failed — no recommendation available.</p>
+              )}
+              {calibrationReport?.skippedCombos && calibrationReport.skippedCombos.length > 0 && (
+                <p className="info-message">
+                  Skipped combos:{' '}
+                  {calibrationReport.skippedCombos
+                    .map((s) => s.combo.label ?? formatCombo(s.combo))
+                    .join(', ')}{' '}
+                  — {calibrationReport.skippedCombos[0].reason}
+                </p>
+              )}
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* Image Generation Form */}
       {isRunning && (

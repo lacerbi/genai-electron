@@ -253,6 +253,7 @@ export {
   DIFFUSION_VRAM_THRESHOLDS,
   DIFFUSION_COMPONENT_FLAGS,
   DIFFUSION_COMPONENT_ORDER,
+  DIFFUSION_CALIBRATION_DEFAULTS,
 } from './config/defaults.js';
 
 // ============================================================================
@@ -303,6 +304,12 @@ export type {
   DiffusionServerInfo,
   GenerationStatus,
   GenerationState,
+  DiffusionOffloadCombo,
+  CalibrationSize,
+  DiffusionCalibrationConfig,
+  DiffusionCalibrationProgress,
+  CalibrationRun,
+  DiffusionCalibrationReport,
   // Utility types
   Optional,
   RequiredKeys,

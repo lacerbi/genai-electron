@@ -57,6 +57,7 @@ genai-electron manages the runtime infrastructure for running local AI models (l
 - ✅ **Async image generation API** - HTTP endpoints with polling pattern for non-blocking generation
 - ✅ **Batch generation** - Generate multiple image variations in one request (1-5 images)
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when generating images
+- ✅ **Offload calibration** - Benchmark CPU-offload flag combinations on the user's machine and pick the fastest (`diffusionServer.calibrate()`)
 - ✅ **Health monitoring** - Real-time server health checks and status tracking
 - ✅ **Structured logs** - Parse server logs into typed objects for easy filtering and display
 - ✅ **Binary management** - Automatic binary download and verification on first run
