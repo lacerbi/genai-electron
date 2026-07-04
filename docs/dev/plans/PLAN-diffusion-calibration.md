@@ -12,7 +12,19 @@ Source: `ISSUE-diffusion-offload-calibration.md` (repo root) + design discussion
 - [x] Phase 4: Documentation + housekeeping
 - [x] Phase 5: Example-app wiring
 - [x] Phase 6: Live smoke (PASSED 2026-07-04 — see Phase 6 results)
-- [~] Final `/doublecheck`
+- [x] Final `/doublecheck` (2026-07-04): 3 read-only Opus reviewers (core impl / API+docs /
+  example+tests) + main-thread CI gate. **Verdict: faithful to plan & ISSUE, zero
+  critical/important findings.** Minor hardening applied same-day: `calibrating` released
+  before the awaited `reloadLLM()` (lock-safety), per-sweep combo copies (no shared refs to
+  `DIFFUSION_CALIBRATION_DEFAULTS.combos` in reports), calibration log writes made
+  fire-and-forget (match `executeImageGeneration`), IPC double-calibrate guard in the example,
+  +3 tests closing reviewer gaps (stdout-driven `stageMs`/fractional progress, happy-path
+  median of 2 samples + combo-copy lock-in, calibrate-during-calibrate guard) → 566/566,
+  and doc polish (docs index feature bullet, troubleshooting → calibrate cross-ref,
+  CLAUDE.md Key Exports line). Not addressed (accepted): internal-only
+  `orchestrateImageGeneration`-during-calibrate misuse (unreachable from public surface),
+  exit-code-based OOM classification (message/stderr matching suffices), pre-existing docs
+  catch-narrowing style, pre-existing preload `WindowAPI` missing image `cancel` (unrelated).
 
 ## Summary
 

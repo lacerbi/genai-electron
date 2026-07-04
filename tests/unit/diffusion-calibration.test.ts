@@ -179,6 +179,7 @@ jest.unstable_mockModule('../../src/config/paths.js', () => ({
 const { DiffusionServerManager, pickRecommended } = await import(
   '../../src/managers/DiffusionServerManager.js'
 );
+const { DIFFUSION_CALIBRATION_DEFAULTS } = await import('../../src/config/defaults.js');
 
 /** Script for one spawned generation (by spawn index) */
 interface SpawnScript {
@@ -437,6 +438,27 @@ describe('DiffusionServerManager calibration', () => {
       await startRejection;
       expect(diffusionServer.isCalibrating()).toBe(false);
     });
+
+    it('rejects a second calibrate() while one is in flight', async () => {
+      let secondRejection: Promise<void> | undefined;
+      const calibratePromise = diffusionServer.calibrate({
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        onProgress: (p) => {
+          if (p.phase === 'warmup' && !secondRejection) {
+            secondRejection = expect(
+              diffusionServer.calibrate({ modelId: 'sdxl-turbo' })
+            ).rejects.toThrow(/already in progress/);
+          }
+        },
+        combos: [{ label: 'auto' }],
+      });
+
+      await calibratePromise;
+      expect(secondRejection).toBeDefined();
+      await secondRejection;
+      expect(diffusionServer.isCalibrating()).toBe(false);
+    });
   });
 
   describe('sweep structure and per-run flag resolution', () => {
@@ -537,6 +559,72 @@ describe('DiffusionServerManager calibration', () => {
       });
       // Recommended combo is the AS-REQUESTED combo (auto), not the resolved flags
       expect(report.recommended['768x768']).toEqual({ label: 'auto' });
+    });
+  });
+
+  describe('stage timing and medians (stdout-driven)', () => {
+    // Realistic sd-cli stdout for one generation (sd.cpp master-746 literals)
+    const SD_STDOUT = [
+      'loading model from /test/models/diffusion/sdxl-turbo.gguf\n',
+      'generating image: 1/1 - seed 42\n',
+      '  |==>               | 2/4 - 1.50it/s\n',
+      '  |=========>        | 4/4 - 1.45it/s\n',
+      'decoding 1 latents\n',
+      'decode_first_stage completed, taking 1.23s\n',
+    ];
+
+    it('populates stageMs from stdout markers and medians multi-sample timings', async () => {
+      spawnScript = () => ({ stdout: [...SD_STDOUT] });
+      const progressEvents: DiffusionCalibrationProgress[] = [];
+
+      const report = await diffusionServer.calibrate({
+        modelId: 'sdxl-turbo',
+        samples: 2,
+        steps: 4,
+        combos: [{ label: 'auto' }],
+        onProgress: (p) => progressEvents.push(p),
+      });
+
+      // 1 combo × (1 warmup + 2 samples) = 3 generations
+      expect(spawnCalls).toHaveLength(3);
+      const calRun = report.runs[0]!;
+      expect(calRun.status).toBe('ok');
+
+      // Happy-path median of two samples = mean of the pair
+      expect(calRun.samplesMs).toHaveLength(2);
+      const [s1, s2] = calRun.samplesMs!;
+      expect(calRun.timeTakenMs).toBeCloseTo((s1! + s2!) / 2, 5);
+
+      // Stage split extracted from the stdout stage markers (instant mock → 0 ms is fine)
+      expect(calRun.stageMs).toBeDefined();
+      expect(calRun.stageMs!.loadMs).toBeGreaterThanOrEqual(0);
+      expect(calRun.stageMs!.diffusionMs).toBeGreaterThanOrEqual(0);
+      expect(calRun.stageMs!.decodeMs).toBeGreaterThanOrEqual(0);
+
+      // The step bars drove within-generation progress into the sweep stream...
+      expect(
+        progressEvents.some(
+          (p) =>
+            (p.phase === 'warmup' || p.phase === 'sampling') && p.generationPercent !== undefined
+        )
+      ).toBe(true);
+      // ...and overall stays monotonic through the fractional folding
+      let last = -1;
+      for (const p of progressEvents) {
+        expect(p.overallPercent).toBeGreaterThanOrEqual(last);
+        last = p.overallPercent;
+      }
+    });
+
+    it('hands back per-sweep combo copies, never the module default objects', async () => {
+      const report = await diffusionServer.calibrate({ modelId: 'sdxl-turbo', samples: 1 });
+
+      // Default sweep: 6 combos × (1 warmup + 1 sample × 1 size) = 12 generations
+      expect(spawnCalls).toHaveLength(12);
+      const firstDefault = DIFFUSION_CALIBRATION_DEFAULTS.combos[0]!;
+      const firstRun = report.runs.find((r) => r.combo.label === firstDefault.label)!;
+      expect(firstRun.combo).toEqual(firstDefault);
+      expect(firstRun.combo).not.toBe(firstDefault); // mutation-safe copy
     });
   });
 

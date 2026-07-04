@@ -344,6 +344,11 @@ export function registerIpcHandlers(): void {
         samples?: number;
       }
     ) => {
+      // Guard before creating a controller: a concurrent second call would
+      // otherwise orphan the running sweep's controller in the finally below
+      if (calibrationController !== null) {
+        throw new Error('Calibration is already in progress');
+      }
       try {
         calibrationController = new AbortController();
         const report = await diffusionServer.calibrate({

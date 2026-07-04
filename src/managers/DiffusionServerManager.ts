@@ -520,9 +520,12 @@ export class DiffusionServerManager extends ServerManager {
         );
       }
 
-      // Combo list (SD3.5-Large filter applied up-front so progress counts are accurate)
-      const requestedCombos =
-        config.combos && config.combos.length > 0 ? config.combos : [...defaults.combos];
+      // Combo list (SD3.5-Large filter applied up-front so progress counts are accurate).
+      // Per-sweep copies: report.runs[].combo / recommended hand these objects to the
+      // caller, so never share references with DIFFUSION_CALIBRATION_DEFAULTS.combos.
+      const requestedCombos = (
+        config.combos && config.combos.length > 0 ? config.combos : defaults.combos
+      ).map((combo) => ({ ...combo }));
       const skippedCombos: { combo: DiffusionOffloadCombo; reason: string }[] = [];
       let combos = requestedCombos;
       if (
@@ -600,14 +603,18 @@ export class DiffusionServerManager extends ServerManager {
       if (!this.logManager) {
         await this.initializeLogManager('diffusion-server.log', 'Offload calibration starting');
       }
-      await this.logManager?.write(
-        `Calibration: model=${config.modelId}, sizes=${sizes
-          .map((s) => `${s.width}x${s.height}`)
-          .join(',')}, combos=${combos.length}${
-          skippedCombos.length > 0 ? ` (${skippedCombos.length} skipped: SD3.5-Large)` : ''
-        }, steps=${steps}, samples=${samples}`,
-        'info'
-      );
+      // Fire-and-forget (matching executeImageGeneration): a log-write failure
+      // must never abort a sweep this expensive
+      void this.logManager
+        ?.write(
+          `Calibration: model=${config.modelId}, sizes=${sizes
+            .map((s) => `${s.width}x${s.height}`)
+            .join(',')}, combos=${combos.length}${
+            skippedCombos.length > 0 ? ` (${skippedCombos.length} skipped: SD3.5-Large)` : ''
+          }, steps=${steps}, samples=${samples}`,
+          'info'
+        )
+        .catch(() => void 0);
 
       // Install working state. May download the binary on first run
       // (long; reports via 'binary-progress'/'binary-log' events).
@@ -779,12 +786,14 @@ export class DiffusionServerManager extends ServerManager {
             }
           }
           runs.push(run);
-          await this.logManager?.write(
-            `Calibration run: ${combo.label ?? JSON.stringify(combo)} @ ${size.width}x${size.height} → ${run.status}${
-              run.timeTakenMs !== undefined ? ` (${Math.round(run.timeTakenMs)} ms)` : ''
-            }${run.error ? ` — ${run.error.split('\n')[0]}` : ''}`,
-            run.status === 'ok' ? 'info' : 'warn'
-          );
+          void this.logManager
+            ?.write(
+              `Calibration run: ${combo.label ?? JSON.stringify(combo)} @ ${size.width}x${size.height} → ${run.status}${
+                run.timeTakenMs !== undefined ? ` (${Math.round(run.timeTakenMs)} ms)` : ''
+              }${run.error ? ` — ${run.error.split('\n')[0]}` : ''}`,
+              run.status === 'ok' ? 'info' : 'warn'
+            )
+            .catch(() => void 0);
         }
       }
 
@@ -825,6 +834,11 @@ export class DiffusionServerManager extends ServerManager {
       this.currentModelInfo = savedModelInfo;
       this.binaryPath = savedBinaryPath;
 
+      // Release the manager before the awaited LLM reload: reloadLLM() is
+      // contractually never-throwing, but if that ever regressed a throw here
+      // must not leave the manager permanently locked in calibrating state
+      this.calibrating = false;
+
       if (this.orchestrator) {
         emitFn?.({
           phase: 'restoring-llm',
@@ -847,8 +861,6 @@ export class DiffusionServerManager extends ServerManager {
           overallPercent: 100,
         });
       }
-
-      this.calibrating = false;
     }
   }
 
