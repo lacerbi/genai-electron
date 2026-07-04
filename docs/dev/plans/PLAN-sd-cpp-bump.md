@@ -1,7 +1,7 @@
 # Plan: stable-diffusion.cpp bump — `master-504-636d3cb` → `master-746-2574f59` (v0.10.0)
 
 Created: 2026-07-03
-Status: IMPLEMENTED — Phases 0-4 complete, live smoke all green, PR #36 open (2026-07-04). Remaining: release mechanics (Phase 5 step 4) on user go-ahead. (Tracking: `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked)
+Status: COMPLETE — all phases done. PR #36 (batch) + PR #37 (release) merged, tag `v0.10.0` + GitHub release published 2026-07-04. Remaining outside this plan: `npm publish` (maintainer-side, guarded by `prepublishOnly`). (Tracking: `[ ]` todo, `[~]` in progress, `[x]` done, `[!]` blocked)
 
 ## Summary
 
@@ -136,7 +136,7 @@ Bump the pinned stable-diffusion.cpp binaries by 242 releases (2026-02-10 → 20
 1. [x] PROGRESS.md: new v0.10.0 section — bump details (242 releases, backward-compatible surface, win-cpu consolidation, Linux Vulkan variant added), guard outcome with smoke evidence (box specs, models, per-flag matrix), riders; **fold-in line for `36952da`** (genai-lite 0.11 pairing notes; example pins genai-lite ^0.11.0 — already on main, previously unrecorded); strike the sd-bump follow-up (~line 501); add the cudart re-download-skip follow-up; refresh the status block (test counts, date)
 2. [x] Update README status line (version/status) as part of the release PR
 3. [x] (PR #36: https://github.com/lacerbi/genai-electron/pull/36) Push branch, open PR (single batch PR per release workflow), request user review
-4. [~] (go-ahead received 2026-07-04; release PR in flight) On user go-ahead: release PR mechanics — `package.json` version 0.10.0, migration note if the guard was retired (behavior change), merge → tag `v0.10.0` → GitHub release; **user runs `npm publish`** (guarded by `prepublishOnly`)
+4. [x] (PR #37 merged, tag `v0.10.0` pushed, GitHub release published 2026-07-04; `npm publish` remains with the user) On user go-ahead: release PR mechanics — `package.json` version 0.10.0, migration note if the guard was retired (behavior change), merge → tag `v0.10.0` → GitHub release; **user runs `npm publish`** (guarded by `prepublishOnly`)
 
 **Verification**:
 - [x] CI green on the PR (all 6 checks: Code Quality, Package Validation, Security Audit, Node 22 tests on macos/ubuntu/windows)
