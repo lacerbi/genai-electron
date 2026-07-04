@@ -1,14 +1,14 @@
 # Plan: Diffusion Offload Calibration API (`diffusionServer.calibrate()`)
 
 Created: 2026-07-04
-Status: IN PROGRESS (approved 2026-07-04)
+Status: COMPLETE (2026-07-04) — all phases done, live smoke PASSED, doublecheck clean; ships unreleased per the batch workflow
 Source: `ISSUE-diffusion-offload-calibration.md` (repo root) + design discussion (agreed decisions below)
 
 ## Phase status
 
 - [x] Phase 1: Types, defaults, core plumbing
 - [x] Phase 2: `calibrate()` implementation
-- [x] Phase 3: Tests (20 new; 563/563 total, 22 suites)
+- [x] Phase 3: Tests (20 new; +3 in doublecheck hardening → 566/566 total, 22 suites)
 - [x] Phase 4: Documentation + housekeeping
 - [x] Phase 5: Example-app wiring
 - [x] Phase 6: Live smoke (PASSED 2026-07-04 — see Phase 6 results)
