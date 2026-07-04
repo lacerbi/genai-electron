@@ -362,14 +362,24 @@ export class ResourceOrchestrator {
   }
 
   /**
-   * Offload LLM (save state and stop)
+   * Offload the LLM (save state and stop)
    *
    * Saves the current LLM configuration and stops the server to free resources.
+   * Used internally by orchestrateImageGeneration() and by
+   * DiffusionServerManager.calibrate() for sweep-level offload.
    *
-   * @throws {ServerError} If no configuration found
-   * @private
+   * No-ops when the LLM server is not running.
+   *
+   * @throws {ServerError} If the LLM is running but its configuration cannot be retrieved
+   *
+   * @example
+   * ```typescript
+   * await orchestrator.offloadLLM();
+   * // ... run VRAM-heavy work ...
+   * await orchestrator.reloadLLM();
+   * ```
    */
-  private async offloadLLM(): Promise<void> {
+  async offloadLLM(): Promise<void> {
     debugLog('[Orchestrator] offloadLLM called');
 
     if (!this.llamaServer.isRunning()) {
@@ -402,14 +412,15 @@ export class ResourceOrchestrator {
   }
 
   /**
-   * Reload LLM (restore from saved state)
+   * Reload the LLM (restore from saved state)
    *
-   * Restarts the LLM server with the previously saved configuration.
-   * Errors are logged but not thrown to avoid disrupting image generation.
+   * Restarts the LLM server with the previously saved configuration, retrying
+   * once after a short delay. No-ops when there is no saved state.
    *
-   * @private
+   * Never throws — errors are logged and the saved state is kept so the
+   * caller (or user) can retry manually.
    */
-  private async reloadLLM(): Promise<void> {
+  async reloadLLM(): Promise<void> {
     debugLog('[Orchestrator] reloadLLM called');
 
     if (!this.savedLLMState || !this.savedLLMState.wasRunning) {
