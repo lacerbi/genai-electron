@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.11.x to v0.12.0](migration-0-11-to-0-12.md)** - `calibrate()` now takes a required `generation` block (`steps`/`cfgScale`/`sampler`) so it mirrors production; pass your real `cfgScale`
 - **[Migrating from v0.10.x to v0.11.0](migration-0-10-to-0-11.md)** - Offload calibration (`calibrate()`); purely additive, nothing to migrate
 - **[Migrating from v0.9.x to v0.10.0](migration-0-9-to-0-10.md)** - stable-diffusion.cpp master-746 bump; CPU-offload flags now auto-detected on CUDA too
 - **[Migrating from v0.8.x to v0.9.0](migration-0-8-to-0-9.md)** - Structured `'binary-progress'` event for provisioning UIs

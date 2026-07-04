@@ -3,12 +3,7 @@
  * @module config/defaults
  */
 
-import type {
-  CalibrationSize,
-  DiffusionComponentRole,
-  DiffusionOffloadCombo,
-  ImageSampler,
-} from '../types/index.js';
+import type { DiffusionComponentRole, DiffusionOffloadCombo } from '../types/index.js';
 
 /**
  * Default ports for different server types
@@ -290,12 +285,9 @@ export const DIFFUSION_VRAM_THRESHOLDS = {
  * Combo labels are surfaced by progress UIs and persisted recommendations.
  */
 export const DIFFUSION_CALIBRATION_DEFAULTS: {
-  readonly sizes: readonly CalibrationSize[];
   readonly combos: readonly DiffusionOffloadCombo[];
-  readonly steps: number;
   readonly samples: number;
   readonly seed: number;
-  readonly sampler: ImageSampler;
   readonly prompt: string;
   /** Runs within this % of the fastest prefer fewer forced flags (robustness tie-break) */
   readonly tieTolerancePct: number;
@@ -304,7 +296,9 @@ export const DIFFUSION_CALIBRATION_DEFAULTS: {
   /** stderr/message patterns classifying a failed generation as out-of-memory */
   readonly oomPatterns: readonly RegExp[];
 } = {
-  sizes: [{ width: 768, height: 768 }],
+  // steps/cfgScale/sampler/sizes are NOT defaulted — the caller must pass them
+  // (via DiffusionCalibrationConfig.generation / .sizes) so the sweep measures the
+  // same compute profile as production. See DiffusionCalibrationGeneration.
   combos: [
     { label: 'auto' },
     { label: 'clip-gpu', clipOnCpu: false },
@@ -313,10 +307,8 @@ export const DIFFUSION_CALIBRATION_DEFAULTS: {
     { label: 'all-resident', clipOnCpu: false, vaeOnCpu: false, offloadToCpu: false },
     { label: 'max-savings', clipOnCpu: true, vaeOnCpu: true, offloadToCpu: true },
   ],
-  steps: 4,
   samples: 2,
   seed: 42,
-  sampler: 'euler',
   prompt: 'a photograph of a lighthouse on a rocky coast at sunset, detailed',
   tieTolerancePct: 5,
   sd35LargePattern: /(?:sd|stable[-_.\s]?diffusion)[-_.\s]?3[-_.\s]?5.*?large/i,

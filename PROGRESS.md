@@ -1,6 +1,6 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.11.0 released — diffusion offload calibration (2026-07-04)
+> **Current Status**: v0.12.0 released — calibration mirrors production generation params (2026-07-04)
 
 ---
 
@@ -8,8 +8,46 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 566/566 passing (22 suites)
-- **Branch:** `main` (v0.11.0)
-- **Last Updated:** 2026-07-04 (v0.11.0 release)
+- **Branch:** `main` (v0.12.0)
+- **Last Updated:** 2026-07-04 (v0.12.0 release)
+
+---
+
+## v0.12.0: Calibration Mirrors Production Generation Params (breaking `calibrate()` change) (2026-07-04)
+
+**Problem:** `calibrate()` let the compute-shaping generation params default individually, so a
+partial call silently diverged from production. In particular `cfgScale` defaulted to *omitted →
+sd.cpp default (> 1)*, which enables classifier-free guidance = **two model passes per step**. A
+downstream app (palimpsest) benchmarked Flux Klein without passing `cfgScale`, so every calibration
+generation did ~2× the diffusion work of its real generations (`cfgScale: 1`, guidance-distilled) —
+inflating all times and **inverting the offload ranking** (offload-on measured ~16 s in the sweep
+vs ~8 s in real use; the sweep then recommended the offload-off combo). Root-caused from the app's
+own logs: identical model/size/steps/threads/sampler/flags, only sampling time doubled (10.2 s vs
+5.1 s), load/decode identical → the classifier-free-guidance signature.
+
+**Fix (breaking):** the compute-shaping params are no longer individually defaultable —
+`DiffusionCalibrationConfig` now takes them as a required unit:
+- New required `sizes: CalibrationSize[]` (was optional, defaulted to 768²) and required
+  `generation: DiffusionCalibrationGeneration` (`{ steps, cfgScale, sampler }` required, optional
+  `threads`/`batchSize`). Removed the flat `steps`/`cfgScale`/`sampler`/`threads`/`batchSize` fields.
+- New exported type `DiffusionCalibrationGeneration`.
+- `DiffusionCalibrationReport` gains `cfgScale` (methodology echo alongside `steps`/`sampler`).
+- `DIFFUSION_CALIBRATION_DEFAULTS` drops `sizes`/`steps`/`sampler` (caller-supplied now).
+
+**Migration:** wrap the old flat fields in `generation` / `sizes`, and **pass your production
+`cfgScale`** (e.g. `1` for Flux Klein / SDXL-Lightning/Turbo; 5–8 for standard models):
+`calibrate({ modelId, sizes: [...], generation: { steps, cfgScale, sampler } })`.
+
+**Files:** `src/types/images.ts`, `src/types/index.ts`, `src/index.ts`, `src/config/defaults.ts`,
+`src/managers/DiffusionServerManager.ts`, `tests/unit/diffusion-calibration.test.ts` (helper +
+`cfgScale` echo assertion), example app (`ipc-handlers`, `DiffusionServerControl`, `renderer/types/api`),
+docs (`image-generation`, `typescript-reference`, `migration-0-11-to-0-12.md`, docs index). Downstream
+palimpsest call site tracked in that repo's `ISSUE-diffusion-calibration-cfgscale.md`.
+
+**Build:** ✅ 0 TypeScript errors / 566/566 tests passing (22 suites); example app typechecks clean.
+
+**Released 2026-07-04 as v0.12.0.** Breaking change scoped to `calibrate()` (added in v0.11.0);
+see `genai-electron-docs/migration-0-11-to-0-12.md`.
 
 ---
 

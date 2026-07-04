@@ -58,6 +58,7 @@ export type {
   GenerationState,
   DiffusionOffloadCombo,
   CalibrationSize,
+  DiffusionCalibrationGeneration,
   DiffusionCalibrationConfig,
   DiffusionCalibrationProgress,
   CalibrationRun,

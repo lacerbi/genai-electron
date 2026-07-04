@@ -13,6 +13,7 @@ import {
   sendImageProgress,
 } from './genai-api.js';
 import { MetadataFetchStrategy, formatErrorForUI } from 'genai-electron';
+import type { ImageSampler } from 'genai-electron';
 import { LLMService, ImageService } from 'genai-lite';
 
 /**
@@ -339,8 +340,8 @@ export function registerIpcHandlers(): void {
       _event,
       config: {
         modelId: string;
-        sizes?: { width: number; height: number }[];
-        steps?: number;
+        sizes: { width: number; height: number }[];
+        generation: { steps: number; cfgScale: number; sampler: ImageSampler };
         samples?: number;
       }
     ) => {
@@ -354,7 +355,7 @@ export function registerIpcHandlers(): void {
         const report = await diffusionServer.calibrate({
           modelId: config.modelId,
           sizes: config.sizes,
-          steps: config.steps,
+          generation: config.generation,
           samples: config.samples,
           signal: calibrationController.signal,
         });

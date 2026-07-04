@@ -466,7 +466,13 @@ export class DiffusionServerManager extends ServerManager {
     }
 
     const defaults = DIFFUSION_CALIBRATION_DEFAULTS;
-    const sizes = config.sizes && config.sizes.length > 0 ? config.sizes : [...defaults.sizes];
+    const sizes = config.sizes;
+    if (!sizes || sizes.length === 0) {
+      throw new ServerError('Calibration requires at least one size in config.sizes', {
+        suggestion:
+          'Pass the size(s) your app generates at, e.g. sizes: [{ width: 768, height: 768 }]',
+      });
+    }
     for (const size of sizes) {
       if (
         !Number.isInteger(size.width) ||
@@ -483,9 +489,10 @@ export class DiffusionServerManager extends ServerManager {
       }
     }
     const samples = Math.max(1, Math.floor(config.samples ?? defaults.samples));
-    const steps = config.steps ?? defaults.steps;
+    const steps = config.generation.steps;
+    const cfgScale = config.generation.cfgScale;
     const seed = config.seed ?? defaults.seed;
-    const sampler = config.sampler ?? defaults.sampler;
+    const sampler = config.generation.sampler;
     const prompt = config.prompt ?? defaults.prompt;
 
     const runs: CalibrationRun[] = [];
@@ -624,11 +631,11 @@ export class DiffusionServerManager extends ServerManager {
         throw this.calibrationAbortError(runs);
       }
       const syntheticConfig: DiffusionServerConfig = { modelId: config.modelId };
-      if (config.threads !== undefined) {
-        syntheticConfig.threads = config.threads;
+      if (config.generation.threads !== undefined) {
+        syntheticConfig.threads = config.generation.threads;
       }
-      if (config.batchSize !== undefined) {
-        syntheticConfig.batchSize = config.batchSize;
+      if (config.generation.batchSize !== undefined) {
+        syntheticConfig.batchSize = config.generation.batchSize;
       }
       this._config = syntheticConfig as unknown as typeof this._config;
 
@@ -665,7 +672,7 @@ export class DiffusionServerManager extends ServerManager {
             prompt,
             size: sizes[0]!,
             steps,
-            cfgScale: config.cfgScale,
+            cfgScale,
             seed,
             sampler,
             combo,
@@ -719,7 +726,7 @@ export class DiffusionServerManager extends ServerManager {
                   prompt,
                   size,
                   steps,
-                  cfgScale: config.cfgScale,
+                  cfgScale,
                   seed,
                   sampler,
                   combo,
@@ -815,6 +822,7 @@ export class DiffusionServerManager extends ServerManager {
         machine,
         modelId: config.modelId,
         steps,
+        cfgScale,
         sampler,
         samples,
         runs,
@@ -897,7 +905,7 @@ export class DiffusionServerManager extends ServerManager {
     prompt: string;
     size: CalibrationSize;
     steps: number;
-    cfgScale?: number;
+    cfgScale: number;
     seed: number;
     sampler: ImageSampler;
     combo: DiffusionOffloadCombo;
@@ -908,6 +916,7 @@ export class DiffusionServerManager extends ServerManager {
       width: params.size.width,
       height: params.size.height,
       steps: params.steps,
+      cfgScale: params.cfgScale,
       seed: params.seed,
       sampler: params.sampler,
       onProgress: (_currentStep, _totalSteps, _stage, percentage) => {
@@ -916,9 +925,6 @@ export class DiffusionServerManager extends ServerManager {
         }
       },
     };
-    if (params.cfgScale !== undefined) {
-      genConfig.cfgScale = params.cfgScale;
-    }
     return this.executeImageGeneration(genConfig, params.combo);
   }
 

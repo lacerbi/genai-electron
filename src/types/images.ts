@@ -306,44 +306,77 @@ export interface CalibrationSize {
 }
 
 /**
+ * Generation parameters an offload-calibration sweep runs under.
+ *
+ * These define the *compute profile* the sweep measures, so they MUST mirror the
+ * settings the app uses in production — otherwise the benchmark does different work
+ * than real generations and can rank the offload combos wrong. The sweep runs these
+ * verbatim for every combo and varies only the offload flags.
+ *
+ * Provided as a required unit (rather than individually-defaulting fields) so
+ * calibration can never *silently* diverge from production on any of these axes.
+ */
+export interface DiffusionCalibrationGeneration {
+  /**
+   * Inference steps — match production. Diffusion (and offload-streaming) cost scales
+   * roughly linearly with steps.
+   */
+  steps: number;
+
+  /**
+   * Guidance scale — match production. A cfgScale > 1 enables classifier-free guidance,
+   * which runs TWO model passes per step (~2x the diffusion cost) and can flip which
+   * offload combo wins. Guidance-distilled models (Flux Klein, SDXL-Lightning, Turbo)
+   * run at 1; standard models are typically 5-8. Required (no default) precisely because
+   * omitting it silently doubled the measured work in earlier versions.
+   */
+  cfgScale: number;
+
+  /** Sampler algorithm — match production (per-step cost varies by sampler) */
+  sampler: ImageSampler;
+
+  /**
+   * CPU threads (sd.cpp `-t`) — match production. Offload combos are CPU-sensitive, so a
+   * thread-count mismatch skews their timings. Omitted = sd.cpp default.
+   */
+  threads?: number;
+
+  /** Batch size (sd.cpp `-b`) — match production. Omitted = sd.cpp default */
+  batchSize?: number;
+}
+
+/**
  * Configuration for DiffusionServerManager.calibrate()
  */
 export interface DiffusionCalibrationConfig {
   /** Diffusion model ID to calibrate */
   modelId: string;
 
-  /** Sizes to benchmark (default: [{ width: 768, height: 768 }]). Pass your app's real sizes */
-  sizes?: CalibrationSize[];
+  /**
+   * Sizes to benchmark — include the size(s) your app actually generates at. Compute
+   * scales with area, so the fastest combo can differ by size. Each width/height must
+   * be a positive multiple of 64.
+   */
+  sizes: CalibrationSize[];
+
+  /**
+   * Generation parameters the sweep must mirror from production (steps, cfgScale,
+   * sampler, threads, batchSize). Required as a unit so the benchmark measures the same
+   * work your real generations do — see {@link DiffusionCalibrationGeneration}.
+   */
+  generation: DiffusionCalibrationGeneration;
 
   /** Offload combos to benchmark (default: curated set in DIFFUSION_CALIBRATION_DEFAULTS) */
   combos?: DiffusionOffloadCombo[];
 
-  /**
-   * Inference steps per generation (default: 4).
-   * Offload cost scales with steps — prefer your app's real step count.
-   */
-  steps?: number;
-
-  /** Guidance scale (default: omitted, uses the sd.cpp default) */
-  cfgScale?: number;
-
-  /** Sampler algorithm (default: 'euler') */
-  sampler?: ImageSampler;
+  /** Timed samples per (combo, size), after 1 discarded warmup per combo (default: 2) */
+  samples?: number;
 
   /** Fixed seed so every combo does identical work (default: 42) */
   seed?: number;
 
-  /** Benchmark prompt (default: neutral built-in prompt) */
+  /** Benchmark prompt — does not affect timing (default: neutral built-in prompt) */
   prompt?: string;
-
-  /** Timed samples per (combo, size), after 1 discarded warmup per combo (default: 2) */
-  samples?: number;
-
-  /** CPU threads passthrough — match your production config (default: omitted) */
-  threads?: number;
-
-  /** Batch size passthrough — match your production config (default: omitted) */
-  batchSize?: number;
 
   /** Progress callback (the same payload is also emitted as 'calibration-progress' events) */
   onProgress?: (progress: DiffusionCalibrationProgress) => void;
@@ -448,6 +481,9 @@ export interface DiffusionCalibrationReport {
 
   /** Inference steps used per generation (methodology echo for persistence keying) */
   steps: number;
+
+  /** Guidance scale used per generation (methodology echo) */
+  cfgScale: number;
 
   /** Sampler used (methodology echo) */
   sampler: ImageSampler;

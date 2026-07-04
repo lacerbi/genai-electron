@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.11.0
+ * @version 0.12.0
  * @license MIT
  *
  * @example
@@ -306,6 +306,7 @@ export type {
   GenerationState,
   DiffusionOffloadCombo,
   CalibrationSize,
+  DiffusionCalibrationGeneration,
   DiffusionCalibrationConfig,
   DiffusionCalibrationProgress,
   CalibrationRun,
