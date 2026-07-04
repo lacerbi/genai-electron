@@ -32,6 +32,8 @@
 
 **Build Status:** ✅ 0 TypeScript errors / 563/563 tests passing (22 suites)
 
+**Live smoke (2026-07-04, RTX 4060 Laptop 8 GB, flux-2-klein-q40 768²/4-step):** full default sweep passed — recommended `clip-gpu` at 17.1 s median vs auto's 33.5 s (~2×); `vaeOnCpu` decode trap confirmed (97.3 s, decode 66 s); 5% tie-break exercised live (`all-resident` 16.9 s / `clip-gpu` 17.1 s / `clip-gpu+offload` 17.4 s → fewest forced flags won); progress monotonic, phases in order, callback/event parity (2303 events); post-sweep normal `start()` + generation with recommended flags OK, server left stopped. Details: `docs/dev/plans/PLAN-diffusion-calibration.md` Phase 6.
+
 ---
 
 ## Completed Phases

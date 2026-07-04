@@ -11,8 +11,8 @@ Source: `ISSUE-diffusion-offload-calibration.md` (repo root) + design discussion
 - [x] Phase 3: Tests (20 new; 563/563 total, 22 suites)
 - [x] Phase 4: Documentation + housekeeping
 - [x] Phase 5: Example-app wiring
-- [~] Phase 6: Live smoke
-- [ ] Final `/doublecheck`
+- [x] Phase 6: Live smoke (PASSED 2026-07-04 — see Phase 6 results)
+- [~] Final `/doublecheck`
 
 ## Summary
 
@@ -441,8 +441,39 @@ observed if llama server running. **Single heavy-compute run in the main thread 
 agents running GPU work.**
 
 **Verification:**
-- [ ] Report matches the empirical shape from the ISSUE (directionally).
-- [ ] Server left stopped; subsequent normal `start()` + generation works.
+- [x] Report matches the empirical shape from the ISSUE (directionally).
+- [x] Server left stopped; subsequent normal `start()` + generation works.
+
+**Results (2026-07-04, RTX 4060 Laptop 8 GB, flux-2-klein-q40, 768×768 @ 4 steps, euler,
+2 samples, ~12.5 min sweep):**
+
+| Combo | Median | diffusion / decode |
+|---|---|---|
+| `auto` (→ clip=true) | 33.5 s | 8.7 s / 1.4 s |
+| **`clip-gpu`** (recommended) | **17.1 s** | 9.2 s / 4.9 s |
+| `clip-gpu+offload` | 17.4 s | 11.3 s / 1.5 s |
+| `offload` | 57.5 s | 10.9 s / 1.5 s |
+| `all-resident` | 16.9 s | 8.8 s / 5.0 s |
+| `max-savings` | 97.3 s | 10.4 s / 66.4 s |
+
+- Auto heuristic beaten ~2×; `vaeOnCpu` decode trap confirmed (66 s); `offload`-alone worse
+  than auto — all directionally per the ISSUE. Divergence (the point of calibrating): on this
+  box at Q4_0/768², `clip=false` needs no `offloadToCpu` (`all-resident` ran clean at 16.9 s).
+- **Tie-break exercised live**: `all-resident` (16.9 s, 3 forced flags), `clip-gpu` (17.1 s,
+  1 flag), `clip-gpu+offload` (17.4 s, 2 flags) all within the 5% window → fewest-forced-flags
+  rule picked `clip-gpu`. Exactly as designed.
+- Progress: monotonic ✓ (asserted in-script), phases `preparing → (warmup → sampling)×6 →
+  restoring-llm → done` ✓, 2303 events on the `'calibration-progress'` channel (callback parity) ✓.
+- Post-check: normal `start()` with recommended flags + 768² generation OK (17.7 s, valid
+  1.29 MB PNG); server stopped cleanly; `isCalibrating()` false; status `stopped` after sweep.
+- `stageMs.loadMs` absent in all runs (loading-stage start marker not hit for this
+  multi-component model); `diffusionMs`/`decodeMs` present. Field is optional per spec — OK,
+  noted as a possible future parser follow-up.
+- Smoke ran as a headless Electron script sharing the example app's userData (v0.10.0 smoke
+  methodology). Gotcha for next time: **Electron 35's default app hangs silently on `.mjs`
+  entry scripts** — use a `.cjs` entry + dynamic `import()` of the ESM library. Scripts were
+  temporary (example dir, deleted after the run); full log in the session scratchpad
+  (`calibration-smoke2.log`).
 
 ---
 
