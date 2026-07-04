@@ -7,9 +7,9 @@ Source: `ISSUE-diffusion-offload-calibration.md` (repo root) + design discussion
 ## Phase status
 
 - [x] Phase 1: Types, defaults, core plumbing
-- [~] Phase 2: `calibrate()` implementation (code done; final gate = Phase 3 suite)
-- [~] Phase 3: Tests
-- [ ] Phase 4: Documentation + housekeeping
+- [x] Phase 2: `calibrate()` implementation
+- [x] Phase 3: Tests (20 new; 563/563 total, 22 suites)
+- [~] Phase 4: Documentation + housekeeping
 - [ ] Phase 5: Example-app wiring
 - [ ] Phase 6: Live smoke
 - [ ] Final `/doublecheck`
@@ -322,7 +322,7 @@ persisted recommendations surface it):
 
 **Verification:**
 - [x] `npm run build` — 0 TypeScript errors (strict mode).
-- [ ] Full unit-test suite (Phase 3) green.
+- [x] Full unit-test suite (Phase 3) green.
 
 ### Phase 3: Tests
 
@@ -333,36 +333,38 @@ persisted recommendations surface it):
   `DiffusionServerManager.test.ts` — mocked spawn with controllable stdout/stderr/exit; the
   scaffold's mock set is sufficient for the real-`ResourceOrchestrator` path, since the
   orchestrator's own imports pull nothing needing extra mocks). Cases:
-  - [ ] Sweep spawns combos × (warmup + samples × sizes) processes; per-spawn CLI flags match each
+  - [x] Sweep spawns combos × (warmup + samples × sizes) processes; per-spawn CLI flags match each
     combo (per-run flag resolution — replaces the ISSUE's obsolete "restarts per combo" check).
-  - [ ] Injected OOM (exit 1 + `CUDA error: out of memory` stderr) on one combo → `status: 'oom'`,
+  - [x] Injected OOM (exit 1 + `CUDA error: out of memory` stderr) on one combo → `status: 'oom'`,
     sweep continues, other combos recorded `'ok'`.
-  - [ ] Injected generic failure → `status: 'error'`.
-  - [ ] Warmup failure → first size's run carries the failure, later sizes still attempted,
+  - [x] Injected generic failure → `status: 'error'`.
+  - [x] Warmup failure → first size's run carries the failure, later sizes still attempted,
     progress still reaches 100.
-  - [ ] `pickRecommended`: fastest wins; 5%-tolerance tie prefers fewer forced flags; size with all
+  - [x] `pickRecommended`: fastest wins; 5%-tolerance tie prefers fewer forced flags; size with all
     failures absent from `recommended` (pure-function tests with synthetic runs — deterministic,
     no wall-clock dependence).
-  - [ ] Progress: phases observed in order, `overallPercent` monotonic 0→100, `'done'` emitted;
+  - [x] Progress: phases observed in order, `overallPercent` monotonic 0→100, `'done'` emitted;
     `'calibration-progress'` event fires with the same payloads as the callback; a **throwing**
-    `onProgress` does not abort the sweep.
-  - [ ] Abort mid-sweep → rejects with `details.code === 'CALIBRATION_ABORTED'` (top-level code is
+    `onProgress` does not abort the sweep (also covers a throwing event listener).
+  - [x] Abort mid-sweep → rejects with `details.code === 'CALIBRATION_ABORTED'` (top-level code is
     `'SERVER_ERROR'`), partial `details.runs` present, `calibrating` cleared. Pre-aborted
-    signal at call time → immediate rejection, no spawns.
-  - [ ] Throws if server running; `start()` throws during calibration; invalid sizes (non-multiple
+    signal at call time → immediate rejection, no spawns. Plus: in-flight abort via the
+    cancel/kill path (hanging spawn + kill→exit wiring).
+  - [x] Throws if server running; `start()` throws during calibration; invalid sizes (non-multiple
     of 64) rejected up-front.
-  - [ ] SD3.5-Large model name → `clipOnCpu: true` combos in `skippedCombos`, not run.
-  - [ ] Constructed with mock `llamaServer` running → `llamaServer.stop()` once at sweep start,
+  - [x] SD3.5-Large model name → `clipOnCpu: true` combos in `skippedCombos`, not run.
+  - [x] Constructed with mock `llamaServer` running → `llamaServer.stop()` once at sweep start,
     `llamaServer.start()` (restore) at sweep end (exercises the real orchestrator with mocks:
     `isRunning`, `getConfig`, `stop`, `start`).
-  - [ ] State restore: prior `_config`/`currentModelInfo`/`binaryPath` back in place after the
-    sweep (e.g. a normal `start()` + `generateImage()` works unchanged afterwards).
+  - [x] State restore: prior `_config`/`currentModelInfo`/`binaryPath` back in place after the
+    sweep (e.g. a normal `start()` + `generateImage()` works unchanged afterwards; also
+    asserts no leftover combo overrides leak into post-calibration generations).
 - `computeDiffusionOptimizations` override-precedence cases can be covered through the sweep
   tests (flags on spawn args); add a direct case in the existing test file only if a gap remains.
 
 **Verification:**
-- [ ] `npm test` — all suites green (543 existing + new).
-- [ ] `npm run lint`, `npm run format` clean.
+- [x] `npm test` — all suites green (563/563: 543 existing + 20 new, 22 suites).
+- [x] `npm run lint` (0 errors, 62 pre-existing warnings), `npm run format` clean.
 
 ### Phase 4: Documentation + housekeeping
 
