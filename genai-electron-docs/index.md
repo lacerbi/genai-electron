@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.9.0 (Structured Binary-Provisioning Progress)
+> **Version**: 0.10.0 (stable-diffusion.cpp master-746 + CUDA offload auto-detection)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.9.x to v0.10.0](migration-0-9-to-0-10.md)** - stable-diffusion.cpp master-746 bump; CPU-offload flags now auto-detected on CUDA too
 - **[Migrating from v0.8.x to v0.9.0](migration-0-8-to-0-9.md)** - Structured `'binary-progress'` event for provisioning UIs
 - **[Migrating from v0.7.x to v0.8.0](migration-0-7-to-0-8.md)** - MoE-aware sizing: automatic `cpuMoe` for too-big MoE models, expert-weights measurement
 - **[Migrating from v0.6.x to v0.7.0](migration-0-6-to-0-7.md)** - Adaptive context sizing, automatic q8_0 KV quantization, full-offload preference
