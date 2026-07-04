@@ -1,6 +1,6 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.9.0 released; v0.10.0 batch (sd.cpp bump + CUDA offload guard retirement) ready for release (2026-07-04)
+> **Current Status**: v0.10.0 — stable-diffusion.cpp master-746-2574f59 + CUDA offload guard retirement (2026-07-04)
 
 ---
 
@@ -8,8 +8,8 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 543/543 passing (21 suites)
-- **Branch:** `feat/sd-cpp-bump`
-- **Last Updated:** 2026-07-04 (v0.10.0 batch: stable-diffusion.cpp master-746-2574f59)
+- **Branch:** `main`
+- **Last Updated:** 2026-07-04 (v0.10.0 release)
 
 ---
 
@@ -524,7 +524,7 @@ For detailed historical information:
 
 ---
 
-## v0.10.0 (Unreleased): stable-diffusion.cpp master-746-2574f59 + CUDA Offload Guard Retirement (2026-07-04)
+## v0.10.0: stable-diffusion.cpp master-746-2574f59 + CUDA Offload Guard Retirement (2026-07-04)
 
 **Goal/Problem:** The diffusion binary pin (`master-504-636d3cb`, 2026-02-10) was 242 releases behind upstream. Bump to the latest release, re-validate the whole sd-cli surface (flags, log formats, asset scheme), and retire workarounds that no longer apply. Plan: `docs/dev/plans/PLAN-sd-cpp-bump.md`.
 
