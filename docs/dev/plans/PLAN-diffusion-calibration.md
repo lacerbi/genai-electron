@@ -1,7 +1,7 @@
 # Plan: Diffusion Offload Calibration API (`diffusionServer.calibrate()`)
 
 Created: 2026-07-04
-Status: COMPLETE (2026-07-04) — all phases done, live smoke PASSED, doublecheck clean; ships unreleased per the batch workflow
+Status: COMPLETE (2026-07-04) — all phases done, live smoke PASSED, doublecheck clean; **released as v0.11.0** (feature PR #38 → release PR)
 Source: `ISSUE-diffusion-offload-calibration.md` (repo root) + design discussion (agreed decisions below)
 
 ## Phase status
@@ -531,6 +531,11 @@ version-adjacent change). When the user later says to release: one release PR bu
 package.json / `src/index.ts` `@version` / README, adds the PROGRESS release entry and any
 migration notes, then tag → GitHub release → user runs `npm publish`. Merge/PR timing decided
 by the user at the end.
+
+**Released 2026-07-04 as v0.11.0** (user go-ahead same day): feature PR #38 merged with green
+CI (6/6 checks) → `release/v0.11.0` (version strings, `migration-0-10-to-0-11.md`, PROGRESS
+entry moved from "Unreleased" to a v0.11.0 section, docs index migration link) → release PR →
+tag `v0.11.0` → GitHub release → user `npm publish`. Purely additive — no migration steps.
 
 ## Open questions
 

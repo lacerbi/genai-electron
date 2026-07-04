@@ -1,38 +1,15 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.10.0 released — diffusion offload calibration accumulating unreleased (2026-07-04)
+> **Current Status**: v0.11.0 released — diffusion offload calibration (2026-07-04)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 563/563 passing (22 suites)
-- **Branch:** `feat/diffusion-calibration` (unreleased batch)
-- **Last Updated:** 2026-07-04 (offload calibration)
-
----
-
-## Unreleased
-
-### Diffusion Offload Calibration — `diffusionServer.calibrate()` (2026-07-04)
-
-**Goal/Problem:** The static VRAM heuristic cannot pick the fastest CPU-offload flag combo — the optimum is machine-dependent and the flags interact (measured on an 8 GB Win11 laptop with Flux 2 Klein: auto ~18 s vs `clipOnCpu:false`+`offloadToCpu:true` ~10–12 s; `vaeOnCpu` ~3× slower; Windows thrashes where Linux hard-OOMs). Only a live sweep on the target machine can decide. Proposal: `docs/dev/issues/ISSUE-diffusion-offload-calibration.md`; plan: `docs/dev/plans/PLAN-diffusion-calibration.md`.
-
-**Core Features:**
-- `calibrate(config)` on DiffusionServerManager: benchmarks offload combos × sizes with real generations (fixed seed/steps/prompt/sampler → identical work per combo), 1 discarded warmup per combo + median-of-samples timing, per-stage split (`stageMs`: load/diffusion/decode), OOM-vs-error classification from stderr/exit code, per-size `recommended` (5% tie tolerance prefers fewer forced flags)
-- **No server restarts:** per-generation flag overrides threaded through `computeDiffusionOptimizations` (flags resolve per spawn); server must be stopped, is left stopped; `start()` guarded during sweeps; `isCalibrating()`
-- Sweep-level LLM offload/restore via the internal orchestrator (`waitForReload()` → `offloadLLM()` once, `reloadLLM()` in finally; both promoted to public API)
-- Progress for UIs: guarded `onProgress` callback + `'calibration-progress'` event (same payload; smooth monotonic `overallPercent` with within-generation folding) — IPC-forwardable like `'binary-progress'`
-- Abort via `AbortSignal` → `ServerError` with `details.code = 'CALIBRATION_ABORTED'` + partial runs in `details.runs`
-- SD3.5-Large guard: forced `clipOnCpu: true` combos auto-skipped → `report.skippedCombos` (upstream leejet/stable-diffusion.cpp#1578)
-- New exports: `DiffusionOffloadCombo`, `CalibrationSize`, `DiffusionCalibrationConfig/Progress/Report`, `CalibrationRun`, `DIFFUSION_CALIBRATION_DEFAULTS`
-
-**Files Modified:** `src/types/{images,index}.ts`, `src/index.ts`, `src/config/defaults.ts`, `src/managers/{DiffusionServerManager,ResourceOrchestrator}.ts`, `tests/unit/diffusion-calibration.test.ts` (new, 23 cases), docs (`image-generation` "Offload Calibration" section, `typescript-reference`, `resource-orchestration`, index/troubleshooting cross-refs), example app (calibration UI)
-
-**Build Status:** ✅ 0 TypeScript errors / 566/566 tests passing (22 suites)
-
-**Live smoke (2026-07-04, RTX 4060 Laptop 8 GB, flux-2-klein-q40 768²/4-step):** full default sweep passed — recommended `clip-gpu` at 17.1 s median vs auto's 33.5 s (~2×); `vaeOnCpu` decode trap confirmed (97.3 s, decode 66 s); 5% tie-break exercised live (`all-resident` 16.9 s / `clip-gpu` 17.1 s / `clip-gpu+offload` 17.4 s → fewest forced flags won); progress monotonic, phases in order, callback/event parity (2303 events); post-sweep normal `start()` + generation with recommended flags OK, server left stopped. Details: `docs/dev/plans/PLAN-diffusion-calibration.md` Phase 6.
+- **Tests:** ✅ 566/566 passing (22 suites)
+- **Branch:** `main` (v0.11.0)
+- **Last Updated:** 2026-07-04 (v0.11.0 release)
 
 ---
 
@@ -544,6 +521,27 @@ For detailed historical information:
 **Files Modified:** `src/utils/kv-cache-math.ts` (new), `src/utils/model-metadata-helpers.ts`, `src/system/SystemInfo.ts`, `src/managers/{LlamaServerManager,ModelManager,ResourceOrchestrator}.ts`, `src/config/defaults.ts`, `src/types/{models,servers,index}.ts`, `src/index.ts`, docs (`system-detection`, `llm-server`, `typescript-reference`, `image-generation`, `migration-0-6-to-0-7.md`)
 
 **Build Status:** ✅ 0 TypeScript errors / 514/514 tests passing (21 suites); v0.7.1 adds the progressive context-granularity ladder (128→4096 steps by magnitude, `floorContextToGranularity` exported; amends unpublished v0.7.0 — publish 0.7.1). Live GPU smoke: pure auto-config on Qwen3.5-4B → full offload, auto q8_0 KV + FA, context 58368 (→ 57344 with the ladder), 8130-token prompt round-trips without truncation
+
+---
+
+## v0.11.0: Diffusion Offload Calibration — `diffusionServer.calibrate()` (2026-07-04)
+
+**Goal/Problem:** The static VRAM heuristic cannot pick the fastest CPU-offload flag combo — the optimum is machine-dependent and the flags interact (measured on an 8 GB Win11 laptop with Flux 2 Klein: auto ~18 s vs `clipOnCpu:false`+`offloadToCpu:true` ~10–12 s; `vaeOnCpu` ~3× slower; Windows thrashes where Linux hard-OOMs). Only a live sweep on the target machine can decide. Proposal: `docs/dev/issues/ISSUE-diffusion-offload-calibration.md`; plan: `docs/dev/plans/PLAN-diffusion-calibration.md`.
+
+**Core Features:**
+- `calibrate(config)` on DiffusionServerManager: benchmarks offload combos × sizes with real generations (fixed seed/steps/prompt/sampler → identical work per combo), 1 discarded warmup per combo + median-of-samples timing, per-stage split (`stageMs`: load/diffusion/decode), OOM-vs-error classification from stderr/exit code, per-size `recommended` (5% tie tolerance prefers fewer forced flags)
+- **No server restarts:** per-generation flag overrides threaded through `computeDiffusionOptimizations` (flags resolve per spawn); server must be stopped, is left stopped; `start()` guarded during sweeps; `isCalibrating()`
+- Sweep-level LLM offload/restore via the internal orchestrator (`waitForReload()` → `offloadLLM()` once, `reloadLLM()` in finally; both promoted to public API)
+- Progress for UIs: guarded `onProgress` callback + `'calibration-progress'` event (same payload; smooth monotonic `overallPercent` with within-generation folding) — IPC-forwardable like `'binary-progress'`
+- Abort via `AbortSignal` → `ServerError` with `details.code = 'CALIBRATION_ABORTED'` + partial runs in `details.runs`
+- SD3.5-Large guard: forced `clipOnCpu: true` combos auto-skipped → `report.skippedCombos` (upstream leejet/stable-diffusion.cpp#1578)
+- New exports: `DiffusionOffloadCombo`, `CalibrationSize`, `DiffusionCalibrationConfig/Progress/Report`, `CalibrationRun`, `DIFFUSION_CALIBRATION_DEFAULTS`
+
+**Files Modified:** `src/types/{images,index}.ts`, `src/index.ts`, `src/config/defaults.ts`, `src/managers/{DiffusionServerManager,ResourceOrchestrator}.ts`, `tests/unit/diffusion-calibration.test.ts` (new, 23 cases), docs (`image-generation` "Offload Calibration" section, `typescript-reference`, `resource-orchestration`, index/troubleshooting cross-refs, `migration-0-10-to-0-11.md`), example app (calibration UI)
+
+**Build Status:** ✅ 0 TypeScript errors / 566/566 tests passing (22 suites)
+
+**Live smoke (2026-07-04, RTX 4060 Laptop 8 GB, flux-2-klein-q40 768²/4-step):** full default sweep passed — recommended `clip-gpu` at 17.1 s median vs auto's 33.5 s (~2×); `vaeOnCpu` decode trap confirmed (97.3 s, decode 66 s); 5% tie-break exercised live (`all-resident` 16.9 s / `clip-gpu` 17.1 s / `clip-gpu+offload` 17.4 s → fewest forced flags won); progress monotonic, phases in order, callback/event parity (2303 events); post-sweep normal `start()` + generation with recommended flags OK, server left stopped. Details: `docs/dev/plans/PLAN-diffusion-calibration.md` Phase 6.
 
 ---
 

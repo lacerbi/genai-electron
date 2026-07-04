@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.10.0
+ * @version 0.11.0
  * @license MIT
  *
  * @example
