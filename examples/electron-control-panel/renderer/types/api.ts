@@ -166,8 +166,8 @@ export interface WindowAPI {
     cancel: () => Promise<{ cancelled: boolean }>;
     calibrate: (config: {
       modelId: string;
-      sizes?: CalibrationSize[];
-      steps?: number;
+      sizes: CalibrationSize[];
+      generation: { steps: number; cfgScale: number; sampler: ImageSampler };
       samples?: number;
     }) => Promise<CalibrationOutcome>;
     calibrateCancel: () => Promise<{ cancelling: boolean }>;

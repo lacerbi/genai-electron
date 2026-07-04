@@ -244,12 +244,13 @@ const DiffusionServerControl: React.FC = () => {
     setCalibrationPartialRuns(null);
     setCalibrationProgress(null);
     try {
-      // Benchmark at the Generate form's current size/steps (the settings that
-      // will actually be used) — everything else uses library defaults
+      // Benchmark at the Generate form's exact settings (size + the generation
+      // params that shape the compute profile) so the result reflects real use.
+      // cfgScale matters most: cfgScale > 1 doubles the diffusion work.
       const outcome = await window.api.diffusion.calibrate({
         modelId: selectedModel,
         sizes: [{ width, height }],
-        steps,
+        generation: { steps, cfgScale, sampler },
       });
       if ('aborted' in outcome) {
         setCalibrationPartialRuns(outcome.runs);

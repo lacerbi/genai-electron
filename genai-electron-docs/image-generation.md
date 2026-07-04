@@ -324,9 +324,17 @@ calibrate(config: DiffusionCalibrationConfig): Promise<DiffusionCalibrationRepor
 
 Runs the sweep and returns a report. The caller persists/applies the recommendation — the library does not store it.
 
-**Config:** `modelId` (required), `sizes` (default `[{ width: 768, height: 768 }]` — pass your app's real sizes), `combos` (default: curated labeled set in `DIFFUSION_CALIBRATION_DEFAULTS`: `auto`, `clip-gpu`, `clip-gpu+offload`, `offload`, `all-resident`, `max-savings`), `steps` (default 4 — **use your real step count**, offload cost scales with steps), `cfgScale`, `sampler` (`'euler'`), `seed` (42, fixed so every combo does identical work), `prompt`, `samples` (2 timed samples per combo × size, after 1 discarded warmup per combo), `threads`/`batchSize` (match your production config), `onProgress`, `signal`.
+**Config:**
+- `modelId` (**required**).
+- `sizes` (**required**) — the image size(s) your app generates at (`{ width, height }`, positive multiples of 64). Compute scales with area, so the fastest combo can differ by size.
+- `generation` (**required**) — the production generation parameters the sweep must mirror, as a unit: `steps`, `cfgScale`, `sampler` (all required) plus optional `threads`/`batchSize`. See the ⚠️ below.
+- `combos` (default: curated labeled set in `DIFFUSION_CALIBRATION_DEFAULTS`: `auto`, `clip-gpu`, `clip-gpu+offload`, `offload`, `all-resident`, `max-savings`).
+- `samples` (default 2 timed samples per combo × size, after 1 discarded warmup per combo).
+- `seed` (default 42, fixed so every combo does identical work), `prompt` (neutral benchmark; does not affect timing), `onProgress`, `signal`.
 
-Default sweep cost: 6 combos × (1 warmup + 2 samples) = 18 generations — typically a few minutes.
+> ⚠️ **`generation` must match what you generate with in production** — these parameters define the *compute profile* the sweep measures, and a mismatch makes the benchmark rank the combos wrong. In particular **`cfgScale`**: a value > 1 enables classifier-free guidance, which runs **two model passes per step (~2× the diffusion cost)** and can flip which offload combo wins. Guidance-distilled models (Flux Klein, SDXL-Lightning/Turbo) run at `cfgScale: 1`; standard models are typically 5–8. (`steps`, `cfgScale`, `sampler`, and `sizes` have no library defaults precisely so calibration can never *silently* diverge from production.)
+
+Default sweep cost: 6 combos × (1 warmup + 2 samples) = 18 generations per size — typically a few minutes.
 
 **Contract:**
 - The server must be **stopped** and is left stopped. `start()` throws while calibrating; `isCalibrating()` exposes the state (`getInfo().busy` may briefly read `true` while `status` stays `'stopped'` — harmless).
@@ -339,8 +347,13 @@ Default sweep cost: 6 combos × (1 warmup + 2 samples) = 18 generations — typi
 ```typescript
 const report = await diffusionServer.calibrate({
   modelId: 'flux-2-klein',
-  sizes: [{ width: 768, height: 768 }, { width: 512, height: 1024 }], // the app's real sizes
-  steps: 4,                                                            // the app's quality preset
+  sizes: [{ width: 768, height: 768 }, { width: 512, height: 1024 }], // your app's real sizes
+  generation: {
+    steps: 4, // your app's quality preset
+    cfgScale: 1, // MUST match production — Flux Klein is guidance-distilled (cfg 1)
+    sampler: 'euler',
+    // threads / batchSize: pass your production values here if you set them
+  },
   onProgress: (p) => updateBar(p.overallPercent, p.phase, p.combo?.label),
 });
 
@@ -379,7 +392,7 @@ Pass an `AbortSignal`. On abort the in-flight generation is killed and `calibrat
 const controller = new AbortController();
 cancelButton.onclick = () => controller.abort();
 try {
-  await diffusionServer.calibrate({ modelId, signal: controller.signal });
+  await diffusionServer.calibrate({ modelId, sizes, generation, signal: controller.signal });
 } catch (error) {
   if (error.details?.code === 'CALIBRATION_ABORTED') {
     console.log('Aborted; partial results:', error.details.runs);
@@ -389,7 +402,7 @@ try {
 
 ### Caveats
 
-- **Calibrate with your real settings.** `offloadToCpu` overhead scales with step count and larger sizes shift the optimum (hence per-size recommendations). The default `steps: 4` suits distilled models (SDXL-Turbo, Flux Klein).
+- **Calibrate with your real settings** (`generation` + `sizes`). `offloadToCpu` overhead scales with step count, larger sizes shift the optimum (hence per-size recommendations), and — most impactfully — `cfgScale > 1` doubles the diffusion work (two passes/step) and can invert the ranking. The report echoes `steps`/`cfgScale`/`sampler`/`samples` so a persisted recommendation records the exact methodology it was measured under.
 - **Sizes must be positive multiples of 64** (sd.cpp constraint; validated up-front).
 - **SD3.5-Large:** combos forcing `clipOnCpu: true` are skipped automatically (garbled output upstream — leejet/stable-diffusion.cpp#1578) and listed in `report.skippedCombos`. Auto-detection may still resolve `clipOnCpu` on for auto combos on low-VRAM machines — prefer explicit `clipOnCpu: false` combos for this model family.
 - **Timing noise:** thermal throttling and background load perturb results; the raw per-sample totals are kept in `runs[].samplesMs`. `timeTakenMs` is the median (with `samples: 2`, the mean of both).

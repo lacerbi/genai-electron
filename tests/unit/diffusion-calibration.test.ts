@@ -13,7 +13,10 @@ import { jest } from '@jest/globals';
 import { EventEmitter } from 'events';
 import type {
   CalibrationRun,
+  DiffusionCalibrationConfig,
+  DiffusionCalibrationGeneration,
   DiffusionCalibrationProgress,
+  DiffusionCalibrationReport,
   DiffusionServerConfig,
   ModelInfo,
 } from '../../src/types/index.js';
@@ -216,6 +219,30 @@ describe('DiffusionServerManager calibration', () => {
     port: 8081,
   };
 
+  // Required generation params (mirror production). Tests default to a distilled
+  // cfg=1 profile; assertions that care about steps/sampler rely on these.
+  const BASE_GEN: DiffusionCalibrationGeneration = { steps: 4, cfgScale: 1, sampler: 'euler' };
+  const DEFAULT_SIZES = [{ width: 768, height: 768 }];
+
+  /**
+   * Invoke calibrate() with the now-required `sizes` + `generation` filled in.
+   * Overrides win; a partial `generation` is merged onto BASE_GEN.
+   */
+  const runCalibrate = (
+    target: InstanceType<typeof DiffusionServerManager>,
+    overrides: Omit<Partial<DiffusionCalibrationConfig>, 'generation'> & {
+      generation?: Partial<DiffusionCalibrationGeneration>;
+    } = {}
+  ): Promise<DiffusionCalibrationReport> => {
+    const { generation, sizes, modelId, ...rest } = overrides;
+    return target.calibrate({
+      modelId: modelId ?? 'sdxl-turbo',
+      sizes: sizes ?? DEFAULT_SIZES,
+      generation: { ...BASE_GEN, ...generation },
+      ...rest,
+    });
+  };
+
   /** Args of every spawned generation, in order */
   let spawnCalls: string[][] = [];
   /** Per-spawn options handles (for the kill → exit wiring) */
@@ -384,7 +411,7 @@ describe('DiffusionServerManager calibration', () => {
     it('throws if the server is running', async () => {
       await diffusionServer.start(mockServerConfig);
 
-      await expect(diffusionServer.calibrate({ modelId: 'sdxl-turbo' })).rejects.toThrow(
+      await expect(runCalibrate(diffusionServer, { modelId: 'sdxl-turbo' })).rejects.toThrow(
         /Cannot calibrate while the server is running/
       );
 
@@ -393,7 +420,7 @@ describe('DiffusionServerManager calibration', () => {
 
     it('rejects invalid sizes (non-multiple of 64) before any spawn', async () => {
       await expect(
-        diffusionServer.calibrate({
+        runCalibrate(diffusionServer, {
           modelId: 'sdxl-turbo',
           sizes: [{ width: 500, height: 512 }],
         })
@@ -406,7 +433,7 @@ describe('DiffusionServerManager calibration', () => {
       controller.abort();
 
       try {
-        await diffusionServer.calibrate({ modelId: 'sdxl-turbo', signal: controller.signal });
+        await runCalibrate(diffusionServer, { modelId: 'sdxl-turbo', signal: controller.signal });
         throw new Error('Should have thrown');
       } catch (error: any) {
         expect(error.code).toBe('SERVER_ERROR'); // top-level code is generic
@@ -419,7 +446,7 @@ describe('DiffusionServerManager calibration', () => {
 
     it('blocks start() while a calibration is in flight', async () => {
       let startRejection: Promise<void> | undefined;
-      const calibratePromise = diffusionServer.calibrate({
+      const calibratePromise = runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
         onProgress: (p) => {
@@ -441,13 +468,13 @@ describe('DiffusionServerManager calibration', () => {
 
     it('rejects a second calibrate() while one is in flight', async () => {
       let secondRejection: Promise<void> | undefined;
-      const calibratePromise = diffusionServer.calibrate({
+      const calibratePromise = runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
         onProgress: (p) => {
           if (p.phase === 'warmup' && !secondRejection) {
             secondRejection = expect(
-              diffusionServer.calibrate({ modelId: 'sdxl-turbo' })
+              runCalibrate(diffusionServer, { modelId: 'sdxl-turbo' })
             ).rejects.toThrow(/already in progress/);
           }
         },
@@ -463,14 +490,13 @@ describe('DiffusionServerManager calibration', () => {
 
   describe('sweep structure and per-run flag resolution', () => {
     it('spawns combos × (warmup + samples × sizes) and applies per-combo flags', async () => {
-      const report = await diffusionServer.calibrate({
+      const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         sizes: [
           { width: 768, height: 768 },
           { width: 512, height: 1024 },
         ],
         samples: 1,
-        steps: 4,
         combos: [
           { label: 'clip-gpu', clipOnCpu: false },
           { label: 'max-savings', clipOnCpu: true, vaeOnCpu: true, offloadToCpu: true },
@@ -526,6 +552,7 @@ describe('DiffusionServerManager calibration', () => {
       expect(report.recommended['768x768']).toBeDefined();
       expect(report.recommended['512x1024']).toBeDefined();
       expect(report.steps).toBe(4);
+      expect(report.cfgScale).toBe(1);
       expect(report.sampler).toBe('euler');
       expect(report.samples).toBe(1);
       expect(report.modelId).toBe('sdxl-turbo');
@@ -538,7 +565,7 @@ describe('DiffusionServerManager calibration', () => {
     });
 
     it('lets auto-detection resolve omitted flags (auto combo carries resolved values)', async () => {
-      const report = await diffusionServer.calibrate({
+      const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
         combos: [{ label: 'auto' }],
@@ -577,10 +604,9 @@ describe('DiffusionServerManager calibration', () => {
       spawnScript = () => ({ stdout: [...SD_STDOUT] });
       const progressEvents: DiffusionCalibrationProgress[] = [];
 
-      const report = await diffusionServer.calibrate({
+      const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 2,
-        steps: 4,
         combos: [{ label: 'auto' }],
         onProgress: (p) => progressEvents.push(p),
       });
@@ -617,7 +643,7 @@ describe('DiffusionServerManager calibration', () => {
     });
 
     it('hands back per-sweep combo copies, never the module default objects', async () => {
-      const report = await diffusionServer.calibrate({ modelId: 'sdxl-turbo', samples: 1 });
+      const report = await runCalibrate(diffusionServer, { modelId: 'sdxl-turbo', samples: 1 });
 
       // Default sweep: 6 combos × (1 warmup + 1 sample × 1 size) = 12 generations
       expect(spawnCalls).toHaveLength(12);
@@ -636,7 +662,7 @@ describe('DiffusionServerManager calibration', () => {
           ? { exitCode: 1, stderr: ['ggml_cuda_host_malloc: CUDA error: out of memory'] }
           : undefined;
 
-      const report = await diffusionServer.calibrate({
+      const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
         combos: [
@@ -663,7 +689,7 @@ describe('DiffusionServerManager calibration', () => {
       spawnScript = (index) =>
         index === 2 ? { exitCode: 1, stderr: ['some unrelated failure'] } : undefined;
 
-      const report = await diffusionServer.calibrate({
+      const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 2,
         combos: [{ label: 'auto' }],
@@ -683,7 +709,7 @@ describe('DiffusionServerManager calibration', () => {
       spawnScript = (index) =>
         index === 0 ? { exitCode: 1, stderr: ['cudaMalloc failed: out of memory'] } : undefined;
 
-      const report = await diffusionServer.calibrate({
+      const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         sizes: [
           { width: 768, height: 768 },
@@ -715,7 +741,7 @@ describe('DiffusionServerManager calibration', () => {
         eventPayloads.push(p)
       );
 
-      await diffusionServer.calibrate({
+      await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
         combos: [{ label: 'auto' }, { label: 'clip-gpu', clipOnCpu: false }],
@@ -754,7 +780,7 @@ describe('DiffusionServerManager calibration', () => {
         throw new Error('listener boom');
       });
 
-      const report = await diffusionServer.calibrate({
+      const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
         combos: [{ label: 'auto' }],
@@ -773,7 +799,7 @@ describe('DiffusionServerManager calibration', () => {
       const controller = new AbortController();
 
       try {
-        await diffusionServer.calibrate({
+        await runCalibrate(diffusionServer, {
           modelId: 'sdxl-turbo',
           samples: 1,
           combos: [{ label: 'auto' }, { label: 'clip-gpu', clipOnCpu: false }],
@@ -796,7 +822,7 @@ describe('DiffusionServerManager calibration', () => {
 
       expect(diffusionServer.isCalibrating()).toBe(false);
       // A fresh calibrate works afterwards (state fully torn down)
-      const report = await diffusionServer.calibrate({
+      const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
         combos: [{ label: 'auto' }],
@@ -816,7 +842,7 @@ describe('DiffusionServerManager calibration', () => {
       };
 
       try {
-        await diffusionServer.calibrate({
+        await runCalibrate(diffusionServer, {
           modelId: 'sdxl-turbo',
           samples: 1,
           combos: [{ label: 'auto' }],
@@ -841,7 +867,7 @@ describe('DiffusionServerManager calibration', () => {
         name: 'Stable Diffusion 3.5 Large',
       });
 
-      const report = await diffusionServer.calibrate({
+      const report = await runCalibrate(diffusionServer, {
         modelId: 'sd3.5-large-q4',
         samples: 1,
       });
@@ -880,7 +906,7 @@ describe('DiffusionServerManager calibration', () => {
       );
       const phases: string[] = [];
 
-      const report = await server.calibrate({
+      const report = await runCalibrate(server, {
         modelId: 'sdxl-turbo',
         samples: 1,
         combos: [{ label: 'auto' }],
@@ -908,7 +934,7 @@ describe('DiffusionServerManager calibration', () => {
       await diffusionServer.stop();
       const configBefore = diffusionServer.getConfig();
 
-      await diffusionServer.calibrate({
+      await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
         combos: [{ label: 'max-savings', clipOnCpu: true, vaeOnCpu: true, offloadToCpu: true }],
