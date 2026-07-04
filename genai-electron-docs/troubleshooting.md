@@ -43,11 +43,13 @@ await llamaServer.start({
 
 **If you need CUDA on Linux:** Build llama.cpp from source with CUDA enabled and point genai-lite at it via `LLAMACPP_API_BASE_URL` (see the FAQ below). Windows CUDA prebuilts are unaffected.
 
-### CUDA + CPU Offloading Crash
+### CUDA + CPU Offloading Crash (fixed in `master-746-2574f59`)
 
-**Problem:** Diffusion generation crashes silently (exit code `0xC0000005`) when using CUDA backend with any CPU offloading flag: `--clip-on-cpu`, `--vae-on-cpu`, or `--offload-to-cpu` (sd.cpp build `master-504-636d3cb`).
+**Problem (historical):** On sd.cpp builds up to `master-504-636d3cb`, diffusion generation crashed silently (exit code `0xC0000005`) when the CUDA backend was combined with any CPU offloading flag: `--clip-on-cpu`, `--vae-on-cpu`, or `--offload-to-cpu`. genai-electron used to suppress these flags automatically on CUDA installs.
 
-**Solution:** Auto-detection disables all CPU offloading flags for CUDA variants automatically. If you force any of `clipOnCpu`, `vaeOnCpu`, or `offloadToCpu` to `true` manually and generation crashes silently, set them to `false`.
+**Now:** Fixed upstream; re-verified live on `master-746-2574f59` (all three flags, individually and combined). Since genai-electron v0.10.0 the flags are auto-detected identically on all backends. If low VRAM headroom now auto-enables offloading on your CUDA setup and you prefer the old behavior, set `clipOnCpu`/`vaeOnCpu`/`offloadToCpu` to `false` explicitly.
+
+**Known upstream caveat:** SD3.5-Large conditioning is broken with `--clip-on-cpu` on any backend (leejet/stable-diffusion.cpp#1578) — force `clipOnCpu: false` for that model family if you hit it.
 
 ### Missing Shared Libraries
 
@@ -197,7 +199,7 @@ const result = await diffusionServer.generateImage({
 
 **"Model too large" with Multi-Component Models**
 - The `canRunModel()` check uses the aggregate size of all components, which may be conservative when `--offload-to-cpu` is available
-- Try setting `offloadToCpu: true` in the server config to enable CPU offloading (note: crashes on CUDA backend in sd.cpp `master-504-636d3cb`)
+- Try setting `offloadToCpu: true` in the server config to enable CPU offloading
 
 ### Reasoning Not Extracted
 

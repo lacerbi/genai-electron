@@ -50,7 +50,7 @@ Multi-component models (Flux 2, SDXL split) work with the same `start({ modelId 
 - `--diffusion-fa` (flash attention) is auto-enabled when the model has an `llm` component (Flux 2 architecture)
 - Both can be explicitly overridden in the config
 
-**CUDA Backend Warning:** When using a CUDA variant, all CPU offloading flags (`--offload-to-cpu`, `--clip-on-cpu`, `--vae-on-cpu`) are automatically disabled regardless of auto-detection or user config. This prevents silent crashes in sd.cpp CUDA builds. If you need CPU offloading, use the Vulkan or CPU backend instead.
+**Behavior change (v0.10.0):** CPU offloading flags are now auto-detected identically on all backends, including CUDA. The old CUDA suppression worked around a silent crash in sd.cpp builds up to `master-504-636d3cb`; that crash is fixed upstream (re-verified live on `master-746-2574f59`). Low-VRAM CUDA setups may therefore now auto-enable `--clip-on-cpu`/`--vae-on-cpu`/`--offload-to-cpu` — pass explicit `false` to restore the old behavior. Upstream caveat: SD3.5-Large is broken with `--clip-on-cpu` on any backend (leejet/stable-diffusion.cpp#1578).
 
 **Config Fields for Multi-Component Models:**
 
@@ -67,12 +67,12 @@ Enable flash attention in the diffusion model. `undefined` = auto-detect (enable
 ```typescript
 clipOnCpu?: boolean
 ```
-Force CLIP model to run on CPU instead of GPU. Maps to `--clip-on-cpu`. Auto-detected: enabled when VRAM headroom after model load is less than 6GB. Disabled for CUDA backend (see warning above).
+Force CLIP model to run on CPU instead of GPU. Maps to `--clip-on-cpu`. Auto-detected: enabled when VRAM headroom after model load is less than 6GB.
 
 ```typescript
 vaeOnCpu?: boolean
 ```
-Force VAE model to run on CPU instead of GPU. Maps to `--vae-on-cpu`. Auto-detected: enabled when VRAM headroom after model load is less than 2GB. Disabled for CUDA backend (see warning above).
+Force VAE model to run on CPU instead of GPU. Maps to `--vae-on-cpu`. Auto-detected: enabled when VRAM headroom after model load is less than 2GB.
 
 ```typescript
 batchSize?: number
@@ -306,7 +306,7 @@ const result = await diffusionServer.generateImage({
 
 ### Available Samplers
 
-`euler_a` (default), `euler`, `heun` (slower, better quality), `dpm2`, `dpm++2s_a`, `dpm++2m` (good quality), `dpm++2mv2`, `lcm` (very fast).
+`euler_a` (default), `euler`, `heun` (slower, better quality), `dpm2`, `dpm++2s_a`, `dpm++2m` (good quality), `dpm++2mv2`, `lcm` (very fast), `er_sde`, `euler_cfg_pp`, `euler_a_cfg_pp` (CFG++ variants).
 
 ---
 

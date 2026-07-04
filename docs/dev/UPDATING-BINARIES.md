@@ -1,6 +1,6 @@
-# Updating llama.cpp Binaries
+# Updating llama.cpp / stable-diffusion.cpp Binaries
 
-This guide explains how to update genai-electron to use a new llama.cpp release.
+This guide explains how to update genai-electron to use a new llama.cpp release. The same process applies to stable-diffusion.cpp — see the [stable-diffusion.cpp Specifics](#stable-diffusioncpp-specifics) section for the differences.
 
 ## Archive Format Change (b7956+)
 
@@ -488,9 +488,28 @@ cd /path/to/binaries
 ### Implementation Details
 
 - **Location**: `src/managers/BinaryManager.ts` - `runRealFunctionalityTest()` method
-- **Timeout**: 30 seconds (prevents hanging on broken binaries)
+- **Timeout**: 120 s when a multi-component test model is configured (large component loads), 15 s for single-file models (see `runDiffusionTest()` in `BinaryManager.ts`)
 - **Error Patterns**: See `errorPatterns` array in `runRealFunctionalityTest()`
 - **Automatic**: No configuration needed, happens transparently during `start()`
+
+## stable-diffusion.cpp Specifics
+
+The same process applies to the diffusion binaries (`BINARY_VERSIONS.diffusionCpp`), with these differences:
+
+- **Repo**: https://github.com/leejet/stable-diffusion.cpp. Releases are auto-generated per commit with tags `master-<count>-<shortsha>` (e.g. `master-746-2574f59`) and empty release bodies — read README/source diffs between the two pinned commits for changes; there are no curated release notes.
+- **Checksums**: the releases API `digest` field works here too:
+
+  ```bash
+  curl -s "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases/tags/<tag>" \
+    | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{for(const a of JSON.parse(d).assets)console.log(a.name,'|',a.digest)})"
+  ```
+
+- **Asset naming**: `sd-master-<shortsha>-bin-<platform>.zip`, all `.zip` (including macOS and Linux — no `.tar.gz`). The Darwin asset name embeds the CI runner's macOS version (e.g. `...bin-Darwin-macOS-15.7.7-arm64.zip`) — expect it to change every release. No darwin-x64 asset exists.
+- **Windows CPU consolidation** (since ~mid-2026): the per-ISA zips (`win-noavx/avx/avx2/avx512`) were replaced by a single `win-cpu-x64.zip` built with runtime CPU dispatch (`GGML_BACKEND_DL=ON`, `GGML_CPU_ALL_VARIANTS=ON`) — it ships `ggml-cpu-<arch>.dll` backends and the best one is selected at runtime. ALL extracted DLLs must stay next to `sd-cli.exe` (the standard copy logic handles this).
+- **CUDA dependency**: `cudart-sd-bin-win-cu12-x64.zip`. It has been byte-identical across releases (compare digests before assuming a new download is needed); only the URL tag changes.
+- **Zip contents**: `sd-cli(.exe)` (the binary genai-electron runs), `sd-server(.exe)` (unused), the `stable-diffusion` shared library, and ggml backend DLLs. The binary search order in `BinaryManager.ts` prefers `sd-cli` over the legacy `sd` name.
+- **Log-format coupling**: `DiffusionServerManager.processStdoutForProgress()` parses sd.cpp stdout (stage literals and progress bars). After a bump, run a live generation and confirm stage transitions and step progress still report. Precedent: at `master-746` upstream renamed the `loading tensors from` literal to `loading model from` and switched loading progress to `#`-style byte bars (`| N/M - X.XXGB/s`), both of which required parser updates.
+- **Offload-flag history**: `--clip-on-cpu`/`--vae-on-cpu`/`--offload-to-cpu` crashed CUDA builds up to `master-504-636d3cb` (genai-electron suppressed them on CUDA); fixed upstream and the suppression was removed in v0.10.0. Re-run the offload matrix (each flag alone + all three, on a CUDA install) when bumping.
 
 ## Related Files
 
