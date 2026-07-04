@@ -291,6 +291,8 @@ Progress provides stage information with self-calibrating time estimates.
 
 System adapts time estimates based on hardware: first generation uses defaults, subsequent generations adjust to image size/steps.
 
+> Not to be confused with [Offload Calibration](#offload-calibration) below — that section is about benchmarking **offload flags**, this one is about progress-bar time estimates.
+
 **Example:**
 ```typescript
 const result = await diffusionServer.generateImage({
@@ -307,6 +309,91 @@ const result = await diffusionServer.generateImage({
 ### Available Samplers
 
 `euler_a` (default), `euler`, `heun` (slower, better quality), `dpm2`, `dpm++2s_a`, `dpm++2m` (good quality), `dpm++2mv2`, `lcm` (very fast), `er_sde`, `euler_cfg_pp`, `euler_a_cfg_pp` (CFG++ variants).
+
+---
+
+## Offload Calibration
+
+The fastest combination of the CPU-offload flags (`clipOnCpu`, `vaeOnCpu`, `offloadToCpu`, `diffusionFlashAttention`) is machine-dependent: driver behaviour, PCIe/RAM bandwidth, CPU speed, and OS all shift the optimum, and the flags interact (e.g. `offloadToCpu` looks inert alone but wins under the VRAM pressure that `clipOnCpu: false` creates; on Windows an oversubscribed GPU silently thrashes while on Linux it hard-OOMs). `calibrate()` measures instead of guessing: it runs real generations for each combo × size on the actual machine and reports the fastest working configuration.
+
+### calibrate(config)
+
+```typescript
+calibrate(config: DiffusionCalibrationConfig): Promise<DiffusionCalibrationReport>
+```
+
+Runs the sweep and returns a report. The caller persists/applies the recommendation — the library does not store it.
+
+**Config:** `modelId` (required), `sizes` (default `[{ width: 768, height: 768 }]` — pass your app's real sizes), `combos` (default: curated labeled set in `DIFFUSION_CALIBRATION_DEFAULTS`: `auto`, `clip-gpu`, `clip-gpu+offload`, `offload`, `all-resident`, `max-savings`), `steps` (default 4 — **use your real step count**, offload cost scales with steps), `cfgScale`, `sampler` (`'euler'`), `seed` (42, fixed so every combo does identical work), `prompt`, `samples` (2 timed samples per combo × size, after 1 discarded warmup per combo), `threads`/`batchSize` (match your production config), `onProgress`, `signal`.
+
+Default sweep cost: 6 combos × (1 warmup + 2 samples) = 18 generations — typically a few minutes.
+
+**Contract:**
+- The server must be **stopped** and is left stopped. `start()` throws while calibrating; `isCalibrating()` exposes the state (`getInfo().busy` may briefly read `true` while `status` stays `'stopped'` — harmless).
+- When the manager is wired for orchestration (the `diffusionServer` singleton is), a running LLM is offloaded **once** for the whole sweep and restored afterwards. Without orchestration wiring, stop the LLM yourself before calibrating.
+- Failing combos are recorded (`status: 'oom' | 'error'`) and never abort the sweep; the `max-savings` fallback combo means something usually succeeds even on very tight VRAM.
+- `recommended` is keyed `"<width>x<height>"` (e.g. `"768x768"`) and holds combos **as requested** — the winner may be the plain auto combo; what auto-detection resolved to is in the winning run's `resolved`. Ties within 5% of the fastest prefer fewer forced flags (robustness).
+
+**Example** (an app that commits to specific illustration sizes):
+
+```typescript
+const report = await diffusionServer.calibrate({
+  modelId: 'flux-2-klein',
+  sizes: [{ width: 768, height: 768 }, { width: 512, height: 1024 }], // the app's real sizes
+  steps: 4,                                                            // the app's quality preset
+  onProgress: (p) => updateBar(p.overallPercent, p.phase, p.combo?.label),
+});
+
+// Persist the per-size winner in your app's settings…
+const best = report.recommended['768x768'];
+if (best) {
+  const { label, ...flags } = best; // strip the label — it is not a server-config field
+  await settings.save('diffusion-flags-768', flags);
+  // …and pass the flags to future start() calls:
+  await diffusionServer.start({ modelId: 'flux-2-klein', port: 8081, ...flags });
+}
+```
+
+> **Note:** spread only the flag fields into `start()` — `label` is a UI/report field and `start()` rejects unknown config fields.
+
+### Calibration progress (progress-bar wiring)
+
+The same `DiffusionCalibrationProgress` payload is delivered on two channels: the `onProgress` callback and the `'calibration-progress'` event (mirrors `'binary-progress'` — use the event to forward over IPC):
+
+```typescript
+// Electron main process
+diffusionServer.on('calibration-progress', (p) => {
+  mainWindow.webContents.send('diffusion:calibration-progress', p);
+});
+```
+
+Payload: `phase` (`'preparing' | 'warmup' | 'sampling' | 'restoring-llm' | 'done'`), `comboIndex`/`comboCount` + `combo` (labeled), `sizeIndex`/`sizeCount` + `size`, `sample`/`sampleCount`, `generationPercent` (within the current generation), and a smooth, monotonic `overallPercent` (0–100). Throwing progress consumers are swallowed — they cannot abort the sweep.
+
+**First-run note:** binary provisioning (download + validation, potentially hundreds of MB) happens during the `'preparing'` phase and reports through the existing `'binary-progress'` event — subscribe to both for accurate first-run UX.
+
+### Cancelling a sweep
+
+Pass an `AbortSignal`. On abort the in-flight generation is killed and `calibrate()` rejects with a `ServerError` whose **`details.code === 'CALIBRATION_ABORTED'`** (the top-level `error.code` is the generic `'SERVER_ERROR'`) and `details.runs` = the completed partial runs.
+
+```typescript
+const controller = new AbortController();
+cancelButton.onclick = () => controller.abort();
+try {
+  await diffusionServer.calibrate({ modelId, signal: controller.signal });
+} catch (error) {
+  if (error.details?.code === 'CALIBRATION_ABORTED') {
+    console.log('Aborted; partial results:', error.details.runs);
+  } else throw error;
+}
+```
+
+### Caveats
+
+- **Calibrate with your real settings.** `offloadToCpu` overhead scales with step count and larger sizes shift the optimum (hence per-size recommendations). The default `steps: 4` suits distilled models (SDXL-Turbo, Flux Klein).
+- **Sizes must be positive multiples of 64** (sd.cpp constraint; validated up-front).
+- **SD3.5-Large:** combos forcing `clipOnCpu: true` are skipped automatically (garbled output upstream — leejet/stable-diffusion.cpp#1578) and listed in `report.skippedCombos`. Auto-detection may still resolve `clipOnCpu` on for auto combos on low-VRAM machines — prefer explicit `clipOnCpu: false` combos for this model family.
+- **Timing noise:** thermal throttling and background load perturb results; the raw per-sample totals are kept in `runs[].samplesMs`. `timeTakenMs` is the median (with `samples: 2`, the mean of both).
+- Each timed generation **includes model load** (sd.cpp reloads the model every generation — representative of real usage); the per-stage split is in `runs[].stageMs` (`loadMs`/`diffusionMs`/`decodeMs`).
 
 ---
 
@@ -373,6 +460,7 @@ DiffusionServerManager extends `EventEmitter`:
 - `'stopped'` - Server stopped
 - `'binary-log'` - Binary download/validation progress (receives `{ message, level }`)
 - `'binary-progress'` - Structured provisioning progress (receives `BinaryProgressEvent`: phase + file + throttled whole-percent download progress) — build progress UIs from this instead of parsing log messages
+- `'calibration-progress'` - Offload-calibration sweep progress (receives `DiffusionCalibrationProgress`; same payload as the `calibrate()` `onProgress` callback) — see [Offload Calibration](#offload-calibration)
 
 **Note:** DiffusionServerManager does not emit a `'crashed'` event because it does not maintain a persistent process — stable-diffusion.cpp is spawned on-demand for each generation. Generation failures are reported via the returned promise or HTTP error responses.
 

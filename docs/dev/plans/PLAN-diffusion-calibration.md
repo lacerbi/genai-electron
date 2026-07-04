@@ -9,8 +9,8 @@ Source: `ISSUE-diffusion-offload-calibration.md` (repo root) + design discussion
 - [x] Phase 1: Types, defaults, core plumbing
 - [x] Phase 2: `calibrate()` implementation
 - [x] Phase 3: Tests (20 new; 563/563 total, 22 suites)
-- [~] Phase 4: Documentation + housekeeping
-- [ ] Phase 5: Example-app wiring
+- [x] Phase 4: Documentation + housekeeping
+- [~] Phase 5: Example-app wiring
 - [ ] Phase 6: Live smoke
 - [ ] Final `/doublecheck`
 
@@ -371,7 +371,7 @@ persisted recommendations surface it):
 **Goal:** Docs are a deliverable, not an afterthought.
 
 **Work:**
-- [ ] `genai-electron-docs/image-generation.md` — new **"Offload Calibration"** section (named to
+- [x] `genai-electron-docs/image-generation.md` — new **"Offload Calibration"** section (named to
   avoid colliding with the existing "Self-Calibrating Estimates" progress section; add a
   one-line cross-reference disambiguating the two): motivation (one short paragraph — the
   optimum is machine-dependent), API + example (mirroring the ISSUE's consumer usage),
@@ -385,12 +385,12 @@ persisted recommendations surface it):
   abort semantics (`details.code === 'CALIBRATION_ABORTED'`, `details.runs`), progress-bar
   wiring snippet (callback + `'calibration-progress'` IPC forwarding). Add
   `'calibration-progress'` to the **Events** list in the same file.
-- [ ] `genai-electron-docs/typescript-reference.md` — new types under "Image Generation Types"
+- [x] `genai-electron-docs/typescript-reference.md` — new types under "Image Generation Types"
   (+ navigation entries); `DIFFUSION_CALIBRATION_DEFAULTS` under Constants.
-- [ ] `genai-electron-docs/resource-orchestration.md` — document now-public
+- [x] `genai-electron-docs/resource-orchestration.md` — document now-public
   `offloadLLM()`/`reloadLLM()`.
-- [ ] `PROGRESS.md` — "Unreleased" entry (no version bump, per release workflow).
-- [ ] Move `ISSUE-diffusion-offload-calibration.md` → `docs/dev/issues/`, add a resolution header
+- [x] `PROGRESS.md` — "Unreleased" entry (no version bump, per release workflow).
+- [x] Move `ISSUE-diffusion-offload-calibration.md` → `docs/dev/issues/`, add a resolution header
   (implemented, date) listing **all** deviations: no-restart design; abort throws with partial
   runs in `details` (code in `details.code`); 5% tie tolerance; progress phase enum reworked
   (`'starting'` → `'preparing'`, added `'restoring-llm'`) and payload enriched
@@ -399,8 +399,10 @@ persisted recommendations surface it):
   labeled default combos.
 
 **Verification:**
-- [ ] Docs examples spot-checked against the final API (types, error discriminator, key format).
-- [ ] `npm run format` after doc edits.
+- [x] Docs examples spot-checked against the final API (types, error discriminator, key format;
+  added a label-stripping note — spreading a labeled combo into start() would hit config
+  validation).
+- [x] `npm run format` after doc edits.
 
 ### Phase 5: Example-app wiring (confirmed in scope)
 

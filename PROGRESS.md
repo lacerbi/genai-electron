@@ -1,15 +1,36 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.10.0 — stable-diffusion.cpp master-746-2574f59 + CUDA offload guard retirement (2026-07-04)
+> **Current Status**: v0.10.0 released — diffusion offload calibration accumulating unreleased (2026-07-04)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 543/543 passing (21 suites)
-- **Branch:** `main`
-- **Last Updated:** 2026-07-04 (v0.10.0 release)
+- **Tests:** ✅ 563/563 passing (22 suites)
+- **Branch:** `feat/diffusion-calibration` (unreleased batch)
+- **Last Updated:** 2026-07-04 (offload calibration)
+
+---
+
+## Unreleased
+
+### Diffusion Offload Calibration — `diffusionServer.calibrate()` (2026-07-04)
+
+**Goal/Problem:** The static VRAM heuristic cannot pick the fastest CPU-offload flag combo — the optimum is machine-dependent and the flags interact (measured on an 8 GB Win11 laptop with Flux 2 Klein: auto ~18 s vs `clipOnCpu:false`+`offloadToCpu:true` ~10–12 s; `vaeOnCpu` ~3× slower; Windows thrashes where Linux hard-OOMs). Only a live sweep on the target machine can decide. Proposal: `docs/dev/issues/ISSUE-diffusion-offload-calibration.md`; plan: `docs/dev/plans/PLAN-diffusion-calibration.md`.
+
+**Core Features:**
+- `calibrate(config)` on DiffusionServerManager: benchmarks offload combos × sizes with real generations (fixed seed/steps/prompt/sampler → identical work per combo), 1 discarded warmup per combo + median-of-samples timing, per-stage split (`stageMs`: load/diffusion/decode), OOM-vs-error classification from stderr/exit code, per-size `recommended` (5% tie tolerance prefers fewer forced flags)
+- **No server restarts:** per-generation flag overrides threaded through `computeDiffusionOptimizations` (flags resolve per spawn); server must be stopped, is left stopped; `start()` guarded during sweeps; `isCalibrating()`
+- Sweep-level LLM offload/restore via the internal orchestrator (`waitForReload()` → `offloadLLM()` once, `reloadLLM()` in finally; both promoted to public API)
+- Progress for UIs: guarded `onProgress` callback + `'calibration-progress'` event (same payload; smooth monotonic `overallPercent` with within-generation folding) — IPC-forwardable like `'binary-progress'`
+- Abort via `AbortSignal` → `ServerError` with `details.code = 'CALIBRATION_ABORTED'` + partial runs in `details.runs`
+- SD3.5-Large guard: forced `clipOnCpu: true` combos auto-skipped → `report.skippedCombos` (upstream leejet/stable-diffusion.cpp#1578)
+- New exports: `DiffusionOffloadCombo`, `CalibrationSize`, `DiffusionCalibrationConfig/Progress/Report`, `CalibrationRun`, `DIFFUSION_CALIBRATION_DEFAULTS`
+
+**Files Modified:** `src/types/{images,index}.ts`, `src/index.ts`, `src/config/defaults.ts`, `src/managers/{DiffusionServerManager,ResourceOrchestrator}.ts`, `tests/unit/diffusion-calibration.test.ts` (new, 20 cases), docs (`image-generation` "Offload Calibration" section, `typescript-reference`, `resource-orchestration`), example app (calibration UI)
+
+**Build Status:** ✅ 0 TypeScript errors / 563/563 tests passing (22 suites)
 
 ---
 
