@@ -114,7 +114,7 @@ export function getCPUPerformanceScore(): number {
   const coreScore = Math.min(cpu.cores * 3.5, 70);
 
   // Architecture bonus (0-30 points)
-  let archBonus = 0;
+  let archBonus: number;
   if (cpu.architecture === 'arm64') {
     // Apple Silicon gets higher score due to unified memory and efficiency
     archBonus = 30;

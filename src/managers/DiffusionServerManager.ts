@@ -1630,9 +1630,9 @@ export class DiffusionServerManager extends ServerManager {
     const modelSize = this.currentModelInfo?.size ?? 0;
     const modelFootprint = modelSize * DIFFUSION_VRAM_THRESHOLDS.modelOverheadMultiplier;
 
-    let autoClipOnCpu = false;
-    let autoVaeOnCpu = false;
-    let autoOffloadToCpu = false;
+    let autoClipOnCpu: boolean;
+    let autoVaeOnCpu: boolean;
+    let autoOffloadToCpu: boolean;
 
     try {
       const gpu = await this.systemInfo.getGPUInfo();
