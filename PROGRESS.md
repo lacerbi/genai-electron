@@ -1,6 +1,6 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.12.1 ready for release — archive dependency security and tooling hardening (2026-07-25)
+> **Current Status**: v0.12.1 released — archive dependency security and tooling hardening (2026-07-25)
 
 ---
 
@@ -8,8 +8,7 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 570/570 passing (23 suites)
-- **Branch:** `release/v0.12.1`
-- **Last Updated:** 2026-07-25 (v0.12.1 release preparation)
+- **Last Updated:** 2026-07-25 (v0.12.1 release)
 
 ---
 
@@ -44,7 +43,7 @@
 production audit reports zero vulnerabilities, clean-install dry run passed, and
 `npm pack --dry-run` validated the 163-file package payload.
 
-**Release status:** Prepared for release as v0.12.1.
+**Release status:** v0.12.1 published to npm with a GitHub Release (2026-07-25).
 
 ---
 
