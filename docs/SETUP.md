@@ -1,7 +1,7 @@
 # genai-electron Development Setup
 
-> **Version**: 0.5.0 (Multi-Component Diffusion Models & Shared Variant Downloads)
-> **Last Updated**: 2026-02-17
+> **Version**: 0.12.1
+> **Last Updated**: 2026-07-25
 
 Complete guide for setting up the genai-electron development environment.
 
@@ -24,9 +24,10 @@ Complete guide for setting up the genai-electron development environment.
 
 ### Required Software
 
-#### Node.js 22.x LTS
+#### Node.js 22.13+ (22.x LTS recommended)
 
-genai-electron requires Node.js 22.x for native `fetch()` support and modern features.
+genai-electron supports Node.js 22+, while the ESLint 10 development toolchain requires
+Node.js 22.13 or newer.
 
 **Installation**:
 
@@ -37,7 +38,7 @@ brew install node@22
 
 **Windows** (via official installer):
 - Download from [nodejs.org](https://nodejs.org/)
-- Choose the "22.x LTS" version
+- Choose Node.js 22.13 or newer from the 22.x LTS line
 - Run the installer
 
 **Linux** (via NodeSource):
@@ -53,7 +54,7 @@ sudo dnf install -y nodejs
 
 **Verify Installation**:
 ```bash
-node --version  # Should show v22.x.x
+node --version  # Should show v22.13.0 or newer
 npm --version   # Should show 10.x.x or higher
 ```
 
@@ -124,7 +125,7 @@ make --version
 ### 1. Clone Repository
 
 ```bash
-git clone https://github.com/yourusername/genai-electron.git
+git clone https://github.com/lacerbi/genai-electron.git
 cd genai-electron
 ```
 
@@ -665,8 +666,8 @@ Before submitting PR:
 
 ### Getting Help
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/genai-electron/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/genai-electron/discussions)
+- **Issues**: [GitHub Issues](https://github.com/lacerbi/genai-electron/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/lacerbi/genai-electron/discussions)
 - **Contributing**: See [CONTRIBUTING.md](../CONTRIBUTING.md) (if available)
 
 ---

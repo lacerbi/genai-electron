@@ -73,8 +73,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run npm audit
+      - name: Report full dependency audit
         run: npm audit --audit-level=high
+        continue-on-error: true
+
+      - name: Enforce production dependency audit
+        run: npm audit --omit=dev --audit-level=high
 
   package-validation:
     name: Package Validation

@@ -1,15 +1,50 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.12.0 released — calibration mirrors production generation params (2026-07-04)
+> **Current Status**: v0.12.1 ready for release — archive dependency security and tooling hardening (2026-07-25)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 566/566 passing (22 suites)
-- **Branch:** `main` (v0.12.0)
-- **Last Updated:** 2026-07-04 (v0.12.0 release)
+- **Tests:** ✅ 570/570 passing (23 suites)
+- **Branch:** `release/v0.12.1`
+- **Last Updated:** 2026-07-25 (v0.12.1 release preparation)
+
+---
+
+## v0.12.1: Archive Dependency Security and Tooling Hardening (2026-07-25)
+
+### Archive dependency security hardening (2026-07-25)
+
+- Raised `adm-zip` to `^0.6.0` to prevent crafted ZIP entries from triggering excessive
+  uncompressed-size allocation during extraction.
+- Raised `tar` to `^7.5.22` and regenerated the dependency lockfile with patched archive
+  resolutions.
+- Removed `@types/adm-zip`; `adm-zip` now supplies the TypeScript declarations used by the build.
+- Added real temporary-directory integration coverage for ZIP and `.tar.gz` extraction, including
+  nested binary discovery and content verification.
+
+### ESLint 10 development tooling migration (2026-07-25)
+
+- Upgraded ESLint and `@eslint/js` to v10, `typescript-eslint` to v8.65, and
+  `eslint-config-prettier` to v10. The existing flat configuration required no structural change.
+- Accepted ESLint 10's new recommended `no-useless-assignment` behavior and removed four dead
+  initial assignments without changing runtime logic.
+- Refreshed Jest and `ts-jest` to their latest compatible releases; avoided the unsafe
+  `npm audit fix --force` proposal, which would downgrade the test stack to incompatible majors.
+- ESLint 10 development commands require Node 22.13 or newer; the published runtime engine remains
+  Node 22 or newer.
+- The production audit is clean. The remaining full-audit findings are development-only and come
+  from Jest's current `glob`/`minimatch` dependency chain.
+- Corrected the npm author/repository/homepage metadata and contributor setup links to reference
+  the canonical `lacerbi/genai-electron` repository.
+
+**Validation:** prepublish hook passed (clean build + 570/570 tests), lint and formatting passed,
+production audit reports zero vulnerabilities, clean-install dry run passed, and
+`npm pack --dry-run` validated the 163-file package payload.
+
+**Release status:** Prepared for release as v0.12.1.
 
 ---
 

@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.11.0 (offload calibration: `diffusionServer.calibrate()`)
+> **Version**: 0.12.1 (archive dependency security and tooling hardening)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
