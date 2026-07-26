@@ -4,7 +4,7 @@
  */
 
 import { jest } from '@jest/globals';
-import type { ModelInfo, DownloadConfig } from '../../src/types/index.js';
+import type { ArtifactProvenance, DownloadConfig, ModelInfo } from '../../src/types/index.js';
 
 // Mock StorageManager
 const mockStorageManager = {
@@ -182,6 +182,13 @@ const { DownloadError } = await import('../../src/errors/index.js');
 describe('ModelManager', () => {
   let modelManager: ModelManager;
 
+  const opaqueProvenance: ArtifactProvenance = {
+    license: ' inferred:Apache-2.0? ',
+    licenseUrl: 'evidence://LOCAL/Case Sensitive Path',
+    lastCheckedOn: 'not-a-date',
+    note: '  Evidence: BYTE-identical sibling; keep case/space.  ',
+  };
+
   const mockModelInfo: ModelInfo = {
     id: 'test-model',
     name: 'Test Model',
@@ -280,6 +287,34 @@ describe('ModelManager', () => {
         url: 'https://example.com/model.gguf',
       });
       expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+    });
+
+    it('should snapshot and persist caller-supplied provenance without interpreting it', async () => {
+      const inputProvenance = { ...opaqueProvenance };
+      const downloadPromise = modelManager.downloadModel({
+        ...downloadConfig,
+        provenance: inputProvenance,
+      });
+
+      inputProvenance.license = 'mutated-after-call';
+      inputProvenance.licenseUrl = 'mutated-after-call';
+      inputProvenance.lastCheckedOn = 'mutated-after-call';
+      inputProvenance.note = 'mutated-after-call';
+
+      const model = await downloadPromise;
+      const saved = mockStorageManager.saveModelMetadata.mock.calls[0][0] as ModelInfo;
+
+      expect(model.provenance).toEqual(opaqueProvenance);
+      expect(model.provenance).not.toBe(inputProvenance);
+      expect(saved.provenance).toEqual(opaqueProvenance);
+    });
+
+    it('should omit provenance when the caller does not supply it', async () => {
+      const model = await modelManager.downloadModel(downloadConfig);
+      const saved = mockStorageManager.saveModelMetadata.mock.calls[0][0] as ModelInfo;
+
+      expect(Object.hasOwn(model, 'provenance')).toBe(false);
+      expect(Object.hasOwn(saved, 'provenance')).toBe(false);
     });
 
     it('should download and persist a selected HuggingFace revision', async () => {
@@ -448,6 +483,21 @@ describe('ModelManager', () => {
       expect(info).toEqual(mockModelInfo);
     });
 
+    it('should return persisted provenance unchanged', async () => {
+      const modelWithProvenance: ModelInfo = {
+        ...mockModelInfo,
+        provenance: { ...opaqueProvenance },
+      };
+      mockStorageManager.listModelFiles
+        .mockResolvedValueOnce(['test-model'])
+        .mockResolvedValueOnce([]);
+      mockStorageManager.loadModelMetadata.mockResolvedValue(modelWithProvenance);
+
+      const info = await modelManager.getModelInfo('test-model');
+
+      expect(info.provenance).toEqual(opaqueProvenance);
+    });
+
     it('should throw error if model not found', async () => {
       mockStorageManager.listModelFiles.mockResolvedValue([]);
 
@@ -540,6 +590,24 @@ describe('ModelManager', () => {
         expect(result.ggufMetadata?.block_count).toBe(32);
         expect(result.ggufMetadata?.context_length).toBe(4096);
         expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
+      });
+
+      it('should preserve provenance while refreshing GGUF metadata', async () => {
+        const modelWithProvenance: ModelInfo = {
+          ...mockModelInfo,
+          provenance: { ...opaqueProvenance },
+        };
+        mockStorageManager.listModelFiles
+          .mockResolvedValueOnce(['test-model'])
+          .mockResolvedValueOnce([]);
+        mockStorageManager.loadModelMetadata.mockResolvedValue(modelWithProvenance);
+        mockStorageManager.saveModelMetadata.mockResolvedValue(undefined);
+
+        const result = await modelManager.updateModelMetadata('test-model');
+        const saved = mockStorageManager.saveModelMetadata.mock.calls[0][0] as ModelInfo;
+
+        expect(result.provenance).toEqual(opaqueProvenance);
+        expect(saved.provenance).toEqual(opaqueProvenance);
       });
 
       it('should fetch metadata from local file with explicit local-only option', async () => {
@@ -821,6 +889,19 @@ describe('ModelManager', () => {
       expect(mockStorageManager.saveModelMetadata).toHaveBeenCalledWith(
         expect.objectContaining({ shards: expect.arrayContaining([expect.any(Object)]) })
       );
+    });
+
+    it('should store provenance once at model level and never on individual shards', async () => {
+      const model = await modelManager.downloadModel({
+        ...shardedConfig,
+        provenance: { ...opaqueProvenance },
+      });
+
+      expect(model.provenance).toEqual(opaqueProvenance);
+      expect(model.shards).toHaveLength(3);
+      for (const shard of model.shards!) {
+        expect(Object.hasOwn(shard, 'provenance')).toBe(false);
+      }
     });
 
     it('should treat -00001-of-00001 as a regular single file', async () => {
@@ -1108,6 +1189,113 @@ describe('ModelManager', () => {
         // Verify GGUF metadata was fetched for primary .gguf file
         expect(model.ggufMetadata).toBeDefined();
         expect(model.ggufMetadata!.architecture).toBe('llama');
+      });
+
+      it('should persist independent provenance for the primary and additional components', async () => {
+        const primaryProvenance: ArtifactProvenance = {
+          ...opaqueProvenance,
+          license: 'primary-license',
+        };
+        const llmProvenance: ArtifactProvenance = {
+          ...opaqueProvenance,
+          license: 'llm-license',
+        };
+        const vaeProvenance: ArtifactProvenance = {
+          ...opaqueProvenance,
+          license: 'vae-license',
+        };
+        const expectedPrimaryProvenance = { ...primaryProvenance };
+        const expectedLLMProvenance = { ...llmProvenance };
+        const expectedVAEProvenance = { ...vaeProvenance };
+        const config: DownloadConfig = {
+          ...flux2KleinConfig,
+          provenance: primaryProvenance,
+          components: flux2KleinConfig.components!.map((component) => ({
+            ...component,
+            provenance: component.role === 'llm' ? llmProvenance : vaeProvenance,
+          })),
+        };
+
+        const downloadPromise = modelManager.downloadModel(config);
+
+        Object.assign(primaryProvenance, {
+          license: 'mutated-primary',
+          licenseUrl: 'mutated-primary',
+          lastCheckedOn: 'mutated-primary',
+          note: 'mutated-primary',
+        });
+        Object.assign(llmProvenance, {
+          license: 'mutated-llm',
+          licenseUrl: 'mutated-llm',
+          lastCheckedOn: 'mutated-llm',
+          note: 'mutated-llm',
+        });
+        Object.assign(vaeProvenance, {
+          license: 'mutated-vae',
+          licenseUrl: 'mutated-vae',
+          lastCheckedOn: 'mutated-vae',
+          note: 'mutated-vae',
+        });
+        config.repo = 'mutated/primary';
+        config.file = 'mutated-primary.gguf';
+        config.components!.reverse();
+        config.components![0]!.repo = 'mutated/component';
+        config.components![0]!.file = 'mutated-component.bin';
+
+        const model = await downloadPromise;
+        const saved = mockStorageManager.saveModelMetadata.mock.calls[0][0] as ModelInfo;
+        const primaryComponent = model.components!.diffusion_model!;
+        const llmComponent = model.components!.llm!;
+        const vaeComponent = model.components!.vae!;
+
+        expect(model.provenance).toEqual(expectedPrimaryProvenance);
+        expect(primaryComponent.provenance).toEqual(expectedPrimaryProvenance);
+        expect(llmComponent.provenance).toEqual(expectedLLMProvenance);
+        expect(vaeComponent.provenance).toEqual(expectedVAEProvenance);
+        expect(saved.provenance).toEqual(expectedPrimaryProvenance);
+        expect(saved.components!.llm!.provenance).toEqual(expectedLLMProvenance);
+        expect(model.source.repo).toBe('leejet/FLUX.2-klein-4B-GGUF');
+        expect(llmComponent.source?.repo).toBe('unsloth/Qwen3-4B-GGUF');
+        expect(vaeComponent.source?.repo).toBe('Comfy-Org/flux2-dev');
+
+        expect(model.provenance).not.toBe(primaryProvenance);
+        expect(primaryComponent.provenance).not.toBe(primaryProvenance);
+        expect(primaryComponent.provenance).not.toBe(model.provenance);
+        expect(llmComponent.provenance).not.toBe(llmProvenance);
+        expect(vaeComponent.provenance).not.toBe(vaeProvenance);
+
+        llmComponent.provenance!.license = 'mutated-result';
+        expect(model.provenance!.license).toBe('primary-license');
+        expect(primaryComponent.provenance!.license).toBe('primary-license');
+        expect(vaeComponent.provenance!.license).toBe('vae-license');
+      });
+
+      it('should not inherit primary provenance into additional components', async () => {
+        const model = await modelManager.downloadModel({
+          ...flux2KleinConfig,
+          provenance: { ...opaqueProvenance },
+        });
+
+        expect(model.provenance).toEqual(opaqueProvenance);
+        expect(model.components!.diffusion_model!.provenance).toEqual(opaqueProvenance);
+        expect(Object.hasOwn(model.components!.llm!, 'provenance')).toBe(false);
+        expect(Object.hasOwn(model.components!.vae!, 'provenance')).toBe(false);
+      });
+
+      it('should not promote component provenance to the model or sibling components', async () => {
+        const model = await modelManager.downloadModel({
+          ...flux2KleinConfig,
+          components: flux2KleinConfig.components!.map((component) =>
+            component.role === 'llm'
+              ? { ...component, provenance: { ...opaqueProvenance } }
+              : { ...component }
+          ),
+        });
+
+        expect(Object.hasOwn(model, 'provenance')).toBe(false);
+        expect(Object.hasOwn(model.components!.diffusion_model!, 'provenance')).toBe(false);
+        expect(model.components!.llm!.provenance).toEqual(opaqueProvenance);
+        expect(Object.hasOwn(model.components!.vae!, 'provenance')).toBe(false);
       });
 
       it('should use direct URL source for components', async () => {

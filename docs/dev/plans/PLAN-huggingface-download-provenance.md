@@ -14,7 +14,7 @@ no version bump or release action.
 ## Task Understanding
 
 The implementation must address all validated items in
-`ISSUE-genai-electron-huggingface-downloads.md`:
+[`ISSUE-genai-electron-huggingface-downloads.md`](../issues/ISSUE-genai-electron-huggingface-downloads.md):
 
 - Preserve repository path separators while encoding each file-path segment.
 - Allow callers to select a Hugging Face branch, tag, or commit revision, defaulting to `main`.

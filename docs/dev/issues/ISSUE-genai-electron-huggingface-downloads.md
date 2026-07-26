@@ -6,6 +6,7 @@
 
 **Observed in:** `genai-electron@0.12.1`
 **Filed:** 2026-07-26, from a third-party license audit of a downstream Electron app
+**Status:** RESOLVED (2026-07-26, unreleased)
 
 Line references below are to the published `dist/`, since that is what was inspected; the fixes
 belong in the corresponding `src/` files.
@@ -167,3 +168,25 @@ Recorded so these are not re-investigated:
 - **License metadata on `ModelInfo`** was considered and is deliberately not requested here. A
   generic passthrough would work, but which side should own model licensing is a design question,
   and the consumer that raised it holds the data in its own catalog already.
+
+---
+
+## Resolution note (2026-07-26, unreleased)
+
+All requested download-provenance work was implemented and verified:
+
+- Nested Hugging Face file paths are encoded per segment while retaining repository-relative `/`
+  separators. Downstream range requests established that legacy `%2F` paths also worked, so this
+  was latent correctness/portability hardening rather than a production-regression repair.
+- Optional Hugging Face revisions are threaded through structured single-file, sharded, and
+  multi-component downloads; the effective revision is persisted, and the URL parser returns
+  non-`main` revisions.
+- Newly written diffusion component metadata retains a normalized source locator for every role,
+  including the primary `diffusion_model`. Reused shared files record the current model
+  configuration's locator.
+- The checksum findings remain correctly ruled out.
+
+The originally deferred license-declaration question was later reopened and resolved separately in
+[`ISSUE-artifact-license-provenance.md`](ISSUE-artifact-license-provenance.md).
+Implementation and verification details are retained in
+[`PLAN-huggingface-download-provenance.md`](../plans/PLAN-huggingface-download-provenance.md).

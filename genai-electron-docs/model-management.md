@@ -11,6 +11,7 @@ The `ModelManager` class handles model downloading, storage, and management for 
 - [Core Operations](#core-operations)
   - [listModels()](#listmodels)
   - [downloadModel()](#downloadmodel)
+  - [Artifact License Declarations](#artifact-license-declarations)
   - [Hugging Face Revisions and Nested Paths](#hugging-face-revisions-and-nested-paths)
   - [Multi-Component Model Downloads](#multi-component-model-downloads)
   - [Multi-Shard GGUF Downloads](#multi-shard-gguf-downloads)
@@ -92,7 +93,7 @@ Downloads a model from a URL or HuggingFace repository.
 downloadModel(config: DownloadConfig): Promise<ModelInfo>
 ```
 
-**DownloadConfig**: Supports direct URLs (`source: 'url'`, `url`) or Hugging Face (`source: 'huggingface'`, `repo`, `file`, optional `revision`). Both require `name` and `type` (`'llm' | 'diffusion'`). Optional fields include `checksum` (SHA256) and `onProgress`.
+**DownloadConfig**: Supports direct URLs (`source: 'url'`, `url`) or Hugging Face (`source: 'huggingface'`, `repo`, `file`, optional `revision`). Both require `name` and `type` (`'llm' | 'diffusion'`). Optional fields include `checksum` (SHA256), caller-supplied `provenance`, and `onProgress`.
 
 **Example**:
 ```typescript
@@ -109,6 +110,62 @@ const model = await modelManager.downloadModel({
 ```
 
 **Note**: GGUF metadata is automatically extracted before downloading. For single-file downloads, metadata extraction failure is fatal (throws `DownloadError`). For multi-component downloads, metadata extraction is optional — failure is silently ignored since the primary file may not be a GGUF file.
+
+---
+
+### Artifact License Declarations
+
+`ArtifactProvenance` is optional caller-supplied license-declaration context. The package stores and
+returns the declaration but never validates, normalizes, interprets, compares, fetches, or makes a
+policy decision from it. The caller remains responsible for determining the declaration and for any
+compliance behavior. Despite the general type name, this record does not replace the separate
+`source`, `revision`, or `checksum` fields.
+
+```typescript
+const installed = await modelManager.downloadModel({
+  source: 'huggingface',
+  repo: 'example/image-model',
+  file: 'model.gguf',
+  revision: '0123456789abcdef0123456789abcdef01234567',
+  name: 'Example Image Model',
+  type: 'diffusion',
+  provenance: {
+    license: 'Apache-2.0',
+    licenseUrl: 'https://example.com/image-model/LICENSE',
+    lastCheckedOn: '2026-07-26',
+    note: 'Declaration recorded by the application.',
+  },
+  components: [
+    {
+      role: 'vae',
+      source: 'huggingface',
+      repo: 'example/vae',
+      file: 'vae.safetensors',
+      provenance: {
+        license: 'inferred:Apache-2.0',
+        note: 'Application-specific evidence belongs here.',
+      },
+    },
+  ],
+});
+
+const record = await modelManager.getModelInfo(installed.id);
+console.log(record.provenance?.license); // primary artifact
+console.log(record.components?.vae?.provenance?.license); // VAE declaration
+```
+
+For multi-component models, top-level provenance describes the primary artifact and is also stored
+as a separate object on `components.diffusion_model`. Each additional component receives only the
+declaration on its own download entry; declarations are never inherited across components. For a
+sharded GGUF, provenance appears once on `ModelInfo`, not on individual shards.
+
+If files are shared by multiple model variants, every model record stores the declarations supplied
+for that configuration, including when an existing physical file is reused without another
+download. This is configuration metadata, not forensic first-download or acquisition history.
+Omitting the declaration leaves the property absent, so legacy metadata needs no migration.
+
+Persistence preserves the JSON-serializable fields and values structurally. Raw JSON formatting,
+object identity, prototypes, and `undefined` values are not part of that guarantee.
 
 ---
 
@@ -286,6 +343,8 @@ For multi-component models, `ModelInfo.components` contains a map of component r
 `DiffusionComponentInfo.source` is optional so metadata written by older versions remains valid.
 For newly downloaded or reused shared files, it describes the current model configuration's locator;
 it is not forensic acquisition history for the bytes already on disk.
+`DiffusionComponentInfo.provenance` follows the same current-configuration rule, but contains only
+caller-supplied license-declaration context and is never derived from `source`.
 
 **GGUF Metadata Extraction**:
 - GGUF metadata is only extracted for the primary diffusion model if it's a `.gguf` file

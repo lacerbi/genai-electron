@@ -271,6 +271,7 @@ export type {
   ModelType,
   ModelInfo,
   ModelSource,
+  ArtifactProvenance,
   DownloadConfig,
   DownloadProgress,
   DownloadProgressCallback,

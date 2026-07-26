@@ -97,6 +97,7 @@ describe('StorageManager', () => {
         expect.stringContaining('"id": "test-model"'), // JSON is formatted with spaces
         'utf-8'
       );
+      expect(mockWriteFile.mock.calls[0][1]).not.toContain('"provenance"');
     });
 
     it('should handle write errors', async () => {
@@ -114,10 +115,35 @@ describe('StorageManager', () => {
       const result = await storageManager.loadModelMetadata('llm', 'test-model');
 
       expect(result).toEqual(mockModelInfo);
+      expect(Object.hasOwn(result, 'provenance')).toBe(false);
       expect(mockReadFile).toHaveBeenCalledWith(
         expect.stringContaining('test-model.json'),
         'utf-8'
       );
+    });
+
+    it('should round-trip every opaque provenance field through the persisted JSON', async () => {
+      const modelWithProvenance: ModelInfo = {
+        ...mockModelInfo,
+        provenance: {
+          license: ' inferred:Apache-2.0? ',
+          licenseUrl: 'evidence://LOCAL/Case Sensitive Path',
+          lastCheckedOn: 'not-a-date',
+          note: '  Evidence: BYTE-identical sibling; keep case/space.  ',
+        },
+      };
+      mockWriteFile.mockResolvedValue(undefined);
+
+      await storageManager.saveModelMetadata(modelWithProvenance);
+
+      const capturedJSON = mockWriteFile.mock.calls[0][1] as string;
+      mockFileExists.mockResolvedValue(true);
+      mockReadFile.mockResolvedValue(capturedJSON);
+
+      const loaded = await storageManager.loadModelMetadata('llm', 'test-model');
+
+      expect(loaded).toEqual(modelWithProvenance);
+      expect(loaded.provenance).toEqual(modelWithProvenance.provenance);
     });
 
     it('should throw FileSystemError if file does not exist', async () => {

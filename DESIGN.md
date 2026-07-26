@@ -144,6 +144,8 @@
 - ✅ Clean shutdown and resource cleanup
 - ✅ Comprehensive error handling and logging
 
+- ✅ Preserve optional caller-supplied artifact license declarations with installed metadata
+
 **Developer Experience**:
 - ✅ TypeScript-first with full type safety
 - ✅ Well-documented API with examples
@@ -168,9 +170,14 @@
 - ❌ Not a model marketplace or curation service
 - ❌ Not responsible for API key management (genai-lite handles that)
 
+- ❌ This library is not a license authority: it does not discover, validate, normalize, interpret,
+  compare, or enforce artifact license declarations
+
 **Explicit Boundaries**:
 - This library **starts and stops servers**; genai-lite **talks to those servers**
 - This library **downloads models**; users or other tools **convert models to GGUF**
+- This library **stores configured license-declaration context**; applications determine its
+  accuracy and own every compliance decision
 - This library **detects GPU**; it doesn't **install CUDA/Metal drivers**
 - This library **provides APIs**; apps **build their own UI**
 
@@ -478,7 +485,7 @@ userData/models/diffusion/
   flux-2-klein.json                    # metadata (components map inside)
 ```
 
-Single-file models keep the existing flat layout. The `ModelInfo.components` map (type `DiffusionModelComponents`) stores per-component paths, sizes, checksums, and configured source locators. Component sources are optional for legacy metadata; newly written records include them for every role, including `diffusion_model`. A reused shared file records the current model configuration's locator, not forensic acquisition history. `ModelInfo.path` points to the primary diffusion model component, and `ModelInfo.size` is the aggregate total.
+Single-file models keep the existing flat layout. The `ModelInfo.components` map (type `DiffusionModelComponents`) stores per-component paths, sizes, checksums, configured source locators, and optional caller-supplied license declarations. Component sources and provenance are optional for legacy metadata. Newly written records include a source for every role, including `diffusion_model`; provenance is included only when supplied for that artifact. Top-level `ModelInfo.provenance` and `components.diffusion_model.provenance` are separate copies of the primary declaration, while additional components receive only their own declarations and never inherit from the primary or siblings. A reused shared file records the current model configuration's locator and declaration, not forensic acquisition history. `ModelInfo.path` points to the primary diffusion model component, and `ModelInfo.size` is the aggregate total.
 
 **Summary**: MVP uses isolated per-app storage (safest, simplest). Future extensions may add configurable shared storage.
 
@@ -1095,9 +1102,21 @@ Store alongside each model as `{model-name}.json`:
     "file": "llama-2-7b.Q4_K_M.gguf",
     "revision": "0123456789abcdef0123456789abcdef01234567"
   },
+  "provenance": {
+    "license": "Apache-2.0",
+    "licenseUrl": "https://example.com/model/LICENSE",
+    "lastCheckedOn": "2026-07-26",
+    "note": "Caller-supplied declaration context."
+  },
   "checksum": "sha256:abc123..."
 }
 ```
+
+`ArtifactProvenance` is optional configuration metadata limited to caller-supplied
+license-declaration context. Storage preserves its JSON-serializable fields and values without
+validation, normalization, interpretation, comparison, fetching, or policy behavior. It remains
+separate from source, revision, and checksum. Single-file and sharded models store it at top level;
+individual shards never carry it. Omitting the field preserves compatibility with legacy metadata.
 
 ### 6. Error Handling Strategy
 

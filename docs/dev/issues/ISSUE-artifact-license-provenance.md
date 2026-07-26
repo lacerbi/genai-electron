@@ -3,7 +3,8 @@
 **Filed:** 2026-07-26, from the same downstream third-party licence audit that produced
 [`ISSUE-genai-electron-huggingface-downloads.md`](ISSUE-genai-electron-huggingface-downloads.md).
 **Observed against:** `genai-electron@0.12.1`, and against the completed work in
-[`PLAN-huggingface-download-provenance.md`](PLAN-huggingface-download-provenance.md).
+[`PLAN-huggingface-download-provenance.md`](../plans/PLAN-huggingface-download-provenance.md).
+**Status:** RESOLVED (2026-07-26, unreleased)
 
 **This amends the earlier issue.** It reopens exactly one entry from its "Ruled out" section — the
 deferral of licence metadata on `ModelInfo` — and asks for nothing else. Everything else in that
@@ -123,3 +124,37 @@ unrecognised parsed JSON fields.
 - A download omitting it succeeds and yields records without the field.
 - Legacy metadata written before this change still loads.
 - No code path anywhere in the package branches on the contents of `license`.
+
+---
+
+## Resolution note (2026-07-26, unreleased)
+
+Implemented as an additive, policy-free metadata passthrough:
+
+- Added package-root `ArtifactProvenance` and optional `provenance` fields on `DownloadConfig`,
+  `DiffusionComponentDownload`, `ModelInfo`, and `DiffusionComponentInfo`.
+- Snapshotted declarations when `downloadModel()` is called, then persisted them for single-file,
+  sharded, and multi-component records.
+- Defined top-level provenance as the primary artifact's declaration. Multi-component metadata
+  stores a separate copy on `components.diffusion_model`; each additional component receives only
+  its own declaration, with no inheritance between artifacts.
+- Stored sharded-model provenance once on `ModelInfo`; individual `ShardInfo` entries remain
+  provenance-free.
+- Preserved property absence when callers omit provenance, so legacy records require no migration.
+- Kept all declaration contents opaque: production code never validates, normalizes, interprets,
+  compares, fetches, or branches on the four fields.
+
+Two semantics are now explicit:
+
+1. Provenance is part of each model's **configuration record**, not forensic acquisition or
+   first-transfer history. If variants reuse one physical component file, each installed model
+   record stores the declaration supplied for that configuration, even when the file download is
+   skipped.
+2. The acceptance phrase "byte-for-byte unchanged" means structural preservation of the
+   JSON-serializable field names and values across persistence. Raw JSON whitespace/order, object
+   identity, prototypes, and `undefined` are not preserved or promised.
+
+Focused verification covers 124 passing unit/integration cases across `ModelManager`,
+`StorageManager`, and the real local-HTTP multi-component download path, including shared-file
+reuse with independently configured declarations. Final batch-wide verification is tracked in
+[`PLAN-artifact-license-provenance.md`](../plans/PLAN-artifact-license-provenance.md).

@@ -14,8 +14,10 @@ import type {
   DiffusionModelComponents,
   DiffusionComponentInfo,
   DiffusionComponentRole,
+  DiffusionComponentDownload,
   ModelSource,
   ShardInfo,
+  ArtifactProvenance,
 } from '../types/index.js';
 import { ModelNotFoundError, DownloadError } from '../errors/index.js';
 import { storageManager } from './StorageManager.js';
@@ -131,20 +133,24 @@ export class ModelManager {
    * ```
    */
   public async downloadModel(config: DownloadConfig): Promise<ModelInfo> {
+    // Snapshot the download plan before the first asynchronous operation so each
+    // opaque declaration stays associated with the artifact that supplied it.
+    const configSnapshot = this.snapshotDownloadConfig(config);
+
     // Ensure storage is initialized
     await this.initialize();
 
     // If multi-component, delegate to specialized method
-    if (config.components && config.components.length > 0) {
-      return this.downloadMultiComponentModel(config);
+    if (configSnapshot.components && configSnapshot.components.length > 0) {
+      return this.downloadMultiComponentModel(configSnapshot);
     }
 
     // Resolve and normalize the source once for URL selection and persisted metadata.
-    const modelSource = this.resolveDownloadSource(config);
+    const modelSource = this.resolveDownloadSource(configSnapshot);
     const downloadURL = modelSource.url;
 
     // Generate model ID from name
-    const modelId = this.generateModelId(config.name);
+    const modelId = this.generateModelId(configSnapshot.name);
 
     // Determine filename from URL
     const filename = this.extractFilename(downloadURL, modelSource.file);
@@ -156,13 +162,13 @@ export class ModelManager {
     const shardBasename = modelSource.file
       ? (modelSource.file.split('/').pop() ?? filename)
       : filename;
-    const extraShardFiles = this.resolveShardFilenames(shardBasename, config);
+    const extraShardFiles = this.resolveShardFilenames(shardBasename, configSnapshot);
     if (extraShardFiles.length > 0) {
-      return this.downloadShardedModel(config, modelSource, shardBasename, extraShardFiles);
+      return this.downloadShardedModel(configSnapshot, modelSource, shardBasename, extraShardFiles);
     }
 
     // Get destination path
-    const destinationPath = storageManager.getModelPath(config.type, filename);
+    const destinationPath = storageManager.getModelPath(configSnapshot.type, filename);
 
     // Check if model already exists
     const exists = await fileExists(destinationPath);
@@ -193,7 +199,7 @@ export class ModelManager {
     await this.downloader.download({
       url: downloadURL,
       destination: destinationPath,
-      onProgress: config.onProgress,
+      onProgress: configSnapshot.onProgress,
     });
 
     // Get file size
@@ -201,13 +207,13 @@ export class ModelManager {
 
     // Calculate checksum if requested or if one was provided for verification
     let checksum: string | undefined;
-    if (config.checksum) {
+    if (configSnapshot.checksum) {
       const calculatedChecksum = await calculateSHA256(destinationPath);
-      const expectedChecksum = config.checksum.replace(/^sha256:/, '');
+      const expectedChecksum = configSnapshot.checksum.replace(/^sha256:/, '');
 
       if (calculatedChecksum !== expectedChecksum) {
         // Delete the downloaded file since checksum doesn't match
-        await storageManager.deleteModelFiles(config.type, modelId).catch(() => {
+        await storageManager.deleteModelFiles(configSnapshot.type, modelId).catch(() => {
           // Ignore errors during cleanup
         });
 
@@ -226,8 +232,8 @@ export class ModelManager {
     // Create model info
     const modelInfo: ModelInfo = {
       id: modelId,
-      name: config.name,
-      type: config.type,
+      name: configSnapshot.name,
+      type: configSnapshot.type,
       size,
       path: destinationPath,
       downloadedAt: new Date().toISOString(),
@@ -236,6 +242,10 @@ export class ModelManager {
       supportsReasoning,
       ggufMetadata, // Include GGUF metadata
     };
+
+    if (configSnapshot.provenance) {
+      modelInfo.provenance = this.copyArtifactProvenance(configSnapshot.provenance);
+    }
 
     // Save metadata
     await storageManager.saveModelMetadata(modelInfo);
@@ -293,31 +303,38 @@ export class ModelManager {
       destination: string;
       checksum?: string;
       source: ModelSource;
+      provenance?: ArtifactProvenance;
     }
 
-    const downloadItems: DownloadItem[] = [
-      {
-        role: 'diffusion_model',
-        url: primaryURL,
-        filename: primaryFile,
-        destination: path.join(modelDir, sanitizeFilename(primaryFile)),
-        checksum: config.checksum,
-        source: primarySource,
-      },
-    ];
+    const primaryItem: DownloadItem = {
+      role: 'diffusion_model',
+      url: primaryURL,
+      filename: primaryFile,
+      destination: path.join(modelDir, sanitizeFilename(primaryFile)),
+      checksum: config.checksum,
+      source: primarySource,
+    };
+    if (config.provenance) {
+      primaryItem.provenance = config.provenance;
+    }
+    const downloadItems: DownloadItem[] = [primaryItem];
 
     for (const comp of components) {
       const compSource = this.resolveDownloadSource(comp);
       const compURL = compSource.url;
       const compFile = compSource.file ?? this.extractFilename(compURL);
-      downloadItems.push({
+      const item: DownloadItem = {
         role: comp.role,
         url: compURL,
         filename: compFile,
         destination: path.join(modelDir, sanitizeFilename(compFile)),
         checksum: comp.checksum,
         source: compSource,
-      });
+      };
+      if (comp.provenance) {
+        item.provenance = comp.provenance;
+      }
+      downloadItems.push(item);
     }
 
     // Pre-fetch total size: only count files that need downloading (skip existing)
@@ -488,12 +505,14 @@ export class ModelManager {
       if (item.checksum) {
         compInfo.checksum = formatChecksum(item.checksum.replace(/^sha256:/, ''));
       }
+      if (item.provenance) {
+        compInfo.provenance = this.copyArtifactProvenance(item.provenance);
+      }
 
       componentsMap[item.role as DiffusionComponentRole] = compInfo;
     }
 
     // Create model info — primary is always the first item (diffusion_model)
-    const primaryItem = downloadItems[0]!;
     const modelInfo: ModelInfo = {
       id: modelId,
       name: config.name,
@@ -505,6 +524,10 @@ export class ModelManager {
       ggufMetadata,
       components: componentsMap,
     };
+
+    if (primaryItem.provenance) {
+      modelInfo.provenance = this.copyArtifactProvenance(primaryItem.provenance);
+    }
 
     // Save metadata
     await storageManager.saveModelMetadata(modelInfo);
@@ -797,9 +820,50 @@ export class ModelManager {
       shards,
     };
 
+    if (config.provenance) {
+      modelInfo.provenance = this.copyArtifactProvenance(config.provenance);
+    }
+
     await storageManager.saveModelMetadata(modelInfo);
 
     return modelInfo;
+  }
+
+  /**
+   * Snapshot a caller-owned download plan before asynchronous work begins.
+   *
+   * Artifact provenance remains opaque; copying only keeps each declaration
+   * associated with the source entry that supplied it.
+   */
+  private snapshotDownloadConfig(config: DownloadConfig): DownloadConfig {
+    const snapshot: DownloadConfig = { ...config };
+
+    if (config.provenance) {
+      snapshot.provenance = this.copyArtifactProvenance(config.provenance);
+    }
+    if (config.shardFiles) {
+      snapshot.shardFiles = [...config.shardFiles];
+    }
+    if (config.components) {
+      snapshot.components = config.components.map((component) => {
+        const componentSnapshot: DiffusionComponentDownload = { ...component };
+        if (component.provenance) {
+          componentSnapshot.provenance = this.copyArtifactProvenance(component.provenance);
+        }
+        return componentSnapshot;
+      });
+    }
+
+    return snapshot;
+  }
+
+  /**
+   * Copy an opaque caller-supplied license declaration without interpreting it.
+   */
+  private copyArtifactProvenance(
+    provenance: ArtifactProvenance | undefined
+  ): ArtifactProvenance | undefined {
+    return provenance ? { ...provenance } : undefined;
   }
 
   /**

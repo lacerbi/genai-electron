@@ -1,18 +1,43 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Unreleased — Hugging Face provenance + stable-diffusion.cpp refresh (2026-07-26)
+> **Current Status**: Unreleased — download/license provenance + stable-diffusion.cpp refresh (2026-07-26)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 595/595 passing (25 suites)
+- **Tests:** ✅ 604/604 passing (25 suites)
 - **Last Updated:** 2026-07-26 (Unreleased)
 
 ---
 
 ## Unreleased
+
+### Artifact license provenance passthrough (2026-07-26)
+
+- Added package-root `ArtifactProvenance` and optional `provenance` fields on `DownloadConfig`,
+  `DiffusionComponentDownload`, `ModelInfo`, and `DiffusionComponentInfo`.
+- Persisted caller-supplied license-declaration context for single-file, sharded, and
+  multi-component downloads. Multi-component primary metadata uses independent top-level and
+  `diffusion_model` copies; additional components receive only their own declarations.
+- Preserved configuration-record semantics for shared physical files: every model variant records
+  the declaration supplied for that configuration even when an existing component is reused
+  without another GET.
+- Kept the package policy-free. It does not validate, normalize, interpret, compare, fetch, or
+  branch on declaration contents, and omission remains compatible with legacy metadata.
+- Added manager, storage JSON round-trip, and real local HTTP integration coverage for opaque field
+  preservation, omission, copy isolation, non-inheritance, sharded storage, metadata refresh, and
+  independently declared shared-file variants.
+
+**Validation:** 124/124 focused tests across the three affected unit/integration suites; clean
+library build; lint with 0 errors (61 existing warnings); touched-file formatting; 604/604 full
+tests across 25 suites; electron-control-panel production build; generated declaration/runtime
+inspection; `git diff --check`; and the 163-file package dry run.
+
+**Release status:** Unreleased; no version bump, tag, package publication, or release action.
+
+---
 
 ### stable-diffusion.cpp `master-782-b290693` refresh (2026-07-26)
 
