@@ -50,7 +50,7 @@ Multi-component models (Flux 2, SDXL split) work with the same `start({ modelId 
 - `--diffusion-fa` (flash attention) is auto-enabled when the model has an `llm` component (Flux 2 architecture)
 - Both can be explicitly overridden in the config
 
-**Behavior change (v0.10.0):** CPU offloading flags are now auto-detected identically on all backends, including CUDA. The old CUDA suppression worked around a silent crash in sd.cpp builds up to `master-504-636d3cb`; that crash is fixed upstream (re-verified live on `master-746-2574f59`). Low-VRAM CUDA setups may therefore now auto-enable `--clip-on-cpu`/`--vae-on-cpu`/`--offload-to-cpu` — pass explicit `false` to restore the old behavior. Upstream caveat: SD3.5-Large is broken with `--clip-on-cpu` on any backend (leejet/stable-diffusion.cpp#1578).
+**Behavior change (v0.10.0):** CPU offloading flags are now auto-detected identically on all backends, including CUDA. The old CUDA suppression worked around a silent crash in sd.cpp builds up to `master-504-636d3cb`; that crash is fixed upstream (re-verified live on the current `master-782-b290693` pin). Low-VRAM CUDA setups may therefore now auto-enable `--clip-on-cpu`/`--vae-on-cpu`/`--offload-to-cpu` — pass explicit `false` to restore the old behavior. Upstream caveat: SD3.5-Large is broken with `--clip-on-cpu` on any backend (leejet/stable-diffusion.cpp#1578).
 
 **Config Fields for Multi-Component Models:**
 

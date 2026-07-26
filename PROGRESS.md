@@ -1,6 +1,6 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Unreleased — download/license provenance + stable-diffusion.cpp refresh (2026-07-26)
+> **Current Status**: v0.13.0 ready for release — reproducible downloads, artifact license provenance, and stable-diffusion.cpp refresh (2026-07-26)
 
 ---
 
@@ -8,11 +8,19 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 604/604 passing (25 suites)
-- **Last Updated:** 2026-07-26 (Unreleased)
+- **Branch:** `release/v0.13.0`
+- **Last Updated:** 2026-07-26 (v0.13.0 release preparation)
 
 ---
 
-## Unreleased
+## v0.13.0: Reproducible Downloads, Artifact License Provenance, and sd.cpp Refresh (2026-07-26)
+
+**Release validation:** `prepublishOnly` passed (clean build plus 604/604 tests across 25 suites);
+lint passed with 0 errors (61 existing warnings); repository-wide formatting passed; the production
+dependency audit reported 0 vulnerabilities; the electron-control-panel production build passed;
+generated declarations/runtime output and package metadata were inspected; `git diff --check`
+passed; and the npm package dry run contained the expected 163 files as
+`genai-electron@0.13.0`.
 
 ### Artifact license provenance passthrough (2026-07-26)
 
@@ -35,7 +43,7 @@ library build; lint with 0 errors (61 existing warnings); touched-file formattin
 tests across 25 suites; electron-control-panel production build; generated declaration/runtime
 inspection; `git diff --check`; and the 163-file package dry run.
 
-**Release status:** Unreleased; no version bump, tag, package publication, or release action.
+**Release status:** Included in the v0.13.0 release preparation.
 
 ---
 
@@ -78,8 +86,8 @@ blank, or noise. CUDA initialization and the parser's `sampling using` / `genera
 595/595 tests across 25 suites, electron-control-panel production build, generated
 runtime/declaration pin smoke, `git diff --check`, and the 163-file package dry run pass.
 
-**Release status:** Unreleased; this exact old → new sd.cpp pin must be retained in the eventual
-release notes so downstream consumers know to re-verify model/VAE compatibility.
+**Release status:** Included in v0.13.0. The exact old → new sd.cpp pin must remain explicit in the
+GitHub release notes so downstream consumers know to re-verify model/VAE compatibility.
 
 ---
 
@@ -101,10 +109,9 @@ release notes so downstream consumers know to re-verify model/VAE compatibility.
 
 **Validation:** clean build, lint (0 errors; existing warnings), touched-file formatting, 595/595
 tests across 25 suites, generated runtime/declaration smoke, and the 163-file package dry run pass.
-The repository-wide formatting check still reports six pre-existing mismatches in untouched files;
-none are part of this batch.
+Release preparation subsequently brought the repository-wide formatting check to a clean pass.
 
-**Release status:** Unreleased; no version bump, tag, package publication, or release action.
+**Release status:** Included in the v0.13.0 release preparation.
 
 ---
 

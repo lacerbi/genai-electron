@@ -43,11 +43,11 @@ await llamaServer.start({
 
 **If you need CUDA on Linux:** Build llama.cpp from source with CUDA enabled and point genai-lite at it via `LLAMACPP_API_BASE_URL` (see the FAQ below). Windows CUDA prebuilts are unaffected.
 
-### CUDA + CPU Offloading Crash (fixed in `master-746-2574f59`)
+### CUDA + CPU Offloading Crash (fixed upstream; re-verified in `master-782-b290693`)
 
 **Problem (historical):** On sd.cpp builds up to `master-504-636d3cb`, diffusion generation crashed silently (exit code `0xC0000005`) when the CUDA backend was combined with any CPU offloading flag: `--clip-on-cpu`, `--vae-on-cpu`, or `--offload-to-cpu`. genai-electron used to suppress these flags automatically on CUDA installs.
 
-**Now:** Fixed upstream; re-verified live on `master-746-2574f59` (all three flags, individually and combined). Since genai-electron v0.10.0 the flags are auto-detected identically on all backends. If low VRAM headroom now auto-enables offloading on your CUDA setup and you prefer the old behavior, set `clipOnCpu`/`vaeOnCpu`/`offloadToCpu` to `false` explicitly. To pick these flags systematically instead of guessing, run `diffusionServer.calibrate()` — it benchmarks the combinations on the actual machine (see [Offload Calibration](./image-generation.md#offload-calibration)).
+**Now:** Fixed upstream; re-verified live on the current `master-782-b290693` pin with all three flags combined (and previously with each flag individually). Since genai-electron v0.10.0 the flags are auto-detected identically on all backends. If low VRAM headroom now auto-enables offloading on your CUDA setup and you prefer the old behavior, set `clipOnCpu`/`vaeOnCpu`/`offloadToCpu` to `false` explicitly. To pick these flags systematically instead of guessing, run `diffusionServer.calibrate()` — it benchmarks the combinations on the actual machine (see [Offload Calibration](./image-generation.md#offload-calibration)).
 
 **Known upstream caveat:** SD3.5-Large conditioning is broken with `--clip-on-cpu` on any backend (leejet/stable-diffusion.cpp#1578) — force `clipOnCpu: false` for that model family if you hit it.
 

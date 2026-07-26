@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.12.1 (archive dependency security and tooling hardening)
+> **Version**: 0.13.0 (reproducible downloads, artifact license provenance, and sd.cpp refresh)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.12.x to v0.13.0](migration-0-12-to-0-13.md)** - Additive provenance APIs and Hugging Face revision pinning; sd.cpp binary compatibility re-verification required
 - **[Migrating from v0.11.x to v0.12.0](migration-0-11-to-0-12.md)** - `calibrate()` now takes a required `generation` block (`steps`/`cfgScale`/`sampler`) so it mirrors production; pass your real `cfgScale`
 - **[Migrating from v0.10.x to v0.11.0](migration-0-10-to-0-11.md)** - Offload calibration (`calibrate()`); purely additive, nothing to migrate
 - **[Migrating from v0.9.x to v0.10.0](migration-0-9-to-0-10.md)** - stable-diffusion.cpp master-746 bump; CPU-offload flags now auto-detected on CUDA too
@@ -51,7 +52,8 @@ genai-electron manages the runtime infrastructure for running local AI models (l
 **Core Features**:
 - ✅ **System capability detection** - Automatic detection of RAM, CPU, GPU, and VRAM
 - ✅ **Model storage** - Organized model management in Electron userData directory
-- ✅ **Model downloads** - Download GGUF models from direct URLs with progress tracking
+- ✅ **Model downloads** - Download models from direct URLs or structured Hugging Face repository/file/revision locators
+- ✅ **Artifact provenance** - Persist configured source locators and caller-supplied license declarations
 - ✅ **GGUF metadata extraction** - Accurate model information (layer count, context length, architecture) extracted before download
 - ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
 - ✅ **Reasoning model support** - Automatic detection and configuration for reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS)
