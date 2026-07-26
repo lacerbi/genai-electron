@@ -1,14 +1,117 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.12.1 released — archive dependency security and tooling hardening (2026-07-25)
+> **Current Status**: v0.13.0 ready for release — reproducible downloads, artifact license provenance, and stable-diffusion.cpp refresh (2026-07-26)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 570/570 passing (23 suites)
-- **Last Updated:** 2026-07-25 (v0.12.1 release)
+- **Tests:** ✅ 604/604 passing (25 suites)
+- **Branch:** `release/v0.13.0`
+- **Last Updated:** 2026-07-26 (v0.13.0 release preparation)
+
+---
+
+## v0.13.0: Reproducible Downloads, Artifact License Provenance, and sd.cpp Refresh (2026-07-26)
+
+**Release validation:** `prepublishOnly` passed (clean build plus 604/604 tests across 25 suites);
+lint passed with 0 errors (61 existing warnings); repository-wide formatting passed; the production
+dependency audit reported 0 vulnerabilities; the electron-control-panel production build passed;
+generated declarations/runtime output and package metadata were inspected; `git diff --check`
+passed; and the npm package dry run contained the expected 163 files as
+`genai-electron@0.13.0`.
+
+### Artifact license provenance passthrough (2026-07-26)
+
+- Added package-root `ArtifactProvenance` and optional `provenance` fields on `DownloadConfig`,
+  `DiffusionComponentDownload`, `ModelInfo`, and `DiffusionComponentInfo`.
+- Persisted caller-supplied license-declaration context for single-file, sharded, and
+  multi-component downloads. Multi-component primary metadata uses independent top-level and
+  `diffusion_model` copies; additional components receive only their own declarations.
+- Preserved configuration-record semantics for shared physical files: every model variant records
+  the declaration supplied for that configuration even when an existing component is reused
+  without another GET.
+- Kept the package policy-free. It does not validate, normalize, interpret, compare, fetch, or
+  branch on declaration contents, and omission remains compatible with legacy metadata.
+- Added manager, storage JSON round-trip, and real local HTTP integration coverage for opaque field
+  preservation, omission, copy isolation, non-inheritance, sharded storage, metadata refresh, and
+  independently declared shared-file variants.
+
+**Validation:** 124/124 focused tests across the three affected unit/integration suites; clean
+library build; lint with 0 errors (61 existing warnings); touched-file formatting; 604/604 full
+tests across 25 suites; electron-control-panel production build; generated declaration/runtime
+inspection; `git diff --check`; and the 163-file package dry run.
+
+**Release status:** Included in the v0.13.0 release preparation.
+
+---
+
+### stable-diffusion.cpp `master-782-b290693` refresh (2026-07-26)
+
+- **Binary pin `master-746-2574f59` → `master-782-b290693`** (36 upstream commits;
+  release published 2026-07-16). Updated the Metal, Windows CUDA/Vulkan/CPU, and Linux
+  Vulkan/CPU asset URLs and SHA-256 checksums from the official GitHub release API. The Windows
+  CUDA runtime dependency is byte-identical; its URL moves to the new tag while its digest remains
+  `fe203668…f38d`.
+- Preserved the existing variant priority/fallback policy. Upstream now publishes ROCm variants,
+  but genai-electron still lacks the AMD/ROCm capability detection needed to select them safely, so
+  they are not added by this pin-only refresh.
+- Audited the upstream source delta: every component, generation, optimization, and short-form flag
+  genai-electron emits remains accepted. The Flux 2 component/VAE command shape is unchanged, as
+  are the progress-parser's sampling and decoding literals. At the exact new commit,
+  `docs/flux2.md` still lists `black-forest-labs/FLUX.2-small-decoder` /
+  `full_encoder_small_decoder.safetensors` as an alternative VAE option.
+- Upstream now marks `--clip-on-cpu` and `--vae-on-cpu` deprecated in favor of `--backend`, but both
+  remain functional. genai-electron keeps the established flags in this batch to avoid changing
+  offload semantics during a binary refresh.
+- Deliberately did **not** expose the new `dpm++2m_sde` / `dpm++2m_sde_bt` samplers: the pinned
+  source adds the enum/CLI names without adding their entries to `sampling_methods_str`. A live
+  Brownian-tree run therefore indexed past that display-name array and logged the adjacent
+  `"cuda"` string. The generated image was correct, but the out-of-bounds read is undefined
+  behavior; keep these methods out of the typed API/UI until upstream fixes the table.
+- Added a binary-default invariant test so every configured sd.cpp asset/dependency must share the
+  configured release tag and carry a 64-character lowercase SHA-256 pin.
+
+**Live CUDA smoke (RTX 4060 Laptop 8 GB):** the 362 MB Windows CUDA asset matched the official
+`bc7aa2…8a02` digest exactly and passed `sd-cli --help`. Reused the existing byte-identical CUDA
+runtime in an isolated `C:\tmp` directory, leaving the control-panel cache untouched. Flux 2 Klein
+Q4_0 with Qwen3-4B Q4_0 + `flux2-vae.safetensors` generated a visually inspected, prompt-correct
+red cube at 512²/4-step Euler in 6.86 s. A second run with all three offload flags generated a
+visually inspected, prompt-correct blue sphere (36.61 s); both outputs were real PNGs, not gray,
+blank, or noise. CUDA initialization and the parser's `sampling using` / `generating image:` /
+`decoding 1 latents` / `decode_first_stage completed` transitions were present.
+
+**Validation:** clean library build, lint (0 errors; existing warnings), touched-file formatting,
+595/595 tests across 25 suites, electron-control-panel production build, generated
+runtime/declaration pin smoke, `git diff --check`, and the 163-file package dry run pass.
+
+**Release status:** Included in v0.13.0. The exact old → new sd.cpp pin must remain explicit in the
+GitHub release notes so downstream consumers know to re-verify model/VAE compatibility.
+
+---
+
+### Hugging Face revision support and download provenance (2026-07-26)
+
+- Canonicalized structured Hugging Face URLs: repository-relative file paths retain nested `/`
+  separators, each path segment is encoded safely, and callers can select a branch, tag, or commit
+  through the new optional `revision` field (default `main`).
+- `parseHuggingFaceURL()` now returns decoded `{ repo, revision, file }` data and remains compatible
+  with legacy generated URLs that encoded nested file separators as `%2F`.
+- Persisted the effective Hugging Face revision for single-file, multi-shard, and multi-component
+  downloads. Derived bare shard filenames inherit the primary revision.
+- Added normalized `source` locators to every newly written diffusion component, including the
+  primary `diffusion_model`; reused shared files record the current model configuration's locator.
+- The public changes are additive: two-argument URL-helper calls still default to `main`, input
+  revision fields are optional, and legacy component metadata without `source` remains valid.
+- Closed the issue's `%2F` severity question with downstream range-request evidence and documented
+  the maintainer rule that every future sd.cpp pin change must be explicit in release notes.
+
+**Validation:** clean build, lint (0 errors; existing warnings), touched-file formatting, 595/595
+tests across 25 suites, generated runtime/declaration smoke, and the 163-file package dry run pass.
+Release preparation subsequently brought the repository-wide formatting check to a clean pass.
+
+**Release status:** Included in the v0.13.0 release preparation.
 
 ---
 

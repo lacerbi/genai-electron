@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.12.1
+ * @version 0.13.0
  * @license MIT
  *
  * @example
@@ -271,6 +271,7 @@ export type {
   ModelType,
   ModelInfo,
   ModelSource,
+  ArtifactProvenance,
   DownloadConfig,
   DownloadProgress,
   DownloadProgressCallback,

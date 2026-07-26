@@ -99,6 +99,7 @@ interface ModelInfo {
   path: string;
   downloadedAt: string;
   source: ModelSource;
+  provenance?: ArtifactProvenance;  // Caller-supplied license declaration for the primary artifact
   checksum?: string;
   supportsReasoning?: boolean;
   ggufMetadata?: GGUFMetadata;
@@ -133,8 +134,34 @@ interface ModelSource {
   url: string;
   repo?: string;
   file?: string;
+  revision?: string; // Effective Hugging Face revision on newly written HF metadata; omitted for direct URLs and may be absent from legacy metadata
 }
 ```
+
+### ArtifactProvenance
+
+Optional caller-supplied license-declaration context. `genai-electron` stores and returns these
+JSON-serializable field values without validating, normalizing, interpreting, comparing, fetching,
+or acting on them. The caller owns the declaration and any resulting compliance policy.
+
+```typescript
+interface ArtifactProvenance {
+  license: string;        // SPDX identifier when applicable, or any caller-defined label
+  licenseUrl?: string;    // Caller-provided supporting location
+  lastCheckedOn?: string; // Unvalidated caller review-date text; YYYY-MM-DD recommended
+  note?: string;          // Caller-provided evidence or context
+}
+```
+
+The optional field is accepted by `DownloadConfig` and `DiffusionComponentDownload`, then persisted
+on `ModelInfo` and `DiffusionComponentInfo`. Top-level provenance always describes the primary
+artifact. Additional components receive only their own declarations; a sharded model stores the
+declaration once on `ModelInfo`. Reused shared files record each model configuration's supplied
+declaration rather than forensic acquisition history.
+
+`ArtifactProvenance` is exported from the package root. Its name does not broaden its current
+contract beyond license-declaration context; `ModelSource`, Hugging Face `revision`, and checksums
+remain separate records.
 
 ### GGUFMetadata
 
@@ -203,9 +230,11 @@ interface DownloadConfig {
   url?: string;
   repo?: string;
   file?: string;
+  revision?: string;  // Hugging Face branch, tag, or full commit SHA; defaults to 'main'
   name: string;
   type: ModelType;
   checksum?: string;
+  provenance?: ArtifactProvenance;  // Caller-supplied license declaration for the primary artifact
   onProgress?: DownloadProgressCallback;
   shardFiles?: string[];  // Explicit sibling shards for non-standard multi-shard naming (filenames resolved next to the primary file, or full URLs). Standard `*-00001-of-0000N.gguf` names are auto-discovered.
   components?: DiffusionComponentDownload[];  // Additional component files for multi-component diffusion models
@@ -243,6 +272,8 @@ interface DiffusionComponentInfo {
   path: string;       // Absolute path to component file
   size: number;       // File size in bytes
   checksum?: string;  // SHA256 checksum (sha256: prefix)
+  source?: ModelSource; // Configured locator; optional for legacy metadata
+  provenance?: ArtifactProvenance; // Caller-supplied license declaration; optional for legacy metadata
 }
 ```
 
@@ -265,9 +296,28 @@ interface DiffusionComponentDownload {
   url?: string;       // Required if source is 'url'
   repo?: string;      // Required if source is 'huggingface'
   file?: string;      // Required if source is 'huggingface'
+  revision?: string;  // Hugging Face branch, tag, or full commit SHA; defaults to 'main'
   checksum?: string;  // Expected SHA256 checksum
+  provenance?: ArtifactProvenance; // Independent caller-supplied license declaration
 }
 ```
+
+### Hugging Face URL Utilities
+
+```typescript
+function getHuggingFaceURL(repo: string, file: string, revision?: string): string;
+
+function parseHuggingFaceURL(
+  url: string
+): { repo: string; revision: string; file: string } | null;
+```
+
+`getHuggingFaceURL()` accepts a raw revision (default `main`), encodes it as one route segment, and
+preserves nested `file` path separators while encoding each segment. A full commit SHA is an
+immutable pin; branches and tags can move. `parseHuggingFaceURL()` returns decoded values and accepts
+both canonical nested paths and legacy `%2F`-encoded file paths. If a route is ambiguous between a
+single-segment repository whose revision is `resolve` and a namespaced repository named `resolve`,
+the namespaced repository shape takes precedence.
 
 ---
 
@@ -912,6 +962,7 @@ const DIFFUSION_CALIBRATION_DEFAULTS: {
 ```typescript
 import type {
   SystemCapabilities,
+  ArtifactProvenance,
   ModelInfo,
   ServerStatus,
   ImageGenerationConfig,
@@ -948,6 +999,8 @@ import {
   detectReasoningSupport,
   REASONING_MODEL_PATTERNS,
   getArchField,
+  getHuggingFaceURL,
+  parseHuggingFaceURL,
   findFreePort,
   isPortBindable,
   normalizeHealthHost

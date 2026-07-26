@@ -509,7 +509,18 @@ The same process applies to the diffusion binaries (`BINARY_VERSIONS.diffusionCp
 - **CUDA dependency**: `cudart-sd-bin-win-cu12-x64.zip`. It has been byte-identical across releases (compare digests before assuming a new download is needed); only the URL tag changes.
 - **Zip contents**: `sd-cli(.exe)` (the binary genai-electron runs), `sd-server(.exe)` (unused), the `stable-diffusion` shared library, and ggml backend DLLs. The binary search order in `BinaryManager.ts` prefers `sd-cli` over the legacy `sd` name.
 - **Log-format coupling**: `DiffusionServerManager.processStdoutForProgress()` parses sd.cpp stdout (stage literals and progress bars). After a bump, run a live generation and confirm stage transitions and step progress still report. Precedent: at `master-746` upstream renamed the `loading tensors from` literal to `loading model from` and switched loading progress to `#`-style byte bars (`| N/M - X.XXGB/s`), both of which required parser updates.
+- **Sampler-surface coupling**: a method appearing in `--help` is not sufficient evidence that it
+  is safe to expose. Compare the sampler enum/CLI-name table with every display-name table and run
+  the method. At `master-782-b290693`, `dpm++2m_sde` and `dpm++2m_sde_bt` were added to the enum and
+  CLI table but not `sampling_methods_str`; logging either method reads past that array (the
+  Brownian-tree method logged the adjacent `"cuda"` string in a live run). Keep both out of
+  `ImageSampler` until upstream fixes the undefined behavior.
 - **Offload-flag history**: `--clip-on-cpu`/`--vae-on-cpu`/`--offload-to-cpu` crashed CUDA builds up to `master-504-636d3cb` (genai-electron suppressed them on CUDA); fixed upstream and the suppression was removed in v0.10.0. Re-run the offload matrix (each flag alone + all three, on a CUDA install) when bumping.
+- **Release-note contract**: every sd.cpp pin change must state the old and new pins explicitly in
+  `PROGRESS.md` and the eventual release notes, even for a patch release. Downstream model
+  compatibility may depend on upstream documentation at the exact pinned commit, and an
+  incompatible VAE can fail as a silent gray image rather than a clear error. Call out the pin so
+  consumers know to re-verify their model/VAE combinations.
 
 ## Related Files
 

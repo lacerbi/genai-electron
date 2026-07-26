@@ -30,7 +30,10 @@ const FILES: Record<string, Buffer> = {
   '/model.bin': MODEL_CONTENT,
   '/encoder.bin': ENCODER_CONTENT,
   '/vae.bin': VAE_CONTENT,
+  '/mirror/encoder.bin': ENCODER_CONTENT,
+  '/mirror/vae.bin': VAE_CONTENT,
 };
+const getRequestCounts = new Map<string, number>();
 
 // ── Shared mutable state (set in beforeAll, read by mock closures) ───────────
 const testState = {
@@ -46,7 +49,11 @@ const savedMetadata: unknown[] = [];
 const mockStorageManager = {
   initialize: async () => {},
   saveModelMetadata: async (info: unknown) => {
-    savedMetadata.push(info);
+    const serialized = JSON.stringify(info);
+    if (serialized === undefined) {
+      throw new Error('Model metadata was not JSON-serializable');
+    }
+    savedMetadata.push(JSON.parse(serialized) as unknown);
   },
   getModelPath: (type: string, filename: string) => path.join(testState.tempDir, type, filename),
   listModelFiles: async () => [],
@@ -137,6 +144,7 @@ function createTestServer(): Promise<{ server: http.Server; port: number }> {
       }
 
       // GET
+      getRequestCounts.set(filePath, (getRequestCounts.get(filePath) ?? 0) + 1);
       res.writeHead(200, {
         'Content-Length': String(content.length),
         'Content-Type': 'application/octet-stream',
@@ -172,6 +180,7 @@ describe('Multi-component download integration', () => {
 
   beforeEach(() => {
     savedMetadata.length = 0;
+    getRequestCounts.clear();
   });
 
   it('downloads all components with correct progress and file output', async () => {
@@ -191,6 +200,12 @@ describe('Multi-component download integration', () => {
       url: `http://localhost:${port}/model.bin`,
       name: 'Test Multi Model',
       type: 'diffusion',
+      provenance: {
+        license: ' inferred:primary-license? ',
+        licenseUrl: 'evidence://LOCAL/Primary Artifact',
+        lastCheckedOn: 'not-a-date',
+        note: '  Preserve CASE and surrounding whitespace.  ',
+      },
       onProgress: (downloaded: number, total: number) => {
         progressCalls.push({ downloaded, total });
       },
@@ -202,11 +217,23 @@ describe('Multi-component download integration', () => {
           role: 'llm' as const,
           source: 'url' as const,
           url: `http://localhost:${port}/encoder.bin`,
+          provenance: {
+            license: 'encoder-license',
+            licenseUrl: 'evidence://LOCAL/Encoder Artifact',
+            lastCheckedOn: 'unknown',
+            note: 'Caller declaration for encoder.',
+          },
         },
         {
           role: 'vae' as const,
           source: 'url' as const,
           url: `http://localhost:${port}/vae.bin`,
+          provenance: {
+            license: 'vae-license',
+            licenseUrl: 'evidence://LOCAL/VAE Artifact',
+            lastCheckedOn: 'unchecked',
+            note: 'Caller declaration for VAE.',
+          },
         },
       ],
     });
@@ -282,6 +309,30 @@ describe('Multi-component download integration', () => {
     expect(result.components!.llm!.size).toBe(ENCODER_CONTENT.length);
     expect(result.components!.vae).toBeDefined();
     expect(result.components!.vae!.size).toBe(VAE_CONTENT.length);
+    expect(result.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/model.bin`,
+    });
+    expect(result.components!.diffusion_model!.source).toEqual(result.source);
+    expect(result.components!.diffusion_model!.source).not.toBe(result.source);
+    expect(result.components!.llm!.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/encoder.bin`,
+    });
+    expect(result.components!.vae!.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/vae.bin`,
+    });
+    expect(result.provenance).toEqual({
+      license: ' inferred:primary-license? ',
+      licenseUrl: 'evidence://LOCAL/Primary Artifact',
+      lastCheckedOn: 'not-a-date',
+      note: '  Preserve CASE and surrounding whitespace.  ',
+    });
+    expect(result.components!.diffusion_model!.provenance).toEqual(result.provenance);
+    expect(result.components!.diffusion_model!.provenance).not.toBe(result.provenance);
+    expect(result.components!.llm!.provenance?.license).toBe('encoder-license');
+    expect(result.components!.vae!.provenance?.license).toBe('vae-license');
 
     // All component paths should be absolute and inside the model dir
     for (const comp of Object.values(result.components!)) {
@@ -290,7 +341,23 @@ describe('Multi-component download integration', () => {
 
     // ── Metadata saved ──────────────────────────────────────────────────
     expect(savedMetadata).toHaveLength(1);
-    expect((savedMetadata[0] as { id: string }).id).toBe('test-multi-model');
+    const saved = savedMetadata[0] as typeof result;
+    expect(saved.id).toBe('test-multi-model');
+    expect(saved.components!.llm!.source).toEqual(result.components!.llm!.source);
+    expect(saved.components!.vae!.source).toEqual(result.components!.vae!.source);
+    expect(saved.provenance).toEqual(result.provenance);
+    expect(saved.components!.diffusion_model!.provenance).toEqual(
+      result.components!.diffusion_model!.provenance
+    );
+    expect(saved.components!.llm!.provenance).toEqual(result.components!.llm!.provenance);
+    expect(saved.components!.vae!.provenance).toEqual(result.components!.vae!.provenance);
+    expect(saved).not.toBe(result);
+    expect(saved.provenance).not.toBe(result.provenance);
+    expect(saved.components!.diffusion_model!.provenance).not.toBe(
+      result.components!.diffusion_model!.provenance
+    );
+    expect(saved.components!.llm!.provenance).not.toBe(result.components!.llm!.provenance);
+    expect(saved.components!.vae!.provenance).not.toBe(result.components!.vae!.provenance);
   }, 15_000);
 
   it('skips existing shared components when downloading a second variant', async () => {
@@ -301,6 +368,16 @@ describe('Multi-component download integration', () => {
     await mm.initialize();
 
     const sharedDir = 'shared-model';
+    const variantAProvenance = {
+      primary: { license: 'variant-a-primary' },
+      llm: { license: 'variant-a-encoder' },
+      vae: { license: 'variant-a-vae' },
+    };
+    const variantBProvenance = {
+      primary: { license: 'variant-b-primary' },
+      llm: { license: 'variant-b-encoder' },
+      vae: { license: 'variant-b-vae' },
+    };
     const componentStarts: Array<{
       role: string;
       filename: string;
@@ -315,21 +392,33 @@ describe('Multi-component download integration', () => {
       name: 'Shared Model Variant A',
       type: 'diffusion',
       modelDirectory: sharedDir,
+      provenance: variantAProvenance.primary,
       components: [
         {
           role: 'llm' as const,
           source: 'url' as const,
           url: `http://localhost:${port}/encoder.bin`,
+          provenance: variantAProvenance.llm,
         },
         {
           role: 'vae' as const,
           source: 'url' as const,
           url: `http://localhost:${port}/vae.bin`,
+          provenance: variantAProvenance.vae,
         },
       ],
     });
 
     expect(resultA.id).toBe('shared-model-variant-a');
+    expect(resultA.provenance).toEqual(variantAProvenance.primary);
+    expect(resultA.components!.llm!.provenance).toEqual(variantAProvenance.llm);
+    expect(resultA.components!.vae!.provenance).toEqual(variantAProvenance.vae);
+    const savedA = savedMetadata[0] as typeof resultA;
+    expect(savedA.provenance).toEqual(variantAProvenance.primary);
+    expect(savedA.components!.llm!.provenance).toEqual(variantAProvenance.llm);
+    expect(savedA.components!.vae!.provenance).toEqual(variantAProvenance.vae);
+    const encoderGetsAfterVariantA = getRequestCounts.get('/encoder.bin') ?? 0;
+    const vaeGetsAfterVariantA = getRequestCounts.get('/vae.bin') ?? 0;
     const modelDir = path.join(testState.tempDir, 'diffusion', sharedDir);
     expect(await fileExists(path.join(modelDir, 'model.bin'))).toBe(true);
     expect(await fileExists(path.join(modelDir, 'encoder.bin'))).toBe(true);
@@ -350,6 +439,7 @@ describe('Multi-component download integration', () => {
       name: 'Shared Model Variant B',
       type: 'diffusion',
       modelDirectory: sharedDir,
+      provenance: variantBProvenance.primary,
       onComponentStart: (info) => {
         componentStarts.push(info);
       },
@@ -357,12 +447,14 @@ describe('Multi-component download integration', () => {
         {
           role: 'llm' as const,
           source: 'url' as const,
-          url: `http://localhost:${port}/encoder.bin`,
+          url: `http://localhost:${port}/mirror/encoder.bin`,
+          provenance: variantBProvenance.llm,
         },
         {
           role: 'vae' as const,
           source: 'url' as const,
-          url: `http://localhost:${port}/vae.bin`,
+          url: `http://localhost:${port}/mirror/vae.bin`,
+          provenance: variantBProvenance.vae,
         },
       ],
     });
@@ -376,6 +468,30 @@ describe('Multi-component download integration', () => {
     expect(resultB.components!.diffusion_model!.path).toContain('model-b.bin');
     expect(resultB.components!.llm!.path).toContain('encoder.bin');
     expect(resultB.components!.vae!.path).toContain('vae.bin');
+    expect(resultB.components!.llm!.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/mirror/encoder.bin`,
+    });
+    expect(resultB.components!.vae!.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/mirror/vae.bin`,
+    });
+    expect(resultB.provenance).toEqual(variantBProvenance.primary);
+    expect(resultB.components!.llm!.provenance).toEqual(variantBProvenance.llm);
+    expect(resultB.components!.vae!.provenance).toEqual(variantBProvenance.vae);
+    expect(savedMetadata).toHaveLength(1);
+    const savedB = savedMetadata[0] as typeof resultB;
+    expect(savedB.components!.llm!.source).toEqual(resultB.components!.llm!.source);
+    expect(savedB.components!.vae!.source).toEqual(resultB.components!.vae!.source);
+    expect(savedB.provenance).toEqual(variantBProvenance.primary);
+    expect(savedB.components!.llm!.provenance).toEqual(variantBProvenance.llm);
+    expect(savedB.components!.vae!.provenance).toEqual(variantBProvenance.vae);
+    expect(savedB.components!.llm!.provenance).not.toEqual(savedA.components!.llm!.provenance);
+    expect(savedB.components!.vae!.provenance).not.toEqual(savedA.components!.vae!.provenance);
+    expect(getRequestCounts.get('/encoder.bin') ?? 0).toBe(encoderGetsAfterVariantA);
+    expect(getRequestCounts.get('/vae.bin') ?? 0).toBe(vaeGetsAfterVariantA);
+    expect(getRequestCounts.get('/mirror/encoder.bin') ?? 0).toBe(0);
+    expect(getRequestCounts.get('/mirror/vae.bin') ?? 0).toBe(0);
 
     // Size should reflect all components (including skipped shared ones)
     const expectedTotal = VARIANT_B_CONTENT.length + ENCODER_CONTENT.length + VAE_CONTENT.length;

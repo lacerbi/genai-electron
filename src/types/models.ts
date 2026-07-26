@@ -21,6 +21,24 @@ export type DiffusionComponentRole =
   | 'llm_vision' // --llm_vision (LLM vision, Qwen Image)
   | 'vae'; // --vae (VAE decoder)
 
+/**
+ * Caller-supplied artifact license-declaration context.
+ *
+ * This package carries the object structurally and never validates, normalizes,
+ * compares, interprets, or makes policy decisions from its contents. Source,
+ * revision, and checksum remain separate metadata.
+ */
+export interface ArtifactProvenance {
+  /** SPDX identifier where one applies, otherwise a caller-defined label. */
+  license: string;
+  /** Caller-supplied URL for the license declaration or supporting evidence. */
+  licenseUrl?: string;
+  /** Caller-supplied date text for the last review (recommended: YYYY-MM-DD). */
+  lastCheckedOn?: string;
+  /** Caller-supplied evidence or context. */
+  note?: string;
+}
+
 /** Info about a single component file within a multi-component model. */
 export interface DiffusionComponentInfo {
   /** Absolute path to this component file on disk. */
@@ -29,6 +47,20 @@ export interface DiffusionComponentInfo {
   size: number;
   /** SHA256 checksum with sha256: prefix. */
   checksum?: string;
+  /**
+   * Configured source locator for this component.
+   * Optional for compatibility with metadata written before source tracking.
+   * For reused shared files, this describes the current model's configured
+   * locator rather than forensic acquisition history.
+   */
+  source?: ModelSource;
+  /**
+   * Caller-supplied license declaration for this model configuration.
+   * Optional for compatibility with metadata written before provenance tracking.
+   * For reused shared files, this is the current configuration's declaration,
+   * not forensic acquisition history.
+   */
+  provenance?: ArtifactProvenance;
 }
 
 /**
@@ -54,6 +86,10 @@ export interface DiffusionComponentDownload {
   repo?: string;
   /** File path within the HuggingFace repo (required if source is 'huggingface'). */
   file?: string;
+  /** HuggingFace revision (branch, tag, or full commit SHA; defaults to "main"). */
+  revision?: string;
+  /** Opaque caller-supplied license declaration to persist with this component. */
+  provenance?: ArtifactProvenance;
   /** Expected SHA256 checksum for verification. */
   checksum?: string;
 }
@@ -84,6 +120,13 @@ export interface ModelSource {
 
   /** HuggingFace file name (e.g., "llama-2-7b.Q4_K_M.gguf") */
   file?: string;
+
+  /**
+   * Effective HuggingFace revision.
+   * Present on newly written HuggingFace metadata; optional for direct URLs
+   * and metadata written by earlier versions.
+   */
+  revision?: string;
 }
 
 /**
@@ -214,6 +257,12 @@ export interface ModelInfo {
   /** Source information */
   source: ModelSource;
 
+  /**
+   * Caller-supplied license declaration for the primary artifact in this model configuration.
+   * Optional for compatibility with metadata written before provenance tracking.
+   */
+  provenance?: ArtifactProvenance;
+
   /** SHA256 checksum (if available) */
   checksum?: string;
 
@@ -277,6 +326,12 @@ export interface DownloadConfig {
 
   /** HuggingFace file name (required if source is 'huggingface') */
   file?: string;
+
+  /** HuggingFace revision (branch, tag, or full commit SHA; defaults to "main") */
+  revision?: string;
+
+  /** Opaque caller-supplied license declaration for the primary artifact in this configuration */
+  provenance?: ArtifactProvenance;
 
   /** Human-readable model name */
   name: string;

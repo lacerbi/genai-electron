@@ -44,7 +44,7 @@ This Electron application showcases genai-electron's Phase 1 & 2 capabilities: s
     - Prompt and negative prompt (multiline textareas)
     - Dimensions (width/height, 256-2048px)
     - Steps (1-150), CFG Scale (1-20)
-    - 8 sampler options (euler_a, euler, heun, dpm2, dpm++2s_a, dpm++2m, dpm++2mv2, lcm)
+    - 11 sampler options, including ER-SDE and CFG++ variants
     - Random or fixed seed
   - Real-time generation progress indicator
   - Generated image display with metadata (dimensions, time taken, seed)

@@ -1,13 +1,13 @@
 # genai-electron
 
-> **Version**: 0.12.1 | **Status**: Production Ready - LLM & Image Generation, per-machine offload calibration
+> **Version**: 0.13.0 | **Status**: Production Ready - LLM & Image Generation, reproducible model provenance
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 
 ## Features
 
 - ✅ **System detection** - Auto-detect RAM, CPU, GPU, VRAM capabilities
-- ✅ **Model management** - Download GGUF models with progress tracking and metadata extraction
+- ✅ **Model management** - Download GGUF models with pinned Hugging Face revisions, persisted provenance, progress tracking, and metadata extraction
 - ✅ **LLM server** - Manage llama-server lifecycle with auto-configuration
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
 - ✅ **Multi-component diffusion models** - Flux 2, SDXL split components with aggregate checksum validation

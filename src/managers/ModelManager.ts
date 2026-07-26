@@ -14,7 +14,10 @@ import type {
   DiffusionModelComponents,
   DiffusionComponentInfo,
   DiffusionComponentRole,
+  DiffusionComponentDownload,
+  ModelSource,
   ShardInfo,
+  ArtifactProvenance,
 } from '../types/index.js';
 import { ModelNotFoundError, DownloadError } from '../errors/index.js';
 import { storageManager } from './StorageManager.js';
@@ -130,60 +133,42 @@ export class ModelManager {
    * ```
    */
   public async downloadModel(config: DownloadConfig): Promise<ModelInfo> {
+    // Snapshot the download plan before the first asynchronous operation so each
+    // opaque declaration stays associated with the artifact that supplied it.
+    const configSnapshot = this.snapshotDownloadConfig(config);
+
     // Ensure storage is initialized
     await this.initialize();
 
     // If multi-component, delegate to specialized method
-    if (config.components && config.components.length > 0) {
-      return this.downloadMultiComponentModel(config);
+    if (configSnapshot.components && configSnapshot.components.length > 0) {
+      return this.downloadMultiComponentModel(configSnapshot);
     }
 
-    // Determine download URL
-    let downloadURL: string;
-    let sourceRepo: string | undefined;
-    let sourceFile: string | undefined;
-
-    if (config.source === 'url') {
-      if (!config.url) {
-        throw new DownloadError('URL is required when source is "url"');
-      }
-      downloadURL = config.url;
-    } else if (config.source === 'huggingface') {
-      if (!config.repo || !config.file) {
-        throw new DownloadError('Repository and file are required when source is "huggingface"');
-      }
-      downloadURL = getHuggingFaceURL(config.repo, config.file);
-      sourceRepo = config.repo;
-      sourceFile = config.file;
-    } else {
-      throw new DownloadError(`Unsupported source type: ${config.source}`);
-    }
+    // Resolve and normalize the source once for URL selection and persisted metadata.
+    const modelSource = this.resolveDownloadSource(configSnapshot);
+    const downloadURL = modelSource.url;
 
     // Generate model ID from name
-    const modelId = this.generateModelId(config.name);
+    const modelId = this.generateModelId(configSnapshot.name);
 
     // Determine filename from URL
-    const filename = this.extractFilename(downloadURL, sourceFile);
+    const filename = this.extractFilename(downloadURL, modelSource.file);
 
     // Multi-shard GGUF: explicit shardFiles or auto-detected -00001-of-0000N naming.
     // Detection uses the plain BASENAME: extractFilename() sanitizes away any
     // repo sub-directory separators (Q4_K_M/model-...), which would corrupt
     // sibling derivation and the sub-directory-preserving URL resolution.
-    const shardBasename = sourceFile ? (sourceFile.split('/').pop() ?? filename) : filename;
-    const extraShardFiles = this.resolveShardFilenames(shardBasename, config);
+    const shardBasename = modelSource.file
+      ? (modelSource.file.split('/').pop() ?? filename)
+      : filename;
+    const extraShardFiles = this.resolveShardFilenames(shardBasename, configSnapshot);
     if (extraShardFiles.length > 0) {
-      return this.downloadShardedModel(
-        config,
-        downloadURL,
-        sourceRepo,
-        sourceFile,
-        shardBasename,
-        extraShardFiles
-      );
+      return this.downloadShardedModel(configSnapshot, modelSource, shardBasename, extraShardFiles);
     }
 
     // Get destination path
-    const destinationPath = storageManager.getModelPath(config.type, filename);
+    const destinationPath = storageManager.getModelPath(configSnapshot.type, filename);
 
     // Check if model already exists
     const exists = await fileExists(destinationPath);
@@ -214,7 +199,7 @@ export class ModelManager {
     await this.downloader.download({
       url: downloadURL,
       destination: destinationPath,
-      onProgress: config.onProgress,
+      onProgress: configSnapshot.onProgress,
     });
 
     // Get file size
@@ -222,13 +207,13 @@ export class ModelManager {
 
     // Calculate checksum if requested or if one was provided for verification
     let checksum: string | undefined;
-    if (config.checksum) {
+    if (configSnapshot.checksum) {
       const calculatedChecksum = await calculateSHA256(destinationPath);
-      const expectedChecksum = config.checksum.replace(/^sha256:/, '');
+      const expectedChecksum = configSnapshot.checksum.replace(/^sha256:/, '');
 
       if (calculatedChecksum !== expectedChecksum) {
         // Delete the downloaded file since checksum doesn't match
-        await storageManager.deleteModelFiles(config.type, modelId).catch(() => {
+        await storageManager.deleteModelFiles(configSnapshot.type, modelId).catch(() => {
           // Ignore errors during cleanup
         });
 
@@ -247,21 +232,20 @@ export class ModelManager {
     // Create model info
     const modelInfo: ModelInfo = {
       id: modelId,
-      name: config.name,
-      type: config.type,
+      name: configSnapshot.name,
+      type: configSnapshot.type,
       size,
       path: destinationPath,
       downloadedAt: new Date().toISOString(),
-      source: {
-        type: config.source,
-        url: downloadURL,
-        repo: sourceRepo,
-        file: sourceFile,
-      },
+      source: { ...modelSource },
       checksum,
       supportsReasoning,
       ggufMetadata, // Include GGUF metadata
     };
+
+    if (configSnapshot.provenance) {
+      modelInfo.provenance = this.copyArtifactProvenance(configSnapshot.provenance);
+    }
 
     // Save metadata
     await storageManager.saveModelMetadata(modelInfo);
@@ -290,8 +274,9 @@ export class ModelManager {
     }
 
     // Resolve primary download URL
-    const primaryURL = this.resolveComponentURL(config);
-    const primaryFile = config.file ?? this.extractFilename(primaryURL);
+    const primarySource = this.resolveDownloadSource(config);
+    const primaryURL = primarySource.url;
+    const primaryFile = primarySource.file ?? this.extractFilename(primaryURL);
 
     // Generate model ID and create subdirectory
     // modelDirectory allows multiple variants to share a directory
@@ -317,28 +302,39 @@ export class ModelManager {
       filename: string;
       destination: string;
       checksum?: string;
+      source: ModelSource;
+      provenance?: ArtifactProvenance;
     }
 
-    const downloadItems: DownloadItem[] = [
-      {
-        role: 'diffusion_model',
-        url: primaryURL,
-        filename: primaryFile,
-        destination: path.join(modelDir, sanitizeFilename(primaryFile)),
-        checksum: config.checksum,
-      },
-    ];
+    const primaryItem: DownloadItem = {
+      role: 'diffusion_model',
+      url: primaryURL,
+      filename: primaryFile,
+      destination: path.join(modelDir, sanitizeFilename(primaryFile)),
+      checksum: config.checksum,
+      source: primarySource,
+    };
+    if (config.provenance) {
+      primaryItem.provenance = config.provenance;
+    }
+    const downloadItems: DownloadItem[] = [primaryItem];
 
     for (const comp of components) {
-      const compURL = this.resolveComponentURL(comp);
-      const compFile = comp.file ?? this.extractFilename(compURL);
-      downloadItems.push({
+      const compSource = this.resolveDownloadSource(comp);
+      const compURL = compSource.url;
+      const compFile = compSource.file ?? this.extractFilename(compURL);
+      const item: DownloadItem = {
         role: comp.role,
         url: compURL,
         filename: compFile,
         destination: path.join(modelDir, sanitizeFilename(compFile)),
         checksum: comp.checksum,
-      });
+        source: compSource,
+      };
+      if (comp.provenance) {
+        item.provenance = comp.provenance;
+      }
+      downloadItems.push(item);
     }
 
     // Pre-fetch total size: only count files that need downloading (skip existing)
@@ -503,17 +499,20 @@ export class ModelManager {
       const compInfo: DiffusionComponentInfo = {
         path: item.destination,
         size: fileSize,
+        source: { ...item.source },
       };
 
       if (item.checksum) {
         compInfo.checksum = formatChecksum(item.checksum.replace(/^sha256:/, ''));
+      }
+      if (item.provenance) {
+        compInfo.provenance = this.copyArtifactProvenance(item.provenance);
       }
 
       componentsMap[item.role as DiffusionComponentRole] = compInfo;
     }
 
     // Create model info — primary is always the first item (diffusion_model)
-    const primaryItem = downloadItems[0]!;
     const modelInfo: ModelInfo = {
       id: modelId,
       name: config.name,
@@ -521,15 +520,14 @@ export class ModelManager {
       size: aggregateSize,
       path: primaryItem.destination,
       downloadedAt: new Date().toISOString(),
-      source: {
-        type: config.source,
-        url: primaryURL,
-        repo: config.repo,
-        file: config.file,
-      },
+      source: { ...primaryItem.source },
       ggufMetadata,
       components: componentsMap,
     };
+
+    if (primaryItem.provenance) {
+      modelInfo.provenance = this.copyArtifactProvenance(primaryItem.provenance);
+    }
 
     // Save metadata
     await storageManager.saveModelMetadata(modelInfo);
@@ -602,25 +600,25 @@ export class ModelManager {
    *
    * @private
    */
-  private resolveShardURL(shardEntry: string, config: DownloadConfig, primaryURL: string): string {
+  private resolveShardURL(shardEntry: string, primarySource: ModelSource): string {
     if (/^https?:\/\//i.test(shardEntry)) {
       return shardEntry;
     }
-    if (config.source === 'huggingface') {
+    if (primarySource.type === 'huggingface') {
       // Preserve any directory prefix inside the repo (file: 'subdir/model-...');
       // function replacement avoids '$'-pattern interpretation in filenames
-      const hfFile = config.file!.includes('/')
-        ? config.file!.replace(/[^/]+$/, () => shardEntry)
+      const hfFile = primarySource.file!.includes('/')
+        ? primarySource.file!.replace(/[^/]+$/, () => shardEntry)
         : shardEntry;
-      return getHuggingFaceURL(config.repo!, hfFile);
+      return getHuggingFaceURL(primarySource.repo!, hfFile, primarySource.revision ?? 'main');
     }
     // Replace the last path segment, preserving any query string
     try {
-      const url = new URL(primaryURL);
+      const url = new URL(primarySource.url);
       url.pathname = url.pathname.slice(0, url.pathname.lastIndexOf('/') + 1) + shardEntry;
       return url.toString();
     } catch {
-      return primaryURL.slice(0, primaryURL.lastIndexOf('/') + 1) + shardEntry;
+      return primarySource.url.slice(0, primarySource.url.lastIndexOf('/') + 1) + shardEntry;
     }
   }
 
@@ -635,13 +633,12 @@ export class ModelManager {
    */
   private async downloadShardedModel(
     config: DownloadConfig,
-    primaryURL: string,
-    sourceRepo: string | undefined,
-    sourceFile: string | undefined,
+    primarySource: ModelSource,
     primaryFilename: string,
     extraShardFiles: string[]
   ): Promise<ModelInfo> {
     const modelId = this.generateModelId(config.name);
+    const primaryURL = primarySource.url;
 
     // Idempotency guard: prevent silent metadata overwrite
     try {
@@ -668,7 +665,7 @@ export class ModelManager {
       },
     ];
     for (const entry of extraShardFiles) {
-      const url = this.resolveShardURL(entry, config, primaryURL);
+      const url = this.resolveShardURL(entry, primarySource);
       const shardFilename = this.extractFilename(
         url,
         /^https?:\/\//i.test(entry) ? undefined : entry
@@ -814,12 +811,7 @@ export class ModelManager {
       size: aggregateSize,
       path: shardItems[0]!.destination,
       downloadedAt: new Date().toISOString(),
-      source: {
-        type: config.source,
-        url: primaryURL,
-        repo: sourceRepo,
-        file: sourceFile,
-      },
+      source: { ...primarySource },
       checksum: config.checksum
         ? formatChecksum(config.checksum.replace(/^sha256:/, ''))
         : undefined,
@@ -828,31 +820,86 @@ export class ModelManager {
       shards,
     };
 
+    if (config.provenance) {
+      modelInfo.provenance = this.copyArtifactProvenance(config.provenance);
+    }
+
     await storageManager.saveModelMetadata(modelInfo);
 
     return modelInfo;
   }
 
   /**
-   * Resolve a component download specification to a URL.
+   * Snapshot a caller-owned download plan before asynchronous work begins.
+   *
+   * Artifact provenance remains opaque; copying only keeps each declaration
+   * associated with the source entry that supplied it.
    */
-  private resolveComponentURL(spec: {
+  private snapshotDownloadConfig(config: DownloadConfig): DownloadConfig {
+    const snapshot: DownloadConfig = { ...config };
+
+    if (config.provenance) {
+      snapshot.provenance = this.copyArtifactProvenance(config.provenance);
+    }
+    if (config.shardFiles) {
+      snapshot.shardFiles = [...config.shardFiles];
+    }
+    if (config.components) {
+      snapshot.components = config.components.map((component) => {
+        const componentSnapshot: DiffusionComponentDownload = { ...component };
+        if (component.provenance) {
+          componentSnapshot.provenance = this.copyArtifactProvenance(component.provenance);
+        }
+        return componentSnapshot;
+      });
+    }
+
+    return snapshot;
+  }
+
+  /**
+   * Copy an opaque caller-supplied license declaration without interpreting it.
+   */
+  private copyArtifactProvenance(
+    provenance: ArtifactProvenance | undefined
+  ): ArtifactProvenance | undefined {
+    return provenance ? { ...provenance } : undefined;
+  }
+
+  /**
+   * Resolve and normalize a download specification for URL use and metadata.
+   */
+  private resolveDownloadSource(spec: {
     source: 'huggingface' | 'url';
     url?: string;
     repo?: string;
     file?: string;
-  }): string {
+    revision?: string;
+  }): ModelSource {
     if (spec.source === 'url') {
       if (!spec.url) {
         throw new DownloadError('URL is required when source is "url"');
       }
-      return spec.url;
+      return {
+        type: 'url',
+        url: spec.url,
+      };
     }
     if (spec.source === 'huggingface') {
       if (!spec.repo || !spec.file) {
         throw new DownloadError('Repository and file are required when source is "huggingface"');
       }
-      return getHuggingFaceURL(spec.repo, spec.file);
+      if (spec.revision !== undefined && spec.revision.trim().length === 0) {
+        throw new DownloadError('Revision must be a non-empty string when source is "huggingface"');
+      }
+      const revision = spec.revision ?? 'main';
+      return {
+        type: 'huggingface',
+        url: getHuggingFaceURL(spec.repo, spec.file, revision),
+        repo: spec.repo,
+        file: spec.file,
+        revision,
+      };
     }
     throw new DownloadError(`Unsupported source type: ${spec.source}`);
   }

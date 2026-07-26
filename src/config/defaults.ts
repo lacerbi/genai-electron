@@ -173,7 +173,7 @@ export const BINARY_VERSIONS = {
   /** stable-diffusion.cpp configuration (Phase 2) */
   diffusionCpp: {
     /** Version/commit tag */
-    version: 'master-746-2574f59',
+    version: 'master-782-b290693',
     /**
      * Binary variants for each platform (in priority order for fallback)
      *
@@ -183,8 +183,8 @@ export const BINARY_VERSIONS = {
       'darwin-arm64': [
         {
           type: 'metal' as BinaryVariant,
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-746-2574f59/sd-master-2574f59-bin-Darwin-macOS-15.7.7-arm64.zip',
-          checksum: '570213614f4021ee99f832169da5c0abb73b53d48c8be2252eda30e4df3c4a1d',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-782-b290693/sd-master-b290693-bin-Darwin-macOS-26.4-arm64.zip',
+          checksum: '61620d31fa787d318ca1ec67ba73ef77b3236bc3a2dc891d66c161c7b075e45c',
         },
       ],
       'darwin-x64': [
@@ -194,11 +194,11 @@ export const BINARY_VERSIONS = {
         // Priority order: CUDA (fastest) → Vulkan (cross-GPU) → CPU fallback
         {
           type: 'cuda' as BinaryVariant,
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-746-2574f59/sd-master-2574f59-bin-win-cuda12-x64.zip',
-          checksum: 'baa07994a81dcdf1b3895c9dd290aa87683a65120d196501e3d015daca71d2d5',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-782-b290693/sd-master-b290693-bin-win-cuda12-x64.zip',
+          checksum: 'bc7aa2f6d471b324bfbc76f108a5cb3b76de29cb892d12609647e11b041f8a02',
           dependencies: [
             {
-              url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-746-2574f59/cudart-sd-bin-win-cu12-x64.zip',
+              url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-782-b290693/cudart-sd-bin-win-cu12-x64.zip',
               checksum: 'fe20366827d357c00797eebb58244dddab7fd9a348d70090c3871004c320f38d',
               description: 'CUDA 12 runtime libraries required for NVIDIA GPU acceleration',
             },
@@ -206,28 +206,28 @@ export const BINARY_VERSIONS = {
         },
         {
           type: 'vulkan' as BinaryVariant,
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-746-2574f59/sd-master-2574f59-bin-win-vulkan-x64.zip',
-          checksum: 'b6c9551a4e47cb7ce0b7ff41d382c12ec7f62f930a7d47fdc484851f19153248',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-782-b290693/sd-master-b290693-bin-win-vulkan-x64.zip',
+          checksum: '431dd14e12cc5fb1abdc20ab213bbfdf390f18766ed7f54ecfd61d6b467a7915',
         },
         {
           // Runtime CPU dispatch — the single win-cpu zip ships all ISA variants
           // (sse42/avx/avx2/avx512/…) as loadable ggml backends; replaces the
           // former per-ISA avx2/avx512/avx/noavx zips
           type: 'cpu' as BinaryVariant,
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-746-2574f59/sd-master-2574f59-bin-win-cpu-x64.zip',
-          checksum: 'add4a495403e6170bb8ed6e68a5c6c59568f7d2ad28e773a9264a2a0537fc722',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-782-b290693/sd-master-b290693-bin-win-cpu-x64.zip',
+          checksum: '38da3539d3af6918f4c218fd198ac6e26cd71249e54feb3a491d184d3ca94ea0',
         },
       ],
       'linux-x64': [
         {
           type: 'vulkan' as BinaryVariant,
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-746-2574f59/sd-master-2574f59-bin-Linux-Ubuntu-24.04-x86_64-vulkan.zip',
-          checksum: '79ea8096d1fdf35bdc9cf92f8008713cd5a0b2f0c23fa067e1c8144f89f902e2',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-782-b290693/sd-master-b290693-bin-Linux-Ubuntu-24.04-x86_64-vulkan.zip',
+          checksum: 'e49466d0c0c5f985d9ca9f82c18bb55e8e02885c654210f918ca0c0098ea2829',
         },
         {
           type: 'cpu' as BinaryVariant,
-          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-746-2574f59/sd-master-2574f59-bin-Linux-Ubuntu-24.04-x86_64.zip',
-          checksum: '80c6597f2ec18e7d2473bd3169db8b72500e50244110548d904216549993483c',
+          url: 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-782-b290693/sd-master-b290693-bin-Linux-Ubuntu-24.04-x86_64.zip',
+          checksum: '16547f8ffb35547f9058e2ea831a2eb36cfcb99594043fc97ad2895c6c485aaf',
         },
       ],
     },
