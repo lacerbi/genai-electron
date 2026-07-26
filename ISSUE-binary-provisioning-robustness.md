@@ -44,7 +44,7 @@ block — this is a ZIP-path problem, which in practice means a Windows problem.
 
 Not the cause, ruled out: the checksum step (`calculateChecksum`) streams via `createReadStream`
 and does not block. The adm-zip 0.5.16 → 0.6.0 security bump (v0.12.1,
-[`ISSUE-archive-dependency-security.md`](ISSUE-archive-dependency-security.md)) did not introduce
+[`ISSUE-archive-dependency-security.md`](docs/dev/issues/ISSUE-archive-dependency-security.md)) did not introduce
 the synchronicity — it was always there — though 0.6.0's hardened extraction may have changed its
 speed; the bump must stay regardless.
 
@@ -145,7 +145,7 @@ as-is.
   appearance was sequential archives + the killed first attempt (findings 2/3), not retries.
 - **Checksum step:** streaming, not a freeze contributor.
 - **Download URL/revision handling:** tracked separately in
-  [`ISSUE-genai-electron-huggingface-downloads.md`](ISSUE-genai-electron-huggingface-downloads.md);
+  [`ISSUE-genai-electron-huggingface-downloads.md`](docs/dev/issues/ISSUE-genai-electron-huggingface-downloads.md);
   nothing here overlaps it.
 
 ## Acceptance criteria
