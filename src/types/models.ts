@@ -29,6 +29,13 @@ export interface DiffusionComponentInfo {
   size: number;
   /** SHA256 checksum with sha256: prefix. */
   checksum?: string;
+  /**
+   * Configured source locator for this component.
+   * Optional for compatibility with metadata written before source tracking.
+   * For reused shared files, this describes the current model's configured
+   * locator rather than forensic acquisition history.
+   */
+  source?: ModelSource;
 }
 
 /**
@@ -54,6 +61,8 @@ export interface DiffusionComponentDownload {
   repo?: string;
   /** File path within the HuggingFace repo (required if source is 'huggingface'). */
   file?: string;
+  /** HuggingFace revision (branch, tag, or full commit SHA; defaults to "main"). */
+  revision?: string;
   /** Expected SHA256 checksum for verification. */
   checksum?: string;
 }
@@ -84,6 +93,13 @@ export interface ModelSource {
 
   /** HuggingFace file name (e.g., "llama-2-7b.Q4_K_M.gguf") */
   file?: string;
+
+  /**
+   * Effective HuggingFace revision.
+   * Present on newly written HuggingFace metadata; optional for direct URLs
+   * and metadata written by earlier versions.
+   */
+  revision?: string;
 }
 
 /**
@@ -277,6 +293,9 @@ export interface DownloadConfig {
 
   /** HuggingFace file name (required if source is 'huggingface') */
   file?: string;
+
+  /** HuggingFace revision (branch, tag, or full commit SHA; defaults to "main") */
+  revision?: string;
 
   /** Human-readable model name */
   name: string;

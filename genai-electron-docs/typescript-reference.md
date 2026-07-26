@@ -133,6 +133,7 @@ interface ModelSource {
   url: string;
   repo?: string;
   file?: string;
+  revision?: string; // Effective Hugging Face revision on newly written HF metadata; omitted for direct URLs and may be absent from legacy metadata
 }
 ```
 
@@ -203,6 +204,7 @@ interface DownloadConfig {
   url?: string;
   repo?: string;
   file?: string;
+  revision?: string;  // Hugging Face branch, tag, or full commit SHA; defaults to 'main'
   name: string;
   type: ModelType;
   checksum?: string;
@@ -243,6 +245,7 @@ interface DiffusionComponentInfo {
   path: string;       // Absolute path to component file
   size: number;       // File size in bytes
   checksum?: string;  // SHA256 checksum (sha256: prefix)
+  source?: ModelSource; // Configured locator; optional for legacy metadata
 }
 ```
 
@@ -265,9 +268,27 @@ interface DiffusionComponentDownload {
   url?: string;       // Required if source is 'url'
   repo?: string;      // Required if source is 'huggingface'
   file?: string;      // Required if source is 'huggingface'
+  revision?: string;  // Hugging Face branch, tag, or full commit SHA; defaults to 'main'
   checksum?: string;  // Expected SHA256 checksum
 }
 ```
+
+### Hugging Face URL Utilities
+
+```typescript
+function getHuggingFaceURL(repo: string, file: string, revision?: string): string;
+
+function parseHuggingFaceURL(
+  url: string
+): { repo: string; revision: string; file: string } | null;
+```
+
+`getHuggingFaceURL()` accepts a raw revision (default `main`), encodes it as one route segment, and
+preserves nested `file` path separators while encoding each segment. A full commit SHA is an
+immutable pin; branches and tags can move. `parseHuggingFaceURL()` returns decoded values and accepts
+both canonical nested paths and legacy `%2F`-encoded file paths. If a route is ambiguous between a
+single-segment repository whose revision is `resolve` and a namespaced repository named `resolve`,
+the namespaced repository shape takes precedence.
 
 ---
 
@@ -948,6 +969,8 @@ import {
   detectReasoningSupport,
   REASONING_MODEL_PATTERNS,
   getArchField,
+  getHuggingFaceURL,
+  parseHuggingFaceURL,
   findFreePort,
   isPortBindable,
   normalizeHealthHost

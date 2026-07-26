@@ -11,6 +11,7 @@ The `ModelManager` class handles model downloading, storage, and management for 
 - [Core Operations](#core-operations)
   - [listModels()](#listmodels)
   - [downloadModel()](#downloadmodel)
+  - [Hugging Face Revisions and Nested Paths](#hugging-face-revisions-and-nested-paths)
   - [Multi-Component Model Downloads](#multi-component-model-downloads)
   - [Multi-Shard GGUF Downloads](#multi-shard-gguf-downloads)
   - [getModelInfo()](#getmodelinfo)
@@ -32,7 +33,7 @@ The `ModelManager` class handles model downloading, storage, and management for 
 
 ## Overview
 
-`ModelManager` handles model downloads, storage, and metadata extraction in Electron's `userData` directory. Downloads GGUF models from direct URLs or HuggingFace with automatic metadata extraction (layer count, context length, architecture) before download. Supports checksum verification, progress tracking, and automatic reasoning model detection.
+`ModelManager` handles model downloads, storage, and metadata extraction in Electron's `userData` directory. Downloads GGUF models from direct URLs or structured Hugging Face repository/file/revision locators with automatic metadata extraction (layer count, context length, architecture) before download. Supports checksum verification, progress tracking, and automatic reasoning model detection.
 
 ---
 
@@ -91,7 +92,7 @@ Downloads a model from a URL or HuggingFace repository.
 downloadModel(config: DownloadConfig): Promise<ModelInfo>
 ```
 
-**DownloadConfig**: Supports direct URLs (`source: 'url'`, `url`) or HuggingFace (`source: 'huggingface'`, `repo`, `file`). Both require `name`, `type` ('llm' | 'diffusion'). Optional: `checksum` (SHA256), `onProgress` callback.
+**DownloadConfig**: Supports direct URLs (`source: 'url'`, `url`) or Hugging Face (`source: 'huggingface'`, `repo`, `file`, optional `revision`). Both require `name` and `type` (`'llm' | 'diffusion'`). Optional fields include `checksum` (SHA256) and `onProgress`.
 
 **Example**:
 ```typescript
@@ -111,17 +112,65 @@ const model = await modelManager.downloadModel({
 
 ---
 
+### Hugging Face Revisions and Nested Paths
+
+Structured Hugging Face downloads accept an optional raw `revision` (branch, tag, or full commit
+SHA). It defaults to `main`. New Hugging Face model metadata stores the effective revision, including
+`main` when the caller omits it.
+
+Use a full commit SHA when the model must be reproducible: branches and tags can move. Pass revisions
+unencoded; the library encodes the revision as one URL segment. An empty or whitespace-only revision
+throws `DownloadError`.
+
+The `file` field is a repository-relative path, so nested Hub files do not require an opaque direct
+URL:
+
+```typescript
+const model = await modelManager.downloadModel({
+  source: 'huggingface',
+  repo: 'organization/model',
+  revision: '0123456789abcdef0123456789abcdef01234567',
+  file: 'weights/Q4_K_M/model Q4.gguf',
+  name: 'Pinned Nested Model',
+  type: 'llm',
+});
+
+console.log(model.source.revision); // full commit SHA above
+```
+
+The exported helpers use the same contract:
+
+```typescript
+import { getHuggingFaceURL, parseHuggingFaceURL } from 'genai-electron';
+
+const url = getHuggingFaceURL('organization/model', 'weights/model Q4.gguf', 'release/1.0');
+// https://huggingface.co/organization/model/resolve/release%2F1.0/weights/model%20Q4.gguf
+
+parseHuggingFaceURL(url);
+// { repo: 'organization/model', revision: 'release/1.0', file: 'weights/model Q4.gguf' }
+```
+
+`parseHuggingFaceURL()` also accepts older generated URLs where nested file separators were encoded
+as `%2F`. Its result now includes `revision`; code that compares the complete returned object should
+account for that additive property. One route is inherently ambiguous offline: a single-segment
+repository whose revision is literally `resolve` can look identical to a namespaced repository whose
+name is `resolve`. The parser consistently gives the namespaced repository shape precedence.
+
+---
+
 ### Multi-Component Model Downloads
 
 Some diffusion models require multiple files to work together (e.g., diffusion model + text encoder + VAE). ModelManager supports downloading multi-component models by providing a `components` array in the download config.
 
 **How it works**:
 - The top-level `source`/`repo`/`file` (or `url`) describes the primary diffusion model
-- Each entry in `components` describes an additional component with its own source
+- Each entry in `components` describes an additional component with its own source and optional
+  Hugging Face revision
 - Components have a `role` field (e.g., `'llm'`, `'vae'`, `'clip'`) identifying their purpose
 - All files are stored in a per-model subdirectory under the diffusion models folder
 - Progress reporting aggregates across all components (smooth 0→100%)
 - If any component download fails, all downloaded files are cleaned up automatically
+- Every newly written component record includes its normalized source locator
 
 **Component Roles** (`DiffusionComponentRole`):
 - `'diffusion_model'` - Main UNet/DiT (`--diffusion-model`)
@@ -138,6 +187,7 @@ Some diffusion models require multiple files to work together (e.g., diffusion m
 const modelInfo = await modelManager.downloadModel({
   source: 'huggingface',
   repo: 'leejet/FLUX.2-klein-4B-GGUF',
+  revision: 'flux-release',
   file: 'flux-2-klein-4b-Q8_0.gguf',
   name: 'Flux 2 Klein',
   type: 'diffusion',
@@ -146,12 +196,14 @@ const modelInfo = await modelManager.downloadModel({
       role: 'llm',
       source: 'huggingface',
       repo: 'unsloth/Qwen3-4B-GGUF',
+      revision: 'encoder-release',
       file: 'Qwen3-4B-Q4_0.gguf',
     },
     {
       role: 'vae',
-      source: 'url',
-      url: 'https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors',
+      source: 'huggingface',
+      repo: 'Comfy-Org/flux2-dev',
+      file: 'split_files/vae/flux2-vae.safetensors',
     },
   ],
   onProgress: (downloaded, total) => {
@@ -196,19 +248,44 @@ For multi-component models, `ModelInfo.components` contains a map of component r
       path: '/path/to/userData/models/diffusion/flux-2-klein/flux-2-klein-4b-Q8_0.gguf',
       size: 4300000000,
       checksum: 'sha256:abc123...',
+      source: {
+        type: 'huggingface',
+        url: 'https://huggingface.co/leejet/FLUX.2-klein-4B-GGUF/resolve/flux-release/flux-2-klein-4b-Q8_0.gguf',
+        repo: 'leejet/FLUX.2-klein-4B-GGUF',
+        file: 'flux-2-klein-4b-Q8_0.gguf',
+        revision: 'flux-release',
+      },
     },
     llm: {
       path: '/path/to/userData/models/diffusion/flux-2-klein/Qwen3-4B-Q4_0.gguf',
       size: 2500000000,
       checksum: 'sha256:def456...',
+      source: {
+        type: 'huggingface',
+        url: 'https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/encoder-release/Qwen3-4B-Q4_0.gguf',
+        repo: 'unsloth/Qwen3-4B-GGUF',
+        file: 'Qwen3-4B-Q4_0.gguf',
+        revision: 'encoder-release',
+      },
     },
     vae: {
       path: '/path/to/userData/models/diffusion/flux-2-klein/flux2-vae.safetensors',
       size: 335000000,
+      source: {
+        type: 'huggingface',
+        url: 'https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors',
+        repo: 'Comfy-Org/flux2-dev',
+        file: 'split_files/vae/flux2-vae.safetensors',
+        revision: 'main',
+      },
     }
   }
 }
 ```
+
+`DiffusionComponentInfo.source` is optional so metadata written by older versions remains valid.
+For newly downloaded or reused shared files, it describes the current model configuration's locator;
+it is not forensic acquisition history for the bytes already on disk.
 
 **GGUF Metadata Extraction**:
 - GGUF metadata is only extracted for the primary diffusion model if it's a `.gguf` file
@@ -348,6 +425,9 @@ console.log('Primary path:', model.path);               // → the -00001-of- sh
 
 **Explicit `shardFiles` override**:
 
+Bare derived Hugging Face shard filenames use the primary model's revision and preserve its
+repository subdirectory. Caller-supplied full shard URLs remain unchanged.
+
 For non-standard shard names that don't match the `-00001-of-0000N` pattern, list the additional shards explicitly. Entries are filenames resolved next to the primary file (same HuggingFace repo path / same URL directory), or full `http(s)` URLs:
 
 ```typescript
@@ -423,6 +503,7 @@ console.log('Source:', info.source.type);
 if (info.source.type === 'huggingface') {
   console.log('Repository:', info.source.repo);
   console.log('File:', info.source.file);
+  console.log('Revision:', info.source.revision);
 }
 if (info.checksum) {
   console.log('Checksum:', info.checksum);

@@ -478,7 +478,7 @@ userData/models/diffusion/
   flux-2-klein.json                    # metadata (components map inside)
 ```
 
-Single-file models keep the existing flat layout. The `ModelInfo.components` map (type `DiffusionModelComponents`) stores per-component paths, sizes, and checksums. `ModelInfo.path` points to the primary diffusion model component, and `ModelInfo.size` is the aggregate total.
+Single-file models keep the existing flat layout. The `ModelInfo.components` map (type `DiffusionModelComponents`) stores per-component paths, sizes, checksums, and configured source locators. Component sources are optional for legacy metadata; newly written records include them for every role, including `diffusion_model`. A reused shared file records the current model configuration's locator, not forensic acquisition history. `ModelInfo.path` points to the primary diffusion model component, and `ModelInfo.size` is the aggregate total.
 
 **Summary**: MVP uses isolated per-app storage (safest, simplest). Future extensions may add configurable shared storage.
 
@@ -965,11 +965,19 @@ const BINARY_VERSIONS = {
 
 **HuggingFace Integration**:
 ```typescript
-// Convert HF repo to direct URL
-function getHuggingFaceURL(repo: string, file: string): string {
-  return `https://huggingface.co/${repo}/resolve/main/${file}`;
+// Convert a structured HF locator to a direct URL.
+function getHuggingFaceURL(repo: string, file: string, revision = 'main'): string {
+  const encodedRevision = encodeURIComponent(revision);
+  const encodedFile = file.split('/').map(encodeURIComponent).join('/');
+  return `https://huggingface.co/${repo}/resolve/${encodedRevision}/${encodedFile}`;
 }
 ```
+
+The revision is supplied raw and treated as one route segment; nested file paths retain their
+literal separators. Branches and tags are selectable but movable, while a full commit SHA provides
+an immutable pin. Newly written structured Hugging Face metadata stores the effective revision
+(`main` when omitted). URL parsing returns decoded `{ repo, revision, file }` and remains compatible
+with legacy generated URLs whose nested file separators were encoded as `%2F`.
 
 ### 3. Process Management
 
@@ -1082,8 +1090,10 @@ Store alongside each model as `{model-name}.json`:
   "downloadedAt": "2025-01-15T10:30:00Z",
   "source": {
     "type": "huggingface",
+    "url": "https://huggingface.co/TheBloke/Llama-2-7B-GGUF/resolve/0123456789abcdef0123456789abcdef01234567/llama-2-7b.Q4_K_M.gguf",
     "repo": "TheBloke/Llama-2-7B-GGUF",
-    "file": "llama-2-7b.Q4_K_M.gguf"
+    "file": "llama-2-7b.Q4_K_M.gguf",
+    "revision": "0123456789abcdef0123456789abcdef01234567"
   },
   "checksum": "sha256:abc123..."
 }

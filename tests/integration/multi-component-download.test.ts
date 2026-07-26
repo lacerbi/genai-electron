@@ -30,7 +30,10 @@ const FILES: Record<string, Buffer> = {
   '/model.bin': MODEL_CONTENT,
   '/encoder.bin': ENCODER_CONTENT,
   '/vae.bin': VAE_CONTENT,
+  '/mirror/encoder.bin': ENCODER_CONTENT,
+  '/mirror/vae.bin': VAE_CONTENT,
 };
+const getRequestCounts = new Map<string, number>();
 
 // ── Shared mutable state (set in beforeAll, read by mock closures) ───────────
 const testState = {
@@ -137,6 +140,7 @@ function createTestServer(): Promise<{ server: http.Server; port: number }> {
       }
 
       // GET
+      getRequestCounts.set(filePath, (getRequestCounts.get(filePath) ?? 0) + 1);
       res.writeHead(200, {
         'Content-Length': String(content.length),
         'Content-Type': 'application/octet-stream',
@@ -172,6 +176,7 @@ describe('Multi-component download integration', () => {
 
   beforeEach(() => {
     savedMetadata.length = 0;
+    getRequestCounts.clear();
   });
 
   it('downloads all components with correct progress and file output', async () => {
@@ -282,6 +287,20 @@ describe('Multi-component download integration', () => {
     expect(result.components!.llm!.size).toBe(ENCODER_CONTENT.length);
     expect(result.components!.vae).toBeDefined();
     expect(result.components!.vae!.size).toBe(VAE_CONTENT.length);
+    expect(result.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/model.bin`,
+    });
+    expect(result.components!.diffusion_model!.source).toEqual(result.source);
+    expect(result.components!.diffusion_model!.source).not.toBe(result.source);
+    expect(result.components!.llm!.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/encoder.bin`,
+    });
+    expect(result.components!.vae!.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/vae.bin`,
+    });
 
     // All component paths should be absolute and inside the model dir
     for (const comp of Object.values(result.components!)) {
@@ -290,7 +309,10 @@ describe('Multi-component download integration', () => {
 
     // ── Metadata saved ──────────────────────────────────────────────────
     expect(savedMetadata).toHaveLength(1);
-    expect((savedMetadata[0] as { id: string }).id).toBe('test-multi-model');
+    const saved = savedMetadata[0] as typeof result;
+    expect(saved.id).toBe('test-multi-model');
+    expect(saved.components!.llm!.source).toEqual(result.components!.llm!.source);
+    expect(saved.components!.vae!.source).toEqual(result.components!.vae!.source);
   }, 15_000);
 
   it('skips existing shared components when downloading a second variant', async () => {
@@ -357,12 +379,12 @@ describe('Multi-component download integration', () => {
         {
           role: 'llm' as const,
           source: 'url' as const,
-          url: `http://localhost:${port}/encoder.bin`,
+          url: `http://localhost:${port}/mirror/encoder.bin`,
         },
         {
           role: 'vae' as const,
           source: 'url' as const,
-          url: `http://localhost:${port}/vae.bin`,
+          url: `http://localhost:${port}/mirror/vae.bin`,
         },
       ],
     });
@@ -376,6 +398,20 @@ describe('Multi-component download integration', () => {
     expect(resultB.components!.diffusion_model!.path).toContain('model-b.bin');
     expect(resultB.components!.llm!.path).toContain('encoder.bin');
     expect(resultB.components!.vae!.path).toContain('vae.bin');
+    expect(resultB.components!.llm!.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/mirror/encoder.bin`,
+    });
+    expect(resultB.components!.vae!.source).toEqual({
+      type: 'url',
+      url: `http://localhost:${port}/mirror/vae.bin`,
+    });
+    expect(savedMetadata).toHaveLength(1);
+    const savedB = savedMetadata[0] as typeof resultB;
+    expect(savedB.components!.llm!.source).toEqual(resultB.components!.llm!.source);
+    expect(savedB.components!.vae!.source).toEqual(resultB.components!.vae!.source);
+    expect(getRequestCounts.get('/mirror/encoder.bin') ?? 0).toBe(0);
+    expect(getRequestCounts.get('/mirror/vae.bin') ?? 0).toBe(0);
 
     // Size should reflect all components (including skipped shared ones)
     const expectedTotal = VARIANT_B_CONTENT.length + ENCODER_CONTENT.length + VAE_CONTENT.length;

@@ -275,18 +275,24 @@ describe('ModelManager', () => {
       expect(model.name).toBe('Test Model');
       expect(mockDownload).toHaveBeenCalled();
       expect(mockDownload.mock.calls[0][0].url).toBe('https://example.com/model.gguf');
+      expect(model.source).toEqual({
+        type: 'url',
+        url: 'https://example.com/model.gguf',
+      });
       expect(mockStorageManager.saveModelMetadata).toHaveBeenCalled();
     });
 
-    it('should download from HuggingFace', async () => {
+    it('should download and persist a selected HuggingFace revision', async () => {
+      const revision = '0123456789abcdef0123456789abcdef01234567';
       mockGetHuggingFaceURL.mockReturnValue(
-        'https://huggingface.co/test/model/resolve/main/model.gguf'
+        `https://huggingface.co/test/model/resolve/${revision}/model.gguf`
       );
 
       const hfConfig: DownloadConfig = {
         source: 'huggingface',
         repo: 'test/model',
         file: 'model.gguf',
+        revision,
         name: 'HF Model',
         type: 'llm',
       };
@@ -294,8 +300,47 @@ describe('ModelManager', () => {
       const model = await modelManager.downloadModel(hfConfig);
 
       expect(model).toBeDefined();
-      expect(mockGetHuggingFaceURL).toHaveBeenCalledWith('test/model', 'model.gguf');
+      expect(mockGetHuggingFaceURL).toHaveBeenCalledWith('test/model', 'model.gguf', revision);
       expect(mockDownload).toHaveBeenCalled();
+      expect(model.source).toEqual({
+        type: 'huggingface',
+        url: `https://huggingface.co/test/model/resolve/${revision}/model.gguf`,
+        repo: 'test/model',
+        file: 'model.gguf',
+        revision,
+      });
+    });
+
+    it('should persist main as the effective default HuggingFace revision', async () => {
+      mockGetHuggingFaceURL.mockReturnValue(
+        'https://huggingface.co/test/model/resolve/main/model.gguf'
+      );
+
+      const model = await modelManager.downloadModel({
+        source: 'huggingface',
+        repo: 'test/model',
+        file: 'model.gguf',
+        name: 'HF Main Model',
+        type: 'llm',
+      });
+
+      expect(mockGetHuggingFaceURL).toHaveBeenCalledWith('test/model', 'model.gguf', 'main');
+      expect(model.source.revision).toBe('main');
+    });
+
+    it('should reject an empty HuggingFace revision', async () => {
+      await expect(
+        modelManager.downloadModel({
+          source: 'huggingface',
+          repo: 'test/model',
+          file: 'model.gguf',
+          revision: '  ',
+          name: 'Invalid Revision',
+          type: 'llm',
+        })
+      ).rejects.toThrow(/Revision must be a non-empty string/);
+
+      expect(mockGetHuggingFaceURL).not.toHaveBeenCalled();
     });
 
     it('should call progress callback', async () => {
@@ -694,6 +739,7 @@ describe('ModelManager', () => {
       source: 'huggingface',
       repo: 'org/Big-GGUF',
       file: 'big-model-00001-of-00003.gguf',
+      revision: 'release/2026-07',
       name: 'Big Model',
       type: 'llm',
     };
@@ -707,7 +753,8 @@ describe('ModelManager', () => {
       // Idempotency guard: model doesn't exist yet
       mockStorageManager.loadModelMetadata.mockRejectedValue(new Error('not found'));
       mockGetHuggingFaceURL.mockImplementation(
-        (repo: string, file: string) => `https://huggingface.co/${repo}/resolve/main/${file}`
+        (repo: string, file: string, revision = 'main') =>
+          `https://huggingface.co/${repo}/resolve/${encodeURIComponent(revision)}/${file}`
       );
       mockGetFileSize.mockResolvedValue(1000);
       fetchSpy = jest
@@ -756,6 +803,17 @@ describe('ModelManager', () => {
       expect(model.path).toContain('big-model-00001-of-00003.gguf');
       expect(model.shards).toHaveLength(3);
       expect(model.size).toBe(3000);
+      expect(model.source).toEqual({
+        type: 'huggingface',
+        url: 'https://huggingface.co/org/Big-GGUF/resolve/release%2F2026-07/big-model-00001-of-00003.gguf',
+        repo: 'org/Big-GGUF',
+        file: 'big-model-00001-of-00003.gguf',
+        revision: 'release/2026-07',
+      });
+      expect(mockGetHuggingFaceURL).toHaveBeenCalledTimes(3);
+      for (const call of mockGetHuggingFaceURL.mock.calls) {
+        expect(call[2]).toBe('release/2026-07');
+      }
 
       // GGUF metadata fetched once, from the first shard only
       expect(ggufMockState.fetchGGUFMetadataCallCount).toBe(1);
@@ -799,6 +857,24 @@ describe('ModelManager', () => {
       expect(urls[2]).toBe('https://cdn.example.com/weird-c.gguf');
     });
 
+    it('should use the primary HuggingFace revision for bare shards and preserve full URLs', async () => {
+      await modelManager.downloadModel({
+        ...shardedConfig,
+        file: 'weights/weird-a.gguf',
+        name: 'Explicit HF Shards',
+        shardFiles: ['weird-b.gguf', 'https://cdn.example.com/weird-c.gguf?download=1'],
+      });
+
+      const urls = mockDownload.mock.calls.map((c: any) => c[0].url);
+      expect(urls[0]).toBe(
+        'https://huggingface.co/org/Big-GGUF/resolve/release%2F2026-07/weights/weird-a.gguf'
+      );
+      expect(urls[1]).toBe(
+        'https://huggingface.co/org/Big-GGUF/resolve/release%2F2026-07/weights/weird-b.gguf'
+      );
+      expect(urls[2]).toBe('https://cdn.example.com/weird-c.gguf?download=1');
+    });
+
     it('should clean up downloaded shards when a later shard fails', async () => {
       mockDownload
         .mockResolvedValueOnce(undefined)
@@ -838,13 +914,13 @@ describe('ModelManager', () => {
 
       const urls = mockDownload.mock.calls.map((c: any) => c[0].url);
       expect(urls[0]).toBe(
-        'https://huggingface.co/org/Big-GGUF/resolve/main/Q4_K_M/big-model-00001-of-00003.gguf'
+        'https://huggingface.co/org/Big-GGUF/resolve/release%2F2026-07/Q4_K_M/big-model-00001-of-00003.gguf'
       );
       expect(urls[1]).toBe(
-        'https://huggingface.co/org/Big-GGUF/resolve/main/Q4_K_M/big-model-00002-of-00003.gguf'
+        'https://huggingface.co/org/Big-GGUF/resolve/release%2F2026-07/Q4_K_M/big-model-00002-of-00003.gguf'
       );
       expect(urls[2]).toBe(
-        'https://huggingface.co/org/Big-GGUF/resolve/main/Q4_K_M/big-model-00003-of-00003.gguf'
+        'https://huggingface.co/org/Big-GGUF/resolve/release%2F2026-07/Q4_K_M/big-model-00003-of-00003.gguf'
       );
       // Local destinations use the plain basename (no directory smushing)
       for (const call of mockDownload.mock.calls) {
@@ -888,6 +964,7 @@ describe('ModelManager', () => {
       source: 'huggingface',
       repo: 'leejet/FLUX.2-klein-4B-GGUF',
       file: 'flux2-klein-4B-Q4_0.gguf',
+      revision: 'flux-release',
       name: 'Flux 2 Klein 4B',
       type: 'diffusion',
       components: [
@@ -896,6 +973,7 @@ describe('ModelManager', () => {
           source: 'huggingface',
           repo: 'unsloth/Qwen3-4B-GGUF',
           file: 'Qwen3-4B-Q4_0.gguf',
+          revision: 'encoder/preview',
         },
         {
           role: 'vae',
@@ -918,7 +996,8 @@ describe('ModelManager', () => {
       mockStorageManager.loadModelMetadata.mockRejectedValue(new Error('not found'));
       mockIsHuggingFaceURL.mockReturnValue(false);
       mockGetHuggingFaceURL.mockImplementation(
-        (repo: string, file: string) => `https://huggingface.co/${repo}/resolve/main/${file}`
+        (repo: string, file: string, revision = 'main') =>
+          `https://huggingface.co/${repo}/resolve/${encodeURIComponent(revision)}/${file}`
       );
       // Default file sizes: primary 4.3GB, llm 2.5GB, vae 335MB
       // Called twice per component: once after download (completedBytes) + once for components map
@@ -990,6 +1069,29 @@ describe('ModelManager', () => {
         expect(model.components!.llm!.size).toBe(2_500_000_000);
         expect(model.components!.vae).toBeDefined();
         expect(model.components!.vae!.size).toBe(335_000_000);
+        expect(model.source).toEqual({
+          type: 'huggingface',
+          url: 'https://huggingface.co/leejet/FLUX.2-klein-4B-GGUF/resolve/flux-release/flux2-klein-4B-Q4_0.gguf',
+          repo: 'leejet/FLUX.2-klein-4B-GGUF',
+          file: 'flux2-klein-4B-Q4_0.gguf',
+          revision: 'flux-release',
+        });
+        expect(model.components!.diffusion_model!.source).toEqual(model.source);
+        expect(model.components!.diffusion_model!.source).not.toBe(model.source);
+        expect(model.components!.llm!.source).toEqual({
+          type: 'huggingface',
+          url: 'https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/encoder%2Fpreview/Qwen3-4B-Q4_0.gguf',
+          repo: 'unsloth/Qwen3-4B-GGUF',
+          file: 'Qwen3-4B-Q4_0.gguf',
+          revision: 'encoder/preview',
+        });
+        expect(model.components!.vae!.source).toEqual({
+          type: 'huggingface',
+          url: 'https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/flux2-vae.safetensors',
+          repo: 'Comfy-Org/flux2-dev',
+          file: 'flux2-vae.safetensors',
+          revision: 'main',
+        });
 
         // Verify metadata was saved
         expect(mockStorageManager.saveModelMetadata).toHaveBeenCalledWith(
@@ -1012,6 +1114,9 @@ describe('ModelManager', () => {
         const directURLConfig: DownloadConfig = {
           source: 'url',
           url: 'https://example.com/diffusion-model.gguf',
+          repo: 'ignored/primary-repo',
+          file: 'ignored-primary.gguf',
+          revision: 'ignored-primary-revision',
           name: 'Direct URL Model',
           type: 'diffusion',
           components: [
@@ -1019,6 +1124,9 @@ describe('ModelManager', () => {
               role: 'vae',
               source: 'url',
               url: 'https://example.com/vae.safetensors',
+              repo: 'ignored/component-repo',
+              file: 'ignored-vae.safetensors',
+              revision: 'ignored-component-revision',
             },
           ],
         };
@@ -1037,6 +1145,16 @@ describe('ModelManager', () => {
         expect(model.components).toBeDefined();
         expect(model.components!.diffusion_model).toBeDefined();
         expect(model.components!.vae).toBeDefined();
+        expect(model.source).toEqual({
+          type: 'url',
+          url: 'https://example.com/diffusion-model.gguf',
+        });
+        expect(model.components!.diffusion_model!.source).toEqual(model.source);
+        expect(model.components!.diffusion_model!.source).not.toBe(model.source);
+        expect(model.components!.vae!.source).toEqual({
+          type: 'url',
+          url: 'https://example.com/vae.safetensors',
+        });
       });
     });
 
@@ -1653,7 +1771,7 @@ describe('ModelManager', () => {
       });
     });
 
-    describe('resolveComponentURL', () => {
+    describe('resolveDownloadSource', () => {
       it('should resolve HuggingFace source via getHuggingFaceURL', async () => {
         // The flux2KleinConfig uses HuggingFace sources
         await modelManager.downloadModel(flux2KleinConfig);
@@ -1662,15 +1780,18 @@ describe('ModelManager', () => {
         expect(mockGetHuggingFaceURL).toHaveBeenCalledTimes(3);
         expect(mockGetHuggingFaceURL).toHaveBeenCalledWith(
           'leejet/FLUX.2-klein-4B-GGUF',
-          'flux2-klein-4B-Q4_0.gguf'
+          'flux2-klein-4B-Q4_0.gguf',
+          'flux-release'
         );
         expect(mockGetHuggingFaceURL).toHaveBeenCalledWith(
           'unsloth/Qwen3-4B-GGUF',
-          'Qwen3-4B-Q4_0.gguf'
+          'Qwen3-4B-Q4_0.gguf',
+          'encoder/preview'
         );
         expect(mockGetHuggingFaceURL).toHaveBeenCalledWith(
           'Comfy-Org/flux2-dev',
-          'flux2-vae.safetensors'
+          'flux2-vae.safetensors',
+          'main'
         );
       });
 
@@ -1746,6 +1867,24 @@ describe('ModelManager', () => {
             name: 'Missing Repo Test 2',
           })
         ).rejects.toThrow(/Repository and file are required/);
+      });
+
+      it('should throw DownloadError when a component revision is empty', async () => {
+        await expect(
+          modelManager.downloadModel({
+            ...flux2KleinConfig,
+            name: 'Empty Component Revision',
+            components: [
+              {
+                role: 'vae',
+                source: 'huggingface',
+                repo: 'Comfy-Org/flux2-dev',
+                file: 'flux2-vae.safetensors',
+                revision: '',
+              },
+            ],
+          })
+        ).rejects.toThrow(/Revision must be a non-empty string/);
       });
 
       it('should throw DownloadError when primary URL source has no url', async () => {

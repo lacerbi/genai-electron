@@ -7,38 +7,53 @@
  * Convert HuggingFace repository and file to direct download URL
  *
  * @param repo - Repository name (e.g., "TheBloke/Llama-2-7B-GGUF")
- * @param file - File name (e.g., "llama-2-7b.Q4_K_M.gguf")
+ * @param file - File path within the repository (e.g., "models/llama-2-7b.Q4_K_M.gguf")
+ * @param revision - Raw Git revision (branch, tag, or full commit SHA; defaults to "main")
  * @returns Direct download URL
+ * @throws {TypeError} If revision is empty or whitespace-only
  *
  * @example
  * ```typescript
- * const url = getHuggingFaceURL('TheBloke/Llama-2-7B-GGUF', 'llama-2-7b.Q4_K_M.gguf');
+ * const url = getHuggingFaceURL(
+ *   'organization/model',
+ *   'weights/model Q4.gguf',
+ *   '0123456789abcdef0123456789abcdef01234567'
+ * );
  * console.log(url);
- * // https://huggingface.co/TheBloke/Llama-2-7B-GGUF/resolve/main/llama-2-7b.Q4_K_M.gguf
+ * // https://huggingface.co/organization/model/resolve/0123456789abcdef0123456789abcdef01234567/weights/model%20Q4.gguf
  * ```
  */
-export function getHuggingFaceURL(repo: string, file: string): string {
-  // Encode the file name for URL
-  const encodedFile = encodeURIComponent(file);
+export function getHuggingFaceURL(repo: string, file: string, revision = 'main'): string {
+  if (revision.trim().length === 0) {
+    throw new TypeError('Hugging Face revision must be a non-empty string');
+  }
+
+  // Revisions occupy one route segment, while file paths retain their hierarchy.
+  const encodedRevision = encodeURIComponent(revision);
+  const encodedFile = file.split('/').map(encodeURIComponent).join('/');
 
   // Construct the direct download URL
-  return `https://huggingface.co/${repo}/resolve/main/${encodedFile}`;
+  return `https://huggingface.co/${repo}/resolve/${encodedRevision}/${encodedFile}`;
 }
 
 /**
  * Parse HuggingFace URL to extract repository and file name
  *
  * @param url - HuggingFace URL
- * @returns Object with repo and file, or null if not a valid HuggingFace URL
+ * @returns Object with decoded repo revision and file, or null if not a valid HuggingFace URL.
+ * In the inherently ambiguous route where both a single-segment repo revision
+ * and a namespaced repo name are "resolve", the namespaced repo shape wins.
  *
  * @example
  * ```typescript
  * const parsed = parseHuggingFaceURL('https://huggingface.co/TheBloke/Llama-2-7B-GGUF/resolve/main/llama-2-7b.Q4_K_M.gguf');
  * console.log(parsed);
- * // { repo: 'TheBloke/Llama-2-7B-GGUF', file: 'llama-2-7b.Q4_K_M.gguf' }
+ * // { repo: 'TheBloke/Llama-2-7B-GGUF', revision: 'main', file: 'llama-2-7b.Q4_K_M.gguf' }
  * ```
  */
-export function parseHuggingFaceURL(url: string): { repo: string; file: string } | null {
+export function parseHuggingFaceURL(
+  url: string
+): { repo: string; revision: string; file: string } | null {
   try {
     const urlObj = new URL(url);
 
@@ -47,32 +62,39 @@ export function parseHuggingFaceURL(url: string): { repo: string; file: string }
       return null;
     }
 
-    // Parse the path: /repo/user/Model-Name/resolve/main/file.gguf
+    // Parse either /repo/resolve/revision/file or /owner/repo/resolve/revision/file.
     const pathParts = urlObj.pathname.split('/').filter((p) => p);
 
-    // Need at least 4 parts: [user, model, 'resolve', 'main', ...file]
-    if (pathParts.length < 5) {
+    // Need at least 4 parts: [repo, 'resolve', revision, ...file]
+    if (pathParts.length < 4) {
       return null;
     }
 
-    // Find 'resolve' index
-    const resolveIndex = pathParts.indexOf('resolve');
-    if (resolveIndex === -1 || resolveIndex < 2) {
+    // Prefer the namespaced shape when both candidates are possible (for a repo
+    // named "resolve"), otherwise accept a single-segment repo ID such as gpt2.
+    const resolveIndex =
+      pathParts[2] === 'resolve' && pathParts.length >= 5
+        ? 2
+        : pathParts[1] === 'resolve' && pathParts.length >= 4
+          ? 1
+          : -1;
+    if (resolveIndex === -1) {
       return null;
     }
 
     // Extract repo (everything before 'resolve')
     const repo = pathParts.slice(0, resolveIndex).join('/');
 
-    // Extract file (everything after 'main')
-    const mainIndex = resolveIndex + 1;
-    if (pathParts[mainIndex] !== 'main') {
+    const revisionPart = pathParts[resolveIndex + 1];
+    const fileParts = pathParts.slice(resolveIndex + 2);
+    if (!revisionPart || fileParts.length === 0) {
       return null;
     }
 
-    const file = decodeURIComponent(pathParts.slice(mainIndex + 1).join('/'));
+    const revision = decodeURIComponent(revisionPart);
+    const file = decodeURIComponent(fileParts.join('/'));
 
-    return { repo, file };
+    return { repo, revision, file };
   } catch {
     return null;
   }
