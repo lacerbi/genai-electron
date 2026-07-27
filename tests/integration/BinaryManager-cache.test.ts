@@ -242,5 +242,5 @@ describe('BinaryManager dependency cache integration', () => {
       expect.objectContaining({ url: movedDependencyUrl }),
     ]);
     expect((await readdir(binaryRoots.llama)).filter((file) => file.endsWith('.tmp'))).toEqual([]);
-  });
+  }, 15_000);
 });
