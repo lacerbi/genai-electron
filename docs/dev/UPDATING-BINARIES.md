@@ -10,6 +10,10 @@ Starting with llama.cpp **b7956**, macOS and Linux binaries use **`.tar.gz`** fo
 
 - **Unix tar.gz archives nest everything under a top-level `llama-<tag>/` directory** (true since at least b7956). `BinaryManager.downloadAndTestVariant` flattens this automatically by copying the directory that actually contains the binary — do not "fix" the copy back to the extract root.
 - **Windows zips are flat**, but since ~b9860 `llama-server.exe` is a small launcher with the real code in `llama-server-impl.dll` — the exe alone is not runnable, which is why ALL extracted files are copied next to it.
+- **ZIP inflation runs in a worker thread.** Keep both archive consumers routed
+  through `extractZipInWorker`; its per-file callbacks drive
+  `'binary-progress'` entry counters and keep Electron's main event loop free.
+  Tar extraction remains asynchronous through `tar.x`.
 - **No Linux x64 CUDA prebuilt exists anymore** (as of b9860). The `linux-x64` variant chain is Vulkan → CPU; Linux NVIDIA users run the Vulkan build or compile from source.
 
 ## When to Update
@@ -388,6 +392,25 @@ cudart-llama-bin-win-cuda-12.4-x64.zip | 8c79a9b226de4b3cacfd1f83d24f962d0773be7
 3. **Testing:** Binary is tested WITH dependencies present
 4. **Cleanup:** If binary test fails, BOTH binary and dependencies are cleaned up
 5. **Deployment:** All files (binary + dependencies) are copied to the final binaries directory
+6. **Reuse:** Successful installs are recorded by checksum in
+   `binaries/<type>/.deps.json`. A matching checksum reuses the installed files
+   even when an upstream release changes the dependency URL.
+
+The manifest is written atomically only after the candidate binary passes
+validation and the dependency files are installed. Changing a configured
+dependency checksum prunes the old entry. Missing/malformed manifests or
+missing installed files safely fall back to normal download and extraction;
+checksumming each installed DLL is intentionally out of scope.
+
+Main and dependency archives left by an interrupted process are reused only
+after their configured SHA-256 verifies. Variant staging is always deleted
+before new extraction, preventing partial old contents from mixing with fresh
+files. If the installed binary already validates, known leftover variant
+main archives and extraction directories are cleaned best-effort before the
+fast path returns. A dependency archive is deleted only when its checksum
+matches committed manifest state; an unmanifested archive is retained for
+recovery after a kill between installation and manifest commit. `.partial`
+files remain Downloader-owned and are not range-resumed.
 
 ### CUDA GPU Detection
 
@@ -441,8 +464,10 @@ The library automatically performs real GPU functionality testing during variant
 2. Downloads dependencies if needed (CUDA runtime DLLs)
 3. Runs **real inference test** instead of just `--version`:
    - **LLM**: Generates 1 token with GPU layers forced (`-ngl 1`)
-   - **Diffusion**: Generates 64x64 image with 1 step
-4. Parses output for GPU errors:
+   - **Diffusion**: Generates 64x64 image with 1 step and the production-resolved
+     `--clip-on-cpu`, `--vae-on-cpu`, `--offload-to-cpu`, and `--diffusion-fa`
+     flags. Generation-only batch/thread settings are excluded.
+4. Parses line-anchored output diagnostics for GPU errors:
    - "CUDA error"
    - "failed to allocate"
    - "out of memory"
@@ -450,6 +475,10 @@ The library automatically performs real GPU functionality testing during variant
    - etc.
 5. If test fails: Logs warning, tries next variant
 6. If test succeeds: Caches variant for fast subsequent starts
+
+Known backend/function prefixes and bracketed timestamp/level prefixes are
+accepted, but a pattern mentioned mid-line in explanatory prose does not reject
+a healthy variant.
 
 **When no model is available:**
 - Falls back to basic `--version`/`--help` test

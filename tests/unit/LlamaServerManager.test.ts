@@ -122,8 +122,15 @@ jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
 }));
 
 // Mock BinaryManager
+const mockEnsureLlamaBinary = jest.fn();
+const mockLlamaBinaryConfigs: any[] = [];
+
 class MockBinaryManager {
-  ensureBinary = jest.fn().mockResolvedValue('/test/binaries/llama/llama-server');
+  ensureBinary = mockEnsureLlamaBinary;
+
+  constructor(config: any) {
+    mockLlamaBinaryConfigs.push(config);
+  }
 }
 
 jest.unstable_mockModule('../../src/managers/BinaryManager.js', () => ({
@@ -191,6 +198,8 @@ describe('LlamaServerManager', () => {
     mockLogManager.initialize.mockImplementation(() => Promise.resolve());
     mockLogManager.getRecent.mockImplementation(() => Promise.resolve([]));
     mockLogManager.clear.mockImplementation(() => Promise.resolve());
+    mockEnsureLlamaBinary.mockResolvedValue('/test/binaries/llama/llama-server');
+    mockLlamaBinaryConfigs.length = 0;
 
     llamaServer = new LlamaServerManager(mockModelManager as any, mockSystemInfo as any);
 
@@ -359,6 +368,53 @@ describe('LlamaServerManager', () => {
       const info = llamaServer.getInfo();
       expect(info.status).toBe('running');
       expect(info.pid).toBe(12345);
+    });
+
+    it('rejects a concurrent start while binary provisioning is in progress', async () => {
+      let resolveBinary!: (binaryPath: string) => void;
+      mockEnsureLlamaBinary.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveBinary = resolve;
+          })
+      );
+
+      const firstStart = llamaServer.start(mockConfig);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      await expect(llamaServer.start(mockConfig)).rejects.toThrow('already starting');
+
+      resolveBinary('/test/binaries/llama/llama-server');
+      await expect(firstStart).resolves.toMatchObject({ status: 'running' });
+      expect(mockEnsureLlamaBinary).toHaveBeenCalledTimes(1);
+    });
+
+    it('persists provisioning logs even when binary setup fails', async () => {
+      mockEnsureLlamaBinary.mockImplementationOnce(async () => {
+        mockLlamaBinaryConfigs.at(-1)?.log('llama provisioning checksum failed', 'error');
+        throw new Error('llama provisioning failed');
+      });
+
+      await expect(llamaServer.start(mockConfig)).rejects.toThrow('llama provisioning failed');
+
+      expect(mockLogManager.initialize.mock.invocationCallOrder[0]).toBeLessThan(
+        mockEnsureLlamaBinary.mock.invocationCallOrder[0]!
+      );
+      expect(mockLogManager.write).toHaveBeenCalledWith(
+        'llama provisioning checksum failed',
+        'error'
+      );
+    });
+
+    it('persists provisioning logs on a successful start', async () => {
+      mockEnsureLlamaBinary.mockImplementationOnce(async () => {
+        mockLlamaBinaryConfigs.at(-1)?.log('llama cuda variant validated', 'info');
+        return '/test/binaries/llama/llama-server';
+      });
+
+      await llamaServer.start(mockConfig);
+
+      expect(mockLogManager.write).toHaveBeenCalledWith('llama cuda variant validated', 'info');
     });
 
     it('should throw error if model not found', async () => {

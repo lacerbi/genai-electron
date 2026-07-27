@@ -1229,6 +1229,9 @@ The `BinaryManager` class provides generic functionality for:
 3. Selecting the first variant that works on the current system
 4. Copying all files (executable + DLLs) to the correct location
 5. Caching which variant worked for faster startup next time
+6. Inflating ZIP archives in a worker thread with entry-level progress
+7. Reusing installed dependencies by verified archive checksum through an
+   atomic `.deps.json` manifest
 
 **Separate Storage by Binary Type**:
 
@@ -1271,10 +1274,23 @@ const binaryPath = await binaryManager.ensureBinary();
 
 **Variant Testing**:
 
-The BinaryManager tests each variant by running `--version` to ensure:
+BinaryManager always runs a basic `--version` / `--help` check. When a model is
+available it also runs a real one-token LLM request or one-step 64×64 diffusion
+generation. Diffusion validation receives the same resolved CPU-offload and
+diffusion-flash-attention flags as production generation. This verifies:
+
 1. The executable runs without errors
 2. Required DLLs are present (no missing dependency errors)
-3. GPU drivers are available (for CUDA/Vulkan/Metal variants)
+3. GPU drivers and real inference are available for accelerated variants
+
+ZIP extraction and dependency materialization occur in a clean per-variant
+staging directory. Complete archives left by an interrupted process are reused
+only after SHA-256 verification; `.partial` files are not treated as complete.
+If a process was killed after installing a candidate but before cleanup, a
+later validated-binary fast path removes main archives and extraction
+directories before returning. Dependency archives are deleted only when their
+own checksum has a matching committed manifest entry; an unmanifested archive
+is retained as the recovery point for the install-before-manifest kill window.
 
 If a variant fails (e.g., Vulkan DLL missing), it tries the next variant automatically (e.g., CPU-only).
 

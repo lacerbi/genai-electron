@@ -297,8 +297,9 @@ export interface BinaryLogEvent {
  * Structured progress for binary provisioning ('binary-progress' event)
  *
  * Machine-readable companion to 'binary-log': download progress is throttled
- * to whole-percent changes at the source, and each phase transition emits one
- * event. Build progress UIs from this instead of parsing log strings.
+ * to whole-percent changes at the source, ZIP extraction reports entry-level
+ * progress, and each remaining phase transition emits one event. Build
+ * progress UIs from this instead of parsing log strings.
  */
 export interface BinaryProgressEvent {
   /** Provisioning phase */
@@ -313,6 +314,12 @@ export interface BinaryProgressEvent {
   /** Total bytes, when known (phase === 'downloading') */
   total?: number;
 
-  /** Whole-number download percentage convenience (phase === 'downloading') */
+  /** Whole-number percentage convenience (downloading or ZIP extracting) */
   percent?: number;
+
+  /** ZIP entries extracted so far (phase === 'extracting') */
+  completedEntries?: number;
+
+  /** Total ZIP file entries (phase === 'extracting') */
+  totalEntries?: number;
 }

@@ -27,7 +27,7 @@ import {
 } from '../utils/archive-utils.js';
 import { detectGPU } from '../system/gpu-detect.js';
 import path from 'path';
-import { promises as fs } from 'fs';
+import { constants as fsConstants, promises as fs } from 'fs';
 import { spawn } from 'child_process';
 
 /**
@@ -49,6 +49,25 @@ interface ValidationCache {
   version?: string;
 }
 
+interface DependencyManifestEntry {
+  /** Most recently configured source URL (content identity is the checksum) */
+  url: string;
+  /** Verified dependency archive SHA-256 */
+  checksum: string;
+  /** Installed archive-relative files needed to stage a fresh candidate */
+  files: string[];
+}
+
+interface DependencyManifest {
+  version: 1;
+  dependencies: DependencyManifestEntry[];
+}
+
+interface PreparedDependencies {
+  entries: DependencyManifestEntry[];
+  manifest: DependencyManifest;
+}
+
 /**
  * Configuration for binary download and management
  */
@@ -65,8 +84,8 @@ export interface BinaryManagerConfig {
   log?: (message: string, level?: 'info' | 'warn' | 'error') => void;
   /**
    * Optional structured progress callback ('binary-progress' event source).
-   * Download progress is throttled to whole-percent changes; phase
-   * transitions (extracting/verifying/testing) emit one event each.
+   * Download progress is throttled to whole-percent changes. ZIP extraction
+   * emits per-entry counters; verification and testing emit phase transitions.
    */
   onProgress?: (event: BinaryProgressEvent) => void;
   /**
@@ -81,6 +100,11 @@ export interface BinaryManagerConfig {
    * Used for multi-component models that require --diffusion-model + --llm + --vae.
    */
   testModelArgs?: string[];
+  /**
+   * Optional production-resolved optimization flags for the Phase 2 diffusion
+   * test (for example --clip-on-cpu / --offload-to-cpu).
+   */
+  testOptimizationArgs?: string[];
   /** Expected binary version from BINARY_VERSIONS — used for cache invalidation */
   version?: string;
 }
@@ -143,6 +167,93 @@ export class BinaryManager {
       // Non-fatal - just log warning
       this.log(`Failed to save validation cache: ${error}`, 'warn');
     }
+  }
+
+  /**
+   * Load the installed dependency manifest.
+   *
+   * Missing, legacy, or malformed files safely degrade to an empty manifest.
+   */
+  private async loadDependencyManifest(): Promise<DependencyManifest> {
+    const manifestPath = path.join(PATHS.binaries[this.config.type], '.deps.json');
+
+    try {
+      const parsed = JSON.parse(await fs.readFile(manifestPath, 'utf-8')) as unknown;
+      if (
+        !BinaryManager.isRecord(parsed) ||
+        parsed.version !== 1 ||
+        !Array.isArray(parsed.dependencies)
+      ) {
+        return { version: 1, dependencies: [] };
+      }
+
+      const dependencies: DependencyManifestEntry[] = [];
+      for (const value of parsed.dependencies) {
+        if (
+          BinaryManager.isRecord(value) &&
+          typeof value.url === 'string' &&
+          typeof value.checksum === 'string' &&
+          Array.isArray(value.files) &&
+          value.files.every((file) => typeof file === 'string')
+        ) {
+          dependencies.push({
+            url: value.url,
+            checksum: value.checksum,
+            files: [...value.files],
+          });
+        }
+      }
+
+      return { version: 1, dependencies };
+    } catch {
+      return { version: 1, dependencies: [] };
+    }
+  }
+
+  /**
+   * Save the dependency manifest atomically.
+   *
+   * Manifest persistence is non-fatal: a failure only forfeits reuse on the
+   * next provisioning run.
+   */
+  private async saveDependencyManifest(manifest: DependencyManifest): Promise<void> {
+    const manifestPath = path.join(PATHS.binaries[this.config.type], '.deps.json');
+    const tempPath = `${manifestPath}.${process.pid}.${Date.now()}.tmp`;
+
+    try {
+      await fs.writeFile(tempPath, JSON.stringify(manifest, null, 2), 'utf-8');
+      await fs.rename(tempPath, manifestPath);
+    } catch (error) {
+      await deleteFile(tempPath).catch(() => void 0);
+      this.log(`Failed to save dependency manifest: ${error}`, 'warn');
+    }
+  }
+
+  /**
+   * Drop manifest entries whose checksums are no longer configured.
+   */
+  private async pruneDependencyManifest(): Promise<void> {
+    const manifest = await this.loadDependencyManifest();
+    if (manifest.dependencies.length === 0) {
+      return;
+    }
+
+    const configuredChecksums = new Set(
+      this.config.variants.flatMap((variant) =>
+        (variant.dependencies ?? []).map((dependency) => dependency.checksum)
+      )
+    );
+    const dependencies = manifest.dependencies.filter((entry) =>
+      configuredChecksums.has(entry.checksum)
+    );
+
+    if (dependencies.length !== manifest.dependencies.length) {
+      await this.saveDependencyManifest({ version: 1, dependencies });
+    }
+  }
+
+  private static isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null;
   }
 
   /**
@@ -223,6 +334,7 @@ export class BinaryManager {
 
     // Ensure binary directory exists
     await ensureDirectory(PATHS.binaries[type]);
+    await this.pruneDependencyManifest();
 
     const binaryPath = getBinaryPath(type, binaryName);
     const variantCachePath = path.join(PATHS.binaries[type], '.variant.json');
@@ -258,6 +370,7 @@ export class BinaryManager {
               `Last validated: ${new Date(validationCache.validatedAt).toLocaleString()}`,
               'info'
             );
+            await this.cleanupInstalledBinaryResidue(binaryPath);
             return binaryPath;
           } else {
             // Checksum mismatch - binary was modified
@@ -283,6 +396,7 @@ export class BinaryManager {
           });
 
           this.log('Binary validated successfully', 'info');
+          await this.cleanupInstalledBinaryResidue(binaryPath);
           return binaryPath;
         } else {
           this.log('Existing binary not working, re-downloading...', 'warn');
@@ -339,6 +453,157 @@ export class BinaryManager {
   }
 
   /**
+   * Download an archive only when a complete, checksum-matching copy is not
+   * already present.
+   */
+  private async ensureVerifiedArchive(options: {
+    url: string;
+    destination: string;
+    checksum: string;
+    fileLabel: string;
+    downloadLabel: string;
+    dependency?: boolean;
+  }): Promise<void> {
+    const { url, destination, checksum, fileLabel, downloadLabel, dependency } = options;
+
+    if (await fileExists(destination)) {
+      this.progress({ phase: 'verifying', file: fileLabel });
+      const existingChecksum = await calculateChecksum(destination);
+      if (existingChecksum === checksum) {
+        this.log(`Reusing verified ${downloadLabel} archive`, 'info');
+        return;
+      }
+
+      this.log(`Discarding checksum-mismatched ${downloadLabel} archive`, 'warn');
+      await deleteFile(destination).catch(() => void 0);
+    }
+
+    this.log(`Downloading ${downloadLabel}...`, 'info');
+    const downloader = new Downloader();
+    let lastWholePercent = -1;
+    await downloader.download({
+      url,
+      destination,
+      onProgress: (downloaded, total) => {
+        const ratio = total > 0 ? downloaded / total : 0;
+        const wholePercent = Math.floor(ratio * 100);
+        this.log(`Downloading ${downloadLabel}: ${(ratio * 100).toFixed(1)}%`, 'info');
+        if (wholePercent !== lastWholePercent) {
+          lastWholePercent = wholePercent;
+          this.progress({
+            phase: 'downloading',
+            file: fileLabel,
+            downloaded,
+            total,
+            percent: wholePercent,
+          });
+        }
+      },
+    });
+
+    this.progress({ phase: 'verifying', file: fileLabel });
+    const actualChecksum = await calculateChecksum(destination);
+    if (actualChecksum !== checksum) {
+      await deleteFile(destination).catch(() => void 0);
+      throw new BinaryError(
+        dependency
+          ? 'Dependency checksum verification failed'
+          : 'Binary checksum verification failed',
+        {
+          ...(dependency ? { dependency: url } : {}),
+          expected: checksum,
+          actual: actualChecksum,
+          suggestion: dependency
+            ? 'The downloaded dependency may be corrupted. Try again.'
+            : 'The downloaded file may be corrupted. Try deleting and re-downloading.',
+        }
+      );
+    }
+  }
+
+  private getDependencyArchivePaths(dependencies: readonly BinaryDependency[]): string[] {
+    return dependencies.map((dependency, index) =>
+      path.join(
+        PATHS.binaries[this.config.type],
+        `.dep${index}${getArchiveExtension(dependency.url)}`
+      )
+    );
+  }
+
+  /**
+   * Resolve an archive-relative dependency path inside a trusted root.
+   */
+  private resolveDependencyFile(rootDir: string, relativeFile: string): string | undefined {
+    const portablePath = relativeFile.replaceAll('\\', '/');
+    if (
+      portablePath.length === 0 ||
+      portablePath.startsWith('/') ||
+      /^[A-Za-z]:/.test(portablePath) ||
+      portablePath.split('/').includes('..')
+    ) {
+      return undefined;
+    }
+
+    const resolvedRoot = path.resolve(rootDir);
+    const resolvedFile = path.resolve(resolvedRoot, portablePath);
+    if (!resolvedFile.startsWith(`${resolvedRoot}${path.sep}`)) {
+      return undefined;
+    }
+    return resolvedFile;
+  }
+
+  /**
+   * Stage already-installed dependency files into a clean candidate directory.
+   */
+  private async stageCachedDependency(
+    entry: DependencyManifestEntry,
+    extractDir: string
+  ): Promise<boolean> {
+    const installedDir = PATHS.binaries[this.config.type];
+    const stagedFiles: string[] = [];
+
+    try {
+      for (const relativeFile of entry.files) {
+        const source = this.resolveDependencyFile(installedDir, relativeFile);
+        const destination = this.resolveDependencyFile(extractDir, relativeFile);
+        if (!source || !destination || !(await fileExists(source))) {
+          throw new Error(`Installed dependency file is unavailable: ${relativeFile}`);
+        }
+
+        await fs.mkdir(path.dirname(destination), { recursive: true });
+        await fs.copyFile(source, destination, fsConstants.COPYFILE_FICLONE);
+        stagedFiles.push(destination);
+      }
+      return entry.files.length > 0;
+    } catch (error) {
+      for (const stagedFile of stagedFiles) {
+        await deleteFile(stagedFile).catch(() => void 0);
+      }
+      this.log(
+        `Installed dependency cache is incomplete; provisioning it again: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        'warn'
+      );
+      return false;
+    }
+  }
+
+  private extractionProgress(
+    file: string
+  ): (progress: { completedEntries: number; totalEntries: number }) => void {
+    return ({ completedEntries, totalEntries }) => {
+      this.progress({
+        phase: 'extracting',
+        file,
+        completedEntries,
+        totalEntries,
+        percent: totalEntries > 0 ? Math.floor((completedEntries / totalEntries) * 100) : 100,
+      });
+    };
+  }
+
+  /**
    * Download and extract binary dependencies (e.g., CUDA runtime DLLs)
    *
    * Dependencies are downloaded and extracted BEFORE the main binary is tested.
@@ -352,69 +617,211 @@ export class BinaryManager {
   private async downloadDependencies(
     dependencies: readonly BinaryDependency[],
     extractDir: string
-  ): Promise<void> {
-    const { type } = this.config;
+  ): Promise<PreparedDependencies> {
+    const manifest = await this.loadDependencyManifest();
+    const entries: DependencyManifestEntry[] = [];
 
-    for (let i = 0; i < dependencies.length; i++) {
-      const dep = dependencies[i];
-      if (!dep) continue;
+    for (const [index, dependency] of dependencies.entries()) {
+      const dependencyName = dependency.description || `Dependency ${index + 1}`;
+      const cachedEntry = manifest.dependencies.find(
+        (entry) => entry.checksum === dependency.checksum
+      );
 
-      const depName = dep.description || `Dependency ${i + 1}`;
-      this.log(`Downloading ${depName}...`, 'info');
-
-      const downloader = new Downloader();
-      const depExt = getArchiveExtension(dep.url);
-      const depArchivePath = path.join(PATHS.binaries[type], `.dep${i}${depExt}`);
-
-      try {
-        // Download dependency
-        let lastDepPercent = -1;
-        await downloader.download({
-          url: dep.url,
-          destination: depArchivePath,
-          onProgress: (downloaded, total) => {
-            const percent = ((downloaded / total) * 100).toFixed(1);
-            this.log(`Downloading ${depName}: ${percent}%`, 'info');
-            const wholePercent = Math.floor((downloaded / total) * 100);
-            if (wholePercent !== lastDepPercent) {
-              lastDepPercent = wholePercent;
-              this.progress({
-                phase: 'downloading',
-                file: depName,
-                downloaded,
-                total,
-                percent: wholePercent,
-              });
-            }
-          },
+      if (cachedEntry && (await this.stageCachedDependency(cachedEntry, extractDir))) {
+        this.log(`Using installed ${dependencyName} (checksum match)`, 'info');
+        entries.push({
+          url: dependency.url,
+          checksum: dependency.checksum,
+          files: [...cachedEntry.files],
         });
+        continue;
+      }
 
-        this.progress({ phase: 'verifying', file: depName });
+      const archivePath = path.join(
+        PATHS.binaries[this.config.type],
+        `.dep${index}${getArchiveExtension(dependency.url)}`
+      );
+      await this.ensureVerifiedArchive({
+        url: dependency.url,
+        destination: archivePath,
+        checksum: dependency.checksum,
+        fileLabel: dependencyName,
+        downloadLabel: dependencyName,
+        dependency: true,
+      });
 
-        // Verify checksum
-        const actualChecksum = await calculateChecksum(depArchivePath);
-        if (actualChecksum !== dep.checksum) {
-          throw new BinaryError('Dependency checksum verification failed', {
-            dependency: dep.url,
-            expected: dep.checksum,
-            actual: actualChecksum,
-            suggestion: 'The downloaded dependency may be corrupted. Try again.',
+      this.progress({ phase: 'extracting', file: dependencyName });
+      const extractedFiles = await extractArchive(
+        archivePath,
+        extractDir,
+        this.extractionProgress(dependencyName)
+      );
+      const files = [...new Set(extractedFiles)];
+
+      if (
+        files.length === 0 ||
+        files.some((relativeFile) => !this.resolveDependencyFile(extractDir, relativeFile))
+      ) {
+        throw new BinaryError('Dependency archive contained no safe files', {
+          dependency: dependency.url,
+          suggestion: 'Check the configured dependency archive and checksum.',
+        });
+      }
+
+      entries.push({
+        url: dependency.url,
+        checksum: dependency.checksum,
+        files,
+      });
+      this.log(`${dependencyName} extracted successfully`, 'info');
+    }
+
+    return { entries, manifest };
+  }
+
+  /**
+   * Explicitly install all dependency files, including nested paths.
+   */
+  private async installDependencyFiles(
+    entries: readonly DependencyManifestEntry[],
+    extractDir: string
+  ): Promise<void> {
+    const installedDir = PATHS.binaries[this.config.type];
+
+    for (const entry of entries) {
+      for (const relativeFile of entry.files) {
+        const source = this.resolveDependencyFile(extractDir, relativeFile);
+        const destination = this.resolveDependencyFile(installedDir, relativeFile);
+        if (!source || !destination || !(await fileExists(source))) {
+          throw new BinaryError('Dependency file missing after extraction', {
+            file: relativeFile,
+            checksum: entry.checksum,
           });
         }
+        await fs.mkdir(path.dirname(destination), { recursive: true });
+        await fs.copyFile(source, destination, fsConstants.COPYFILE_FICLONE);
+      }
+    }
+  }
 
-        // Extract dependency to same directory as main binary
-        // This ensures DLLs are in the same directory as the executable
-        this.progress({ phase: 'extracting', file: depName });
-        await extractArchive(depArchivePath, extractDir);
+  /**
+   * Reject main archives that overwrite files attributed to a dependency
+   * checksum. Matching is case-insensitive because dependencies are used
+   * primarily on Windows.
+   */
+  private assertNoDependencyFileCollisions(
+    entries: readonly DependencyManifestEntry[],
+    mainArchiveFiles: readonly string[]
+  ): void {
+    const dependencyFiles = new Set(
+      entries.flatMap((entry) =>
+        entry.files.map((file) => file.replaceAll('\\', '/').toLowerCase())
+      )
+    );
+    const collision = mainArchiveFiles.find((file) =>
+      dependencyFiles.has(file.replaceAll('\\', '/').toLowerCase())
+    );
 
-        // Cleanup dependency ZIP
-        await deleteFile(depArchivePath).catch(() => void 0);
+    if (collision) {
+      throw new BinaryError('Main binary archive conflicts with a dependency file', {
+        file: collision,
+        suggestion: 'Use binary and dependency archives with disjoint file paths.',
+      });
+    }
+  }
 
-        this.log(`${depName} extracted successfully`, 'info');
+  /**
+   * Merge successfully installed dependencies and persist the result.
+   */
+  private async commitDependencyManifest(prepared: PreparedDependencies): Promise<void> {
+    if (prepared.entries.length === 0) {
+      return;
+    }
+
+    const installedFiles = new Set(
+      prepared.entries.flatMap((entry) =>
+        entry.files.map((file) => file.replaceAll('\\', '/').toLowerCase())
+      )
+    );
+    const configuredChecksums = new Set(
+      this.config.variants.flatMap((variant) =>
+        (variant.dependencies ?? []).map((dependency) => dependency.checksum)
+      )
+    );
+    const retained = prepared.manifest.dependencies.filter(
+      (entry) =>
+        configuredChecksums.has(entry.checksum) &&
+        !prepared.entries.some((installed) => installed.checksum === entry.checksum) &&
+        !entry.files.some((file) => installedFiles.has(file.replaceAll('\\', '/').toLowerCase()))
+    );
+
+    await this.saveDependencyManifest({
+      version: 1,
+      dependencies: [...retained, ...prepared.entries],
+    });
+  }
+
+  private async cleanupVariantArtifacts(
+    archivePath: string,
+    extractDir: string,
+    dependencyArchivePaths: readonly string[]
+  ): Promise<void> {
+    await deleteFile(archivePath).catch(() => void 0);
+    for (const dependencyArchivePath of dependencyArchivePaths) {
+      await deleteFile(dependencyArchivePath).catch(() => void 0);
+    }
+    await cleanupExtraction(extractDir).catch(() => void 0);
+  }
+
+  /**
+   * Best-effort cleanup for artifacts left if the process was killed after a
+   * candidate had been installed but before its normal cleanup completed.
+   *
+   * An unmanifested dependency archive may be the only reusable recovery copy
+   * after a kill between dependency installation and manifest commit, so it is
+   * retained. A manifested archive is deleted only after its own checksum
+   * proves that the installed dependency state already records those bytes.
+   */
+  private async cleanupInstalledBinaryResidue(finalBinaryPath: string): Promise<void> {
+    const manifest = await this.loadDependencyManifest();
+    const manifestedChecksums = new Set(
+      manifest.dependencies.map((dependency) => dependency.checksum)
+    );
+    const dependencyArchivePaths = new Set<string>();
+
+    for (const variant of this.config.variants) {
+      const archivePath = `${finalBinaryPath}.${variant.type}${getArchiveExtension(variant.url)}`;
+      const extractDir = `${finalBinaryPath}.${variant.type}.extract`;
+      for (const dependencyArchivePath of this.getDependencyArchivePaths(
+        variant.dependencies ?? []
+      )) {
+        dependencyArchivePaths.add(dependencyArchivePath);
+      }
+
+      await deleteFile(archivePath).catch(() => void 0);
+      await cleanupExtraction(extractDir).catch(() => void 0);
+    }
+
+    for (const dependencyArchivePath of dependencyArchivePaths) {
+      if (!(await fileExists(dependencyArchivePath))) {
+        continue;
+      }
+
+      try {
+        const archiveChecksum = await calculateChecksum(dependencyArchivePath);
+        if (manifestedChecksums.has(archiveChecksum)) {
+          await deleteFile(dependencyArchivePath).catch(() => void 0);
+        } else {
+          this.log(
+            `Preserving unmanifested dependency archive for recovery: ${path.basename(dependencyArchivePath)}`,
+            'info'
+          );
+        }
       } catch (error) {
-        // Cleanup on error
-        await deleteFile(depArchivePath).catch(() => void 0);
-        throw error;
+        this.log(
+          `Could not verify leftover dependency archive; preserving it for recovery: ${error}`,
+          'warn'
+        );
       }
     }
   }
@@ -432,51 +839,30 @@ export class BinaryManager {
     finalBinaryPath: string
   ): Promise<boolean> {
     const { type } = this.config;
-    const downloader = new Downloader();
     const archiveExt = getArchiveExtension(variant.url);
     const archivePath = `${finalBinaryPath}.${variant.type}${archiveExt}`;
     const extractDir = `${finalBinaryPath}.${variant.type}.extract`;
+    const dependencies = variant.dependencies ?? [];
+    const dependencyArchivePaths = this.getDependencyArchivePaths(dependencies);
+
+    await cleanupExtraction(extractDir);
 
     try {
-      // Download and extract dependencies FIRST (e.g., CUDA runtime DLLs)
-      // This ensures all required files are present when testing the binary
-      if (variant.dependencies && variant.dependencies.length > 0) {
-        await this.downloadDependencies(variant.dependencies, extractDir);
-      }
+      const preparedDependencies =
+        dependencies.length > 0
+          ? await this.downloadDependencies(dependencies, extractDir)
+          : {
+              entries: [],
+              manifest: await this.loadDependencyManifest(),
+            };
 
-      // Download main binary archive
-      let lastPercent = -1;
-      await downloader.download({
+      await this.ensureVerifiedArchive({
         url: variant.url,
         destination: archivePath,
-        onProgress: (downloaded, total) => {
-          const percent = ((downloaded / total) * 100).toFixed(1);
-          this.log(`Downloading ${variant.type} binary: ${percent}%`, 'info');
-          const wholePercent = Math.floor((downloaded / total) * 100);
-          if (wholePercent !== lastPercent) {
-            lastPercent = wholePercent;
-            this.progress({
-              phase: 'downloading',
-              file: 'binary',
-              downloaded,
-              total,
-              percent: wholePercent,
-            });
-          }
-        },
+        checksum: variant.checksum,
+        fileLabel: 'binary',
+        downloadLabel: `${variant.type} binary`,
       });
-
-      this.progress({ phase: 'verifying', file: 'binary' });
-
-      // Verify checksum
-      const actualChecksum = await calculateChecksum(archivePath);
-      if (actualChecksum !== variant.checksum) {
-        throw new BinaryError('Binary checksum verification failed', {
-          expected: variant.checksum,
-          actual: actualChecksum,
-          suggestion: 'The downloaded file may be corrupted. Try deleting and re-downloading.',
-        });
-      }
 
       // Determine which binary names to search for based on type
       const binaryNamesToSearch =
@@ -486,7 +872,17 @@ export class BinaryManager {
 
       // Extract main binary archive to same directory as dependencies
       this.progress({ phase: 'extracting', file: 'binary' });
-      const extractedBinaryPath = await extractBinary(archivePath, extractDir, binaryNamesToSearch);
+      let mainArchiveFiles: readonly string[] = [];
+      const extractedBinaryPath = await extractBinary(
+        archivePath,
+        extractDir,
+        binaryNamesToSearch,
+        this.extractionProgress('binary'),
+        (files) => {
+          mainArchiveFiles = files;
+        }
+      );
+      this.assertNoDependencyFileCollisions(preparedDependencies.entries, mainArchiveFiles);
 
       // Test if binary works (has required drivers, etc.)
       this.progress({ phase: 'testing', file: 'binary' });
@@ -510,33 +906,29 @@ export class BinaryManager {
             if (entry.isFile()) {
               await fs.copyFile(
                 path.join(extractDir, entry.name),
-                path.join(PATHS.binaries[type], entry.name)
+                path.join(PATHS.binaries[type], entry.name),
+                fsConstants.COPYFILE_FICLONE
               );
             }
           }
         }
+        await this.installDependencyFiles(preparedDependencies.entries, extractDir);
 
         // Make executable (Unix-like systems)
         if (process.platform !== 'win32') {
           await fs.chmod(finalBinaryPath, 0o755);
         }
 
-        // Cleanup
-        await deleteFile(archivePath).catch(() => void 0);
-        await cleanupExtraction(extractDir).catch(() => void 0);
+        await this.commitDependencyManifest(preparedDependencies);
+        await this.cleanupVariantArtifacts(archivePath, extractDir, dependencyArchivePaths);
 
         return true;
       } else {
-        // Binary doesn't work (missing drivers, etc.)
-        // Cleanup everything including dependencies and return false to try next variant
-        await deleteFile(archivePath).catch(() => void 0);
-        await cleanupExtraction(extractDir).catch(() => void 0);
+        await this.cleanupVariantArtifacts(archivePath, extractDir, dependencyArchivePaths);
         return false;
       }
     } catch (error) {
-      // Cleanup everything on error (including dependencies)
-      await deleteFile(archivePath).catch(() => void 0);
-      await cleanupExtraction(extractDir).catch(() => void 0);
+      await this.cleanupVariantArtifacts(archivePath, extractDir, dependencyArchivePaths);
       throw error;
     }
   }
@@ -641,32 +1033,53 @@ export class BinaryManager {
     }
   }
 
-  /** GPU error patterns to check in server/process output */
-  private static readonly GPU_ERROR_PATTERNS = [
-    'cuda error',
-    'cuda_error',
-    'failed to allocate',
-    'vkcreatedevice failed',
-    'vulkan error',
-    'gpu error',
-    'out of memory',
-    'llama_model_load: error',
-    'failed to load model',
-    'error: invalid argument',
+  /** Diagnostic-line patterns to check in server/process output */
+  private static readonly GPU_ERROR_PATTERNS: readonly {
+    label: string;
+    pattern: RegExp;
+  }[] = [
+    {
+      label: 'cuda error',
+      pattern: /^(?:(?:ggml|llama|cuda|gpu)[\w.-]*:\s*)?cuda(?:\s+|_)error\b/i,
+    },
+    {
+      label: 'failed to allocate',
+      pattern: /^(?:(?:ggml|llama|cuda|vulkan|gpu)[\w.-]*:\s*)?failed to allocate\b/i,
+    },
+    { label: 'vkcreatedevice failed', pattern: /^vkcreatedevice failed\b/i },
+    {
+      label: 'vulkan error',
+      pattern: /^(?:(?:ggml|vulkan|gpu)[\w.-]*:\s*)?vulkan error\b/i,
+    },
+    {
+      label: 'gpu error',
+      pattern: /^(?:(?:ggml|llama|cuda|vulkan|gpu)[\w.-]*:\s*)?gpu error\b/i,
+    },
+    {
+      label: 'out of memory',
+      pattern: /^(?:(?:ggml|llama|cuda|vulkan|gpu)[\w.-]*(?:\s+failed)?:\s*)?out of memory\b/i,
+    },
+    { label: 'llama_model_load: error', pattern: /^llama_model_load:\s*error\b/i },
+    { label: 'failed to load model', pattern: /^failed to load model\b/i },
+    { label: 'error: invalid argument', pattern: /^error:\s*invalid argument\b/i },
   ];
 
   /**
    * Check output string for GPU/CUDA error patterns
    *
-   * @param output - Combined stdout+stderr output (will be lowercased)
+   * @param output - Combined stdout+stderr output
    * @returns The matched error pattern, or null if none found
    * @private
    */
   private checkForGpuErrors(output: string): string | null {
-    const lower = output.toLowerCase();
-    for (const pattern of BinaryManager.GPU_ERROR_PATTERNS) {
-      if (lower.includes(pattern)) {
-        return pattern;
+    for (const rawLine of output.split(/\r?\n/)) {
+      // Remove common bracketed timestamp/level prefixes while keeping the
+      // diagnostic itself anchored to the beginning of the remaining line.
+      const line = rawLine.trim().replace(/^(?:\[[^\]]+\]\s*)+/, '');
+      for (const { label, pattern } of BinaryManager.GPU_ERROR_PATTERNS) {
+        if (pattern.test(line)) {
+          return label;
+        }
       }
     }
     return null;
@@ -847,6 +1260,7 @@ export class BinaryManager {
 
       const testArgs = [
         ...modelArgs,
+        ...(this.config.testOptimizationArgs ?? []),
         '-p',
         'test',
         '-o',
@@ -863,7 +1277,7 @@ export class BinaryManager {
       const timeout = this.config.testModelArgs ? 120000 : 15000;
       const { stdout, stderr } = await this.spawnWithTimeout(binaryPath, testArgs, timeout);
 
-      const gpuError = this.checkForGpuErrors(`${stdout} ${stderr}`);
+      const gpuError = this.checkForGpuErrors(`${stdout}\n${stderr}`);
       if (gpuError) {
         this.log(`Phase 2: ✗ GPU error detected: ${gpuError}`, 'warn');
         return false;
@@ -884,7 +1298,7 @@ export class BinaryManager {
         );
       }
 
-      const gpuError = this.checkForGpuErrors(`${stdout} ${stderr}`);
+      const gpuError = this.checkForGpuErrors(`${stdout}\n${stderr}`);
       if (gpuError) {
         this.log(`Phase 2: ✗ GPU error detected in output: ${gpuError}`, 'warn');
         return false;

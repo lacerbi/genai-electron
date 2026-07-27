@@ -485,6 +485,8 @@ export abstract class ServerManager extends EventEmitter {
    * @param binaryConfig - Binary configuration from BINARY_VERSIONS
    * @param testModelPath - Optional path to model for real functionality testing
    * @param forceValidation - If true, re-run validation tests even if cached validation exists
+   * @param testModelArgs - Optional model/component arguments for diffusion validation
+   * @param testOptimizationArgs - Production-resolved optimization arguments for validation
    * @returns Path to the binary
    * @throws {BinaryError} If download or verification fails for all variants
    * @protected
@@ -495,7 +497,8 @@ export abstract class ServerManager extends EventEmitter {
     binaryConfig: any,
     testModelPath?: string,
     forceValidation = false,
-    testModelArgs?: string[]
+    testModelArgs?: string[],
+    testOptimizationArgs?: string[]
   ): Promise<string> {
     const platformKey = getPlatformKey();
     const variants = binaryConfig.variants[platformKey];
@@ -508,6 +511,7 @@ export abstract class ServerManager extends EventEmitter {
       variants: variants || [],
       testModelPath,
       testModelArgs,
+      testOptimizationArgs,
       version: binaryConfig.version,
       log: (message, level = 'info') => {
         // Write to log file

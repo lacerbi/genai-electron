@@ -77,6 +77,27 @@ llamaServer.on('binary-log', (data) => {
 await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
 ```
 
+Provisioning output is persisted automatically in `llama-server.log` or
+`diffusion-server.log`, even if every variant fails before a server starts.
+`'binary-log'` remains useful for live UI output.
+
+### Interrupted or Long Windows Provisioning
+
+Windows CUDA ZIPs can inflate to hundreds of megabytes. Extraction runs in a
+worker thread; a responsive window plus changing
+`completedEntries` / `totalEntries` on `'binary-progress'` means provisioning is
+still active.
+
+If the process is killed, restart normally. The next attempt removes the stale
+variant extraction directory and reuses any complete archive whose SHA-256
+still matches. A `.partial` download is never treated as complete and currently
+starts over rather than using HTTP range resume. Installed dependencies are
+reused by checksum through `.deps.json`; deleting that manifest is safe and
+forces ordinary dependency provisioning. If the binary installation completed
+before the process was killed, the next validated start removes leftover main
+archives and extraction directories. An unmanifested dependency archive is
+kept as a recovery copy for the next provisioning run.
+
 ---
 
 ## HTTP API Errors

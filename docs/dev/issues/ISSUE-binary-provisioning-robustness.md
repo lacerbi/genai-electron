@@ -1,7 +1,7 @@
 # ISSUE: Binary provisioning freezes the Electron main process and redoes work it has already done
 
 Created: 2026-07-26
-Status: OPEN
+Status: RESOLVED (2026-07-27)
 Package: genai-electron (filed from palimpsest-engine)
 Observed against: `genai-electron@0.13.0`, Windows 11, NVIDIA CUDA machine, during the
 one-time diffusion runtime re-provisioning triggered by the 0.13.0 sd.cpp re-pin
@@ -158,3 +158,43 @@ as-is.
 - The phase-2 diffusion test uses the same offload flags production would use on that machine.
 - After a provisioning run (success or failure), the per-server log file contains the full
   BinaryManager log for it.
+
+## Resolution
+
+- ZIP parsing and per-file extraction now run in an inline `worker_threads` worker for both archive
+  consumers. `'binary-progress'` carries optional `completedEntries` / `totalEntries` counters, and
+  a real-archive heartbeat regression confirms the caller's event loop remains responsive.
+- Verified dependency installations are recorded atomically in checksum-addressed `.deps.json`
+  manifests with validated file lists. A cache hit stages installed files without another
+  download or inflation, even if the source URL changed.
+- Every variant begins from clean staging. Complete bare main/dependency archives left by an
+  interruption are reused only after SHA-256 verification; checksum mismatches are discarded. If
+  installation completed before the interruption, the validated-binary fast path removes leftover
+  main archives and extraction directories before returning. It deletes a dependency archive only
+  when its checksum matches committed manifest state, retaining an unmanifested archive as the
+  recovery point for a kill between installation and manifest commit.
+- Diffusion Phase-2 validation and production generation share one resolved offload/flash-attention
+  flag mapper. GPU failure detection is line-aware, retaining direct/function-prefixed backend
+  errors without treating prose as a failure.
+- Llama and diffusion logs initialize before provisioning and keep the same serial writer through
+  startup or failure, so BinaryManager output is durable.
+- The final double-check also closed two adjacent races: concurrent starts are rejected while
+  provisioning is active, and main archives cannot overwrite a dependency-owned path before that
+  dependency is installed or recorded.
+- A real-filesystem integration test provisions through the actual ZIP worker and filesystem,
+  persists `.deps.json` atomically, constructs a fresh manager, changes the dependency URL while
+  retaining its checksum, and confirms the second run neither downloads nor inflates it and stages
+  the installed dependency beside the candidate before validation.
+
+## Validation evidence
+
+- 215/215 original focused archive, BinaryManager, and server-manager tests pass, plus 58/58
+  focused cleanup/cache follow-up tests.
+- 634/634 full tests across 26 suites pass with Jest open-handle detection.
+- TypeScript build, repository formatting, and lint pass; lint retains 61 existing warnings and
+  introduces no errors.
+- Generated runtime/declaration output contains the inline worker, additive progress fields,
+  validation flags, collision guard, and concurrent-start guard.
+- The 163-file npm package dry run and `git diff --check` pass.
+- Final follow-up double-check found and closed the install-before-manifest recovery window, then
+  confirmed the corrected cleanup policy and candidate-staging integration check have no blocker.

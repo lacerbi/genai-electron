@@ -469,10 +469,14 @@ await diffusionServer.clearLogs();
 
 DiffusionServerManager extends `EventEmitter`:
 
+During ZIP extraction, `'binary-progress'` adds `completedEntries`,
+`totalEntries`, and an extraction `percent`. ZIP inflation runs in a worker
+thread, so these updates continue without blocking Electron's main event loop.
+
 - `'started'` - Server started successfully (receives `DiffusionServerInfo`)
 - `'stopped'` - Server stopped
-- `'binary-log'` - Binary download/validation progress (receives `{ message, level }`)
-- `'binary-progress'` - Structured provisioning progress (receives `BinaryProgressEvent`: phase + file + throttled whole-percent download progress) — build progress UIs from this instead of parsing log messages
+- `'binary-log'` - Binary download/validation progress (receives `{ message, level }`); the same messages are persisted to `diffusion-server.log` from the beginning of `start()`
+- `'binary-progress'` - Structured provisioning progress (receives `BinaryProgressEvent`: phase + file + throttled whole-percent byte-download progress or ZIP entry-extraction progress) — build progress UIs from this instead of parsing log messages
 - `'calibration-progress'` - Offload-calibration sweep progress (receives `DiffusionCalibrationProgress`; same payload as the `calibrate()` `onProgress` callback) — see [Offload Calibration](#offload-calibration)
 
 **Note:** DiffusionServerManager does not emit a `'crashed'` event because it does not maintain a persistent process — stable-diffusion.cpp is spawned on-demand for each generation. Generation failures are reported via the returned promise or HTTP error responses.
@@ -480,6 +484,18 @@ DiffusionServerManager extends `EventEmitter`:
 ---
 
 ## Binary Management
+
+The phase-2 image test receives the same resolved `clipOnCpu`, `vaeOnCpu`,
+`offloadToCpu`, and `diffusionFlashAttention` flags that production generation
+would use at that moment. Batch size and thread count remain outside the tiny
+validation workload.
+
+CUDA dependencies are recorded in `.deps.json` by checksum, so byte-identical
+runtime archives are reused across release URL changes. A restart after
+interrupted provisioning clears stale staging and reuses complete
+checksum-valid archives. If installation had already completed, the
+validated-binary fast path removes leftover main archives and extraction
+directories while retaining an unmanifested dependency archive for recovery.
 
 On first `start()`: Downloads binary (~50-100MB), tests variants (CUDA → Vulkan → CPU) with real functionality test (64x64 image), falls back if test fails, caches working variant. Subsequent starts skip tests and verify checksum only (~0.5s). Use `forceValidation: true` after driver updates. Real functionality testing requires model; falls back to `--help` test if model missing.
 

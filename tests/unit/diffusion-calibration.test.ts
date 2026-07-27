@@ -129,11 +129,12 @@ jest.unstable_mockModule('../../src/process/log-manager.js', () => ({
 
 // Mock BinaryManager
 const mockEnsureBinary = jest.fn();
+const mockBinaryConfigs: any[] = [];
 
 class MockBinaryManager {
   ensureBinary = mockEnsureBinary;
-  constructor(_config: any) {
-    // Config unused in tests
+  constructor(config: any) {
+    mockBinaryConfigs.push(config);
   }
 }
 
@@ -290,6 +291,7 @@ describe('DiffusionServerManager calibration', () => {
     mockLogGetRecent.mockResolvedValue([]);
     mockLogClear.mockResolvedValue(undefined);
     mockEnsureBinary.mockResolvedValue('/test/binaries/sd');
+    mockBinaryConfigs.length = 0;
     mockCreateServer.mockReturnValue(mockHttpServer);
     mockHttpServer.listen.mockImplementation((port: number, callback: () => void) => {
       callback();
@@ -485,6 +487,32 @@ describe('DiffusionServerManager calibration', () => {
       expect(secondRejection).toBeDefined();
       await secondRejection;
       expect(diffusionServer.isCalibrating()).toBe(false);
+    });
+
+    it('resolves validation flags from calibration state instead of stale stopped-server config', async () => {
+      (
+        diffusionServer as unknown as {
+          _config: DiffusionServerConfig;
+        }
+      )._config = {
+        modelId: 'old-model',
+        clipOnCpu: false,
+        vaeOnCpu: true,
+        offloadToCpu: true,
+        diffusionFlashAttention: true,
+      };
+
+      await runCalibrate(diffusionServer, {
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      // The mocked 2 GB model on an 8 GB GPU auto-resolves only clip-on-cpu.
+      // Stale flags from a prior stopped configuration must not leak into the
+      // provisioning test that calibrate() performs before its sweep.
+      expect(mockBinaryConfigs[0]).toMatchObject({
+        testOptimizationArgs: ['--clip-on-cpu'],
+      });
     });
   });
 

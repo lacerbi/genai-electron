@@ -70,8 +70,12 @@ const mockChmod = jest.fn();
 const mockMkdir = jest.fn();
 const mockReaddir = jest.fn();
 const mockCopyFile = jest.fn();
+const mockRename = jest.fn();
 
 jest.unstable_mockModule('fs', () => ({
+  constants: {
+    COPYFILE_FICLONE: 2,
+  },
   promises: {
     readFile: mockReadFile,
     writeFile: mockWriteFile,
@@ -79,6 +83,7 @@ jest.unstable_mockModule('fs', () => ({
     mkdir: mockMkdir,
     readdir: mockReaddir,
     copyFile: mockCopyFile,
+    rename: mockRename,
   },
 }));
 
@@ -233,7 +238,7 @@ describe('BinaryManager', () => {
     mockDeleteFile.mockResolvedValue(undefined);
     mockCopyDirectory.mockResolvedValue(undefined);
     mockExtractBinary.mockResolvedValue('/mock/extract/llama-server.exe');
-    mockExtractArchive.mockResolvedValue(undefined);
+    mockExtractArchive.mockResolvedValue([]);
     mockCleanupExtraction.mockResolvedValue(undefined);
     mockGetArchiveExtension.mockReturnValue('.zip');
     mockGetBinaryPath.mockReturnValue('/mock/binaries/llama/llama-server.exe');
@@ -243,6 +248,7 @@ describe('BinaryManager', () => {
     mockMkdir.mockResolvedValue(undefined);
     mockReaddir.mockResolvedValue([]);
     mockCopyFile.mockResolvedValue(undefined);
+    mockRename.mockResolvedValue(undefined);
     mockDownload.mockResolvedValue(undefined);
 
     // Reset spawn behavior for each test (tests will configure as needed)
@@ -310,7 +316,8 @@ describe('BinaryManager', () => {
       // Root-level dependency files are copied too; the nested dir is skipped
       expect(mockCopyFile).toHaveBeenCalledWith(
         path.join(extractDir, 'cudart64_12.dll'),
-        path.join(MOCK_PATHS.binaries.llama, 'cudart64_12.dll')
+        path.join(MOCK_PATHS.binaries.llama, 'cudart64_12.dll'),
+        2
       );
       expect(mockCopyFile).toHaveBeenCalledTimes(1);
     });
@@ -556,6 +563,8 @@ describe('BinaryManager', () => {
         opts.onProgress?.(500, 1000);
         opts.onProgress?.(1000, 1000);
       });
+      mockExtractArchive.mockResolvedValue(['cudart64_12.dll']);
+      mockFileExists.mockImplementation(async (filePath: string) => filePath.includes('.extract'));
 
       await manager.ensureBinary();
 
@@ -566,6 +575,49 @@ describe('BinaryManager', () => {
         'verifying:',
         'extracting:',
       ]);
+    });
+
+    it('forwards ZIP entry counters through binary-progress extraction events', async () => {
+      const progressEvents: Array<Record<string, unknown>> = [];
+      const depVariant: BinaryVariantConfig = {
+        type: 'cuda',
+        url: 'https://example.com/llama-cuda.zip',
+        checksum: 'abc123cuda',
+        dependencies: [
+          {
+            url: 'https://example.com/cudart.zip',
+            checksum: 'depchecksum',
+            description: 'CUDA runtime',
+          },
+        ],
+      };
+      mockCalculateChecksum.mockImplementation(async (filePath: string) =>
+        filePath.includes('.dep0') ? 'depchecksum' : 'abc123cuda'
+      );
+      mockFileExists.mockImplementation(async (filePath: string) => filePath.includes('.extract'));
+      mockExtractArchive.mockImplementation(async (_archive, _destination, onProgress) => {
+        onProgress?.({ completedEntries: 0, totalEntries: 2 });
+        onProgress?.({ completedEntries: 1, totalEntries: 2, entry: 'cublas.dll' });
+        onProgress?.({ completedEntries: 2, totalEntries: 2, entry: 'cudart.dll' });
+        return ['cublas.dll', 'cudart.dll'];
+      });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [depVariant],
+        onProgress: (event) => progressEvents.push(event as unknown as Record<string, unknown>),
+      });
+
+      await manager.ensureBinary();
+
+      const entryEvents = progressEvents.filter(
+        (event) => event.file === 'CUDA runtime' && event.completedEntries !== undefined
+      );
+      expect(entryEvents.map((event) => event.completedEntries)).toEqual([0, 1, 2]);
+      expect(entryEvents.map((event) => event.percent)).toEqual([0, 50, 100]);
+      expect(entryEvents.every((event) => event.totalEntries === 2)).toBe(true);
     });
 
     it('emits nothing without an onProgress callback (no throw)', async () => {
@@ -635,7 +687,7 @@ describe('BinaryManager', () => {
     });
 
     it('should return false when binary execution fails', async () => {
-      mockFileExists.mockResolvedValue(true);
+      mockFileExists.mockResolvedValueOnce(true).mockResolvedValue(false);
       // First call fails (existing binary check), subsequent calls succeed (after re-download)
       setSpawnResponses([
         { exitCode: 1, stderr: 'Missing CUDA drivers' },
@@ -778,7 +830,7 @@ describe('BinaryManager', () => {
         cuda: true,
       });
 
-      mockFileExists.mockResolvedValue(false);
+      mockFileExists.mockImplementation(async (filePath: string) => filePath.includes('.extract'));
       mockEnsureDirectory.mockResolvedValue(undefined);
       mockCalculateChecksum.mockImplementation(async (path: string) => {
         if (path.includes('.dep0.zip')) return 'def456cudart';
@@ -789,7 +841,7 @@ describe('BinaryManager', () => {
       mockDeleteFile.mockResolvedValue(undefined);
       mockCopyDirectory.mockResolvedValue(undefined);
       mockExtractBinary.mockResolvedValue('/mock/extract/llama-server.exe');
-      mockExtractArchive.mockResolvedValue(undefined);
+      mockExtractArchive.mockResolvedValue(['cudart64_12.dll']);
       mockCleanupExtraction.mockResolvedValue(undefined);
       mockGetArchiveExtension.mockReturnValue('.zip');
       mockGetBinaryPath.mockReturnValue('/mock/binaries/llama/llama-server.exe');
@@ -869,6 +921,351 @@ describe('BinaryManager', () => {
 
       // Should cleanup extraction dir (which contains both binary and dependencies)
       expect(mockCleanupExtraction).toHaveBeenCalled();
+    });
+
+    it('rejects a main archive that overwrites a dependency-owned file', async () => {
+      mockCalculateChecksum.mockImplementation(async (filePath: string) =>
+        filePath.includes('.dep0.zip') ? 'def456cudart' : 'abc123cuda'
+      );
+      mockExtractArchive.mockResolvedValue(['shared.dll']);
+      mockExtractBinary.mockImplementation(
+        async (
+          _archivePath: string,
+          _extractTo: string,
+          _binaryNames: string[],
+          _onProgress: unknown,
+          onFilesExtracted?: (files: readonly string[]) => void
+        ) => {
+          onFilesExtracted?.(['shared.dll', 'llama-server.exe']);
+          return '/mock/extract/llama-server.exe';
+        }
+      );
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps],
+        log: mockLogger,
+      });
+
+      await expect(manager.ensureBinary()).rejects.toThrow('Failed to download binary');
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Main binary archive conflicts with a dependency file'),
+        'warn'
+      );
+      expect(mockCopyDirectory).not.toHaveBeenCalled();
+    });
+
+    it('reuses an installed dependency by checksum even when its release URL changes', async () => {
+      const changedUrlVariant: BinaryVariantConfig = {
+        ...cudaVariantWithDeps,
+        dependencies: [
+          {
+            url: 'https://example.com/new-release/cudart.zip',
+            checksum: 'def456cudart',
+            description: 'CUDA runtime libraries',
+          },
+        ],
+      };
+      const manifest = JSON.stringify({
+        version: 1,
+        dependencies: [
+          {
+            url: 'https://example.com/old-release/cudart.zip',
+            checksum: 'def456cudart',
+            files: ['cudart64_12.dll'],
+          },
+        ],
+      });
+      mockReadFile.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.deps.json')) return manifest;
+        throw new Error('No validation cache');
+      });
+      mockFileExists.mockImplementation(async (filePath: string) =>
+        filePath.endsWith('cudart64_12.dll')
+      );
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [changedUrlVariant],
+        log: mockLogger,
+      });
+
+      await manager.ensureBinary();
+
+      expect(mockDownload).toHaveBeenCalledTimes(1);
+      expect(mockDownload).toHaveBeenCalledWith(
+        expect.objectContaining({ url: changedUrlVariant.url })
+      );
+      expect(mockDownload).not.toHaveBeenCalledWith(
+        expect.objectContaining({ url: changedUrlVariant.dependencies![0]!.url })
+      );
+      expect(mockExtractArchive).not.toHaveBeenCalled();
+      expect(mockCleanupExtraction.mock.invocationCallOrder[0]).toBeLessThan(
+        mockCopyFile.mock.invocationCallOrder[0]!
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Using installed CUDA runtime libraries (checksum match)',
+        'info'
+      );
+    });
+
+    it('reprovisions a manifest hit when an installed dependency file is missing', async () => {
+      const manifest = JSON.stringify({
+        version: 1,
+        dependencies: [
+          {
+            url: cudaVariantWithDeps.dependencies![0]!.url,
+            checksum: 'def456cudart',
+            files: ['cudart64_12.dll'],
+          },
+        ],
+      });
+      mockReadFile.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.deps.json')) return manifest;
+        throw new Error('No validation cache');
+      });
+      mockFileExists.mockImplementation(
+        async (filePath: string) =>
+          filePath.includes('.extract') && filePath.endsWith('cudart64_12.dll')
+      );
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps],
+        log: mockLogger,
+      });
+
+      await manager.ensureBinary();
+
+      expect(mockDownload).toHaveBeenCalledWith(
+        expect.objectContaining({ url: cudaVariantWithDeps.dependencies![0]!.url })
+      );
+      expect(mockExtractArchive).toHaveBeenCalled();
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Installed dependency cache is incomplete'),
+        'warn'
+      );
+    });
+
+    it('treats a malformed dependency manifest as a cache miss', async () => {
+      mockReadFile.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.deps.json')) return '{not valid JSON';
+        throw new Error('No validation cache');
+      });
+      mockFileExists.mockImplementation(
+        async (filePath: string) =>
+          filePath.includes('.extract') && filePath.endsWith('cudart64_12.dll')
+      );
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps],
+      });
+
+      await manager.ensureBinary();
+
+      expect(mockDownload).toHaveBeenCalledWith(
+        expect.objectContaining({ url: cudaVariantWithDeps.dependencies![0]!.url })
+      );
+      expect(mockExtractArchive).toHaveBeenCalled();
+    });
+
+    it('rejects dependency-manifest paths that escape the binaries directory', async () => {
+      const unsafeManifest = JSON.stringify({
+        version: 1,
+        dependencies: [
+          {
+            url: cudaVariantWithDeps.dependencies![0]!.url,
+            checksum: 'def456cudart',
+            files: ['../escape.dll'],
+          },
+        ],
+      });
+      mockReadFile.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.deps.json')) return unsafeManifest;
+        throw new Error('No validation cache');
+      });
+      mockFileExists.mockImplementation(
+        async (filePath: string) =>
+          filePath.includes('.extract') && filePath.endsWith('cudart64_12.dll')
+      );
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps],
+      });
+
+      await manager.ensureBinary();
+
+      expect(mockDownload).toHaveBeenCalledWith(
+        expect.objectContaining({ url: cudaVariantWithDeps.dependencies![0]!.url })
+      );
+      expect(
+        mockCopyFile.mock.calls.some(
+          ([source, destination]) =>
+            String(source).includes('escape.dll') || String(destination).includes('escape.dll')
+        )
+      ).toBe(false);
+    });
+
+    it('reuses verified archives after an interrupted run and cleans staging first', async () => {
+      mockReadFile.mockRejectedValue(new Error('No cache'));
+      mockFileExists.mockImplementation(async (filePath: string) => {
+        if (filePath.endsWith('.dep0.zip') || filePath.endsWith('.cuda.zip')) return true;
+        return filePath.includes('.extract') && filePath.endsWith('cudart64_12.dll');
+      });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps],
+        log: mockLogger,
+      });
+
+      await manager.ensureBinary();
+
+      expect(mockDownload).not.toHaveBeenCalled();
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Reusing verified CUDA runtime libraries archive',
+        'info'
+      );
+      expect(mockLogger).toHaveBeenCalledWith('Reusing verified cuda binary archive', 'info');
+      expect(mockCleanupExtraction.mock.invocationCallOrder[0]).toBeLessThan(
+        mockExtractArchive.mock.invocationCallOrder[0]!
+      );
+    });
+
+    it('does not commit dependency state when the candidate binary fails validation', async () => {
+      mockFileExists.mockImplementation(async (filePath: string) => filePath.includes('.extract'));
+      setSpawnResponse({ exitCode: 1, stderr: 'backend unavailable' });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps],
+        log: mockLogger,
+      });
+
+      await expect(manager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      const dependencyManifestWrites = mockWriteFile.mock.calls.filter((call) =>
+        String(call[0]).includes('.deps.json')
+      );
+      expect(dependencyManifestWrites).toHaveLength(0);
+      expect(mockCleanupExtraction).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not overwrite a valid installed dependency when its staged candidate fails', async () => {
+      const manifest = JSON.stringify({
+        version: 1,
+        dependencies: [
+          {
+            url: cudaVariantWithDeps.dependencies![0]!.url,
+            checksum: 'def456cudart',
+            files: ['cudart64_12.dll'],
+          },
+        ],
+      });
+      mockReadFile.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.deps.json')) return manifest;
+        throw new Error('No validation cache');
+      });
+      mockFileExists.mockImplementation(async (filePath: string) =>
+        filePath.endsWith('cudart64_12.dll')
+      );
+      setSpawnResponse({ exitCode: 1, stderr: 'candidate rejected' });
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariantWithDeps],
+      });
+
+      await expect(manager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      const dependencyCopies = mockCopyFile.mock.calls.filter((call) =>
+        String(call[0]).endsWith('cudart64_12.dll')
+      );
+      expect(dependencyCopies).toHaveLength(1);
+      expect(String(dependencyCopies[0]![0])).not.toContain('.extract');
+      expect(String(dependencyCopies[0]![1])).toContain('.extract');
+      expect(mockWriteFile.mock.calls.some((call) => String(call[0]).includes('.deps.json'))).toBe(
+        false
+      );
+    });
+
+    it('prunes an obsolete dependency checksum and commits the replacement atomically', async () => {
+      const replacementVariant: BinaryVariantConfig = {
+        ...cudaVariantWithDeps,
+        dependencies: [
+          {
+            url: 'https://example.com/cudart-new.zip',
+            checksum: 'new-cudart-checksum',
+            description: 'CUDA runtime libraries',
+          },
+        ],
+      };
+      const staleManifest = JSON.stringify({
+        version: 1,
+        dependencies: [
+          {
+            url: 'https://example.com/cudart-old.zip',
+            checksum: 'obsolete-cudart-checksum',
+            files: ['cudart64_12.dll'],
+          },
+        ],
+      });
+      mockReadFile.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.deps.json')) return staleManifest;
+        throw new Error('No validation cache');
+      });
+      mockCalculateChecksum.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.dep0.zip')) return 'new-cudart-checksum';
+        return 'abc123cuda';
+      });
+      mockFileExists.mockImplementation(
+        async (filePath: string) =>
+          filePath.includes('.extract') && filePath.endsWith('cudart64_12.dll')
+      );
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [replacementVariant],
+        log: mockLogger,
+      });
+
+      await manager.ensureBinary();
+
+      const dependencyManifests = mockWriteFile.mock.calls
+        .filter((call) => String(call[0]).includes('.deps.json'))
+        .map((call) => JSON.parse(String(call[1])));
+      expect(dependencyManifests).toContainEqual({ version: 1, dependencies: [] });
+      expect(dependencyManifests).toContainEqual({
+        version: 1,
+        dependencies: [
+          {
+            url: replacementVariant.dependencies![0]!.url,
+            checksum: 'new-cudart-checksum',
+            files: ['cudart64_12.dll'],
+          },
+        ],
+      });
+      expect(mockRename).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -1162,6 +1559,12 @@ describe('BinaryManager', () => {
         platformKey: 'win32-x64',
         variants: [cudaVariant],
         testModelPath,
+        testOptimizationArgs: [
+          '--clip-on-cpu',
+          '--vae-on-cpu',
+          '--offload-to-cpu',
+          '--diffusion-fa',
+        ],
         log: mockLogger,
       });
 
@@ -1193,6 +1596,10 @@ describe('BinaryManager', () => {
         expect.arrayContaining([
           '-m',
           testModelPath,
+          '--clip-on-cpu',
+          '--vae-on-cpu',
+          '--offload-to-cpu',
+          '--diffusion-fa',
           '-p',
           'test',
           '--width',
@@ -1206,6 +1613,32 @@ describe('BinaryManager', () => {
           stdio: ['ignore', 'pipe', 'pipe'],
         })
       );
+    });
+
+    it('matches anchored backend diagnostics but ignores the same text in prose', () => {
+      const gpuErrors = binaryManager as unknown as {
+        checkForGpuErrors(output: string): string | null;
+      };
+
+      expect(gpuErrors.checkForGpuErrors('[12:34:56] CUDA error: out of memory')).toBe(
+        'cuda error'
+      );
+      expect(gpuErrors.checkForGpuErrors('ggml_cuda_init: failed to allocate device buffer')).toBe(
+        'failed to allocate'
+      );
+      expect(gpuErrors.checkForGpuErrors('error: invalid argument --device')).toBe(
+        'error: invalid argument'
+      );
+      expect(
+        gpuErrors.checkForGpuErrors(
+          'Recovery note: prior error: invalid argument was ignored and startup continued'
+        )
+      ).toBeNull();
+      expect(
+        gpuErrors.checkForGpuErrors(
+          'Model metadata mentions failed to allocate in a troubleshooting example'
+        )
+      ).toBeNull();
     });
 
     it('should fail variant if completion request fails during Phase 2', async () => {
@@ -1318,6 +1751,108 @@ describe('BinaryManager', () => {
       expect(mockDownload).not.toHaveBeenCalled();
     });
 
+    it('cleans known provisioning residue before a cached binary returns', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+      };
+      const cudaWithDependency: BinaryVariantConfig = {
+        ...cudaVariant,
+        dependencies: [
+          {
+            url: 'https://example.com/runtime.zip',
+            checksum: 'runtime-checksum',
+          },
+        ],
+      };
+
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+      mockReadFile.mockImplementation(async (filePath: string) =>
+        filePath.includes('.deps.json')
+          ? JSON.stringify({
+              version: 1,
+              dependencies: [
+                {
+                  url: 'https://example.com/runtime.zip',
+                  checksum: 'runtime-checksum',
+                  files: ['runtime.dll'],
+                },
+              ],
+            })
+          : JSON.stringify(validationCache)
+      );
+      mockCalculateChecksum.mockImplementation(async (filePath: string) =>
+        filePath.includes('.dep0.zip') ? 'runtime-checksum' : 'abc123'
+      );
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaWithDependency, cpuVariant],
+      });
+
+      await expect(manager.ensureBinary()).resolves.toBe(binaryPath);
+
+      expect(mockDeleteFile).toHaveBeenCalledWith(`${binaryPath}.cuda.zip`);
+      expect(mockDeleteFile).toHaveBeenCalledWith(`${binaryPath}.cpu.zip`);
+      expect(mockDeleteFile).toHaveBeenCalledWith(expect.stringContaining('.dep0.zip'));
+      expect(mockCleanupExtraction).toHaveBeenCalledWith(`${binaryPath}.cuda.extract`);
+      expect(mockCleanupExtraction).toHaveBeenCalledWith(`${binaryPath}.cpu.extract`);
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it('preserves an unmanifested dependency archive after an install-before-commit kill', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+      };
+      const cudaWithDependency: BinaryVariantConfig = {
+        ...cudaVariant,
+        dependencies: [
+          {
+            url: 'https://example.com/runtime.zip',
+            checksum: 'runtime-checksum',
+          },
+        ],
+      };
+
+      mockFileExists.mockResolvedValue(true);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+      mockReadFile.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.deps.json')) {
+          throw new Error('Manifest commit was interrupted');
+        }
+        return JSON.stringify(validationCache);
+      });
+      mockCalculateChecksum.mockResolvedValue('abc123');
+
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaWithDependency],
+        log: mockLogger,
+      });
+
+      await expect(manager.ensureBinary()).resolves.toBe(binaryPath);
+
+      expect(mockDeleteFile).toHaveBeenCalledWith(`${binaryPath}.cuda.zip`);
+      expect(mockDeleteFile).not.toHaveBeenCalledWith(expect.stringContaining('.dep0.zip'));
+      expect(mockCleanupExtraction).toHaveBeenCalledWith(`${binaryPath}.cuda.extract`);
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Preserving unmanifested dependency archive for recovery'),
+        'info'
+      );
+    });
+
     it('should re-run validation if checksum does not match cache', async () => {
       const binaryPath = '/mock/binaries/llama/llama-server.exe';
       const validationCache = {
@@ -1362,6 +1897,8 @@ describe('BinaryManager', () => {
         expect.stringContaining('different-checksum'),
         'utf-8'
       );
+      expect(mockDeleteFile).toHaveBeenCalledWith(`${binaryPath}.cuda.zip`);
+      expect(mockCleanupExtraction).toHaveBeenCalledWith(`${binaryPath}.cuda.extract`);
     });
 
     it('should re-run validation if forceValidation=true', async () => {
@@ -1478,11 +2015,12 @@ describe('BinaryManager', () => {
       };
 
       // Binary exists
-      mockFileExists.mockResolvedValue(true);
+      mockFileExists.mockImplementation(async (filePath: string) => filePath === binaryPath);
       mockGetBinaryPath.mockReturnValue(binaryPath);
 
-      // Mock readFile: first call returns validation cache, second call fails (no variant cache)
+      // Dependency manifest is checked first, followed by the validation cache.
       mockReadFile
+        .mockRejectedValueOnce(new Error('No dependency manifest'))
         .mockResolvedValueOnce(JSON.stringify(validationCache))
         .mockRejectedValue(new Error('No cache'));
 
@@ -1528,11 +2066,12 @@ describe('BinaryManager', () => {
       };
 
       // Binary exists
-      mockFileExists.mockResolvedValue(true);
+      mockFileExists.mockImplementation(async (filePath: string) => filePath === binaryPath);
       mockGetBinaryPath.mockReturnValue(binaryPath);
 
-      // Mock readFile: first call returns validation cache, second call fails (no variant cache)
+      // Dependency manifest is checked first, followed by the validation cache.
       mockReadFile
+        .mockRejectedValueOnce(new Error('No dependency manifest'))
         .mockResolvedValueOnce(JSON.stringify(validationCache))
         .mockRejectedValue(new Error('No cache'));
 

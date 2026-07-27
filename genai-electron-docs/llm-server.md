@@ -471,7 +471,9 @@ llamaServer.on('status', (newStatus: ServerStatus, oldStatus: ServerStatus) => {
 
 ### 'binary-log'
 
-Emitted during binary download and variant testing.
+Emitted during binary download and variant testing. The same messages are
+persisted to `llama-server.log` from the beginning of `start()`, including when
+provisioning fails before the server process is spawned.
 
 ```typescript
 llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 'error' }) => {
@@ -481,17 +483,32 @@ llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 
 
 ### 'binary-progress'
 
-Structured companion to `'binary-log'` for progress UIs — no log-string parsing needed. Download events are throttled to whole-percent changes at the source; each phase transition (`downloading` → `verifying` → `extracting` → `testing`) emits one event. Dependency downloads (e.g. the CUDA runtime) carry their description in `file`; the main binary uses `'binary'`.
+Structured companion to `'binary-log'` for progress UIs — no log-string parsing needed. Download events are throttled to whole-percent changes at the source. ZIP extraction emits an initial entry count and one update after every file; `verifying` and `testing` retain their phase-transition events. Dependency work (e.g. the CUDA runtime) carries its description in `file`; the main binary uses `'binary'`.
 
 ```typescript
 llamaServer.on('binary-progress', (event: BinaryProgressEvent) => {
   if (event.phase === 'downloading') {
     progressBar.update(event.percent!, { label: event.file });
+  } else if (event.phase === 'extracting' && event.totalEntries !== undefined) {
+    progressBar.update(event.percent!, {
+      label: `Extracting ${event.file} (${event.completedEntries}/${event.totalEntries})`,
+    });
   } else {
     statusLine.set(`${event.phase} ${event.file}...`);
   }
 });
 ```
+
+ZIP extraction runs in a worker thread and reports
+`completedEntries` / `totalEntries`, keeping Electron's main event loop
+responsive. Installed dependencies are cached by checksum in `.deps.json`; a
+later binary release that references the same bytes reuses the installed files
+without downloading or inflating the archive again. After an interrupted run,
+complete checksum-valid archives are reused and stale extraction directories
+are discarded before new work begins. If the binary was already installed,
+the validation fast path cleans leftover main archives and staging before
+returning. It preserves an unmanifested dependency archive as the recovery copy
+for a kill between dependency installation and manifest commit.
 
 **Example**:
 ```typescript

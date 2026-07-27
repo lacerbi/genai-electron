@@ -119,11 +119,12 @@ jest.unstable_mockModule('../../src/process/log-manager.js', () => ({
 
 // Mock BinaryManager
 const mockEnsureBinary = jest.fn();
+const mockBinaryConfigs: any[] = [];
 
 class MockBinaryManager {
   ensureBinary = mockEnsureBinary;
   constructor(config: any) {
-    // Constructor can receive config but we don't need to do anything with it
+    mockBinaryConfigs.push(config);
   }
 }
 
@@ -212,6 +213,7 @@ describe('DiffusionServerManager', () => {
     });
     mockGetTempPath.mockImplementation((filename: string) => `/test/temp/${filename}`);
     mockDeleteFile.mockResolvedValue(undefined);
+    mockBinaryConfigs.length = 0;
 
     diffusionServer = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
 
@@ -354,6 +356,25 @@ describe('DiffusionServerManager', () => {
       await expect(diffusionServer.start(mockConfig)).rejects.toThrow('already running');
     });
 
+    it('rejects a concurrent start while binary provisioning is in progress', async () => {
+      let resolveBinary!: (binaryPath: string) => void;
+      mockEnsureBinary.mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            resolveBinary = resolve;
+          })
+      );
+
+      const firstStart = diffusionServer.start(mockConfig);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      await expect(diffusionServer.start(mockConfig)).rejects.toThrow('already starting');
+
+      resolveBinary('/test/binaries/sd');
+      await expect(firstStart).resolves.toMatchObject({ status: 'running' });
+      expect(mockEnsureBinary).toHaveBeenCalledTimes(1);
+    });
+
     it('should emit started event', async () => {
       const startedHandler = jest.fn();
       diffusionServer.on('started', startedHandler);
@@ -371,6 +392,49 @@ describe('DiffusionServerManager', () => {
         expect.stringContaining('Starting diffusion server'),
         'info'
       );
+    });
+
+    it('persists provisioning logs even when binary setup fails', async () => {
+      mockEnsureBinary.mockImplementationOnce(async () => {
+        mockBinaryConfigs.at(-1)?.log('provisioning failed after checksum', 'error');
+        throw new Error('provisioning failed');
+      });
+
+      await expect(diffusionServer.start(mockConfig)).rejects.toThrow('provisioning failed');
+
+      expect(mockLogInitialize.mock.invocationCallOrder[0]).toBeLessThan(
+        mockEnsureBinary.mock.invocationCallOrder[0]!
+      );
+      expect(mockLogWrite).toHaveBeenCalledWith('provisioning failed after checksum', 'error');
+    });
+
+    it('persists provisioning logs on a successful start', async () => {
+      mockEnsureBinary.mockImplementationOnce(async () => {
+        mockBinaryConfigs.at(-1)?.log('cuda variant validated', 'info');
+        return '/test/binaries/sd';
+      });
+
+      await diffusionServer.start(mockConfig);
+
+      expect(mockLogWrite).toHaveBeenCalledWith('cuda variant validated', 'info');
+    });
+
+    it('passes production-resolved offload flags into phase-2 binary validation', async () => {
+      await diffusionServer.start({
+        ...mockConfig,
+        threads: 3,
+        batchSize: 4,
+        clipOnCpu: true,
+        vaeOnCpu: false,
+        offloadToCpu: true,
+        diffusionFlashAttention: true,
+      });
+
+      expect(mockBinaryConfigs.at(-1)).toMatchObject({
+        testOptimizationArgs: ['--clip-on-cpu', '--offload-to-cpu', '--diffusion-fa'],
+      });
+      expect(mockBinaryConfigs.at(-1).testOptimizationArgs).not.toContain('-t');
+      expect(mockBinaryConfigs.at(-1).testOptimizationArgs).not.toContain('-b');
     });
   });
 
