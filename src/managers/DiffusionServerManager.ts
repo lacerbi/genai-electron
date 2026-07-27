@@ -52,6 +52,14 @@ import type {
 } from '../types/index.js';
 import type { LlamaServerManager } from './LlamaServerManager.js';
 
+interface ResolvedDiffusionOptimizations {
+  clipOnCpu: boolean;
+  vaeOnCpu: boolean;
+  offloadToCpu: boolean;
+  diffusionFlashAttention: boolean;
+  batchSize?: number;
+}
+
 /**
  * DiffusionServerManager class
  *
@@ -123,12 +131,7 @@ export class DiffusionServerManager extends ServerManager {
    * Flags resolved by the most recent computeDiffusionOptimizations() call.
    * Read by calibrate() after each run to report what auto-detection picked.
    */
-  private lastResolvedOptimizations?: {
-    clipOnCpu: boolean;
-    vaeOnCpu: boolean;
-    offloadToCpu: boolean;
-    diffusionFlashAttention: boolean;
-  };
+  private lastResolvedOptimizations?: Omit<ResolvedDiffusionOptimizations, 'batchSize'>;
   /** True while an offload-calibration sweep is running (server stays 'stopped') */
   private calibrating = false;
 
@@ -203,10 +206,16 @@ export class DiffusionServerManager extends ServerManager {
    * @throws {ServerError} If server fails to start
    */
   async start(config: DiffusionServerConfig): Promise<ServerInfo> {
-    if (this._status === 'running') {
-      throw new ServerError('Server is already running', {
-        suggestion: 'Stop the server first with stop()',
-      });
+    if (this._status === 'running' || this._status === 'starting') {
+      throw new ServerError(
+        this._status === 'running' ? 'Server is already running' : 'Server is already starting',
+        {
+          suggestion:
+            this._status === 'running'
+              ? 'Stop the server first with stop()'
+              : 'Wait for the current start() call to finish',
+        }
+      );
     }
 
     if (this.calibrating) {
@@ -233,6 +242,11 @@ export class DiffusionServerManager extends ServerManager {
     this.registry = this.createRegistry();
 
     try {
+      await this.initializeLogManager(
+        'diffusion-server.log',
+        `Preparing diffusion server for model ${config.modelId}`
+      );
+
       // 1. Validate model exists and is correct type
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
       if (modelInfo.type !== 'diffusion') {
@@ -266,11 +280,8 @@ export class DiffusionServerManager extends ServerManager {
         config.port === 'auto' ? await findFreePort() : (config.port ?? DEFAULT_PORTS.diffusion);
       await this.checkPortAvailability(port);
 
-      // 5. Initialize log manager
-      await this.initializeLogManager(
-        'diffusion-server.log',
-        `Starting diffusion server on port ${port}`
-      );
+      // 5. Record the resolved port in the provisioning log
+      await this.logManager?.write(`Starting diffusion server on port ${port}`, 'info');
 
       // 6. Create HTTP server
       await this.createHTTPServer(port);
@@ -626,10 +637,6 @@ export class DiffusionServerManager extends ServerManager {
       // Install working state. May download the binary on first run
       // (long; reports via 'binary-progress'/'binary-log' events).
       this.currentModelInfo = modelInfo;
-      this.binaryPath = await this.ensureBinary(modelInfo);
-      if (config.signal?.aborted) {
-        throw this.calibrationAbortError(runs);
-      }
       const syntheticConfig: DiffusionServerConfig = { modelId: config.modelId };
       if (config.generation.threads !== undefined) {
         syntheticConfig.threads = config.generation.threads;
@@ -638,6 +645,10 @@ export class DiffusionServerManager extends ServerManager {
         syntheticConfig.batchSize = config.generation.batchSize;
       }
       this._config = syntheticConfig as unknown as typeof this._config;
+      this.binaryPath = await this.ensureBinary(modelInfo);
+      if (config.signal?.aborted) {
+        throw this.calibrationAbortError(runs);
+      }
 
       // Offload a running LLM once for the whole sweep (measurement hygiene).
       // waitForReload() first: a background reload from a prior orchestrated
@@ -1044,13 +1055,18 @@ export class DiffusionServerManager extends ServerManager {
       }
     }
 
+    const testOptimizationArgs = modelInfo
+      ? this.buildDiffusionOptimizationArgs(await this.computeDiffusionOptimizations())
+      : undefined;
+
     return this.ensureBinaryHelper(
       'diffusion',
       'sd-cli',
       BINARY_VERSIONS.diffusionCpp,
       modelInfo?.path,
       forceValidation,
-      testModelArgs
+      testModelArgs,
+      testOptimizationArgs
     );
   }
 
@@ -1619,13 +1635,9 @@ export class DiffusionServerManager extends ServerManager {
    * @returns Resolved optimization flags: clipOnCpu, vaeOnCpu, batchSize
    * @private
    */
-  private async computeDiffusionOptimizations(flagOverrides?: DiffusionOffloadCombo): Promise<{
-    clipOnCpu: boolean;
-    vaeOnCpu: boolean;
-    offloadToCpu: boolean;
-    diffusionFlashAttention: boolean;
-    batchSize?: number;
-  }> {
+  private async computeDiffusionOptimizations(
+    flagOverrides?: DiffusionOffloadCombo
+  ): Promise<ResolvedDiffusionOptimizations> {
     const serverConfig = this._config as DiffusionServerConfig;
     const modelSize = this.currentModelInfo?.size ?? 0;
     const modelFootprint = modelSize * DIFFUSION_VRAM_THRESHOLDS.modelOverheadMultiplier;
@@ -1700,13 +1712,7 @@ export class DiffusionServerManager extends ServerManager {
   private buildDiffusionArgs(
     config: ImageGenerationConfig,
     modelInfo: ModelInfo,
-    optimizations?: {
-      clipOnCpu: boolean;
-      vaeOnCpu: boolean;
-      offloadToCpu: boolean;
-      diffusionFlashAttention: boolean;
-      batchSize?: number;
-    }
+    optimizations?: ResolvedDiffusionOptimizations
   ): string[] {
     const args: string[] = [];
 
@@ -1784,21 +1790,36 @@ export class DiffusionServerManager extends ServerManager {
 
     // VRAM optimization flags
     if (optimizations) {
-      if (optimizations.clipOnCpu) {
-        args.push('--clip-on-cpu');
-      }
-      if (optimizations.vaeOnCpu) {
-        args.push('--vae-on-cpu');
-      }
-      if (optimizations.offloadToCpu) {
-        args.push('--offload-to-cpu');
-      }
-      if (optimizations.diffusionFlashAttention) {
-        args.push('--diffusion-fa');
-      }
+      args.push(...this.buildDiffusionOptimizationArgs(optimizations));
       if (optimizations.batchSize !== undefined) {
         args.push('-b', String(optimizations.batchSize));
       }
+    }
+
+    return args;
+  }
+
+  /**
+   * Convert resolved production optimization decisions into sd-cli flags.
+   *
+   * Kept separate from generation-only settings such as batch size and thread
+   * count so binary validation exercises the same backend/offload path without
+   * changing its deliberately tiny workload.
+   */
+  private buildDiffusionOptimizationArgs(optimizations: ResolvedDiffusionOptimizations): string[] {
+    const args: string[] = [];
+
+    if (optimizations.clipOnCpu) {
+      args.push('--clip-on-cpu');
+    }
+    if (optimizations.vaeOnCpu) {
+      args.push('--vae-on-cpu');
+    }
+    if (optimizations.offloadToCpu) {
+      args.push('--offload-to-cpu');
+    }
+    if (optimizations.diffusionFlashAttention) {
+      args.push('--diffusion-fa');
     }
 
     return args;

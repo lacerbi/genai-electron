@@ -58,14 +58,29 @@ GPU acceleration is optional but recommended for performance.
 
 On first call to `llamaServer.start()` or `diffusionServer.start()`, the library automatically:
 
-1. **Downloads appropriate binary** (~50-100MB) for your platform
+1. **Downloads the appropriate binary** for your platform (GPU archives and
+   their runtime dependencies can total hundreds of megabytes)
 2. **Tests GPU variants** in platform-specific priority order (e.g., CUDA → Vulkan → CPU on Linux/Windows)
 3. **Runs real functionality tests**:
    - LLM: Generates 1 token with GPU layers enabled (`-ngl 1`)
    - Diffusion: Generates 64x64 image with 1 diffusion step
+   - Diffusion validation uses the same resolved CPU-offload and diffusion
+     flash-attention flags as production generation
    - Verifies GPU actually works (not just that binary loads)
 4. **Falls back automatically** if test fails (e.g., broken CUDA → Vulkan → CPU)
 5. **Caches working variant** for fast subsequent starts
+
+On Windows, ZIP inflation runs in a worker thread so Electron's main event loop
+remains responsive. The `'binary-progress'` event reports entry counters during
+extraction. Successfully installed dependency archives are recorded by checksum
+in `userData/binaries/<type>/.deps.json`; byte-identical CUDA runtimes are reused
+across upstream release-URL changes. If provisioning is interrupted, the next
+run clears stale extraction staging and reuses any complete archive whose
+checksum still matches. If installation completed before the interruption,
+the validated-binary fast path removes leftover main archives and extraction
+directories. An unmanifested dependency archive is retained as a recovery copy
+until a later provisioning run can verify, extract, and record it. Partial
+downloads are not range-resumed.
 
 **Timing**:
 - First start: 2-10 seconds for variant testing (plus download time, which depends on connection speed)
@@ -82,6 +97,11 @@ await llamaServer.start({
 
 **Validation Caching**:
 After first successful validation, subsequent starts skip expensive tests and only verify binary integrity via checksum. Use `forceValidation: true` to re-run full tests after driver updates.
+
+Provisioning messages are also written to `llama-server.log` or
+`diffusion-server.log` from the beginning of `start()`, including failed
+downloads and variant validation. Hosts may still subscribe to `'binary-log'`
+for live UI output.
 
 ---
 

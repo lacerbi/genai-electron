@@ -1,15 +1,59 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.13.0 ready for release — reproducible downloads, artifact license provenance, and stable-diffusion.cpp refresh (2026-07-26)
+> **Current Status**: v0.14.0 release candidate — binary-provisioning robustness (2026-07-27)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 604/604 passing (25 suites)
-- **Branch:** `release/v0.13.0`
-- **Last Updated:** 2026-07-26 (v0.13.0 release preparation)
+- **Tests:** ✅ 634/634 passing (26 suites)
+- **Branch:** `release/v0.14.0`
+- **Last Updated:** 2026-07-27 (v0.14.0 release preparation)
+
+---
+
+## v0.14.0: Binary Provisioning Robustness (2026-07-27)
+
+- Moved ZIP parsing/inflation for both binary and dependency archives into an
+  inline worker thread. `'binary-progress'` now reports ZIP entry counters and
+  extraction percentages while Electron's main event loop remains responsive.
+- Added atomic `.deps.json` manifests keyed by dependency checksum. Matching
+  installed dependencies are materialized into clean staging without another
+  download or inflation, including when only the upstream release URL changed.
+- Hardened interrupted provisioning: stale variant staging is removed first,
+  and complete main/dependency archives are reused only after SHA-256
+  verification. HTTP range resume for `.partial` files remains deferred.
+- Phase-2 diffusion validation now uses the same resolved CPU-offload and
+  diffusion-flash-attention flags as production generation. GPU diagnostics are
+  line-anchored to retain real backend errors without rejecting prose mentions.
+- Initialized llama and diffusion log managers before provisioning, preserving
+  the complete BinaryManager log on both successful starts and failures.
+- Guarded concurrent starts from sharing provisioning paths and reject any
+  main-archive path that collides with a dependency-owned file before candidate
+  installation or manifest commit.
+- Folded in the final lifecycle follow-ups: validated installed binaries clean
+  leftover main archives/staging before returning while preserving any
+  unmanifested dependency archive as a recovery copy, and a
+  real-filesystem cross-instance regression now exercises ZIP extraction,
+  atomic manifest persistence, URL-independent checksum reuse, and dependency
+  staging beside the candidate on the incident platform.
+
+**Release validation:** `prepublishOnly` passes (clean build plus 634/634 tests
+across 26 suites); mandatory implementation double-check found no acceptance
+blockers and its two medium-risk findings were fixed with regressions; 215/215
+original focused tests, 58/58 follow-up focused tests, and the full suite pass
+with open-handle detection; repository formatting passes; lint passes with 0
+errors (61 existing warnings); generated runtime/declarations and the 163-file
+`genai-electron@0.14.0` npm package dry run were inspected; `git diff --check`
+passes.
+The final follow-up double-check identified the install-before-manifest recovery
+window; the corrected manifest-aware cleanup policy and its regressions passed
+re-review with no remaining blocker.
+
+**Release status:** Release candidate on `release/v0.14.0`. Version metadata and migration guide
+are included in the release PR; merge, tag, GitHub release, and maintainer-side `npm publish`
+remain pending.
 
 ---
 
@@ -674,7 +718,9 @@ For detailed historical information:
 **Follow-ups (agreed, not yet started; updated 2026-07-03 post-v0.9.0):**
 - **palimpsest-engine integration** (downstream, next natural step) — consume v0.8/0.9: drop the MoE filename regex (`/-a\d+b/i`) + manual `cpuMoe`/`gpuLayers: 999`/pinned-context path (v0.8 auto-config covers it), and the `binary-log` percent regex + throttle (subscribe to `'binary-progress'`, v0.9).
 - ~~stable-diffusion.cpp bump~~ — DONE in v0.10.0 (pin `master-746-2574f59`, full surface re-validation, live smoke on all three win32 variants; see the v0.10.0 section and `docs/dev/plans/PLAN-sd-cpp-bump.md`).
-- **Skip byte-identical dependency re-downloads** — a version-tag change invalidates the binary cache, so Windows CUDA users re-download the 563 MB cudart zip even when its checksum is unchanged across releases (it was byte-identical for the v0.10.0 bump). BinaryManager could keep dependencies whose checksum already matches an installed file.
+- ~~**Skip byte-identical dependency re-downloads**~~ — RESOLVED in Unreleased
+  binary-provisioning robustness: installed dependencies are reused by checksum
+  across release-URL changes.
 - **Example-app toolchain chore** — Electron Forge devDependency chain carries npm-audit highs fixable only via major bumps (electron 35→43 + Forge majors). Dev-only, outside the published package and CI's root-only audit gate.
 - **Example app: forward `'binary-progress'` over IPC** — the control panel still forwards only `'binary-log'`; wire the structured event through preload/renderer for a real progress bar (small; pairs with the toolchain chore).
 - **ROCm/HIP binary variants** — upstream now ships `win-hip-radeon` + `ubuntu-rocm` prebuilts; blocked on Windows AMD GPU detection (DESIGN Phase 4).

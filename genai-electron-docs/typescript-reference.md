@@ -454,7 +454,8 @@ type ServerEvent =
   | 'restarted'
   | 'health-check-ok'
   | 'health-check-failed'
-  | 'binary-log';
+  | 'binary-log'
+  | 'binary-progress';
 ```
 
 ### ServerEventData
@@ -488,7 +489,9 @@ interface HealthCheckResponse {
 
 ### BinaryProgressEvent
 
-Structured provisioning progress (`'binary-progress'` event). Download events are throttled to whole-percent changes; phase transitions emit one event each.
+Structured provisioning progress (`'binary-progress'` event). Download events
+are throttled to whole-percent changes. ZIP extraction adds an initial entry
+count and one update after each extracted file.
 
 ```typescript
 interface BinaryProgressEvent {
@@ -496,9 +499,15 @@ interface BinaryProgressEvent {
   file: string; // 'binary' or a dependency description (e.g. 'CUDA runtime')
   downloaded?: number; // bytes (downloading)
   total?: number; // bytes (downloading)
-  percent?: number; // whole number (downloading)
+  percent?: number; // whole number (downloading or extracting)
+  completedEntries?: number; // extracted file entries (ZIP extraction)
+  totalEntries?: number; // total file entries (ZIP extraction)
 }
 ```
+
+`downloaded`/`total` are byte counts and only apply to downloads.
+`completedEntries`/`totalEntries` count ZIP file entries. Extraction callbacks
+start at `0 / totalEntries` and finish at `totalEntries / totalEntries`.
 
 ### Port & Health Utilities
 

@@ -150,11 +150,17 @@ export class LlamaServerManager extends ServerManager {
    * @throws {ServerError} If server fails to start
    */
   async start(config: ServerConfig): Promise<ServerInfo> {
-    // Check if already running
-    if (this._status === 'running') {
-      throw new ServerError('Server is already running', {
-        suggestion: 'Stop the server first with stop()',
-      });
+    // Prevent concurrent starts from sharing binary provisioning artifacts.
+    if (this._status === 'running' || this._status === 'starting') {
+      throw new ServerError(
+        this._status === 'running' ? 'Server is already running' : 'Server is already starting',
+        {
+          suggestion:
+            this._status === 'running'
+              ? 'Stop the server first with stop()'
+              : 'Wait for the current start() call to finish',
+        }
+      );
     }
 
     // Validate config fields before proceeding
@@ -181,6 +187,11 @@ export class LlamaServerManager extends ServerManager {
     this.healthHost = normalizeHealthHost(config.host);
 
     try {
+      await this.initializeLogManager(
+        'llama-server.log',
+        `Preparing llama-server for model ${config.modelId} on port ${resolvedPort}`
+      );
+
       // 1. Validate model exists
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
 
@@ -243,11 +254,8 @@ export class LlamaServerManager extends ServerManager {
       // 6. Save final configuration (AFTER auto-configuration)
       this._config = finalConfig;
 
-      // 7. Initialize log manager
-      await this.initializeLogManager(
-        'llama-server.log',
-        `Starting llama-server on port ${finalConfig.port}`
-      );
+      // 7. Record the final auto-configured start parameters
+      await this.logManager?.write(`Starting llama-server on port ${finalConfig.port}`, 'info');
 
       // 8. Build command-line arguments
       const args = this.buildCommandLineArgs(finalConfig, modelInfo);
