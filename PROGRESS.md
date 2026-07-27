@@ -1,6 +1,6 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.13.0 plus unreleased binary-provisioning robustness (2026-07-27)
+> **Current Status**: v0.14.0 release candidate — binary-provisioning robustness (2026-07-27)
 
 ---
 
@@ -8,14 +8,12 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 634/634 passing (26 suites)
-- **Branch:** `main`
-- **Last Updated:** 2026-07-27 (unreleased binary-provisioning robustness)
+- **Branch:** `release/v0.14.0`
+- **Last Updated:** 2026-07-27 (v0.14.0 release preparation)
 
 ---
 
-## Unreleased
-
-### Binary provisioning robustness (2026-07-27)
+## v0.14.0: Binary Provisioning Robustness (2026-07-27)
 
 - Moved ZIP parsing/inflation for both binary and dependency archives into an
   inline worker thread. `'binary-progress'` now reports ZIP entry counters and
@@ -41,17 +39,21 @@
   atomic manifest persistence, URL-independent checksum reuse, and dependency
   staging beside the candidate on the incident platform.
 
-**Validation:** mandatory implementation double-check found no acceptance
+**Release validation:** `prepublishOnly` passes (clean build plus 634/634 tests
+across 26 suites); mandatory implementation double-check found no acceptance
 blockers and its two medium-risk findings were fixed with regressions; 215/215
-original focused tests, 58/58 follow-up focused tests, and 634/634 full tests
-pass with open-handle detection; build and repository formatting pass; lint
-passes with 0 errors (61 existing warnings); generated runtime/declarations and
-the 163-file npm package dry run were inspected; `git diff --check` passes.
+original focused tests, 58/58 follow-up focused tests, and the full suite pass
+with open-handle detection; repository formatting passes; lint passes with 0
+errors (61 existing warnings); generated runtime/declarations and the 163-file
+`genai-electron@0.14.0` npm package dry run were inspected; `git diff --check`
+passes.
 The final follow-up double-check identified the install-before-manifest recovery
 window; the corrected manifest-aware cleanup policy and its regressions passed
 re-review with no remaining blocker.
 
-**Release status:** Unreleased; no version bump, tag, publish, or release action.
+**Release status:** Release candidate on `release/v0.14.0`. Version metadata and migration guide
+are included in the release PR; merge, tag, GitHub release, and maintainer-side `npm publish`
+remain pending.
 
 ---
 

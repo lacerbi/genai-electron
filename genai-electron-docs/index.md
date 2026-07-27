@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.13.0 (reproducible downloads, artifact license provenance, and sd.cpp refresh)
+> **Version**: 0.14.0 (responsive, reusable, and recoverable binary provisioning)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.13.x to v0.14.0](migration-0-13-to-0-14.md)** - Additive extraction progress plus worker-thread ZIP extraction, dependency reuse, recovery hardening, validation parity, and durable provisioning logs
 - **[Migrating from v0.12.x to v0.13.0](migration-0-12-to-0-13.md)** - Additive provenance APIs and Hugging Face revision pinning; sd.cpp binary compatibility re-verification required
 - **[Migrating from v0.11.x to v0.12.0](migration-0-11-to-0-12.md)** - `calibrate()` now takes a required `generation` block (`steps`/`cfgScale`/`sampler`) so it mirrors production; pass your real `cfgScale`
 - **[Migrating from v0.10.x to v0.11.0](migration-0-10-to-0-11.md)** - Offload calibration (`calibrate()`); purely additive, nothing to migrate
