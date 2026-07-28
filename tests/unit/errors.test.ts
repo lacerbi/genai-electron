@@ -6,6 +6,7 @@
 import { describe, it, expect } from '@jest/globals';
 import {
   GenaiElectronError,
+  ContextConstraintError,
   ModelNotFoundError,
   DownloadError,
   InsufficientResourcesError,
@@ -39,6 +40,25 @@ describe('Error Classes', () => {
 
       expect(error.stack).toBeDefined();
       expect(error.stack).toContain('GenaiElectronError');
+    });
+  });
+
+  describe('ContextConstraintError', () => {
+    it('should expose a stable code and typed structured details', () => {
+      const error = new ContextConstraintError('Minimum exceeds model context', {
+        reason: 'minimum-exceeds-native',
+        stage: 'sizing',
+        minimumContextSize: 32768,
+        nativeContextSize: 16384,
+        suggestion: 'Choose a smaller minimum',
+      });
+
+      expect(error.message).toContain('Minimum exceeds model context');
+      expect(error.code).toBe('CONTEXT_CONSTRAINT_ERROR');
+      expect(error.details.reason).toBe('minimum-exceeds-native');
+      expect(error.details.stage).toBe('sizing');
+      expect(error.details.minimumContextSize).toBe(32768);
+      expect(error).toBeInstanceOf(GenaiElectronError);
     });
   });
 
@@ -155,6 +175,10 @@ describe('Error Classes', () => {
         required: '8GB',
         available: '4GB',
       });
+      const constraintError = new ContextConstraintError('test', {
+        reason: 'runtime-capacity-unavailable',
+        stage: 'runtime',
+      });
 
       expect(modelError).toBeInstanceOf(GenaiElectronError);
       expect(modelError).toBeInstanceOf(Error);
@@ -164,6 +188,8 @@ describe('Error Classes', () => {
 
       expect(resourceError).toBeInstanceOf(GenaiElectronError);
       expect(resourceError).toBeInstanceOf(Error);
+      expect(constraintError).toBeInstanceOf(GenaiElectronError);
+      expect(constraintError).toBeInstanceOf(Error);
     });
 
     it('should be catchable as GenaiElectronError', () => {

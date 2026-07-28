@@ -11,6 +11,7 @@ Complete type definitions for genai-electron. The library is TypeScript-first wi
 - [Async Generation Types](#async-generation-types)
 - [Logging Types](#logging-types)
 - [Resource Types](#resource-types)
+- [Error Types](#error-types)
 - [UI Types](#ui-types)
 - [Low-Level Types](#low-level-types)
 - [Utility Types](#utility-types)
@@ -347,6 +348,8 @@ interface ServerInfo {
   startedAt?: string;
   error?: string;
   loadTimeMs?: number;         // Last successful start duration, spawn → healthy (llama-server only)
+  configuredContextSize?: number; // Configured total llama-server -c allocation
+  effectiveContextSize?: number;  // Verified /props context per request slot
 }
 ```
 
@@ -373,7 +376,9 @@ interface ServerConfig {
   modelId: string;
   port?: number | 'auto';           // Default: 8080 (llama) / 8081 (diffusion); 'auto' picks a free OS port
   threads?: number;
-  contextSize?: number;
+  contextSize?: number;             // Exact total llama-server -c allocation
+  minimumContextSize?: number;      // Minimum effective context per request slot
+  maximumContextSize?: number;      // Maximum effective context per request slot
   gpuLayers?: number;
   parallelRequests?: number;
   flashAttention?: FlashAttentionSetting;
@@ -382,6 +387,10 @@ interface ServerConfig {
   startupTimeout?: number;          // Max ms to wait for health after spawn (default: 120000)
 }
 ```
+
+The context, parallel-request, flash-attention, and host fields are consumed by
+`LlamaServerManager`; `DiffusionServerManager` keeps its narrower runtime allowlist and rejects
+LLM-only fields.
 
 ### DiffusionServerInfo
 
@@ -824,6 +833,8 @@ type OptimalConfigHints = Partial<
   Pick<
     LlamaServerConfig,
     | 'contextSize'
+    | 'minimumContextSize'
+    | 'maximumContextSize'
     | 'gpuLayers'
     | 'parallelRequests'
     | 'flashAttention'
@@ -836,7 +847,17 @@ type OptimalConfigHints = Partial<
 >;
 ```
 
-`getOptimalConfig` returns `Promise<Partial<LlamaServerConfig>>` (may include auto-selected `cacheTypeK`/`cacheTypeV`/`flashAttention`). The KV arithmetic is exported as `estimateKVBytesPerToken(modelInfo, cacheTypeK?, cacheTypeV?)`; context rounding as `floorContextToGranularity(tokens)` (progressive: 512-steps up to 8K, 1024 to 16K, 2048 to 32K, 4096 beyond).
+`contextSize` is an exact total pin and is mutually exclusive with the range fields in
+`getOptimalConfig()`. Minimum/maximum values are inclusive effective capacities per parallel
+request slot; returned `contextSize` is the total allocation across all slots. A constrained
+result retains its range and caller-owned placement/cache hints for direct spread into
+`llamaServer.start()`.
+
+`getOptimalConfig` returns `Promise<Partial<LlamaServerConfig>>` (may include auto-selected
+`cacheTypeK`/`cacheTypeV`/`flashAttention`). The KV arithmetic is exported as
+`estimateKVBytesPerToken(modelInfo, cacheTypeK?, cacheTypeV?)`; context rounding as
+`floorContextToGranularity(tokens)` (progressive: 512-steps up to 8K, 1024 to 16K, 2048 to 32K,
+4096 beyond).
 
 
 ### SavedLLMState
@@ -848,6 +869,69 @@ interface SavedLLMState {
   savedAt: Date;
 }
 ```
+
+---
+
+## Error Types
+
+### ContextConstraintError
+
+`ContextConstraintError` extends `GenaiElectronError`, uses code
+`CONTEXT_CONSTRAINT_ERROR`, and exposes typed details:
+
+```typescript
+type ContextConstraintStage = 'validation' | 'sizing' | 'runtime';
+
+type ContextConstraintReason =
+  | 'invalid-minimum'
+  | 'invalid-maximum'
+  | 'exact-range-conflict'
+  | 'minimum-exceeds-maximum'
+  | 'unsafe-total-capacity'
+  | 'minimum-exceeds-native'
+  | 'model-context-unknown'
+  | 'fit-range-conflict'
+  | 'precomputed-context-out-of-range'
+  | 'runtime-capacity-unavailable'
+  | 'runtime-slots-mismatch'
+  | 'runtime-below-minimum'
+  | 'runtime-above-maximum';
+
+interface ContextConstraintDetails {
+  reason: ContextConstraintReason;
+  stage: ContextConstraintStage;
+  contextSize?: number;
+  minimumContextSize?: number;
+  maximumContextSize?: number;
+  configuredContextSize?: number;
+  effectiveContextSize?: number;
+  nativeContextSize?: number;
+  parallelRequests?: number;
+  effectiveParallelRequests?: number;
+  suggestion?: string;
+  cause?: string;
+}
+```
+
+Invalid combinations and unverifiable runtime capacity use this error. A valid minimum that no
+permitted hardware placement can satisfy uses `InsufficientResourcesError` instead.
+
+### InsufficientResourcesDetails
+
+```typescript
+interface InsufficientResourcesDetails {
+  required: string;
+  available: string;
+  suggestion?: string;
+  minimumContextSize?: number;
+  maximumContextSize?: number;
+  configuredContextSize?: number;
+  maxFeasibleContextSize?: number;
+  parallelRequests?: number;
+}
+```
+
+All error classes and the details/reason/stage types are exported from the package root.
 
 ---
 

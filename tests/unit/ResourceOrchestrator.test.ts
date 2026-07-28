@@ -253,6 +253,8 @@ describe('ResourceOrchestrator', () => {
         threads: 8,
         gpuLayers: 35,
         contextSize: 4096,
+        minimumContextSize: 1024,
+        maximumContextSize: 2048,
         parallelRequests: 4,
         flashAttention: true,
       };

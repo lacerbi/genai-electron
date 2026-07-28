@@ -5,6 +5,7 @@
 
 import {
   GenaiElectronError,
+  ContextConstraintError,
   ModelNotFoundError,
   DownloadError,
   InsufficientResourcesError,
@@ -97,6 +98,18 @@ export interface UIErrorFormat {
  * ```
  */
 export function formatErrorForUI(error: unknown): UIErrorFormat {
+  // Handle ContextConstraintError
+  if (error instanceof ContextConstraintError) {
+    return {
+      code: error.code,
+      title: 'Context Capacity Requirement Not Met',
+      message: error.message,
+      remediation:
+        error.details.suggestion ||
+        'Review the requested context range, parallel request count, and available model metadata.',
+    };
+  }
+
   // Handle ModelNotFoundError
   if (error instanceof ModelNotFoundError) {
     return {

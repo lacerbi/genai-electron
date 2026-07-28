@@ -13,6 +13,7 @@ import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
 import { checkHealth, waitForHealthy, normalizeHealthHost } from '../process/health-check.js';
 import { findFreePort } from '../process/port-utils.js';
+import { fetchLlamaRuntimeCapacity } from '../process/llama-props.js';
 import { parseLlamaCppLogLevel, stripLlamaCppFormatting } from '../process/llama-log-parser.js';
 import type {
   ServerConfig,
@@ -21,10 +22,18 @@ import type {
   HealthStatus,
   ModelInfo,
 } from '../types/index.js';
-import { ServerError, InsufficientResourcesError } from '../errors/index.js';
+import {
+  ContextConstraintError,
+  ServerError,
+  InsufficientResourcesError,
+} from '../errors/index.js';
 import { BINARY_VERSIONS, DEFAULT_PORTS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
 import { fileExists } from '../utils/file-utils.js';
 import { debugLog } from '../utils/debug-log.js';
+import {
+  normalizeContextConstraints,
+  validateModelContextRange,
+} from '../utils/context-constraints.js';
 
 /**
  * Internal config shape after the port has been resolved to a concrete number
@@ -70,6 +79,8 @@ export class LlamaServerManager extends ServerManager {
     'port',
     'threads',
     'contextSize',
+    'minimumContextSize',
+    'maximumContextSize',
     'gpuLayers',
     'parallelRequests',
     'flashAttention',
@@ -104,6 +115,14 @@ export class LlamaServerManager extends ServerManager {
   private healthHost = '127.0.0.1';
   /** Duration of the last successful start, spawn → healthy (ms) */
   private _loadTimeMs?: number;
+  /** Effective per-slot context reported by llama-server /props */
+  private _effectiveContextSize?: number;
+  /** Monotonic identity for the active startup/process attempt. */
+  private processGeneration = 0;
+  /** Startup generations explicitly cancelled by stop(), awaiting rejection. */
+  private readonly cancelledStartupGenerations = new Set<number>();
+  /** Changes on every explicit stop(), including a no-op stop during auto-restart startup. */
+  private autoRestartCancellationEpoch = 0;
   /** Total auto-restart attempts since the last MANUAL start (lifetime budget, not consecutive) */
   private restartAttempts = 0;
   /** Pending auto-restart timer (crash backoff) */
@@ -147,18 +166,26 @@ export class LlamaServerManager extends ServerManager {
    * @throws {PortInUseError} If port is already in use
    * @throws {BinaryError} If binary download/verification fails
    * @throws {InsufficientResourcesError} If system can't run the model
+   * @throws {ContextConstraintError} If a context contract is invalid,
+   * unsupported by model metadata, or cannot be verified at runtime
    * @throws {ServerError} If server fails to start
    */
   async start(config: ServerConfig): Promise<ServerInfo> {
     // Prevent concurrent starts from sharing binary provisioning artifacts.
-    if (this._status === 'running' || this._status === 'starting') {
+    if (this._status === 'running' || this._status === 'starting' || this._status === 'stopping') {
       throw new ServerError(
-        this._status === 'running' ? 'Server is already running' : 'Server is already starting',
+        this._status === 'running'
+          ? 'Server is already running'
+          : this._status === 'starting'
+            ? 'Server is already starting'
+            : 'Server is already stopping',
         {
           suggestion:
             this._status === 'running'
               ? 'Stop the server first with stop()'
-              : 'Wait for the current start() call to finish',
+              : this._status === 'starting'
+                ? 'Wait for the current start() call to finish'
+                : 'Wait for stop() to finish before starting again',
         }
       );
     }
@@ -169,6 +196,10 @@ export class LlamaServerManager extends ServerManager {
       LlamaServerManager.VALID_CONFIG_FIELDS,
       'LlamaServerManager'
     );
+    const llamaConfig = config as LlamaServerConfig;
+    const contextConstraints = normalizeContextConstraints(llamaConfig, {
+      allowExactWithRange: true,
+    });
 
     // A manual start resets the auto-restart budget and cancels any pending
     // auto-restart; the auto-restart path itself skips this.
@@ -177,28 +208,62 @@ export class LlamaServerManager extends ServerManager {
       this.cancelPendingRestart();
     }
 
+    this._effectiveContextSize = undefined;
+    const startupGeneration = ++this.processGeneration;
+    let startupPid: number | undefined;
     this.setStatus('starting');
 
-    // Resolve the port once, up front — every later step (availability check,
-    // health polling, CLI args, saved config for restart) uses this value.
-    // 'auto' binds port 0 to get an OS-assigned free port.
-    const resolvedPort =
-      config.port === 'auto' ? await findFreePort() : (config.port ?? DEFAULT_PORTS.llama);
-    this.healthHost = normalizeHealthHost(config.host);
-
     try {
+      // Resolve the port once, up front — every later step (availability check,
+      // health polling, CLI args, saved config for restart) uses this value.
+      // 'auto' binds port 0 to get an OS-assigned free port.
+      const resolvedPort =
+        config.port === 'auto' ? await findFreePort() : (config.port ?? DEFAULT_PORTS.llama);
+      const startupHealthHost = normalizeHealthHost(config.host);
+      this.assertStartupAttemptActive(startupGeneration);
+      this.healthHost = startupHealthHost;
+
       await this.initializeLogManager(
         'llama-server.log',
         `Preparing llama-server for model ${config.modelId} on port ${resolvedPort}`
       );
+      this.assertStartupAttemptActive(startupGeneration);
 
       // 1. Validate model exists
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
+      this.assertStartupAttemptActive(startupGeneration);
 
-      // 2. Check if system can run this model
-      const canRun = await this.systemInfo.canRunModel(modelInfo, {
-        gpuLayers: config.gpuLayers,
-      });
+      let finalConfig: ResolvedLlamaServerConfig | undefined;
+      let canRun: Awaited<ReturnType<SystemInfo['canRunModel']>>;
+
+      if (contextConstraints.hasRange) {
+        // Validate model limits and resolve the constrained placement before
+        // provisioning. The legacy unresolved preflight can otherwise reject a
+        // configuration that fits through GPU/MoE offload or quantized KV.
+        validateModelContextRange(modelInfo, contextConstraints);
+        finalConfig = await this.autoConfigureIfNeeded(
+          { ...config, port: resolvedPort },
+          modelInfo
+        );
+        canRun =
+          finalConfig.contextSize !== undefined && finalConfig.gpuLayers !== undefined
+            ? await this.systemInfo.canRunModel(modelInfo, {
+                gpuLayers: finalConfig.gpuLayers,
+                contextSize: finalConfig.contextSize,
+                cacheTypeK: finalConfig.cacheTypeK,
+                cacheTypeV: finalConfig.cacheTypeV,
+                cpuMoe: finalConfig.cpuMoe,
+                nCpuMoe: finalConfig.nCpuMoe,
+                overrideTensors: finalConfig.overrideTensors,
+              })
+            : { possible: true };
+      } else {
+        // Preserve the existing preflight order and behavior for legacy callers.
+        canRun = await this.systemInfo.canRunModel(modelInfo, {
+          gpuLayers: config.gpuLayers,
+        });
+      }
+
       if (!canRun.possible) {
         throw new InsufficientResourcesError(
           `System cannot run model: ${canRun.reason || 'Insufficient resources'}`,
@@ -208,15 +273,21 @@ export class LlamaServerManager extends ServerManager {
               (await this.systemInfo.getMemoryInfo()).available / 1024 / 1024 / 1024
             )}GB`,
             suggestion: canRun.suggestion || canRun.reason || 'Try a smaller model',
+            minimumContextSize: contextConstraints.minimumContextSize,
+            maximumContextSize: contextConstraints.maximumContextSize,
+            configuredContextSize: finalConfig?.contextSize,
+            parallelRequests: contextConstraints.parallelRequests,
           }
         );
       }
 
       // 3. Ensure binary is downloaded (pass model path for real functionality testing)
       this.binaryPath = await this.ensureBinary(modelInfo.path, config.forceValidation);
+      this.assertStartupAttemptActive(startupGeneration);
 
       // 4. Check if port is in use (on the host the server will bind)
-      await this.checkPortAvailability(resolvedPort, undefined, this.healthHost);
+      await this.checkPortAvailability(resolvedPort, undefined, startupHealthHost);
+      this.assertStartupAttemptActive(startupGeneration);
 
       // 4b. Occupancy safety rail: detect other llama-servers that could
       // double-load VRAM (default 'warn'; 'strict' throws; 'off' skips)
@@ -224,12 +295,14 @@ export class LlamaServerManager extends ServerManager {
         (config as LlamaServerConfig).occupancyCheck ?? 'warn',
         resolvedPort
       );
+      this.assertStartupAttemptActive(startupGeneration);
 
-      // 5. Auto-configure if needed
-      const finalConfig = await this.autoConfigureIfNeeded(
+      // 5. Auto-configure if needed (ranged starts were resolved before provisioning)
+      finalConfig ??= await this.autoConfigureIfNeeded(
         { ...config, port: resolvedPort },
         modelInfo
       );
+      this.assertStartupAttemptActive(startupGeneration);
 
       // 5b. Quantized V-cache requires flash attention ON (llama.cpp runtime constraint)
       const quantizedVCache =
@@ -256,6 +329,7 @@ export class LlamaServerManager extends ServerManager {
 
       // 7. Record the final auto-configured start parameters
       await this.logManager?.write(`Starting llama-server on port ${finalConfig.port}`, 'info');
+      this.assertStartupAttemptActive(startupGeneration);
 
       // 8. Build command-line arguments
       const args = this.buildCommandLineArgs(finalConfig, modelInfo);
@@ -267,7 +341,9 @@ export class LlamaServerManager extends ServerManager {
         });
       }
 
-      if (!(await fileExists(this.binaryPath))) {
+      const binaryExists = await fileExists(this.binaryPath);
+      this.assertStartupAttemptActive(startupGeneration);
+      if (!binaryExists) {
         throw new ServerError(`Binary file not found: ${this.binaryPath}`, {
           path: this.binaryPath,
           suggestion: 'Try deleting the binaries directory and restarting the app',
@@ -278,16 +354,27 @@ export class LlamaServerManager extends ServerManager {
         `Spawning llama-server: ${this.binaryPath} with args: ${args.join(' ')}`,
         'info'
       );
+      this.assertStartupAttemptActive(startupGeneration);
 
       // 10. Spawn the process
       const spawnStartedAt = Date.now();
       const { pid } = this.processManager.spawn(this.binaryPath, args, {
-        onStdout: (data) => this.handleStdout(data),
-        onStderr: (data) => this.handleStderr(data),
-        onExit: (code, signal) => this.handleExit(code, signal),
-        onError: (error) => this.handleSpawnError(error),
+        onStdout: (data) => {
+          if (startupGeneration === this.processGeneration) {
+            this.handleStdout(data);
+          }
+        },
+        onStderr: (data) => {
+          if (startupGeneration === this.processGeneration) {
+            this.handleStderr(data);
+          }
+        },
+        onExit: (code, signal) => this.handleExit(code, signal, startupGeneration),
+        onError: (error) => this.handleSpawnError(error, startupGeneration),
       });
 
+      this.assertStartupAttemptActive(startupGeneration);
+      startupPid = pid;
       this._pid = pid;
       this._port = finalConfig.port;
 
@@ -302,20 +389,82 @@ export class LlamaServerManager extends ServerManager {
         finalConfig.startupTimeout ?? DEFAULT_TIMEOUTS.serverStart,
         undefined,
         undefined,
-        this.healthHost
+        startupHealthHost
       );
 
-      this._loadTimeMs = Date.now() - spawnStartedAt;
+      this.assertStartupAttemptActive(startupGeneration, pid);
+      const loadTimeMs = Date.now() - spawnStartedAt;
+      const configuredParallelRequests = finalConfig.parallelRequests ?? 1;
+      const runtimeCapacity = await fetchLlamaRuntimeCapacity(
+        finalConfig.port,
+        startupHealthHost,
+        configuredParallelRequests,
+        DEFAULT_TIMEOUTS.healthCheck
+      );
+      this.assertStartupAttemptActive(startupGeneration, pid);
+
+      if (
+        contextConstraints.minimumContextSize !== undefined &&
+        runtimeCapacity.effectiveContextSize < contextConstraints.minimumContextSize
+      ) {
+        throw new ContextConstraintError(
+          `Effective context ${runtimeCapacity.effectiveContextSize} is below the required minimum ${contextConstraints.minimumContextSize}`,
+          {
+            reason: 'runtime-below-minimum',
+            stage: 'runtime',
+            minimumContextSize: contextConstraints.minimumContextSize,
+            maximumContextSize: contextConstraints.maximumContextSize,
+            configuredContextSize: finalConfig.contextSize,
+            effectiveContextSize: runtimeCapacity.effectiveContextSize,
+            parallelRequests: configuredParallelRequests,
+            effectiveParallelRequests: runtimeCapacity.totalSlots ?? configuredParallelRequests,
+            suggestion:
+              'Reduce the minimum or parallel request count, or choose a configuration with more context capacity',
+          }
+        );
+      }
+
+      if (
+        contextConstraints.maximumContextSize !== undefined &&
+        runtimeCapacity.effectiveContextSize > contextConstraints.maximumContextSize
+      ) {
+        throw new ContextConstraintError(
+          `Effective context ${runtimeCapacity.effectiveContextSize} is above the requested maximum ${contextConstraints.maximumContextSize}`,
+          {
+            reason: 'runtime-above-maximum',
+            stage: 'runtime',
+            minimumContextSize: contextConstraints.minimumContextSize,
+            maximumContextSize: contextConstraints.maximumContextSize,
+            configuredContextSize: finalConfig.contextSize,
+            effectiveContextSize: runtimeCapacity.effectiveContextSize,
+            parallelRequests: configuredParallelRequests,
+            effectiveParallelRequests: runtimeCapacity.totalSlots ?? configuredParallelRequests,
+            suggestion: 'Use a smaller configured context or disable llama-server fitting',
+          }
+        );
+      }
+
+      const effectiveContextSize = runtimeCapacity.effectiveContextSize;
+      const effectiveParallelRequests = runtimeCapacity.totalSlots ?? configuredParallelRequests;
+
+      await this.logManager?.write(
+        `Server is running and healthy (load time: ${loadTimeMs}ms, configured context: ${
+          finalConfig.contextSize ?? 'llama-fit'
+        } total, effective context: ${effectiveContextSize} per slot, slots: ${effectiveParallelRequests})`,
+        'info'
+      );
+      this.assertStartupAttemptActive(startupGeneration, pid);
+
+      // Commit verified state only after every asynchronous startup operation.
+      // The synchronous tail cannot be interleaved with stop() or a newer start.
+      this._effectiveContextSize = effectiveContextSize;
+      this._loadTimeMs = loadTimeMs;
       this._startedAt = new Date();
       this.setStatus('running');
+      this.assertStartupAttemptActive(startupGeneration, pid, 'running');
 
       // Start the hang watchdog if configured
       this.startWatchdog(finalConfig);
-
-      await this.logManager!.write(
-        `Server is running and healthy (load time: ${this._loadTimeMs}ms)`,
-        'info'
-      );
 
       // Clear system info cache so subsequent memory checks use fresh data
       this.systemInfo.clearCache();
@@ -325,9 +474,37 @@ export class LlamaServerManager extends ServerManager {
 
       return this.getInfo();
     } catch (error) {
+      // A stop, exit, or newer start owns lifecycle state now. Reject this
+      // stale start without clearing or stopping the newer attempt.
+      if (startupGeneration !== this.processGeneration) {
+        const startupCancelled = this.cancelledStartupGenerations.delete(startupGeneration);
+        throw new ServerError('llama-server stopped or was replaced during startup', {
+          cause: error instanceof Error ? error.message : String(error),
+          startupCancelled,
+          suggestion: 'Retry start() after the active lifecycle operation has completed',
+        });
+      }
+
       throw await this.handleStartupError('llama-server', error, async () => {
-        if (this._pid && this.processManager.isRunning(this._pid)) {
-          await this.processManager.kill(this._pid, 5000);
+        this.invalidateProcessGeneration(startupGeneration);
+        const pidToKill = startupPid;
+        this._pid = undefined;
+        this._port = 0;
+        this._effectiveContextSize = undefined;
+
+        if (pidToKill && this.processManager.isRunning(pidToKill)) {
+          try {
+            await this.processManager.kill(pidToKill, 5000);
+          } catch (cleanupError) {
+            await this.logManager
+              ?.write(
+                `Failed to terminate PID ${pidToKill} after startup failure: ${
+                  cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+                }`,
+                'error'
+              )
+              .catch(() => void 0);
+          }
         }
       });
     }
@@ -342,6 +519,7 @@ export class LlamaServerManager extends ServerManager {
    */
   async stop(): Promise<void> {
     // Intentional stop always cancels any pending auto-restart and the watchdog
+    this.autoRestartCancellationEpoch++;
     this.cancelPendingRestart();
     this.teardownWatchdog();
 
@@ -349,23 +527,30 @@ export class LlamaServerManager extends ServerManager {
       return; // Already stopped
     }
 
+    const stoppingGeneration = this.processGeneration;
+    if (this._status === 'starting') {
+      this.cancelledStartupGenerations.add(stoppingGeneration);
+    }
+    const pidToKill = this._pid;
+    this.invalidateProcessGeneration(stoppingGeneration);
+    this._pid = undefined;
+    this._port = 0;
+    this._effectiveContextSize = undefined;
     this.setStatus('stopping');
 
     try {
       if (this.logManager) {
-        await this.logManager.write('Stopping server...', 'info');
+        await this.logManager.write('Stopping server...', 'info').catch(() => void 0);
       }
 
-      if (this._pid) {
-        await this.processManager.kill(this._pid, DEFAULT_TIMEOUTS.serverStop);
+      if (pidToKill) {
+        await this.processManager.kill(pidToKill, DEFAULT_TIMEOUTS.serverStop);
       }
 
       this.setStatus('stopped');
-      this._pid = undefined;
-      this._port = 0;
 
       if (this.logManager) {
-        await this.logManager.write('Server stopped', 'info');
+        await this.logManager.write('Server stopped', 'info').catch(() => void 0);
       }
 
       // Clear system info cache so subsequent memory checks use fresh data
@@ -377,7 +562,10 @@ export class LlamaServerManager extends ServerManager {
       this.setStatus('stopped'); // Force to stopped state
       throw new ServerError(
         `Failed to stop server: ${error instanceof Error ? error.message : 'Unknown error'}`,
-        { error: error instanceof Error ? error.message : String(error) }
+        {
+          error: error instanceof Error ? error.message : String(error),
+          pid: pidToKill,
+        }
       );
     }
   }
@@ -386,9 +574,12 @@ export class LlamaServerManager extends ServerManager {
    * Get current server information (includes loadTimeMs of the last start)
    */
   override getInfo(): ServerInfo {
+    const config = this._config as LlamaServerConfig | undefined;
     return {
       ...super.getInfo(),
       loadTimeMs: this._loadTimeMs,
+      configuredContextSize: config?.contextSize,
+      effectiveContextSize: this._effectiveContextSize,
     };
   }
 
@@ -470,8 +661,11 @@ export class LlamaServerManager extends ServerManager {
     debugLog('[LlamaServer] autoConfigureIfNeeded input:', JSON.stringify(config));
 
     const llamaConfig = config as LlamaServerConfig & { port: number };
+    const useRangeForSizing = llamaConfig.contextSize === undefined;
     const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo, {
       contextSize: llamaConfig.contextSize,
+      minimumContextSize: useRangeForSizing ? llamaConfig.minimumContextSize : undefined,
+      maximumContextSize: useRangeForSizing ? llamaConfig.maximumContextSize : undefined,
       gpuLayers: llamaConfig.gpuLayers,
       parallelRequests: llamaConfig.parallelRequests,
       flashAttention: llamaConfig.flashAttention,
@@ -692,12 +886,48 @@ export class LlamaServerManager extends ServerManager {
   }
 
   /**
+   * Assert that an asynchronous startup continuation still owns lifecycle state.
+   *
+   * @private
+   */
+  private assertStartupAttemptActive(
+    generation: number,
+    pid?: number,
+    expectedStatus: 'starting' | 'running' = 'starting'
+  ): void {
+    if (
+      generation !== this.processGeneration ||
+      this._status !== expectedStatus ||
+      (pid !== undefined && this._pid !== pid)
+    ) {
+      throw new ServerError('llama-server stopped or exited during startup', {
+        suggestion: 'Retry start() after the active lifecycle operation has completed',
+      });
+    }
+  }
+
+  /**
+   * Invalidate callbacks and continuations belonging to one lifecycle attempt.
+   *
+   * @private
+   */
+  private invalidateProcessGeneration(generation: number): void {
+    if (generation === this.processGeneration) {
+      this.processGeneration++;
+    }
+  }
+
+  /**
    * Handle spawn errors (e.g., ENOENT when binary not found)
    *
    * @param error - Spawn error
+   * @param generation - Process attempt that emitted the error
    * @private
    */
-  private handleSpawnError(error: Error): void {
+  private handleSpawnError(error: Error, generation: number): void {
+    if (generation !== this.processGeneration) {
+      return;
+    }
     if (this.logManager) {
       this.logManager.write(`Spawn error: ${error.message}`, 'error').catch(() => void 0);
     }
@@ -710,12 +940,18 @@ export class LlamaServerManager extends ServerManager {
    *
    * @param code - Exit code
    * @param signal - Exit signal
+   * @param generation - Process attempt that emitted the exit
    * @private
    */
-  private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
+  private handleExit(code: number | null, signal: NodeJS.Signals | null, generation: number): void {
+    if (generation !== this.processGeneration) {
+      return;
+    }
+
     const wasRunning = this._status === 'running';
     const killedByWatchdog = this.watchdogKill;
     this.watchdogKill = false;
+    this.invalidateProcessGeneration(generation);
 
     // The watchdog must not keep polling a dead process
     this.teardownWatchdog();
@@ -726,6 +962,11 @@ export class LlamaServerManager extends ServerManager {
         .catch(() => void 0);
     }
 
+    // Clear dead-process state before synchronous lifecycle listeners run.
+    this._pid = undefined;
+    this._port = 0;
+    this._effectiveContextSize = undefined;
+
     // Update status
     if (wasRunning && ((code !== 0 && code !== null) || killedByWatchdog)) {
       // Unexpected exit (or watchdog-detected hang) = crash
@@ -735,10 +976,6 @@ export class LlamaServerManager extends ServerManager {
     } else {
       this.setStatus('stopped');
     }
-
-    // Cleanup
-    this._pid = undefined;
-    this._port = 0;
   }
 
   /**
@@ -784,12 +1021,26 @@ export class LlamaServerManager extends ServerManager {
       if (this._status !== 'crashed') {
         return;
       }
+      const cancellationEpoch = this.autoRestartCancellationEpoch;
       this.isAutoRestarting = true;
       this.start(this._config!)
         .then((info) => {
-          this.emitEvent('restarted', info);
+          if (
+            cancellationEpoch === this.autoRestartCancellationEpoch &&
+            this._status === 'running'
+          ) {
+            this.emitEvent('restarted', info);
+          }
         })
         .catch((error: unknown) => {
+          if (
+            cancellationEpoch !== this.autoRestartCancellationEpoch ||
+            (error instanceof ServerError &&
+              (error.details as Record<string, unknown>).startupCancelled === true)
+          ) {
+            return;
+          }
+
           // start() already reset status via handleStartupError; reflect the
           // crash-loop state and let the next crash (if any) consume budget
           this.setStatus('crashed');

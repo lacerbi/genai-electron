@@ -51,6 +51,8 @@ jest.unstable_mockModule('../../src/process/health-check.js', () => ({
   waitForHealthy: jest.fn(),
   isServerResponding: jest.fn(),
   normalizeHealthHost: jest.fn((host?: string) => host ?? '127.0.0.1'),
+  formatHttpHost: (host: string) =>
+    host.includes(':') && !host.startsWith('[') ? `[${host}]` : host,
 }));
 
 // Mock LogManager with parseEntry

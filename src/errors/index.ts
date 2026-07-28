@@ -32,6 +32,59 @@ export class GenaiElectronError extends Error {
 }
 
 /**
+ * Stage at which a context-capacity contract failed.
+ */
+export type ContextConstraintStage = 'validation' | 'sizing' | 'runtime';
+
+/**
+ * Stable reason values for ContextConstraintError.details.reason.
+ */
+export type ContextConstraintReason =
+  | 'invalid-minimum'
+  | 'invalid-maximum'
+  | 'exact-range-conflict'
+  | 'minimum-exceeds-maximum'
+  | 'unsafe-total-capacity'
+  | 'minimum-exceeds-native'
+  | 'model-context-unknown'
+  | 'fit-range-conflict'
+  | 'precomputed-context-out-of-range'
+  | 'runtime-capacity-unavailable'
+  | 'runtime-slots-mismatch'
+  | 'runtime-below-minimum'
+  | 'runtime-above-maximum';
+
+/**
+ * Structured context-capacity error details for programmatic handling.
+ */
+export interface ContextConstraintDetails {
+  reason: ContextConstraintReason;
+  stage: ContextConstraintStage;
+  contextSize?: number;
+  minimumContextSize?: number;
+  maximumContextSize?: number;
+  configuredContextSize?: number;
+  effectiveContextSize?: number;
+  nativeContextSize?: number;
+  parallelRequests?: number;
+  effectiveParallelRequests?: number;
+  suggestion?: string;
+  cause?: string;
+}
+
+/**
+ * Thrown when a context-capacity contract is invalid or cannot be verified.
+ */
+export class ContextConstraintError extends GenaiElectronError {
+  declare public readonly details: ContextConstraintDetails;
+
+  constructor(message: string, details: ContextConstraintDetails) {
+    super(`Context constraint error: ${message}`, 'CONTEXT_CONSTRAINT_ERROR', details);
+    this.name = 'ContextConstraintError';
+  }
+}
+
+/**
  * Thrown when a requested model is not found
  *
  * @example
@@ -67,7 +120,7 @@ export class DownloadError extends GenaiElectronError {
 }
 
 /**
- * Thrown when system resources are insufficient to perform an operation
+ * Structured details for resource-capacity failures.
  *
  * @example
  * ```typescript
@@ -81,15 +134,24 @@ export class DownloadError extends GenaiElectronError {
  * );
  * ```
  */
+export interface InsufficientResourcesDetails {
+  required: string;
+  available: string;
+  suggestion?: string;
+  minimumContextSize?: number;
+  maximumContextSize?: number;
+  configuredContextSize?: number;
+  maxFeasibleContextSize?: number;
+  parallelRequests?: number;
+}
+
+/**
+ * Thrown when system resources are insufficient to perform an operation.
+ */
 export class InsufficientResourcesError extends GenaiElectronError {
-  constructor(
-    message: string,
-    details: {
-      required: string;
-      available: string;
-      suggestion?: string;
-    }
-  ) {
+  declare public readonly details: InsufficientResourcesDetails;
+
+  constructor(message: string, details: InsufficientResourcesDetails) {
     super(message, 'INSUFFICIENT_RESOURCES', details);
     this.name = 'InsufficientResourcesError';
   }

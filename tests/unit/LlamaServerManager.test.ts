@@ -20,6 +20,21 @@ const originalFetch = global.fetch;
 const mockFetch = jest.fn();
 global.fetch = mockFetch as any;
 
+const propsResponse = (contextSize = 4096, totalSlots?: number) => ({
+  ok: true,
+  status: 200,
+  json: async () => ({
+    default_generation_settings: { n_ctx: contextSize },
+    ...(totalSlots === undefined ? {} : { total_slots: totalSlots }),
+  }),
+});
+
+const notFoundResponse = () => ({
+  ok: false,
+  status: 404,
+  json: async () => ({}),
+});
+
 // Mock ModelManager
 const mockModelManager = {
   getModelInfo: jest.fn(),
@@ -74,6 +89,8 @@ jest.unstable_mockModule('../../src/process/health-check.js', () => ({
   isServerResponding: mockIsServerResponding,
   normalizeHealthHost: (host?: string) =>
     host === undefined || host === '' || host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host,
+  formatHttpHost: (host: string) =>
+    host.includes(':') && !host.startsWith('[') ? `[${host}]` : host,
 }));
 
 // Mock port-utils (never bind real sockets in unit tests)
@@ -192,6 +209,9 @@ describe('LlamaServerManager', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockFetch.mockImplementation(async (url: unknown) =>
+      String(url).endsWith('/props') ? propsResponse() : notFoundResponse()
+    );
 
     // Ensure logManager.write always returns a Promise
     mockLogManager.write.mockImplementation(() => Promise.resolve());
@@ -454,6 +474,662 @@ describe('LlamaServerManager', () => {
     });
   });
 
+  describe('context capacity contract', () => {
+    const constrainedConfig: LlamaServerConfig = {
+      modelId: 'test-model',
+      port: 8080,
+      contextSize: 8192,
+      minimumContextSize: 4096,
+      maximumContextSize: 4096,
+      parallelRequests: 2,
+      occupancyCheck: 'off',
+    };
+
+    it('reports configured total and verified effective per-slot context', async () => {
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(4096, 2) : notFoundResponse()
+      );
+      const startedHandler = jest.fn();
+      llamaServer.on('started', startedHandler);
+
+      const info = await llamaServer.start(constrainedConfig);
+
+      expect(info).toMatchObject({
+        status: 'running',
+        configuredContextSize: 8192,
+        effectiveContextSize: 4096,
+      });
+      expect(llamaServer.getInfo()).toMatchObject({
+        configuredContextSize: 8192,
+        effectiveContextSize: 4096,
+      });
+      expect(startedHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          configuredContextSize: 8192,
+          effectiveContextSize: 4096,
+        })
+      );
+      expect(llamaServer.getConfig()).toMatchObject({
+        contextSize: 8192,
+        minimumContextSize: 4096,
+        maximumContextSize: 4096,
+        parallelRequests: 2,
+      });
+    });
+
+    it('queries /props after health while the server is still starting', async () => {
+      mockFetch.mockImplementation(async (url: unknown) => {
+        if (String(url).endsWith('/props')) {
+          expect(llamaServer.getStatus()).toBe('starting');
+          return propsResponse(4096, 2);
+        }
+        return notFoundResponse();
+      });
+
+      await llamaServer.start(constrainedConfig);
+
+      expect(mockWaitForHealthy.mock.invocationCallOrder[0]).toBeLessThan(
+        mockFetch.mock.invocationCallOrder[0]!
+      );
+    });
+
+    it('forwards unresolved ranges to sizing and validates the resolved placement', async () => {
+      mockSystemInfo.getOptimalConfig.mockResolvedValue({
+        threads: 7,
+        contextSize: 8192,
+        minimumContextSize: 4096,
+        maximumContextSize: 8192,
+        gpuLayers: 25,
+        parallelRequests: 2,
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+        flashAttention: 'on',
+        cpuMoe: true,
+      });
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(4096, 2) : notFoundResponse()
+      );
+
+      await llamaServer.start({
+        modelId: 'test-model',
+        port: 8080,
+        minimumContextSize: 4096,
+        maximumContextSize: 8192,
+        parallelRequests: 2,
+        occupancyCheck: 'off',
+      });
+
+      expect(mockSystemInfo.getOptimalConfig).toHaveBeenCalledWith(
+        mockModelInfo,
+        expect.objectContaining({
+          contextSize: undefined,
+          minimumContextSize: 4096,
+          maximumContextSize: 8192,
+          parallelRequests: 2,
+        })
+      );
+      expect(mockSystemInfo.canRunModel).toHaveBeenCalledWith(
+        mockModelInfo,
+        expect.objectContaining({
+          contextSize: 8192,
+          gpuLayers: 25,
+          cacheTypeK: 'q8_0',
+          cacheTypeV: 'q8_0',
+          cpuMoe: true,
+        })
+      );
+    });
+
+    it.each([
+      {
+        label: 'below its minimum',
+        runtimeContext: 2048,
+        expectedReason: 'runtime-below-minimum',
+      },
+      {
+        label: 'above its maximum',
+        runtimeContext: 8192,
+        expectedReason: 'runtime-above-maximum',
+      },
+    ])(
+      'kills the child and leaves clean stopped state when runtime context is $label',
+      async ({ runtimeContext, expectedReason }) => {
+        mockFetch.mockImplementation(async (url: unknown) =>
+          String(url).endsWith('/props') ? propsResponse(runtimeContext, 2) : notFoundResponse()
+        );
+        const startedHandler = jest.fn();
+        llamaServer.on('started', startedHandler);
+
+        await expect(llamaServer.start(constrainedConfig)).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: {
+            reason: expectedReason,
+            stage: 'runtime',
+            configuredContextSize: 8192,
+            effectiveContextSize: runtimeContext,
+            parallelRequests: 2,
+            effectiveParallelRequests: 2,
+          },
+        });
+
+        expect(mockProcessKill).toHaveBeenCalledWith(12345, 5000);
+        expect(startedHandler).not.toHaveBeenCalled();
+        expect(llamaServer.getInfo()).toMatchObject({
+          status: 'stopped',
+          port: 0,
+          configuredContextSize: 8192,
+          effectiveContextSize: undefined,
+        });
+        expect(llamaServer.getPid()).toBeUndefined();
+      }
+    );
+
+    it('fails exact-only startup when mandatory runtime capacity is unavailable', async () => {
+      mockFetch.mockImplementation(async () => notFoundResponse());
+      const startedHandler = jest.fn();
+      llamaServer.on('started', startedHandler);
+
+      await expect(
+        llamaServer.start({
+          ...mockConfig,
+          contextSize: 4096,
+          occupancyCheck: 'off',
+        })
+      ).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: {
+          reason: 'runtime-capacity-unavailable',
+          stage: 'runtime',
+        },
+      });
+
+      expect(mockProcessKill).toHaveBeenCalledWith(12345, 5000);
+      expect(startedHandler).not.toHaveBeenCalled();
+      expect(llamaServer.getStatus()).toBe('stopped');
+    });
+
+    it('fails unconstrained startup when mandatory runtime capacity is unavailable', async () => {
+      mockFetch.mockImplementation(async () => notFoundResponse());
+
+      await expect(
+        llamaServer.start({
+          ...mockConfig,
+          occupancyCheck: 'off',
+        })
+      ).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: {
+          reason: 'runtime-capacity-unavailable',
+          stage: 'runtime',
+        },
+      });
+
+      expect(mockProcessKill).toHaveBeenCalledWith(12345, 5000);
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'stopped',
+        port: 0,
+        effectiveContextSize: undefined,
+      });
+      expect(llamaServer.getPid()).toBeUndefined();
+    });
+
+    it('clears startup state even when terminating a failed verification rejects', async () => {
+      mockFetch.mockImplementation(async () => notFoundResponse());
+      mockProcessKill.mockRejectedValueOnce(new Error('kill failed'));
+
+      await expect(
+        llamaServer.start({
+          ...mockConfig,
+          occupancyCheck: 'off',
+        })
+      ).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: { reason: 'runtime-capacity-unavailable' },
+      });
+
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'stopped',
+        port: 0,
+        effectiveContextSize: undefined,
+      });
+      expect(llamaServer.getPid()).toBeUndefined();
+      expect(mockLogManagerWrite).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to terminate PID 12345'),
+        'error'
+      );
+    });
+
+    it('does not replace the last successful load time after verification fails', async () => {
+      const nowSpy = jest
+        .spyOn(Date, 'now')
+        .mockReturnValueOnce(1000)
+        .mockReturnValueOnce(1010)
+        .mockReturnValueOnce(2000)
+        .mockReturnValueOnce(2100);
+
+      try {
+        await llamaServer.start({ ...mockConfig, occupancyCheck: 'off' });
+        const successfulLoadTime = llamaServer.getInfo().loadTimeMs;
+        await llamaServer.stop();
+        mockFetch.mockImplementation(async () => notFoundResponse());
+
+        await expect(
+          llamaServer.start({ ...mockConfig, occupancyCheck: 'off' })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+        });
+
+        expect(successfulLoadTime).toBe(10);
+        expect(llamaServer.getInfo().loadTimeMs).toBe(successfulLoadTime);
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
+    it('does not become running when stop completes during /props verification', async () => {
+      let resolveProps!: (response: ReturnType<typeof propsResponse>) => void;
+      let markPropsRequested!: () => void;
+      const propsRequested = new Promise<void>((resolve) => {
+        markPropsRequested = resolve;
+      });
+      const pendingProps = new Promise<ReturnType<typeof propsResponse>>((resolve) => {
+        resolveProps = resolve;
+      });
+      mockFetch.mockImplementation(async (url: unknown) => {
+        if (String(url).endsWith('/props')) {
+          markPropsRequested();
+          return pendingProps;
+        }
+        return notFoundResponse();
+      });
+      const startedHandler = jest.fn();
+      llamaServer.on('started', startedHandler);
+
+      const startPromise = llamaServer.start(constrainedConfig);
+      const rejectedStart = expect(startPromise).rejects.toThrow(/stopped or was replaced/);
+      await propsRequested;
+      await llamaServer.stop();
+      resolveProps(propsResponse(4096, 2));
+      await rejectedStart;
+
+      expect(startedHandler).not.toHaveBeenCalled();
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'stopped',
+        port: 0,
+        effectiveContextSize: undefined,
+      });
+      expect(llamaServer.getPid()).toBeUndefined();
+    });
+
+    it('does not become running when the child exits during /props verification', async () => {
+      let resolveProps!: (response: ReturnType<typeof propsResponse>) => void;
+      let markPropsRequested!: () => void;
+      const propsRequested = new Promise<void>((resolve) => {
+        markPropsRequested = resolve;
+      });
+      const pendingProps = new Promise<ReturnType<typeof propsResponse>>((resolve) => {
+        resolveProps = resolve;
+      });
+      mockFetch.mockImplementation(async (url: unknown) => {
+        if (String(url).endsWith('/props')) {
+          markPropsRequested();
+          return pendingProps;
+        }
+        return notFoundResponse();
+      });
+      const startedHandler = jest.fn();
+      llamaServer.on('started', startedHandler);
+
+      const startPromise = llamaServer.start(constrainedConfig);
+      const rejectedStart = expect(startPromise).rejects.toThrow(/stopped or was replaced/);
+      await propsRequested;
+      mockProcess.emit('exit', 1, null);
+      resolveProps(propsResponse(4096, 2));
+      await rejectedStart;
+
+      expect(startedHandler).not.toHaveBeenCalled();
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'stopped',
+        port: 0,
+        effectiveContextSize: undefined,
+      });
+      expect(llamaServer.getPid()).toBeUndefined();
+    });
+
+    it('does not spawn when stop completes during late auto-configuration', async () => {
+      let resolveConfig!: (config: Record<string, unknown>) => void;
+      let markConfigRequested!: () => void;
+      const configRequested = new Promise<void>((resolve) => {
+        markConfigRequested = resolve;
+      });
+      const pendingConfig = new Promise<Record<string, unknown>>((resolve) => {
+        resolveConfig = resolve;
+      });
+      mockSystemInfo.getOptimalConfig.mockImplementationOnce(() => {
+        markConfigRequested();
+        return pendingConfig;
+      });
+
+      const startPromise = llamaServer.start({
+        ...mockConfig,
+        occupancyCheck: 'off',
+      });
+      const rejectedStart = expect(startPromise).rejects.toThrow(/stopped or was replaced/);
+      await configRequested;
+      await llamaServer.stop();
+      resolveConfig({
+        threads: 7,
+        contextSize: 4096,
+        gpuLayers: 35,
+        parallelRequests: 1,
+      });
+      await rejectedStart;
+
+      expect(mockProcessSpawn).not.toHaveBeenCalled();
+      expect(llamaServer.getStatus()).toBe('stopped');
+    });
+
+    it('does not emit started when stop completes during the final startup log', async () => {
+      let resolveFinalLog!: () => void;
+      let markFinalLogRequested!: () => void;
+      const finalLogRequested = new Promise<void>((resolve) => {
+        markFinalLogRequested = resolve;
+      });
+      const pendingFinalLog = new Promise<void>((resolve) => {
+        resolveFinalLog = resolve;
+      });
+      mockLogManagerWrite.mockImplementation((message: string) => {
+        if (message.startsWith('Server is running and healthy')) {
+          markFinalLogRequested();
+          return pendingFinalLog;
+        }
+        return Promise.resolve();
+      });
+      const startedHandler = jest.fn();
+      llamaServer.on('started', startedHandler);
+
+      const startPromise = llamaServer.start(constrainedConfig);
+      const rejectedStart = expect(startPromise).rejects.toThrow(/stopped or was replaced/);
+      await finalLogRequested;
+      await llamaServer.stop();
+      resolveFinalLog();
+      await rejectedStart;
+
+      expect(startedHandler).not.toHaveBeenCalled();
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'stopped',
+        port: 0,
+        effectiveContextSize: undefined,
+      });
+    });
+
+    it('cleans up without starting the watchdog when the final startup log rejects', async () => {
+      mockLogManagerWrite.mockImplementation((message: string) =>
+        message.startsWith('Server is running and healthy')
+          ? Promise.reject(new Error('final log failed'))
+          : Promise.resolve()
+      );
+      const startedHandler = jest.fn();
+      llamaServer.on('started', startedHandler);
+
+      await expect(
+        llamaServer.start({
+          ...constrainedConfig,
+          healthCheckInterval: 1000,
+        })
+      ).rejects.toThrow('final log failed');
+
+      expect(startedHandler).not.toHaveBeenCalled();
+      expect(mockCheckHealth).not.toHaveBeenCalled();
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'stopped',
+        port: 0,
+        effectiveContextSize: undefined,
+      });
+      expect(llamaServer.getPid()).toBeUndefined();
+    });
+
+    it('ignores a late exit callback from an older process attempt', async () => {
+      const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
+      let nextPid = 12345;
+      mockProcessSpawn.mockImplementation((_path, _args, callbacks) => {
+        exitCallbacks.push(callbacks.onExit);
+        return { pid: nextPid++ };
+      });
+
+      await llamaServer.start(constrainedConfig);
+      await llamaServer.stop();
+      await llamaServer.start(constrainedConfig);
+      exitCallbacks[0]!(1, null);
+
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'running',
+        pid: 12346,
+        port: 8080,
+        effectiveContextSize: 4096,
+      });
+      expect(llamaServer.getPid()).toBe(12346);
+    });
+
+    it('reports an exact-only runtime difference without rejecting the legacy pin', async () => {
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(2048) : notFoundResponse()
+      );
+
+      const info = await llamaServer.start({
+        ...mockConfig,
+        contextSize: 4096,
+        occupancyCheck: 'off',
+      });
+
+      expect(info).toMatchObject({
+        status: 'running',
+        configuredContextSize: 4096,
+        effectiveContextSize: 2048,
+      });
+    });
+
+    it('rejects a runtime slot-count mismatch and clears verified state', async () => {
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(4096, 1) : notFoundResponse()
+      );
+
+      await expect(llamaServer.start(constrainedConfig)).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: {
+          reason: 'runtime-slots-mismatch',
+          stage: 'runtime',
+          parallelRequests: 2,
+          effectiveParallelRequests: 1,
+        },
+      });
+
+      expect(llamaServer.getInfo().effectiveContextSize).toBeUndefined();
+      expect(llamaServer.getStatus()).toBe('stopped');
+    });
+
+    it('clears effective context on stop', async () => {
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(4096, 2) : notFoundResponse()
+      );
+      await llamaServer.start(constrainedConfig);
+
+      await llamaServer.stop();
+
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'stopped',
+        pid: undefined,
+        port: 0,
+        effectiveContextSize: undefined,
+      });
+      expect(llamaServer.getPid()).toBeUndefined();
+    });
+
+    it('preserves and rechecks the retained range on manual restart', async () => {
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(4096, 2) : notFoundResponse()
+      );
+      await llamaServer.start(constrainedConfig);
+
+      const info = await llamaServer.restart();
+
+      expect(info).toMatchObject({
+        status: 'running',
+        configuredContextSize: 8192,
+        effectiveContextSize: 4096,
+      });
+      expect(llamaServer.getConfig()).toMatchObject({
+        minimumContextSize: 4096,
+        maximumContextSize: 4096,
+      });
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('accepts a constrained getOptimalConfig result by direct spread', async () => {
+      const recommendation = {
+        threads: 7,
+        contextSize: 8192,
+        minimumContextSize: 4096,
+        maximumContextSize: 4096,
+        gpuLayers: 25,
+        parallelRequests: 2,
+        cacheTypeK: 'q8_0' as const,
+        cacheTypeV: 'q8_0' as const,
+        flashAttention: 'on' as const,
+      };
+      mockSystemInfo.getOptimalConfig.mockResolvedValue(recommendation);
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(4096, 2) : notFoundResponse()
+      );
+
+      const optimized = await mockSystemInfo.getOptimalConfig(mockModelInfo, {
+        minimumContextSize: 4096,
+        maximumContextSize: 4096,
+        parallelRequests: 2,
+      });
+      const info = await llamaServer.start({
+        modelId: 'test-model',
+        port: 8080,
+        occupancyCheck: 'off',
+        ...optimized,
+      });
+
+      expect(info).toMatchObject({
+        configuredContextSize: 8192,
+        effectiveContextSize: 4096,
+      });
+      expect(llamaServer.getConfig()).toMatchObject(recommendation);
+    });
+
+    it('uses the resolved auto port and normalized wildcard host for /props', async () => {
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(4096, 2) : notFoundResponse()
+      );
+
+      await llamaServer.start({
+        ...constrainedConfig,
+        port: 'auto',
+        host: '0.0.0.0',
+      });
+
+      expect(mockFetch).toHaveBeenCalledWith('http://127.0.0.1:49152/props', expect.any(Object));
+    });
+
+    it('uses IPv6-safe URLs for a loopback host', async () => {
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(4096, 2) : notFoundResponse()
+      );
+
+      await llamaServer.start({
+        ...constrainedConfig,
+        host: '::1',
+      });
+
+      expect(mockWaitForHealthy).toHaveBeenCalledWith(
+        8080,
+        expect.any(Number),
+        undefined,
+        undefined,
+        '::1'
+      );
+      expect(mockFetch).toHaveBeenCalledWith('http://[::1]:8080/props', expect.any(Object));
+    });
+
+    it('rejects invalid ranges before model or binary work', async () => {
+      await expect(
+        llamaServer.start({
+          ...mockConfig,
+          minimumContextSize: 0,
+        })
+      ).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: { reason: 'invalid-minimum', stage: 'validation' },
+      });
+
+      expect(mockModelManager.getModelInfo).not.toHaveBeenCalled();
+      expect(mockEnsureLlamaBinary).not.toHaveBeenCalled();
+      expect(mockFindFreePort).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(llamaServer.getStatus()).toBe('stopped');
+    });
+
+    it("requires a concrete contextSize when fit: 'on' retains a range", async () => {
+      await expect(
+        llamaServer.start({
+          ...mockConfig,
+          minimumContextSize: 4096,
+          fit: 'on',
+        })
+      ).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: { reason: 'fit-range-conflict', stage: 'validation' },
+      });
+
+      expect(mockModelManager.getModelInfo).not.toHaveBeenCalled();
+      expect(mockEnsureLlamaBinary).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects a precomputed total context outside its retained per-slot range', async () => {
+      await expect(
+        llamaServer.start({
+          ...mockConfig,
+          contextSize: 4096,
+          minimumContextSize: 4096,
+          parallelRequests: 2,
+        })
+      ).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: {
+          reason: 'precomputed-context-out-of-range',
+          stage: 'validation',
+          configuredContextSize: 4096,
+          effectiveContextSize: 2048,
+        },
+      });
+
+      expect(mockModelManager.getModelInfo).not.toHaveBeenCalled();
+      expect(mockEnsureLlamaBinary).not.toHaveBeenCalled();
+    });
+
+    it('rejects an unverifiable high minimum before binary or port checks', async () => {
+      await expect(
+        llamaServer.start({
+          ...mockConfig,
+          minimumContextSize: 8192,
+        })
+      ).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: { reason: 'model-context-unknown', stage: 'sizing' },
+      });
+
+      expect(mockEnsureLlamaBinary).not.toHaveBeenCalled();
+      expect(mockIsPortBindable).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+      expect(mockProcessSpawn).not.toHaveBeenCalled();
+    });
+  });
+
   describe('command-line flag emission', () => {
     const spawnArgs = (): string[] => mockProcessSpawn.mock.calls[0][1] as string[];
 
@@ -629,6 +1305,8 @@ describe('LlamaServerManager', () => {
         port: 8080,
         threads: 4,
         contextSize: 2048,
+        minimumContextSize: 1024,
+        maximumContextSize: 4096,
         gpuLayers: 10,
         parallelRequests: 1,
         flashAttention: 'on',
@@ -675,6 +1353,18 @@ describe('LlamaServerManager', () => {
       );
     });
 
+    it('returns to stopped when automatic port selection fails and allows retry', async () => {
+      mockFindFreePort.mockRejectedValueOnce(new Error('no free port'));
+
+      await expect(llamaServer.start({ ...mockConfig, port: 'auto' })).rejects.toThrow(
+        'no free port'
+      );
+      expect(llamaServer.getStatus()).toBe('stopped');
+
+      const info = await llamaServer.start({ ...mockConfig, port: 'auto' });
+      expect(info).toMatchObject({ status: 'running', port: 49152 });
+    });
+
     it('should record loadTimeMs on successful start', async () => {
       const info = await llamaServer.start(mockConfig);
 
@@ -686,9 +1376,16 @@ describe('LlamaServerManager', () => {
       it('should warn and proceed when another llama-server is detected (default)', async () => {
         const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
         // A llama-server on 8082: /health and /props both respond ok
-        mockFetch.mockImplementation(async (url: unknown) => ({
-          ok: String(url).includes(':8082/'),
-        }));
+        mockFetch.mockImplementation(async (url: unknown) => {
+          const requestUrl = String(url);
+          if (requestUrl === 'http://127.0.0.1:8080/props') {
+            return propsResponse();
+          }
+          return {
+            ...notFoundResponse(),
+            ok: requestUrl.includes(':8082/'),
+          };
+        });
 
         const info = await llamaServer.start(mockConfig);
 
@@ -698,9 +1395,16 @@ describe('LlamaServerManager', () => {
       });
 
       it('should throw in strict mode', async () => {
-        mockFetch.mockImplementation(async (url: unknown) => ({
-          ok: String(url).includes(':8082/'),
-        }));
+        mockFetch.mockImplementation(async (url: unknown) => {
+          const requestUrl = String(url);
+          if (requestUrl === 'http://127.0.0.1:8080/props') {
+            return propsResponse();
+          }
+          return {
+            ...notFoundResponse(),
+            ok: requestUrl.includes(':8082/'),
+          };
+        });
 
         await expect(
           llamaServer.start({ ...mockConfig, occupancyCheck: 'strict' })
@@ -710,9 +1414,16 @@ describe('LlamaServerManager', () => {
       it('should not flag a diffusion wrapper (health ok but /props 404)', async () => {
         const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
         // Diffusion wrapper on 8081: /health ok, /props not found
-        mockFetch.mockImplementation(async (url: unknown) => ({
-          ok: String(url).includes(':8081/health'),
-        }));
+        mockFetch.mockImplementation(async (url: unknown) => {
+          const requestUrl = String(url);
+          if (requestUrl === 'http://127.0.0.1:8080/props') {
+            return propsResponse();
+          }
+          return {
+            ...notFoundResponse(),
+            ok: requestUrl.includes(':8081/health'),
+          };
+        });
 
         await llamaServer.start(mockConfig);
 
@@ -721,12 +1432,11 @@ describe('LlamaServerManager', () => {
       });
 
       it('should skip probing when occupancyCheck is off', async () => {
-        mockFetch.mockImplementation(async () => ({ ok: true }));
-
         const info = await llamaServer.start({ ...mockConfig, occupancyCheck: 'off' });
 
         expect(info.status).toBe('running');
-        expect(mockFetch).not.toHaveBeenCalled();
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+        expect(mockFetch).toHaveBeenCalledWith('http://127.0.0.1:8080/props', expect.any(Object));
       });
     });
 
@@ -737,7 +1447,18 @@ describe('LlamaServerManager', () => {
 
       it('should auto-restart after a crash when enabled', async () => {
         jest.useFakeTimers();
-        await llamaServer.start({ ...mockConfig, autoRestart: true, maxRestarts: 2 });
+        mockFetch.mockImplementation(async (url: unknown) =>
+          String(url).endsWith('/props') ? propsResponse(4096, 2) : notFoundResponse()
+        );
+        await llamaServer.start({
+          ...mockConfig,
+          contextSize: 8192,
+          minimumContextSize: 4096,
+          maximumContextSize: 4096,
+          parallelRequests: 2,
+          autoRestart: true,
+          maxRestarts: 2,
+        });
 
         const crashedHandler = jest.fn();
         const restartedHandler = jest.fn();
@@ -748,6 +1469,7 @@ describe('LlamaServerManager', () => {
 
         expect(crashedHandler).toHaveBeenCalled();
         expect(llamaServer.getStatus()).toBe('crashed');
+        expect(llamaServer.getInfo().effectiveContextSize).toBeUndefined();
         expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
 
         // Backoff: first attempt fires after 1s
@@ -755,6 +1477,153 @@ describe('LlamaServerManager', () => {
 
         expect(restartedHandler).toHaveBeenCalled();
         expect(llamaServer.getStatus()).toBe('running');
+        expect(llamaServer.getInfo()).toMatchObject({
+          configuredContextSize: 8192,
+          effectiveContextSize: 4096,
+        });
+        expect(llamaServer.getConfig()).toMatchObject({
+          minimumContextSize: 4096,
+          maximumContextSize: 4096,
+        });
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(2);
+      });
+
+      it('does not resume auto-restart after stop cancels an in-flight attempt', async () => {
+        jest.useFakeTimers();
+        let propsCallCount = 0;
+        let resolveRestartProps!: (response: ReturnType<typeof propsResponse>) => void;
+        let markRestartPropsRequested!: () => void;
+        const restartPropsRequested = new Promise<void>((resolve) => {
+          markRestartPropsRequested = resolve;
+        });
+        const pendingRestartProps = new Promise<ReturnType<typeof propsResponse>>((resolve) => {
+          resolveRestartProps = resolve;
+        });
+        mockFetch.mockImplementation(async (url: unknown) => {
+          if (!String(url).endsWith('/props')) {
+            return notFoundResponse();
+          }
+          propsCallCount++;
+          if (propsCallCount === 1) {
+            return propsResponse(4096);
+          }
+          markRestartPropsRequested();
+          return pendingRestartProps;
+        });
+
+        await llamaServer.start({
+          ...mockConfig,
+          occupancyCheck: 'off',
+          autoRestart: true,
+          maxRestarts: 3,
+        });
+        mockProcess.emit('exit', 1, null);
+
+        await jest.advanceTimersByTimeAsync(1000);
+        await restartPropsRequested;
+        await llamaServer.stop();
+        resolveRestartProps(propsResponse(4096));
+        await jest.advanceTimersByTimeAsync(60000);
+
+        expect(llamaServer.getStatus()).toBe('stopped');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(2);
+      });
+
+      it('retries when an auto-restart child exits during startup', async () => {
+        jest.useFakeTimers();
+        let propsCallCount = 0;
+        let resolveSecondProps!: (response: ReturnType<typeof propsResponse>) => void;
+        let markSecondPropsRequested!: () => void;
+        const secondPropsRequested = new Promise<void>((resolve) => {
+          markSecondPropsRequested = resolve;
+        });
+        const pendingSecondProps = new Promise<ReturnType<typeof propsResponse>>((resolve) => {
+          resolveSecondProps = resolve;
+        });
+        mockFetch.mockImplementation(async (url: unknown) => {
+          if (!String(url).endsWith('/props')) {
+            return notFoundResponse();
+          }
+          propsCallCount++;
+          if (propsCallCount === 2) {
+            markSecondPropsRequested();
+            return pendingSecondProps;
+          }
+          return propsResponse(4096);
+        });
+
+        await llamaServer.start({
+          ...mockConfig,
+          occupancyCheck: 'off',
+          autoRestart: true,
+          maxRestarts: 3,
+        });
+        mockProcess.emit('exit', 1, null);
+
+        await jest.advanceTimersByTimeAsync(1000);
+        await secondPropsRequested;
+        mockProcess.emit('exit', 1, null);
+        resolveSecondProps(propsResponse(4096));
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(llamaServer.getStatus()).toBe('crashed');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(2);
+
+        await jest.advanceTimersByTimeAsync(2000);
+
+        expect(llamaServer.getStatus()).toBe('running');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(3);
+      });
+
+      it('honors stop from the stopped-status event after a restart child exits', async () => {
+        jest.useFakeTimers();
+        let propsCallCount = 0;
+        let resolveSecondProps!: (response: ReturnType<typeof propsResponse>) => void;
+        let markSecondPropsRequested!: () => void;
+        const secondPropsRequested = new Promise<void>((resolve) => {
+          markSecondPropsRequested = resolve;
+        });
+        const pendingSecondProps = new Promise<ReturnType<typeof propsResponse>>((resolve) => {
+          resolveSecondProps = resolve;
+        });
+        mockFetch.mockImplementation(async (url: unknown) => {
+          if (!String(url).endsWith('/props')) {
+            return notFoundResponse();
+          }
+          propsCallCount++;
+          if (propsCallCount === 2) {
+            markSecondPropsRequested();
+            return pendingSecondProps;
+          }
+          return propsResponse(4096);
+        });
+
+        await llamaServer.start({
+          ...mockConfig,
+          occupancyCheck: 'off',
+          autoRestart: true,
+          maxRestarts: 3,
+        });
+        let stopPromise: Promise<void> | undefined;
+        llamaServer.on('status', (status) => {
+          if (
+            status === 'stopped' &&
+            mockProcessSpawn.mock.calls.length === 2 &&
+            stopPromise === undefined
+          ) {
+            stopPromise = llamaServer.stop();
+          }
+        });
+        mockProcess.emit('exit', 1, null);
+
+        await jest.advanceTimersByTimeAsync(1000);
+        await secondPropsRequested;
+        mockProcess.emit('exit', 1, null);
+        resolveSecondProps(propsResponse(4096));
+        await jest.advanceTimersByTimeAsync(60000);
+        await stopPromise;
+
+        expect(llamaServer.getStatus()).toBe('stopped');
         expect(mockProcessSpawn).toHaveBeenCalledTimes(2);
       });
 
@@ -874,6 +1743,44 @@ describe('LlamaServerManager', () => {
       expect(stoppedHandler).toHaveBeenCalled();
     });
 
+    it('should clear verified context when stopping fails', async () => {
+      mockProcessKill.mockRejectedValueOnce(new Error('kill failed'));
+
+      await expect(llamaServer.stop()).rejects.toThrow('kill failed');
+
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'stopped',
+        pid: undefined,
+        port: 0,
+        effectiveContextSize: undefined,
+      });
+      expect(llamaServer.getPid()).toBeUndefined();
+    });
+
+    it('rejects a new start while stop is still in progress', async () => {
+      let resolveKill!: () => void;
+      let markKillRequested!: () => void;
+      const killRequested = new Promise<void>((resolve) => {
+        markKillRequested = resolve;
+      });
+      const pendingKill = new Promise<void>((resolve) => {
+        resolveKill = resolve;
+      });
+      mockProcessKill.mockImplementationOnce(() => {
+        markKillRequested();
+        return pendingKill;
+      });
+
+      const stopPromise = llamaServer.stop();
+      await killRequested;
+      await expect(llamaServer.start(mockConfig)).rejects.toThrow('already stopping');
+      resolveKill();
+      await stopPromise;
+
+      expect(llamaServer.getStatus()).toBe('stopped');
+      expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
+    });
+
     it('should handle already stopped server', async () => {
       await llamaServer.stop();
 
@@ -977,6 +1884,23 @@ describe('LlamaServerManager', () => {
   });
 
   describe('Process crash handling', () => {
+    it('clears dead-process state before notifying crash listeners', async () => {
+      await llamaServer.start(mockConfig);
+      let infoAtCrash: ReturnType<LlamaServerManager['getInfo']> | undefined;
+      llamaServer.on('crashed', () => {
+        infoAtCrash = llamaServer.getInfo();
+      });
+
+      mockProcess.emit('exit', 1, null);
+
+      expect(infoAtCrash).toMatchObject({
+        status: 'crashed',
+        pid: undefined,
+        port: 0,
+        effectiveContextSize: undefined,
+      });
+    });
+
     it('should emit crashed event on unexpected exit', async () => {
       const crashedHandler = jest.fn();
       llamaServer.on('crashed', crashedHandler);

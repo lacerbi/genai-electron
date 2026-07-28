@@ -44,8 +44,32 @@ export interface ServerConfig {
   /** Number of CPU threads (auto-detected if not specified) */
   threads?: number;
 
-  /** Context size in tokens */
+  /**
+   * Exact total llama-server context allocation (`-c`) in tokens.
+   *
+   * In `SystemInfo.getOptimalConfig()` hints this is mutually exclusive with
+   * minimumContextSize/maximumContextSize. `LlamaServerManager.start()` also
+   * accepts a concrete contextSize together with a range when the value came
+   * from a precomputed constrained recommendation; the range is then retained
+   * as the runtime contract verified against `/props`.
+   */
   contextSize?: number;
+
+  /**
+   * Smallest acceptable effective context per parallel request slot.
+   *
+   * The optimizer may return a larger value. With N parallel request slots,
+   * genai-electron budgets at least `minimumContextSize * N` total `-c` tokens.
+   */
+  minimumContextSize?: number;
+
+  /**
+   * Largest useful effective context per parallel request slot.
+   *
+   * The optimizer may return a smaller value. This prevents allocating KV
+   * cache that the application will never use.
+   */
+  maximumContextSize?: number;
 
   /** Number of GPU layers to offload (auto-detected if not specified) */
   gpuLayers?: number;
@@ -112,6 +136,18 @@ export interface ServerInfo {
    * (llama-server only; undefined before the first successful start)
    */
   loadTimeMs?: number;
+
+  /**
+   * Total context allocation selected for the llama-server `-c` argument.
+   * Undefined when llama-server fitting owns context selection.
+   */
+  configuredContextSize?: number;
+
+  /**
+   * Effective per-slot context reported by the running llama-server `/props`.
+   * Available after every successful llama-server start.
+   */
+  effectiveContextSize?: number;
 }
 
 /**
@@ -230,16 +266,20 @@ export interface LlamaServerConfig extends ServerConfig {
 }
 
 /**
- * Hints for SystemInfo.getOptimalConfig(): fields the caller has already
- * pinned. Pinned values are respected verbatim and inform the sizing of the
- * remaining dimensions (e.g. a pinned contextSize shapes the KV reserve used
- * for GPU-layer packing; explicit cache types or flashAttention: 'off'
- * suppress automatic KV quantization).
+ * Hints for SystemInfo.getOptimalConfig().
+ *
+ * `contextSize` is an exact pin and is mutually exclusive with
+ * `minimumContextSize` / `maximumContextSize`. A range constrains effective
+ * per-slot capacity while allowing the optimizer to select a larger/smaller
+ * total context and adjust offload placement. Other pinned values are
+ * respected verbatim and inform the remaining dimensions.
  */
 export type OptimalConfigHints = Partial<
   Pick<
     LlamaServerConfig,
     | 'contextSize'
+    | 'minimumContextSize'
+    | 'maximumContextSize'
     | 'gpuLayers'
     | 'parallelRequests'
     | 'flashAttention'

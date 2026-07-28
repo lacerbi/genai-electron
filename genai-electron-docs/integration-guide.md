@@ -159,6 +159,7 @@ ipcMain.handle('server:start', async (_event, config) => {
 
 | Error Class | Code | Title | Remediation Example |
 |-------------|------|-------|---------------------|
+| ContextConstraintError | CONTEXT_CONSTRAINT_ERROR | Context Capacity Requirement Not Met | Adjust the range/slots, refresh model metadata, or inspect `/props` |
 | ModelNotFoundError | MODEL_NOT_FOUND | Model Not Found | Check that the model ID is correct... |
 | DownloadError | DOWNLOAD_FAILED | Download Failed | Check your internet connection... |
 | InsufficientResourcesError | INSUFFICIENT_RESOURCES | Not Enough Resources | Try closing other applications... |
@@ -169,6 +170,40 @@ ipcMain.handle('server:start', async (_event, config) => {
 | BinaryError | BINARY_ERROR | Binary Error | Try restarting to trigger fresh download... |
 | GenaiElectronError | (varies) | Operation Failed | (from error details) |
 | Error | UNKNOWN_ERROR | Unknown Error | Please try again... |
+
+For programmatic capacity handling, inspect the stable typed `details.reason` instead of parsing
+messages:
+
+```typescript
+import {
+  ContextConstraintError,
+  InsufficientResourcesError,
+  llamaServer
+} from 'genai-electron';
+
+try {
+  const info = await llamaServer.start(config);
+  console.log('Effective context per slot:', info.effectiveContextSize);
+} catch (error) {
+  if (error instanceof ContextConstraintError) {
+    const capacityFailure = {
+      reason: error.details.reason,
+      stage: error.details.stage,
+      remediation: error.details.suggestion
+    };
+    console.error('Context capacity failure:', capacityFailure);
+  } else if (error instanceof InsufficientResourcesError) {
+    console.error('Server resource failure:', error.details);
+  } else {
+    throw error;
+  }
+}
+```
+
+`runtime-capacity-unavailable` means the mandatory post-health `/props` contract could not be
+read. `runtime-below-minimum` and `runtime-above-maximum` mean the child was stopped before the
+manager entered `running`. `minimum-exceeds-native` and `model-context-unknown` are model metadata
+problems; `INSUFFICIENT_RESOURCES` means the range itself is valid but no permitted placement fits.
 
 **Benefits:**
 - Eliminates brittle substring matching on error messages

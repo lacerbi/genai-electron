@@ -21,6 +21,15 @@ export interface HealthCheckResponse {
 }
 
 /**
+ * Format a hostname for interpolation into an HTTP URL.
+ *
+ * IPv6 literals require brackets, while DNS names and IPv4 addresses do not.
+ */
+export function formatHttpHost(host: string): string {
+  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+}
+
+/**
  * Check server health at the given port
  *
  * Makes a GET request to http://127.0.0.1:{port}/health and parses the response.
@@ -48,7 +57,7 @@ export async function checkHealth(
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const response = await fetch(`http://${host}:${port}/health`, {
+    const response = await fetch(`http://${formatHttpHost(host)}:${port}/health`, {
       signal: controller.signal,
       headers: {
         Accept: 'application/json',
@@ -199,7 +208,7 @@ export async function isServerResponding(
   const timeoutId = setTimeout(() => controller.abort(), timeout);
 
   try {
-    const response = await fetch(`http://${host}:${port}/health`, {
+    const response = await fetch(`http://${formatHttpHost(host)}:${port}/health`, {
       signal: controller.signal,
     });
     clearTimeout(timeoutId);

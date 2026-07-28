@@ -271,6 +271,103 @@ describe('SystemInfo', () => {
       expect(result.possible).toBeDefined();
       expect(typeof result.possible).toBe('boolean');
     });
+
+    it('validates a resolved GPU/q8 placement that the unresolved legacy gate rejects', async () => {
+      const model = {
+        id: 'resolved-model',
+        name: 'Resolved Model',
+        type: 'llm' as const,
+        size: 10 * 1024 ** 3,
+        path: '/test/resolved.gguf',
+        downloadedAt: new Date().toISOString(),
+        source: { type: 'url' as const, url: 'http://test.com' },
+        ggufMetadata: {
+          architecture: 'qwen3',
+          block_count: 48,
+          attention_head_count: 32,
+          attention_head_count_kv: 8,
+          attention_key_length: 128,
+          context_length: 131072,
+        },
+      };
+      jest.spyOn(systemInfo, 'detect').mockResolvedValue({
+        cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+        memory: { total: 16 * 1024 ** 3, available: 8 * 1024 ** 3, used: 8 * 1024 ** 3 },
+        gpu: {
+          available: true,
+          type: 'nvidia',
+          vram: 10 * 1024 ** 3,
+          vramAvailable: 9.28 * 1024 ** 3,
+        },
+        platform: 'linux',
+        recommendations: {
+          maxModelSize: '13B',
+          recommendedQuantization: ['Q4_K_M'],
+          threads: 7,
+          gpuAcceleration: true,
+        },
+        detectedAt: new Date().toISOString(),
+      });
+
+      const unresolved = await systemInfo.canRunModel(model);
+      const resolved = await systemInfo.canRunModel(model, {
+        contextSize: 8192,
+        gpuLayers: 33,
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+      });
+
+      expect(unresolved.possible).toBe(false);
+      expect(resolved).toEqual({ possible: true });
+    });
+
+    it('rejects a resolved placement whose GPU share exceeds raw VRAM', async () => {
+      const model = {
+        id: 'overcommitted-model',
+        name: 'Overcommitted Model',
+        type: 'llm' as const,
+        size: 10 * 1024 ** 3,
+        path: '/test/overcommitted.gguf',
+        downloadedAt: new Date().toISOString(),
+        source: { type: 'url' as const, url: 'http://test.com' },
+        ggufMetadata: {
+          architecture: 'qwen3',
+          block_count: 48,
+          attention_head_count: 32,
+          attention_head_count_kv: 8,
+          attention_key_length: 128,
+          context_length: 131072,
+        },
+      };
+      jest.spyOn(systemInfo, 'detect').mockResolvedValue({
+        cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+        memory: { total: 16 * 1024 ** 3, available: 8 * 1024 ** 3, used: 8 * 1024 ** 3 },
+        gpu: {
+          available: true,
+          type: 'nvidia',
+          vram: 10 * 1024 ** 3,
+          vramAvailable: 9.28 * 1024 ** 3,
+        },
+        platform: 'linux',
+        recommendations: {
+          maxModelSize: '13B',
+          recommendedQuantization: ['Q4_K_M'],
+          threads: 7,
+          gpuAcceleration: true,
+        },
+        detectedAt: new Date().toISOString(),
+      });
+
+      const resolved = await systemInfo.canRunModel(model, {
+        contextSize: 65536,
+        gpuLayers: 48,
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+      });
+
+      expect(resolved.possible).toBe(false);
+      expect(resolved.reason).toContain('VRAM');
+    });
   });
 
   describe('canRunModel() — MoE', () => {
@@ -669,6 +766,67 @@ describe('SystemInfo', () => {
         expect(config.gpuLayers!).toBeLessThan(30);
         expect(config.contextSize!).toBeGreaterThanOrEqual(4096);
       });
+
+      it('keeps the automatic MoE tier while applying a maximum', async () => {
+        mockTotalmem.mockReturnValue(64 * 1024 ** 3);
+        mockFreemem.mockReturnValue(24 * 1024 ** 3);
+
+        const config = await systemInfo.getOptimalConfig(makeMoE(), {
+          maximumContextSize: 32768,
+        });
+
+        expect(config).toMatchObject({
+          contextSize: 32768,
+          maximumContextSize: 32768,
+          gpuLayers: 30,
+          cpuMoe: true,
+        });
+      });
+
+      it('re-optimizes a hinted cpuMoe plan and retains the hint in the result', async () => {
+        mockTotalmem.mockReturnValue(64 * 1024 ** 3);
+        mockFreemem.mockReturnValue(24 * 1024 ** 3);
+        const baseline = await systemInfo.getOptimalConfig(makeMoE(), {
+          cpuMoe: true,
+          gpuLayers: 30,
+        });
+        const minimumContextSize = baseline.contextSize! + 1;
+
+        const constrained = await systemInfo.getOptimalConfig(makeMoE(), {
+          minimumContextSize,
+          cpuMoe: true,
+          gpuLayers: 30,
+        });
+
+        expect(constrained.contextSize).toBeGreaterThanOrEqual(minimumContextSize);
+        expect(constrained).toMatchObject({
+          minimumContextSize,
+          gpuLayers: 30,
+          cpuMoe: true,
+        });
+      });
+
+      it('retains nCpuMoe and custom override pins in constrained results', async () => {
+        const withLayerPin = await systemInfo.getOptimalConfig(makeMoE(), {
+          maximumContextSize: 8192,
+          nCpuMoe: 15,
+        });
+        const withOverride = await systemInfo.getOptimalConfig(makeMoE(), {
+          maximumContextSize: 4096,
+          overrideTensors: 'blk\\.[0-9]+\\.ffn=CPU',
+        });
+
+        expect(withLayerPin).toMatchObject({
+          maximumContextSize: 8192,
+          nCpuMoe: 15,
+        });
+        expect(withLayerPin.contextSize).toBeLessThanOrEqual(8192);
+        expect(withOverride).toMatchObject({
+          contextSize: 4096,
+          maximumContextSize: 4096,
+          overrideTensors: 'blk\\.[0-9]+\\.ffn=CPU',
+        });
+      });
     });
 
     it('sizes context from RAM on CPU-only systems and keeps f16', async () => {
@@ -685,6 +843,257 @@ describe('SystemInfo', () => {
       expect(config.contextSize!).toBeGreaterThan(4096);
       // 16384-32768 bracket rounds to 2048
       expect(config.contextSize! % 2048).toBe(0);
+    });
+
+    describe('context capacity constraints', () => {
+      it('preserves an automatic recommendation that already exceeds the minimum', async () => {
+        const automatic = await systemInfo.getOptimalConfig(makeModel());
+        const constrained = await systemInfo.getOptimalConfig(makeModel(), {
+          minimumContextSize: 8192,
+        });
+
+        expect(constrained.contextSize).toBe(automatic.contextSize);
+        expect(constrained.gpuLayers).toBe(automatic.gpuLayers);
+        expect(constrained.cacheTypeK).toBe(automatic.cacheTypeK);
+        expect(constrained.minimumContextSize).toBe(8192);
+      });
+
+      it('caps an automatic recommendation at a maximum, including below the 4096 floor', async () => {
+        const capped = await systemInfo.getOptimalConfig(makeModel(), {
+          maximumContextSize: 8192,
+        });
+        const belowFloor = await systemInfo.getOptimalConfig(makeModel(), {
+          maximumContextSize: 2048,
+        });
+
+        expect(capped.contextSize).toBe(8192);
+        expect(capped.maximumContextSize).toBe(8192);
+        expect(capped.gpuLayers).toBe(36);
+        expect(belowFloor.contextSize).toBe(2048);
+      });
+
+      it('selects inside a narrow inclusive range without rounding below its minimum', async () => {
+        jest.spyOn(systemInfo, 'detect').mockResolvedValue({
+          ...gpuCapabilities,
+          gpu: { available: false },
+        } as never);
+
+        const config = await systemInfo.getOptimalConfig(makeModel(), {
+          minimumContextSize: 21000,
+          maximumContextSize: 21500,
+        });
+
+        expect(config.contextSize).toBeGreaterThanOrEqual(21000);
+        expect(config.contextSize).toBeLessThanOrEqual(21500);
+        expect(config.gpuLayers).toBe(0);
+      });
+
+      it('re-optimizes partial offload to satisfy a larger minimum', async () => {
+        mockTotalmem.mockReturnValue(64 * 1024 ** 3);
+        mockFreemem.mockReturnValue(48 * 1024 ** 3);
+        const partialModel = makeModel({ size: 9 * 1024 ** 3 });
+        const automatic = await systemInfo.getOptimalConfig(partialModel);
+
+        expect(automatic.contextSize!).toBeLessThan(65536);
+
+        const constrained = await systemInfo.getOptimalConfig(partialModel, {
+          minimumContextSize: 65536,
+        });
+
+        expect(constrained.contextSize!).toBeGreaterThanOrEqual(65536);
+        expect(constrained.gpuLayers!).toBeLessThan(automatic.gpuLayers!);
+        expect(constrained.cacheTypeK).toBe('q8_0');
+      });
+
+      it('treats constraints as per-slot and returns total multi-slot context', async () => {
+        const config = await systemInfo.getOptimalConfig(makeModel(), {
+          maximumContextSize: 12288,
+          parallelRequests: 2,
+        });
+
+        expect(config.contextSize).toBe(24576);
+        expect(Math.floor(config.contextSize! / 2)).toBe(12288);
+        expect(config.maximumContextSize).toBe(12288);
+        expect(config.parallelRequests).toBe(2);
+      });
+
+      it('rejects exact/range conflicts and invalid ranges with typed reasons', async () => {
+        await expect(
+          systemInfo.getOptimalConfig(makeModel(), {
+            contextSize: 16384,
+            minimumContextSize: 8192,
+          })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: { reason: 'exact-range-conflict', stage: 'validation' },
+        });
+
+        await expect(
+          systemInfo.getOptimalConfig(makeModel(), {
+            minimumContextSize: 16384,
+            maximumContextSize: 8192,
+          })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: { reason: 'minimum-exceeds-maximum' },
+        });
+
+        await expect(
+          systemInfo.getOptimalConfig(makeModel(), {
+            minimumContextSize: Number.MAX_SAFE_INTEGER,
+            parallelRequests: 2,
+          })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: { reason: 'unsafe-total-capacity' },
+        });
+      });
+
+      it.each([
+        ['minimumContextSize', 0, 'invalid-minimum'],
+        ['minimumContextSize', 1.5, 'invalid-minimum'],
+        ['minimumContextSize', Number.NaN, 'invalid-minimum'],
+        ['maximumContextSize', -1, 'invalid-maximum'],
+        ['maximumContextSize', Number.POSITIVE_INFINITY, 'invalid-maximum'],
+      ] as const)('rejects invalid %s value %s', async (field, value, reason) => {
+        await expect(
+          systemInfo.getOptimalConfig(makeModel(), { [field]: value })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: { reason, stage: 'validation' },
+        });
+      });
+
+      it('rejects a minimum above the authoritative native model context', async () => {
+        await expect(
+          systemInfo.getOptimalConfig(makeModel(), {
+            minimumContextSize: 262145,
+          })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: {
+            reason: 'minimum-exceeds-native',
+            nativeContextSize: 262144,
+          },
+        });
+      });
+
+      it('uses an explicit unknown-metadata error for a larger legacy minimum', async () => {
+        const legacy = makeModel({ ggufMetadata: undefined });
+
+        await expect(
+          systemInfo.getOptimalConfig(legacy, { minimumContextSize: 8192 })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: { reason: 'model-context-unknown' },
+        });
+
+        const capped = await systemInfo.getOptimalConfig(legacy, {
+          maximumContextSize: 2048,
+        });
+        expect(capped.contextSize).toBe(2048);
+      });
+
+      it('keeps the unknown-metadata minimum policy at 4096 for large legacy models', async () => {
+        const largeLegacy = makeModel({
+          size: 32 * 1024 ** 3,
+          ggufMetadata: undefined,
+        });
+
+        await expect(
+          systemInfo.getOptimalConfig(largeLegacy, { minimumContextSize: 8192 })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: { reason: 'model-context-unknown' },
+        });
+      });
+
+      it('returns InsufficientResourcesError when CPU-only capacity cannot meet the minimum', async () => {
+        jest.spyOn(systemInfo, 'detect').mockResolvedValue({
+          ...gpuCapabilities,
+          gpu: { available: false },
+        } as never);
+        const oversized = makeModel({ size: 6 * 1024 ** 3 });
+
+        await expect(
+          systemInfo.getOptimalConfig(oversized, { minimumContextSize: 8192 })
+        ).rejects.toMatchObject({
+          code: 'INSUFFICIENT_RESOURCES',
+          details: {
+            minimumContextSize: 8192,
+            parallelRequests: 1,
+          },
+        });
+      });
+
+      it('raw-validates a floor-sized minimum on an impossible CPU-only baseline', async () => {
+        jest.spyOn(systemInfo, 'detect').mockResolvedValue({
+          ...gpuCapabilities,
+          gpu: { available: false },
+        } as never);
+        const oversized = makeModel({ size: 6 * 1024 ** 3 });
+
+        await expect(
+          systemInfo.getOptimalConfig(oversized, { minimumContextSize: 4096 })
+        ).rejects.toMatchObject({
+          code: 'INSUFFICIENT_RESOURCES',
+          details: {
+            minimumContextSize: 4096,
+            parallelRequests: 1,
+          },
+        });
+      });
+
+      it('rejects a minimum that cannot fit the caller-pinned GPU placement', async () => {
+        const oversized = makeModel({ size: 9 * 1024 ** 3 });
+
+        await expect(
+          systemInfo.getOptimalConfig(oversized, {
+            minimumContextSize: 65536,
+            gpuLayers: 36,
+          })
+        ).rejects.toMatchObject({
+          code: 'INSUFFICIENT_RESOURCES',
+          details: {
+            minimumContextSize: 65536,
+            parallelRequests: 1,
+          },
+        });
+      });
+
+      it('raw-validates a floor-sized minimum on an impossible pinned GPU placement', async () => {
+        const oversized = makeModel({ size: 9 * 1024 ** 3 });
+
+        await expect(
+          systemInfo.getOptimalConfig(oversized, {
+            minimumContextSize: 4096,
+            gpuLayers: 36,
+          })
+        ).rejects.toMatchObject({
+          code: 'INSUFFICIENT_RESOURCES',
+          details: {
+            minimumContextSize: 4096,
+            parallelRequests: 1,
+          },
+        });
+      });
+
+      it('retains caller-owned cache pins in a directly spreadable constrained result', async () => {
+        const config = await systemInfo.getOptimalConfig(makeModel(), {
+          maximumContextSize: 8192,
+          cacheTypeK: 'f16',
+          cacheTypeV: 'f16',
+          flashAttention: 'off',
+        });
+
+        expect(config).toMatchObject({
+          contextSize: 8192,
+          maximumContextSize: 8192,
+          cacheTypeK: 'f16',
+          cacheTypeV: 'f16',
+          flashAttention: 'off',
+        });
+      });
     });
   });
 

@@ -331,6 +331,7 @@ export type { LogLevel, LogEntry, LogRotationOptions } from './process/log-manag
 
 export {
   GenaiElectronError,
+  ContextConstraintError,
   ModelNotFoundError,
   DownloadError,
   InsufficientResourcesError,
@@ -339,4 +340,11 @@ export {
   FileSystemError,
   ChecksumError,
   BinaryError,
+} from './errors/index.js';
+
+export type {
+  ContextConstraintReason,
+  ContextConstraintStage,
+  ContextConstraintDetails,
+  InsufficientResourcesDetails,
 } from './errors/index.js';
