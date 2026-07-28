@@ -1,6 +1,6 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Unreleased — context-capacity contract (2026-07-28)
+> **Current Status**: v0.15.0 release candidate — context-capacity contract (2026-07-29)
 
 ---
 
@@ -9,11 +9,11 @@
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 701/701 passing (28 suites)
 - **Branch:** `context-capacity-contract`
-- **Last Updated:** 2026-07-29 (live context-capacity smoke)
+- **Last Updated:** 2026-07-29 (v0.15.0 release preparation)
 
 ---
 
-## Unreleased: Context Capacity Contract (2026-07-28)
+## v0.15.0: Context Capacity Contract (2026-07-29)
 
 - Added effective per-slot `minimumContextSize` / `maximumContextSize` constraints while retaining
   exact total `contextSize` behavior. Constraint-aware sizing preserves the normal recommendation
@@ -25,15 +25,20 @@
   entering `running`. `ServerInfo` separates configured total context from verified effective
   per-slot context; ranged starts reject runtime violations and preserve the contract across
   restart, crash auto-restart, and ResourceOrchestrator reload.
-- Updated public sizing, server, TypeScript, integration, and troubleshooting documentation. This
-  is unreleased work only: no package version, tag, release, or publish change is included.
+- Updated public sizing, server, TypeScript, integration, and troubleshooting documentation,
+  including the v0.14.x-to-v0.15.0 migration guide.
 
-**Validation:** repository formatting passes; build passes with 0 TypeScript errors; lint passes
-with 0 errors and the existing 61 warnings; 701/701 tests pass across 28 suites with open-handle
-detection; generated declarations/public exports and `git diff --check` are included in the final
-verification pass. A live smoke against the healthy GUI-provisioned Gemma 4 12B server confirmed
-the 6,144-context/one-slot `/props` result satisfies a 4,096–8,192 range, while a deliberate
-two-slot expectation returns typed `runtime-slots-mismatch` diagnostics.
+**Release validation:** `prepublishOnly` passes (clean build and 701/701 tests across 28 suites);
+the open-handle verification run also passes. Lint passes with 0 errors and the existing 61
+warnings, repository formatting and `git diff --check` pass, and the generated declarations/public
+exports are present. The 0.15.0 package dry-run contains 171 files, and the production dependency
+audit reports 0 vulnerabilities. A live smoke against the healthy GUI-provisioned Gemma 4 12B
+server confirmed the 6,144-context/one-slot `/props` result satisfies a 4,096–8,192 range, while a
+deliberate two-slot expectation returns typed `runtime-slots-mismatch` diagnostics.
+
+**Release status:** Release candidate on `context-capacity-contract`. Version metadata and the
+migration guide are included in the release PR; merge, tag, GitHub release, and maintainer-side
+`npm publish` remain pending.
 
 ---
 

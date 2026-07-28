@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.14.0 | **Status**: Production Ready - LLM & Image Generation, resilient local binary provisioning
+> **Version**: 0.15.0 | **Status**: Production Ready - LLM & Image Generation, verified context-capacity contracts
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 
