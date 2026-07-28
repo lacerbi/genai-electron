@@ -226,16 +226,22 @@ Generates optimal server configuration for a specific model based on system capa
 ```typescript
 getOptimalConfig(
   modelInfo: ModelInfo,
-  hints?: OptimalConfigHints  // fields you've already pinned (contextSize, gpuLayers,
-                              // cacheTypeK/V, flashAttention, parallelRequests)
+  hints?: OptimalConfigHints  // exact contextSize OR per-slot minimum/maximum,
+                              // plus placement/cache hints
 ): Promise<Partial<LlamaServerConfig>>
 ```
 
 **Parameters**:
 - `modelInfo: ModelInfo` - Model to generate config for (GGUF metadata enables the adaptive sizing below)
-- `hints?: OptimalConfigHints` - Fields the caller has already decided; they are respected verbatim and inform the sizing of the remaining ones (e.g. a pinned `contextSize` shapes the KV reserve used for GPU-layer packing; explicit cache types or `flashAttention: 'off'` suppress automatic KV quantization)
+- `hints?: OptimalConfigHints` - An exact `contextSize`, or an inclusive
+  `minimumContextSize`/`maximumContextSize` range, plus placement fields the caller has already
+  decided. Exact and range fields are mutually exclusive in this API. Pinned placement/cache
+  values inform sizing and are retained in constrained results.
 
-**Returns**: `Promise<Partial<LlamaServerConfig>>` - Partial server configuration (threads, gpuLayers, contextSize, and — when auto-selected — cacheTypeK/V + flashAttention) meant to be spread into a full `start()` call. Does not include `modelId` or `port`.
+**Returns**: `Promise<Partial<LlamaServerConfig>>` - Partial server configuration (threads,
+gpuLayers, total `contextSize`, and any selected cache/MoE fields) meant to be spread into a full
+`start()` call. A constrained result retains its minimum/maximum contract. It does not include
+`modelId` or `port`.
 
 **Example**:
 ```typescript
@@ -256,10 +262,44 @@ await llamaServer.start({
 });
 ```
 
+**Context constraint semantics**:
+
+| Hints | Optimizer behavior |
+|---|---|
+| none | Preserves the existing adaptive recommendation |
+| `contextSize` | Exact total `-c` pin; existing behavior is unchanged |
+| `minimumContextSize` | Keeps the normal result if it is already large enough; otherwise re-plans cache/offload placement to satisfy the minimum |
+| `maximumContextSize` | Caps the normal result without opportunistically changing placement |
+| minimum + maximum | Selects within the inclusive range |
+
+Minimum and maximum values are **effective tokens per parallel request slot**. The returned
+`contextSize` is the **total** llama-server `-c` allocation. With two slots and a 12,288-token
+minimum, sizing therefore reserves at least 24,576 total tokens. Minimums round upward when
+needed; maximums round downward. A minimum above authoritative GGUF `context_length`, an unknown
+native limit for a higher-than-conservative minimum, an invalid range, or a range that cannot fit
+the permitted hardware placement produces a typed error.
+
+```typescript
+const optimized = await systemInfo.getOptimalConfig(modelInfo, {
+  minimumContextSize: 12288,
+  maximumContextSize: 32768,
+  parallelRequests: 2
+});
+
+// The range is retained, so startup, restart, and orchestrator reload all
+// enforce the same effective per-slot contract.
+const info = await llamaServer.start({
+  modelId: modelInfo.id,
+  ...optimized
+});
+console.log(optimized.contextSize);       // configured total -c
+console.log(info.effectiveContextSize);   // verified capacity per slot
+```
+
 **What it determines** (v0.7.0 adaptive sizing — requires GGUF metadata; models without it get the legacy behavior: fixed 4096 context, flat 2 GB KV reserve):
 - **threads**: Based on CPU core count: 1-2 cores → all cores, 3-8 → cores - 1, 9-16 → cores - 2, 17+ → floor(cores × 0.85)
 - **gpuLayers / cpuMoe**: **Full GPU offload is preferred** — if all weights fit in VRAM alongside at least a 4096-token KV cache (plus a ~1 GB compute buffer), every layer is offloaded. **For MoE models that don't fit whole**, the next tier is `cpuMoe: true`: expert weights (measured exactly from GGUF tensor offsets, stored as `expert_weights_bytes`) move to the RAM budget while the dense trunk + KV stay fully on GPU — recommended automatically when the trunk fits VRAM and the experts fit RAM (gated against 60% of **total** RAM — experts are mmap'd and sparsely activated, so they page through the OS cache rather than needing committed memory). Only after that are layers packed around a KV reserve (min 1.5 GB). Hints: `cpuMoe`/`nCpuMoe` (and `overrideTensors: 'exps=CPU'`, treated as `cpuMoe`) make the weights-split explicit; any other `-ot` pattern is sized conservatively as dense.
-- **contextSize**: Computed from real KV-cache arithmetic (`layers × kvHeads × headDim × bytes-per-element`, GQA-aware via `attention.head_count_kv`): all VRAM left after weights becomes context budget, clamped to `[4096, model's context_length]` and floored to a progressive granularity (multiples of 512 up to 8K, 1024 up to 16K, 2048 up to 32K, 4096 beyond — always within ~6% of the budget). **There is no artificial ceiling** — a small model on a large GPU can get a very large context (and a correspondingly large KV allocation at server startup).
+- **contextSize**: Without a range, this is computed from real KV-cache arithmetic (`layers × kvHeads × headDim × bytes-per-element`, GQA-aware via `attention.head_count_kv`): all VRAM left after weights becomes context budget, clamped to `[4096, model's context_length]` and floored to a progressive granularity (multiples of 512 up to 8K, 1024 up to 16K, 2048 up to 32K, 4096 beyond — always within ~6% of the budget). A maximum may intentionally select below the historical 4096 floor. A minimum that the baseline misses triggers raw VRAM/RAM feasibility checks and may reduce GPU layers or use the existing q8_0/MoE choices. **There is no artificial ceiling** — a small model on a large GPU can get a very large context (and a correspondingly large KV allocation at server startup).
 - **cacheTypeK / cacheTypeV / flashAttention**: **q8_0 KV quantization is auto-selected by default** (~2× cheaper KV, small quality loss) together with `flashAttention: 'on'`, *unless* f16 KV at the model's full native context fits alongside fully-offloaded weights (abundant headroom → stays f16, no fields emitted). Opt out by setting `cacheTypeK/V: 'f16'` explicitly or `flashAttention: 'off'`.
 - **parallelRequests**: Always 1 (single-user Electron apps)
 

@@ -185,6 +185,43 @@ await orchestrator.orchestrateImageGeneration({
 });
 ```
 
+### Context Capacity Contract Errors
+
+**Problem:** `ContextConstraintError` is thrown during sizing or llama-server startup.
+
+Inspect `error.details.reason`:
+
+| Reason | Meaning | Action |
+|---|---|---|
+| `invalid-minimum`, `invalid-maximum`, `minimum-exceeds-maximum` | The requested range is invalid | Use positive safe integers and an inclusive minimum ≤ maximum |
+| `minimum-exceeds-native` | The per-slot minimum exceeds GGUF `context_length` | Lower the minimum or choose another model |
+| `model-context-unknown` | Native GGUF context metadata is missing and the requested minimum exceeds the conservative legacy limit | Refresh/redownload model metadata or lower the minimum |
+| `precomputed-context-out-of-range` | Configured total `contextSize / parallelRequests` is outside the retained range | Re-run `getOptimalConfig()` with the desired range |
+| `runtime-capacity-unavailable` | Mandatory post-health `GET /props` failed or had an incompatible shape | Check llama-server logs/version and the selected host/port |
+| `runtime-slots-mismatch` | `/props.total_slots` differs from `parallelRequests` | Check the emitted `-np` flag and fitting behavior |
+| `runtime-below-minimum`, `runtime-above-maximum` | `/props` reported an effective per-slot capacity outside the range | Adjust the range/configuration; the child has already been stopped |
+
+```typescript
+import { ContextConstraintError } from 'genai-electron';
+
+try {
+  await llamaServer.start(config);
+} catch (error) {
+  if (error instanceof ContextConstraintError) {
+    console.error(error.details.reason, error.details.suggestion);
+  }
+}
+```
+
+`/props` verification is strict for all managed llama-server starts, including unconstrained and
+exact-only starts. Turning `occupancyCheck` off skips cross-app probing but does not skip this
+post-health verification. Exact-only starts report configured and effective values without
+enforcing equality; ranged starts enforce the effective per-slot result.
+
+If the error code is `INSUFFICIENT_RESOURCES`, the range and model limit are valid but no allowed
+GPU/RAM/cache/MoE placement can satisfy the minimum. Reduce the minimum or parallel slot count,
+close memory-heavy applications, relax pinned placement/cache choices, or choose a smaller model.
+
 ### Batch Generation Limitation (Phase 3)
 
 **Problem:** Generating multiple images (`count > 1`) doesn't trigger automatic LLM offload

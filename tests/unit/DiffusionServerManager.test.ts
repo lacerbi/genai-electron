@@ -460,12 +460,14 @@ describe('DiffusionServerManager', () => {
         modelId: 'sdxl-turbo',
         port: 8081,
         contextSize: 4096,
+        minimumContextSize: 2048,
+        maximumContextSize: 8192,
         parallelRequests: 4,
         flashAttention: true,
       };
 
       await expect(diffusionServer.start(badConfig as any)).rejects.toThrow(
-        /Unknown configuration field.*contextSize/
+        /Unknown configuration field.*contextSize.*minimumContextSize.*maximumContextSize/
       );
     });
 

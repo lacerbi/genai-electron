@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.13.0
+ * @version 0.15.0
  * @license MIT
  *
  * @example
@@ -331,6 +331,7 @@ export type { LogLevel, LogEntry, LogRotationOptions } from './process/log-manag
 
 export {
   GenaiElectronError,
+  ContextConstraintError,
   ModelNotFoundError,
   DownloadError,
   InsufficientResourcesError,
@@ -339,4 +340,11 @@ export {
   FileSystemError,
   ChecksumError,
   BinaryError,
+} from './errors/index.js';
+
+export type {
+  ContextConstraintReason,
+  ContextConstraintStage,
+  ContextConstraintDetails,
+  InsufficientResourcesDetails,
 } from './errors/index.js';

@@ -1,15 +1,44 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.14.0 release candidate — binary-provisioning robustness (2026-07-27)
+> **Current Status**: v0.15.0 release candidate — context-capacity contract (2026-07-29)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 634/634 passing (26 suites)
-- **Branch:** `release/v0.14.0`
-- **Last Updated:** 2026-07-27 (v0.14.0 release preparation)
+- **Tests:** ✅ 701/701 passing (28 suites)
+- **Branch:** `context-capacity-contract`
+- **Last Updated:** 2026-07-29 (v0.15.0 release preparation)
+
+---
+
+## v0.15.0: Context Capacity Contract (2026-07-29)
+
+- Added effective per-slot `minimumContextSize` / `maximumContextSize` constraints while retaining
+  exact total `contextSize` behavior. Constraint-aware sizing preserves the normal recommendation
+  when possible and otherwise searches full, MoE, partial, and CPU placement with raw VRAM/RAM
+  feasibility, multi-slot KV accounting, native-model limits, and typed diagnostics.
+- Added package-root `ContextConstraintError` and typed reason/stage/details exports. Valid but
+  unsatisfiable minima continue to use `InsufficientResourcesError` with context diagnostics.
+- `LlamaServerManager.start()` now requires post-health `GET /props` capacity discovery before
+  entering `running`. `ServerInfo` separates configured total context from verified effective
+  per-slot context; ranged starts reject runtime violations and preserve the contract across
+  restart, crash auto-restart, and ResourceOrchestrator reload.
+- Updated public sizing, server, TypeScript, integration, and troubleshooting documentation,
+  including the v0.14.x-to-v0.15.0 migration guide.
+
+**Release validation:** `prepublishOnly` passes (clean build and 701/701 tests across 28 suites);
+the open-handle verification run also passes. Lint passes with 0 errors and the existing 61
+warnings, repository formatting and `git diff --check` pass, and the generated declarations/public
+exports are present. The 0.15.0 package dry-run contains 171 files, and the production dependency
+audit reports 0 vulnerabilities. A live smoke against the healthy GUI-provisioned Gemma 4 12B
+server confirmed the 6,144-context/one-slot `/props` result satisfies a 4,096–8,192 range, while a
+deliberate two-slot expectation returns typed `runtime-slots-mismatch` diagnostics.
+
+**Release status:** Release candidate on `context-capacity-contract`. Version metadata and the
+migration guide are included in the release PR; merge, tag, GitHub release, and maintainer-side
+`npm publish` remain pending.
 
 ---
 

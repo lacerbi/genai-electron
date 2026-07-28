@@ -10,13 +10,7 @@
 import { EventEmitter } from 'events';
 import path from 'node:path';
 import type { ServerStatus, ServerInfo, ServerConfig, ServerEvent } from '../types/index.js';
-import {
-  ServerError,
-  PortInUseError,
-  ModelNotFoundError,
-  BinaryError,
-  InsufficientResourcesError,
-} from '../errors/index.js';
+import { GenaiElectronError, ServerError, PortInUseError } from '../errors/index.js';
 import { LogManager, type LogEntry } from '../process/log-manager.js';
 import { BinaryManager } from './BinaryManager.js';
 import { PATHS } from '../config/paths.js';
@@ -456,14 +450,8 @@ export abstract class ServerManager extends EventEmitter {
         .catch(() => void 0);
     }
 
-    // Re-throw typed errors
-    if (
-      error instanceof ModelNotFoundError ||
-      error instanceof PortInUseError ||
-      error instanceof BinaryError ||
-      error instanceof InsufficientResourcesError ||
-      error instanceof ServerError
-    ) {
+    // Preserve every typed library error, including future subclasses.
+    if (error instanceof GenaiElectronError) {
       throw error;
     }
 

@@ -23,6 +23,12 @@ import {
   hasGGUFMetadata,
 } from '../utils/model-metadata-helpers.js';
 import { estimateKVBytesPerToken, floorContextToGranularity } from '../utils/kv-cache-math.js';
+import {
+  normalizeContextConstraints,
+  validateModelContextRange,
+  type NormalizedContextConstraints,
+} from '../utils/context-constraints.js';
+import { InsufficientResourcesError } from '../errors/index.js';
 
 /**
  * System information singleton
@@ -180,6 +186,12 @@ export class SystemInfo {
       checkTotalMemory?: boolean;
       gpuLayers?: number;
       totalLayers?: number;
+      contextSize?: number;
+      cacheTypeK?: KVCacheType;
+      cacheTypeV?: KVCacheType;
+      cpuMoe?: boolean;
+      nCpuMoe?: number;
+      overrideTensors?: string;
     }
   ): Promise<{
     possible: boolean;
@@ -187,6 +199,92 @@ export class SystemInfo {
     suggestion?: string;
   }> {
     const capabilities = await this.detect();
+    const currentMemory = this.getMemoryInfo();
+
+    // Constraint-aware callers can validate the resolved placement instead of
+    // the legacy unresolved CPU/f16/floor estimate below.
+    if (options?.contextSize !== undefined && options.gpuLayers !== undefined) {
+      const totalLayers = options.totalLayers ?? getLayerCountWithFallback(modelInfo);
+      const effectiveGpuLayers = Math.max(0, Math.min(totalLayers, options.gpuLayers));
+      const gpuShare = effectiveGpuLayers / totalLayers;
+      const cpuShare = 1 - gpuShare;
+      const expertBytes = getExpertWeightsBytesWithFallback(modelInfo) ?? 0;
+      const allExpertsOnCpu = options.cpuMoe === true || options.overrideTensors === 'exps=CPU';
+      const customOverride =
+        options.overrideTensors !== undefined && options.overrideTensors !== 'exps=CPU';
+      const nCpuMoe =
+        typeof options.nCpuMoe === 'number' && options.nCpuMoe > 0
+          ? Math.min(options.nCpuMoe, totalLayers)
+          : 0;
+      const cpuExpertBytes = customOverride
+        ? 0
+        : allExpertsOnCpu
+          ? expertBytes
+          : expertBytes * (nCpuMoe / totalLayers);
+
+      if (
+        cpuExpertBytes > 0 &&
+        cpuExpertBytes > currentMemory.total * KV_SIZING.moeExpertTotalRamFraction
+      ) {
+        return {
+          possible: false,
+          reason: `Insufficient RAM for CPU-resident MoE experts: ${(cpuExpertBytes / 1024 ** 3).toFixed(1)}GB exceeds ${(KV_SIZING.moeExpertTotalRamFraction * 100).toFixed(0)}% of total RAM`,
+          suggestion: 'Use fewer CPU-resident experts or a smaller model quantization',
+        };
+      }
+
+      const bytesPerToken = estimateKVBytesPerToken(
+        modelInfo,
+        options.cacheTypeK,
+        options.cacheTypeV
+      );
+      const gpu = capabilities.gpu;
+      if (gpuShare > 0 && (!gpu.available || !gpu.vram)) {
+        return {
+          possible: false,
+          reason:
+            'Resolved configuration requires GPU offload, but no usable GPU VRAM is available',
+          suggestion: 'Set gpuLayers to 0 or enable a supported GPU backend',
+        };
+      }
+
+      if (gpuShare > 0) {
+        const vramBudget = Math.max(
+          0,
+          (gpu.vramAvailable ?? gpu.vram!) - KV_SIZING.computeBufferBytes
+        );
+        const requiredVRAM =
+          (modelInfo.size - cpuExpertBytes) * KV_SIZING.gpuWeightsOverhead * gpuShare +
+          options.contextSize * bytesPerToken * gpuShare;
+        if (requiredVRAM > vramBudget) {
+          return {
+            possible: false,
+            reason: `Insufficient VRAM: resolved placement requires ${(requiredVRAM / 1024 ** 3).toFixed(1)}GB, but ${(vramBudget / 1024 ** 3).toFixed(1)}GB is available after compute reserve`,
+            suggestion: 'Reduce GPU layers or context, or use quantized KV cache',
+          };
+        }
+      }
+
+      if (cpuShare > 0) {
+        const cpuResidentWeights = (modelInfo.size - cpuExpertBytes) * cpuShare + cpuExpertBytes;
+        const requiredRAM =
+          cpuResidentWeights * KV_SIZING.cpuWeightsOverhead +
+          options.contextSize * bytesPerToken * cpuShare +
+          KV_SIZING.osRamMarginBytes;
+        const memoryToCheck = options.checkTotalMemory
+          ? currentMemory.total
+          : currentMemory.available;
+        if (requiredRAM > memoryToCheck) {
+          return {
+            possible: false,
+            reason: `Insufficient RAM: resolved placement requires ${(requiredRAM / 1024 ** 3).toFixed(1)}GB, but only ${(memoryToCheck / 1024 ** 3).toFixed(1)}GB is available`,
+            suggestion: 'Close other applications, reduce context, or offload more layers to GPU',
+          };
+        }
+      }
+
+      return { possible: true };
+    }
 
     // Floor-context KV cost (real arithmetic when GGUF metadata is present;
     // models without metadata keep the legacy weights-only estimate)
@@ -223,9 +321,6 @@ export class SystemInfo {
       requiredMemory = committedSize * 1.2 + kvFloorBytes; // 20% overhead + KV floor
     }
 
-    // Get fresh memory info (not cached) for accurate availability check
-    const currentMemory = this.getMemoryInfo();
-
     // Determine which memory metric to check against
     const checkTotalMemory = options?.checkTotalMemory ?? false;
     const memoryToCheck = checkTotalMemory ? currentMemory.total : currentMemory.available;
@@ -260,6 +355,9 @@ export class SystemInfo {
    * Get optimal configuration for a model
    *
    * @param modelInfo - Model information
+   * @param hints - Exact context/placement hints or inclusive effective
+   * per-slot minimum/maximum context constraints. `contextSize` is mutually
+   * exclusive with the range fields.
    * @returns Recommended server configuration
    *
    * @example
@@ -272,6 +370,11 @@ export class SystemInfo {
     modelInfo: ModelInfo,
     hints: OptimalConfigHints = {}
   ): Promise<Partial<LlamaServerConfig>> {
+    const constraints = normalizeContextConstraints(hints);
+    if (constraints.hasRange) {
+      return this.getConstrainedOptimalConfig(modelInfo, hints, constraints);
+    }
+
     const capabilities = await this.detect();
 
     // Get fresh memory info (not cached) for accurate sizing
@@ -465,6 +568,303 @@ export class SystemInfo {
     }
 
     return config;
+  }
+
+  /**
+   * Apply effective per-slot context constraints around the unchanged baseline
+   * optimizer. A maximum caps the baseline. A minimum only triggers a new
+   * placement search when the baseline effective capacity is too small.
+   */
+  private async getConstrainedOptimalConfig(
+    modelInfo: ModelInfo,
+    hints: OptimalConfigHints,
+    constraints: NormalizedContextConstraints
+  ): Promise<Partial<LlamaServerConfig>> {
+    const minimum = constraints.minimumContextSize;
+    const maximum = constraints.maximumContextSize;
+    const parallelRequests = constraints.parallelRequests;
+    const fallbackNativeContext = getContextLengthWithFallback(modelInfo);
+    const { totalNativeContext } = validateModelContextRange(modelInfo, constraints);
+
+    // Compute the current recommendation through the original no-range path.
+    const baselineHints: OptimalConfigHints = { ...hints };
+    delete baselineHints.minimumContextSize;
+    delete baselineHints.maximumContextSize;
+    const baseline = await this.getOptimalConfig(modelInfo, baselineHints);
+    const baselineContext =
+      baseline.contextSize ?? Math.min(fallbackNativeContext, KV_SIZING.floorContextTokens);
+    const totalMinimum = constraints.totalMinimumContextSize;
+    const totalMaximum = constraints.totalMaximumContextSize;
+
+    const attachContract = (config: Partial<LlamaServerConfig>): Partial<LlamaServerConfig> => {
+      const result = { ...config };
+      // Constrained recommendations are intentionally self-contained so they
+      // can be spread directly into start(). Preserve every caller-owned
+      // placement/cache hint that shaped the selected capacity.
+      if (hints.cacheTypeK !== undefined) {
+        result.cacheTypeK = hints.cacheTypeK;
+      }
+      if (hints.cacheTypeV !== undefined) {
+        result.cacheTypeV = hints.cacheTypeV;
+      }
+      if (hints.flashAttention !== undefined) {
+        result.flashAttention = hints.flashAttention;
+      }
+      if (hints.cpuMoe !== undefined) {
+        result.cpuMoe = hints.cpuMoe;
+      }
+      if (hints.nCpuMoe !== undefined) {
+        result.nCpuMoe = hints.nCpuMoe;
+      }
+      if (hints.overrideTensors !== undefined) {
+        result.overrideTensors = hints.overrideTensors;
+      }
+      if (minimum !== undefined) {
+        result.minimumContextSize = minimum;
+      }
+      if (maximum !== undefined) {
+        result.maximumContextSize = maximum;
+      }
+      return result;
+    };
+
+    const capContext = (contextTokens: number, requireMinimum: boolean): number => {
+      const cap = Math.min(contextTokens, totalMaximum ?? Infinity, totalNativeContext);
+      let selected = floorContextToGranularity(cap);
+      if (selected <= 0) {
+        selected = Math.floor(cap);
+      }
+      if (requireMinimum && totalMinimum !== undefined && selected < totalMinimum) {
+        selected = totalMinimum;
+      }
+      return selected;
+    };
+
+    if (minimum === undefined) {
+      return attachContract({
+        ...baseline,
+        contextSize: capContext(baselineContext, false),
+      });
+    }
+    const baselineMeetsMinimum = Math.floor(baselineContext / parallelRequests) >= minimum;
+
+    // A minimum below this point requires a new placement.
+    const capabilities = await this.detect();
+    const currentMemory = this.getMemoryInfo();
+    const totalLayers = getLayerCountWithFallback(modelInfo);
+    const gpu = capabilities.gpu;
+    const hasVRAM = gpu.available && !!gpu.vram;
+    const vramBudget = hasVRAM
+      ? Math.max(0, (gpu.vramAvailable ?? gpu.vram ?? 0) - KV_SIZING.computeBufferBytes)
+      : 0;
+
+    const expertBytes = getExpertWeightsBytesWithFallback(modelInfo);
+    const moeHinted = hints.cpuMoe === true || hints.overrideTensors === 'exps=CPU';
+    const nCpuMoeHint =
+      typeof hints.nCpuMoe === 'number' && hints.nCpuMoe > 0
+        ? Math.min(hints.nCpuMoe, totalLayers)
+        : 0;
+    const customOverrideTensors =
+      hints.overrideTensors !== undefined && hints.overrideTensors !== 'exps=CPU';
+
+    let hintedCpuExpertBytes = 0;
+    if (!customOverrideTensors && expertBytes && expertBytes > 0) {
+      if (moeHinted) {
+        hintedCpuExpertBytes = expertBytes;
+      } else if (nCpuMoeHint > 0) {
+        hintedCpuExpertBytes = expertBytes * (nCpuMoeHint / totalLayers);
+      }
+    }
+
+    const userPinnedCacheType = hints.cacheTypeK !== undefined || hints.cacheTypeV !== undefined;
+    const flashAttentionOff = hints.flashAttention === 'off' || hints.flashAttention === false;
+    let cacheTypeK: KVCacheType = hints.cacheTypeK ?? 'f16';
+    let cacheTypeV: KVCacheType = hints.cacheTypeV ?? 'f16';
+    let autoQuantized = baseline.cacheTypeK !== undefined || baseline.cacheTypeV !== undefined;
+
+    if (autoQuantized) {
+      cacheTypeK = baseline.cacheTypeK ?? 'q8_0';
+      cacheTypeV = baseline.cacheTypeV ?? 'q8_0';
+    } else if (
+      !userPinnedCacheType &&
+      !flashAttentionOff &&
+      hasVRAM &&
+      totalMinimum !== undefined
+    ) {
+      const hintedWeightsGPU =
+        (modelInfo.size - hintedCpuExpertBytes) * KV_SIZING.gpuWeightsOverhead;
+      const bptF16 = estimateKVBytesPerToken(modelInfo, 'f16', 'f16');
+      if (hintedWeightsGPU + totalMinimum * bptF16 > vramBudget) {
+        cacheTypeK = 'q8_0';
+        cacheTypeV = 'q8_0';
+        autoQuantized = true;
+      }
+    }
+
+    const bytesPerToken = estimateKVBytesPerToken(modelInfo, cacheTypeK, cacheTypeV);
+    let bestRawContext = 0;
+
+    const rawCapacityForPlacement = (
+      cpuExpertBytes: number,
+      requestedGpuLayers: number
+    ): number => {
+      if (
+        cpuExpertBytes > 0 &&
+        cpuExpertBytes > currentMemory.total * KV_SIZING.moeExpertTotalRamFraction
+      ) {
+        return 0;
+      }
+
+      const effectiveGpuLayers = Math.max(0, Math.min(totalLayers, requestedGpuLayers));
+      if (effectiveGpuLayers > 0 && !hasVRAM) {
+        return 0;
+      }
+
+      const gpuShare = effectiveGpuLayers / totalLayers;
+      const cpuShare = 1 - gpuShare;
+      const gpuWeights = (modelInfo.size - cpuExpertBytes) * KV_SIZING.gpuWeightsOverhead;
+      const gpuWeightBytes = gpuWeights * gpuShare;
+      const gpuKVBudget = vramBudget - gpuWeightBytes;
+      const byGPU = gpuShare > 0 ? gpuKVBudget / (bytesPerToken * gpuShare) : Infinity;
+
+      const cpuResidentWeights = (modelInfo.size - cpuExpertBytes) * cpuShare + cpuExpertBytes;
+      const ramKVBudget =
+        currentMemory.available -
+        cpuResidentWeights * KV_SIZING.cpuWeightsOverhead -
+        KV_SIZING.osRamMarginBytes;
+      const byRAM = cpuShare > 0 ? ramKVBudget / (bytesPerToken * cpuShare) : Infinity;
+
+      const raw = Math.max(0, Math.min(byGPU, byRAM, totalNativeContext));
+      bestRawContext = Math.max(bestRawContext, raw);
+      return raw;
+    };
+
+    const baselineSelectedContext = capContext(baselineContext, true);
+    const baselineCpuExpertBytes =
+      baseline.cpuMoe === true ? (expertBytes ?? 0) : hintedCpuExpertBytes;
+    const baselineRawCapacity = rawCapacityForPlacement(
+      baselineCpuExpertBytes,
+      baseline.gpuLayers ?? 0
+    );
+    if (baselineMeetsMinimum && baselineRawCapacity >= baselineSelectedContext) {
+      return attachContract({
+        ...baseline,
+        contextSize: baselineSelectedContext,
+      });
+    }
+
+    const chooseContext = (rawCapacity: number): number | undefined => {
+      if (totalMinimum === undefined) {
+        return capContext(rawCapacity, false);
+      }
+      const cap = Math.min(rawCapacity, totalMaximum ?? Infinity, totalNativeContext);
+      if (cap < totalMinimum) {
+        return undefined;
+      }
+      const rounded = floorContextToGranularity(cap);
+      return rounded >= totalMinimum ? rounded : totalMinimum;
+    };
+
+    const buildResult = (
+      selectedContext: number,
+      gpuLayers: number,
+      recommendCpuMoe: boolean
+    ): Partial<LlamaServerConfig> => {
+      const result = attachContract({
+        ...baseline,
+        contextSize: selectedContext,
+        gpuLayers,
+      });
+
+      if (autoQuantized) {
+        result.cacheTypeK = cacheTypeK;
+        result.cacheTypeV = cacheTypeV;
+        result.flashAttention = 'on';
+      } else {
+        if (hints.cacheTypeK === undefined) {
+          delete result.cacheTypeK;
+        }
+        if (hints.cacheTypeV === undefined) {
+          delete result.cacheTypeV;
+        }
+        if (hints.flashAttention === undefined) {
+          delete result.flashAttention;
+        }
+      }
+
+      if (recommendCpuMoe) {
+        result.cpuMoe = true;
+      } else if (hints.cpuMoe === undefined) {
+        delete result.cpuMoe;
+      }
+
+      return result;
+    };
+
+    const pinnedGpuLayers = hints.gpuLayers;
+    if (pinnedGpuLayers !== undefined) {
+      const selected = chooseContext(
+        rawCapacityForPlacement(hintedCpuExpertBytes, pinnedGpuLayers)
+      );
+      if (selected !== undefined) {
+        return buildResult(selected, pinnedGpuLayers, false);
+      }
+    } else {
+      // Preserve the existing priority: full offload, then measured auto-MoE
+      // full trunk offload, then the greatest feasible dense/hinted layer count.
+      if (hasVRAM) {
+        const fullSelected = chooseContext(
+          rawCapacityForPlacement(hintedCpuExpertBytes, totalLayers)
+        );
+        if (fullSelected !== undefined) {
+          return buildResult(fullSelected, totalLayers, false);
+        }
+      }
+
+      const measuredExpertBytes = modelInfo.ggufMetadata?.expert_weights_bytes;
+      const canAutoCpuMoe =
+        hints.cpuMoe === undefined &&
+        hints.nCpuMoe === undefined &&
+        hints.overrideTensors === undefined &&
+        measuredExpertBytes !== undefined &&
+        measuredExpertBytes > 0 &&
+        measuredExpertBytes <= currentMemory.total * KV_SIZING.moeExpertTotalRamFraction;
+
+      if (hasVRAM && canAutoCpuMoe && measuredExpertBytes !== undefined) {
+        const autoMoeSelected = chooseContext(
+          rawCapacityForPlacement(measuredExpertBytes, totalLayers)
+        );
+        if (autoMoeSelected !== undefined) {
+          return buildResult(autoMoeSelected, totalLayers, true);
+        }
+      }
+
+      const highestCandidate = hasVRAM ? totalLayers - 1 : 0;
+      for (let gpuLayers = highestCandidate; gpuLayers >= 0; gpuLayers--) {
+        const selected = chooseContext(rawCapacityForPlacement(hintedCpuExpertBytes, gpuLayers));
+        if (selected !== undefined) {
+          return buildResult(selected, gpuLayers, false);
+        }
+      }
+    }
+
+    const maxFeasiblePerSlot = Math.max(
+      0,
+      Math.floor(Math.min(bestRawContext, totalMaximum ?? Infinity) / parallelRequests)
+    );
+    throw new InsufficientResourcesError(
+      `Cannot satisfy minimum context ${minimum} tokens per slot`,
+      {
+        required: `${minimum} context tokens per slot (${totalMinimum} total across ${parallelRequests} slot${parallelRequests === 1 ? '' : 's'})`,
+        available: `At most ${maxFeasiblePerSlot} context tokens per slot under the permitted placement`,
+        minimumContextSize: minimum,
+        maximumContextSize: maximum,
+        maxFeasibleContextSize: maxFeasiblePerSlot,
+        parallelRequests,
+        suggestion:
+          'Close memory-heavy applications, reduce parallel requests or the minimum context, allow fewer GPU layers, or use a smaller model/quantization',
+      }
+    );
   }
 
   /**

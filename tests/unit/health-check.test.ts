@@ -46,6 +46,24 @@ describe('health-check', () => {
       );
     });
 
+    it('should bracket IPv6 literals in health URLs', async () => {
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ status: 'ok' }),
+      });
+
+      await expect(checkHealth(8080, 5000, '::1')).resolves.toMatchObject({
+        status: 'ok',
+      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://[::1]:8080/health',
+        expect.objectContaining({
+          headers: { Accept: 'application/json' },
+        })
+      );
+    });
+
     it('should return status "error" on non-ok HTTP response', async () => {
       mockFetch.mockResolvedValue({
         ok: false,

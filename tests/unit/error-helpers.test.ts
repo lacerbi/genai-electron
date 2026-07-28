@@ -7,6 +7,7 @@ import { formatErrorForUI } from '../../src/utils/error-helpers.js';
 import type { UIErrorFormat } from '../../src/utils/error-helpers.js';
 import {
   GenaiElectronError,
+  ContextConstraintError,
   ModelNotFoundError,
   DownloadError,
   InsufficientResourcesError,
@@ -19,6 +20,22 @@ import {
 
 describe('error-helpers', () => {
   describe('formatErrorForUI', () => {
+    it('should format ContextConstraintError with actionable details', () => {
+      const error = new ContextConstraintError('Effective context is below the minimum', {
+        reason: 'runtime-below-minimum',
+        stage: 'runtime',
+        minimumContextSize: 12288,
+        effectiveContextSize: 8192,
+        suggestion: 'Reduce parallel requests or choose a smaller minimum',
+      });
+      const formatted = formatErrorForUI(error);
+
+      expect(formatted.code).toBe('CONTEXT_CONSTRAINT_ERROR');
+      expect(formatted.title).toBe('Context Capacity Requirement Not Met');
+      expect(formatted.message).toContain('below the minimum');
+      expect(formatted.remediation).toContain('Reduce parallel requests');
+    });
+
     it('should format ModelNotFoundError correctly', () => {
       const error = new ModelNotFoundError('llama-2-7b');
       const formatted = formatErrorForUI(error);
@@ -235,6 +252,10 @@ describe('error-helpers', () => {
 
     it('should preserve error codes from library errors', () => {
       const errors = [
+        new ContextConstraintError('test', {
+          reason: 'invalid-minimum',
+          stage: 'validation',
+        }),
         new ModelNotFoundError('test'),
         new DownloadError('test'),
         new InsufficientResourcesError('test', {
@@ -249,6 +270,7 @@ describe('error-helpers', () => {
       ];
 
       const expectedCodes = [
+        'CONTEXT_CONSTRAINT_ERROR',
         'MODEL_NOT_FOUND',
         'DOWNLOAD_FAILED',
         'INSUFFICIENT_RESOURCES',
@@ -267,6 +289,11 @@ describe('error-helpers', () => {
 
     it('should provide helpful remediation for all error types', () => {
       const errors = [
+        new ContextConstraintError('test', {
+          reason: 'invalid-minimum',
+          stage: 'validation',
+          suggestion: 'Choose a positive safe integer minimum',
+        }),
         new ModelNotFoundError('test'),
         new DownloadError('test'),
         new InsufficientResourcesError('test', {

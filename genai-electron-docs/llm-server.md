@@ -99,11 +99,20 @@ await llamaServer.start({
 - `ServerError` - Server failed to start
 - `PortInUseError` - Port already in use
 - `InsufficientResourcesError` - Not enough RAM/VRAM
+- `ContextConstraintError` - Invalid/unsupported capacity constraint, or runtime capacity could
+  not be verified within the requested range
 - `BinaryError` - Binary download or execution failed (all variants failed)
 
 **Note**: `start()` accepts a `LlamaServerConfig`. All of its fields (e.g., `modelAlias`, `continuousBatching`, `cacheTypeK`, `overrideTensors`) are applied as llama-server CLI flags at launch. See [Binary Management](#binary-management) for details on automatic download, variant testing, and validation caching.
 
-**Health Check Behavior**: After spawning llama-server, `start()` waits for the health endpoint to respond with 'ok' status. Uses exponential backoff: starts at 100ms intervals, multiplies by 1.5 after each attempt, caps at 2s intervals. Default timeout is 120 seconds (2 minutes), configurable per start via `startupTimeout`. Cold loads of large GGUFs on slow disks may need a higher value.
+**Health and capacity verification**: After spawning llama-server, `start()` waits for the health
+endpoint to respond with `ok`. It then requires a compatible `GET /props` response and records
+`default_generation_settings.n_ctx` as the effective per-slot capacity before entering `running`
+or emitting `started`. Missing, malformed, non-OK, or timed-out `/props` fails every startup,
+including unconstrained and exact-only starts. If `total_slots` is reported, it must match
+`parallelRequests`. Range violations stop the child and throw `ContextConstraintError`; no
+`started` event is emitted. Health polling uses exponential backoff and the configurable
+`startupTimeout` (default 120 seconds).
 
 ---
 
@@ -161,7 +170,9 @@ interface LlamaServerConfig extends ServerConfig {
   modelId: string;                 // Required - Model ID to load
   port?: number | 'auto';          // Optional - Port to listen on (default: 8080; 'auto' picks a free OS port)
   threads?: number;                // Optional - CPU threads (auto-detected if not specified)
-  contextSize?: number;            // Optional - Context window size (default: 4096)
+  contextSize?: number;            // Optional - Exact total llama-server -c allocation
+  minimumContextSize?: number;     // Optional - Minimum effective context per request slot
+  maximumContextSize?: number;     // Optional - Maximum effective context per request slot
   gpuLayers?: number;              // Optional - Layers to offload to GPU (auto-detected if not specified)
   parallelRequests?: number;       // Optional - Concurrent request slots (default: 1)
   flashAttention?: FlashAttentionSetting; // Optional - 'on' | 'off' | 'auto' (boolean accepted: true→'on', false→'off'). Default: unset → server decides
@@ -193,7 +204,15 @@ interface LlamaServerConfig extends ServerConfig {
 
 `KVCacheType` is `'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'q5_0' | 'q5_1' | 'iq4_nl'`, and `FlashAttentionSetting` is `boolean | 'on' | 'off' | 'auto'`. See [TypeScript Reference](typescript-reference.md) for the full definitions.
 
-When `threads`, `gpuLayers`, `contextSize`, or the KV-cache fields are not specified, the library auto-configures based on system capabilities and GGUF metadata (v0.7.0 adaptive sizing): full GPU offload is preferred, the context recommendation comes from real KV-cache arithmetic (no artificial ceiling — capped only by the model's own context length), and **q8_0 KV quantization + flash attention are auto-selected by default** unless f16 KV at the model's full native context comfortably fits. Opt out of auto-quantization with `cacheTypeK/V: 'f16'` or `flashAttention: 'off'`; an explicit `contextSize` is always respected verbatim. MoE models too big for VRAM get `cpuMoe: true` automatically when the dense trunk fits (experts measured from GGUF tensor offsets move to RAM; context sized against the trunk). Models without GGUF metadata keep the legacy behavior (fixed 4096 context). See [System Detection](system-detection.md) for the full algorithm.
+When `threads`, `gpuLayers`, `contextSize`, or the KV-cache fields are not specified, the library
+auto-configures based on system capabilities and GGUF metadata. Full GPU offload is preferred,
+the context recommendation comes from real KV-cache arithmetic, and **q8_0 KV quantization +
+flash attention are auto-selected by default** unless f16 KV at the model's full native context
+comfortably fits. Opt out with `cacheTypeK/V: 'f16'` or `flashAttention: 'off'`; an exact
+`contextSize` retains its historical pinning behavior. MoE models too big for VRAM can use
+`cpuMoe: true` automatically when the dense trunk fits. Models without GGUF metadata keep the
+legacy unconstrained recommendation. See [System Detection](system-detection.md) for the full
+algorithm.
 
 **About `port` and `'auto'`:**
 `port` is optional and defaults to 8080. Pass `'auto'` to have the OS assign a free port — useful when 8080 may already be taken. The resolved numeric port is reported on `ServerInfo.port` (from `getInfo()`) and on `getPort()`. Reliability features such as auto-restart reuse the resolved port rather than re-running `'auto'`.
@@ -201,8 +220,37 @@ When `threads`, `gpuLayers`, `contextSize`, or the KV-cache fields are not speci
 **About `parallelRequests`:**
 The KV cache is shared across all parallel request slots. With N slots and contextSize C, each slot gets approximately C/N tokens. For single-user Electron apps (interactive chat, writing assistance), use `parallelRequests: 1` (default) to avoid wasting context capacity. Only increase this for multi-user server deployments with concurrent requests.
 
-**About Default Context Size:**
-Currently defaults to 4096. We plan to introduce VRAM-aware dynamic context calculation as default.
+**About context capacity constraints:**
+`minimumContextSize` and `maximumContextSize` are inclusive **effective per-slot** constraints;
+`contextSize` is the configured **total** `-c` allocation. Use either an exact `contextSize` or a
+range with `systemInfo.getOptimalConfig()`. `start()` also accepts both when spreading a
+precomputed constrained result: it checks the selected total locally, retains the range for
+restart/auto-restart/orchestrator reload, and verifies the authoritative per-slot value through
+`/props`.
+
+```typescript
+const model = await modelManager.getModelInfo('llama-2-7b');
+const optimized = await systemInfo.getOptimalConfig(model, {
+  minimumContextSize: 12288,
+  maximumContextSize: 32768,
+  parallelRequests: 1
+});
+
+const info = await llamaServer.start({
+  modelId: model.id,
+  ...optimized
+});
+
+console.log(info.configuredContextSize); // total selected -c
+console.log(info.effectiveContextSize);  // verified /props n_ctx per slot
+```
+
+This is a server-capacity contract, not a request-budget policy. Derive the minimum from prompt
+budgets, output reserve, and safety allowance. When several workloads share the model, use the
+largest requirement, not their sum. A larger server window does not expand history, prompt, or
+output budgets automatically; the application or genai-lite must still enforce those budgets.
+`fit: 'on'` cannot be combined with an unresolved range—precompute a concrete `contextSize` first
+if llama-server fitting must remain enabled.
 
 ---
 
@@ -250,9 +298,16 @@ console.log('Health:', info.health); // Note: always 'unknown' — use getHealth
 console.log('PID:', info.pid);
 console.log('Port:', info.port);           // resolved numeric port (even when started with 'auto')
 console.log('Load time (ms):', info.loadTimeMs); // spawn → healthy duration of the last start
+console.log('Configured total context:', info.configuredContextSize);
+console.log('Effective context per slot:', info.effectiveContextSize);
 ```
 
-**Note**: The `health` field in `ServerInfo` always returns `'unknown'` because health checks are asynchronous. For real-time health status, use `getHealthStatus()` instead.
+`configuredContextSize` is the selected total `-c` value (undefined when fitting owns context).
+`effectiveContextSize` is present only after a successful verified start and is cleared on
+stop/crash/failure. It appears in `start()`, `getInfo()`, and lifecycle event payloads. Exact-only
+starts are not rejected merely because the runtime reports a different effective value; both
+values are exposed. The `health` field always returns `'unknown'` because health checks are
+asynchronous; use `getHealthStatus()` for real-time health.
 
 ---
 
