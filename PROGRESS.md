@@ -1,15 +1,41 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.15.0 release candidate — context-capacity contract (2026-07-29)
+> **Current Status**: v0.15.0 published; preferred context sizing and revisioned llama readiness
+> are unreleased (2026-07-29)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 701/701 passing (28 suites)
-- **Branch:** `context-capacity-contract`
-- **Last Updated:** 2026-07-29 (v0.15.0 release preparation)
+- **Tests:** ✅ 709/709 passing (28 suites)
+- **Branch:** `main`
+- **Last Updated:** 2026-07-29
+
+---
+
+## Unreleased
+
+- Added `preferredContextSize` as an effective per-slot soft sizing target. It caps recommended KV
+  allocation with the same granularity and multi-slot accounting as `maximumContextSize`, while
+  allowing the running server to expose additional harmless capacity.
+- Preserved hard `minimumContextSize` and `maximumContextSize` runtime enforcement. Validation now
+  accepts minimum + preferred without a maximum, enforces minimum ≤ preferred ≤ maximum for fields
+  present, and reports typed preferred-value/order/overflow diagnostics.
+- Retained preferred policy through direct-spread recommendations, restart, auto-restart, and
+  ResourceOrchestrator reload; updated public API documentation and regression coverage.
+- Added a canonical llama-server `ready` event with a strict verified-capacity snapshot and a
+  process-lifetime `serverGeneration`. Only successfully committed processes consume generations;
+  `getInfo()` supports late reconciliation without conflating failed or stale startup attempts.
+- Exposed effective parallel slots from `/props.total_slots` when available, otherwise the resolved
+  configured count (default `1`). Initial start, explicit/automatic restart, and orchestrator
+  restoration share the same readiness path with documented event ordering.
+
+**Validation:** Repository formatting, TypeScript build, and `git diff --check` pass. ESLint passes
+with 0 errors and the existing 61 warnings. Jest passes 714/714 tests across 28 suites, including
+the open-handle verification run; 284 focused tests pass across the 5 affected suites.
+
+**Release status:** Unreleased on `main`; no version bump or release preparation performed.
 
 ---
 
@@ -36,9 +62,7 @@ audit reports 0 vulnerabilities. A live smoke against the healthy GUI-provisione
 server confirmed the 6,144-context/one-slot `/props` result satisfies a 4,096–8,192 range, while a
 deliberate two-slot expectation returns typed `runtime-slots-mismatch` diagnostics.
 
-**Release status:** Release candidate on `context-capacity-contract`. Version metadata and the
-migration guide are included in the release PR; merge, tag, GitHub release, and maintainer-side
-`npm publish` remain pending.
+**Release status:** Published as v0.15.0.
 
 ---
 

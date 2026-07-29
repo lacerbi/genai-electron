@@ -289,6 +289,7 @@ export type {
   FlashAttentionSetting,
   ServerConfig,
   ServerInfo,
+  LlamaServerReadyState,
   LlamaServerConfig,
   ServerEvent,
   ServerEventData,

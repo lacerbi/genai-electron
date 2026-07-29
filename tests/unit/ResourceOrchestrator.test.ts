@@ -201,6 +201,7 @@ describe('ResourceOrchestrator', () => {
         port: 8080,
         gpuLayers: 35,
       });
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
     });
 
     it('should offload LLM when RAM is constrained (CPU-only system)', async () => {
@@ -254,6 +255,7 @@ describe('ResourceOrchestrator', () => {
         gpuLayers: 35,
         contextSize: 4096,
         minimumContextSize: 1024,
+        preferredContextSize: 1536,
         maximumContextSize: 2048,
         parallelRequests: 4,
         flashAttention: true,

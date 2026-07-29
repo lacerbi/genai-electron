@@ -184,6 +184,8 @@ import {
 try {
   const info = await llamaServer.start(config);
   console.log('Effective context per slot:', info.effectiveContextSize);
+  console.log('Effective parallel slots:', info.effectiveParallelRequests);
+  console.log('Server generation:', info.serverGeneration);
 } catch (error) {
   if (error instanceof ContextConstraintError) {
     const capacityFailure = {
@@ -203,7 +205,9 @@ try {
 `runtime-capacity-unavailable` means the mandatory post-health `/props` contract could not be
 read. `runtime-below-minimum` and `runtime-above-maximum` mean the child was stopped before the
 manager entered `running`. `minimum-exceeds-native` and `model-context-unknown` are model metadata
-problems; `INSUFFICIENT_RESOURCES` means the range itself is valid but no permitted placement fits.
+problems; `INSUFFICIENT_RESOURCES` means the policy itself is valid but no permitted placement
+fits its minimum. `preferredContextSize` is advisory, so runtime capacity above it never produces
+a context error.
 
 **Benefits:**
 - Eliminates brittle substring matching on error messages
@@ -309,8 +313,8 @@ function setupIPCHandlers(llmService: LLMService) {
 Use server events to send status updates to renderer:
 
 ```typescript
-llamaServer.on('started', () => {
-  mainWindow.webContents.send('server-status', { status: 'running' });
+llamaServer.on('ready', (state) => {
+  mainWindow.webContents.send('server-ready', state);
 });
 
 llamaServer.on('crashed', (data) => {
@@ -318,7 +322,12 @@ llamaServer.on('crashed', (data) => {
 });
 ```
 
-**Opt-in auto-restart**: By default a crash is terminal and you handle recovery yourself. Set `autoRestart: true` in the start config to have `LlamaServerManager` automatically respawn after an unexpected crash, with exponential backoff (1s, 2s, 4s, …), reusing the previously resolved configuration (including the concrete port). Cap the attempts with `maxRestarts` (default 3). When auto-restart succeeds, the event order is `'crashed'` → `'started'` → `'restarted'`, so you can update the UI accordingly:
+**Opt-in auto-restart**: By default a crash is terminal and you handle recovery yourself. Set
+`autoRestart: true` in the start config to have `LlamaServerManager` automatically respawn after
+an unexpected crash, with exponential backoff (1s, 2s, 4s, …), reusing the previously resolved
+configuration (including the concrete port). Cap the attempts with `maxRestarts` (default 3).
+When auto-restart succeeds, the event order is `'crashed'` -> `'ready'` -> `'started'` ->
+`'restarted'`. Use `ready` as the authoritative capacity notification:
 
 ```typescript
 await llamaServer.start({
@@ -327,8 +336,8 @@ await llamaServer.start({
   maxRestarts: 3,
 });
 
-llamaServer.on('restarted', () => {
-  mainWindow.webContents.send('server-status', { status: 'running' });
+llamaServer.on('ready', (state) => {
+  mainWindow.webContents.send('server-ready', state);
 });
 ```
 

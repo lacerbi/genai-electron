@@ -48,10 +48,10 @@ export interface ServerConfig {
    * Exact total llama-server context allocation (`-c`) in tokens.
    *
    * In `SystemInfo.getOptimalConfig()` hints this is mutually exclusive with
-   * minimumContextSize/maximumContextSize. `LlamaServerManager.start()` also
-   * accepts a concrete contextSize together with a range when the value came
-   * from a precomputed constrained recommendation; the range is then retained
-   * as the runtime contract verified against `/props`.
+   * minimumContextSize/preferredContextSize/maximumContextSize.
+   * `LlamaServerManager.start()` also accepts a concrete contextSize together
+   * with retained context policy when the value came from a precomputed
+   * recommendation; hard bounds are then verified against `/props`.
    */
   contextSize?: number;
 
@@ -64,10 +64,19 @@ export interface ServerConfig {
   minimumContextSize?: number;
 
   /**
-   * Largest useful effective context per parallel request slot.
+   * Preferred effective context per parallel request slot.
    *
-   * The optimizer may return a smaller value. This prevents allocating KV
-   * cache that the application will never use.
+   * This is a soft sizing target: the optimizer avoids allocating KV cache
+   * beyond it, but the running server may expose a larger effective capacity.
+   * Runtime capacity above this value is accepted without validation.
+   */
+  preferredContextSize?: number;
+
+  /**
+   * Largest permitted effective context per parallel request slot.
+   *
+   * The optimizer may return a smaller value. A running server that reports a
+   * larger effective capacity does not satisfy this hard upper bound.
    */
   maximumContextSize?: number;
 
@@ -148,6 +157,44 @@ export interface ServerInfo {
    * Available after every successful llama-server start.
    */
   effectiveContextSize?: number;
+
+  /**
+   * Last successfully committed llama-server generation.
+   * Starts at 0 and increases once per verified process (llama-server only).
+   */
+  serverGeneration?: number;
+
+  /**
+   * Effective parallel request slots for the running llama-server.
+   * Reported by `/props` when available, otherwise the resolved configured count.
+   */
+  effectiveParallelRequests?: number;
+}
+
+/**
+ * Canonical verified-ready snapshot for one llama-server process generation.
+ */
+export interface LlamaServerReadyState {
+  /** Process-lifetime generation assigned after verified readiness */
+  serverGeneration: number;
+
+  /** Model ID served by this process */
+  modelId: string;
+
+  /** Resolved numeric port */
+  port: number;
+
+  /** Total context allocation selected for the `-c` argument, when explicit */
+  configuredContextSize?: number;
+
+  /** Verified effective context per request slot */
+  effectiveContextSize: number;
+
+  /** Verified or resolved configured parallel request slots */
+  effectiveParallelRequests: number;
+
+  /** ISO timestamp for this committed process generation */
+  startedAt: string;
 }
 
 /**
@@ -269,16 +316,17 @@ export interface LlamaServerConfig extends ServerConfig {
  * Hints for SystemInfo.getOptimalConfig().
  *
  * `contextSize` is an exact pin and is mutually exclusive with
- * `minimumContextSize` / `maximumContextSize`. A range constrains effective
- * per-slot capacity while allowing the optimizer to select a larger/smaller
- * total context and adjust offload placement. Other pinned values are
- * respected verbatim and inform the remaining dimensions.
+ * `minimumContextSize` / `preferredContextSize` / `maximumContextSize`.
+ * Minimum and maximum are hard effective per-slot bounds; preferred is a soft
+ * sizing target with no runtime enforcement. Other pinned values are respected
+ * verbatim and inform the remaining dimensions.
  */
 export type OptimalConfigHints = Partial<
   Pick<
     LlamaServerConfig,
     | 'contextSize'
     | 'minimumContextSize'
+    | 'preferredContextSize'
     | 'maximumContextSize'
     | 'gpuLayers'
     | 'parallelRequests'
@@ -295,6 +343,7 @@ export type OptimalConfigHints = Partial<
  * Server event types
  */
 export type ServerEvent =
+  | 'ready'
   | 'started'
   | 'stopped'
   | 'crashed'

@@ -1,7 +1,7 @@
 /**
  * Context-capacity constraint validation shared by sizing and server startup.
  *
- * Constraints are effective per parallel request slot. The normalized total
+ * Policy values are effective per parallel request slot. The normalized total
  * values are the llama-server `-c` allocation required across all slots.
  *
  * @module utils/context-constraints
@@ -14,25 +14,31 @@ import { getContextLengthWithFallback } from './model-metadata-helpers.js';
 
 type ContextConstraintInput = Pick<
   OptimalConfigHints,
-  'contextSize' | 'minimumContextSize' | 'maximumContextSize' | 'parallelRequests'
+  | 'contextSize'
+  | 'minimumContextSize'
+  | 'preferredContextSize'
+  | 'maximumContextSize'
+  | 'parallelRequests'
 > &
   Pick<LlamaServerConfig, 'fit'>;
 
 export interface NormalizedContextConstraints {
-  hasRange: boolean;
+  hasContextPolicy: boolean;
   minimumContextSize?: number;
+  preferredContextSize?: number;
   maximumContextSize?: number;
   parallelRequests: number;
   totalMinimumContextSize?: number;
+  totalPreferredContextSize?: number;
   totalMaximumContextSize?: number;
 }
 
 export interface ContextConstraintValidationOptions {
   /**
-   * start() accepts a selected context together with its retained runtime range;
+   * start() accepts a selected context together with its retained policy;
    * getOptimalConfig() input hints do not.
    */
-  allowExactWithRange?: boolean;
+  allowExactWithPolicy?: boolean;
 }
 
 export interface ValidatedModelContextRange {
@@ -45,23 +51,28 @@ function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
-function checkedMultiply(value: number, multiplier: number, kind: 'minimum' | 'maximum'): number {
+function checkedMultiply(
+  value: number,
+  multiplier: number,
+  kind: 'minimum' | 'preferred' | 'maximum'
+): number {
   const result = value * multiplier;
   if (!Number.isSafeInteger(result) || result <= 0) {
     throw new ContextConstraintError('Context capacity exceeds the safe numeric range', {
       reason: 'unsafe-total-capacity',
       stage: 'validation',
       minimumContextSize: kind === 'minimum' ? value : undefined,
+      preferredContextSize: kind === 'preferred' ? value : undefined,
       maximumContextSize: kind === 'maximum' ? value : undefined,
       parallelRequests: multiplier,
-      suggestion: 'Use smaller context constraints or fewer parallel request slots',
+      suggestion: 'Use smaller context values or fewer parallel request slots',
     });
   }
   return result;
 }
 
 /**
- * Validate and normalize exact/range context fields.
+ * Validate and normalize exact/bounded/preferred context fields.
  *
  * Legacy exact-only context values deliberately receive no new validation.
  */
@@ -70,12 +81,14 @@ export function normalizeContextConstraints(
   options: ContextConstraintValidationOptions = {}
 ): NormalizedContextConstraints {
   const minimum = input.minimumContextSize;
+  const preferred = input.preferredContextSize;
   const maximum = input.maximumContextSize;
-  const hasRange = minimum !== undefined || maximum !== undefined;
+  const hasContextPolicy =
+    minimum !== undefined || preferred !== undefined || maximum !== undefined;
 
-  if (!hasRange) {
+  if (!hasContextPolicy) {
     return {
-      hasRange: false,
+      hasContextPolicy: false,
       parallelRequests: input.parallelRequests ?? 1,
     };
   }
@@ -90,6 +103,16 @@ export function normalizeContextConstraints(
     });
   }
 
+  if (preferred !== undefined && !isPositiveSafeInteger(preferred)) {
+    throw new ContextConstraintError('preferredContextSize must be a positive safe integer', {
+      reason: 'invalid-preferred',
+      stage: 'validation',
+      preferredContextSize: preferred,
+      suggestion:
+        'Set preferredContextSize to a positive integer no larger than Number.MAX_SAFE_INTEGER',
+    });
+  }
+
   if (maximum !== undefined && !isPositiveSafeInteger(maximum)) {
     throw new ContextConstraintError('maximumContextSize must be a positive safe integer', {
       reason: 'invalid-maximum',
@@ -98,6 +121,34 @@ export function normalizeContextConstraints(
       suggestion:
         'Set maximumContextSize to a positive integer no larger than Number.MAX_SAFE_INTEGER',
     });
+  }
+
+  if (minimum !== undefined && preferred !== undefined && minimum > preferred) {
+    throw new ContextConstraintError(
+      'minimumContextSize cannot be greater than preferredContextSize',
+      {
+        reason: 'minimum-exceeds-preferred',
+        stage: 'validation',
+        minimumContextSize: minimum,
+        preferredContextSize: preferred,
+        maximumContextSize: maximum,
+        suggestion: 'Choose context values where minimumContextSize <= preferredContextSize',
+      }
+    );
+  }
+
+  if (preferred !== undefined && maximum !== undefined && preferred > maximum) {
+    throw new ContextConstraintError(
+      'preferredContextSize cannot be greater than maximumContextSize',
+      {
+        reason: 'preferred-exceeds-maximum',
+        stage: 'validation',
+        minimumContextSize: minimum,
+        preferredContextSize: preferred,
+        maximumContextSize: maximum,
+        suggestion: 'Choose context values where preferredContextSize <= maximumContextSize',
+      }
+    );
   }
 
   if (minimum !== undefined && maximum !== undefined && minimum > maximum) {
@@ -113,30 +164,32 @@ export function normalizeContextConstraints(
     );
   }
 
-  if (input.contextSize !== undefined && !options.allowExactWithRange) {
+  if (input.contextSize !== undefined && !options.allowExactWithPolicy) {
     throw new ContextConstraintError(
-      'contextSize is mutually exclusive with minimumContextSize/maximumContextSize',
+      'contextSize is mutually exclusive with minimumContextSize/preferredContextSize/maximumContextSize',
       {
         reason: 'exact-range-conflict',
         stage: 'validation',
         contextSize: input.contextSize,
         minimumContextSize: minimum,
+        preferredContextSize: preferred,
         maximumContextSize: maximum,
-        suggestion: 'Use either an exact contextSize or a minimum/maximum range',
+        suggestion: 'Use either an exact contextSize or minimum/preferred/maximum context policy',
       }
     );
   }
 
   if (input.fit === 'on' && input.contextSize === undefined) {
     throw new ContextConstraintError(
-      "fit: 'on' requires a concrete contextSize when context constraints are used",
+      "fit: 'on' requires a concrete contextSize when context policy is used",
       {
         reason: 'fit-range-conflict',
         stage: 'validation',
         minimumContextSize: minimum,
+        preferredContextSize: preferred,
         maximumContextSize: maximum,
         suggestion:
-          "Use genai-electron sizing with fit: 'off', or provide a precomputed contextSize with the range",
+          "Use genai-electron sizing with fit: 'off', or provide a precomputed contextSize with the policy",
       }
     );
   }
@@ -144,11 +197,12 @@ export function normalizeContextConstraints(
   const parallelRequests = input.parallelRequests ?? 1;
   if (!isPositiveSafeInteger(parallelRequests)) {
     throw new ContextConstraintError(
-      'parallelRequests must be a positive safe integer when context constraints are used',
+      'parallelRequests must be a positive safe integer when context policy is used',
       {
         reason: 'unsafe-total-capacity',
         stage: 'validation',
         minimumContextSize: minimum,
+        preferredContextSize: preferred,
         maximumContextSize: maximum,
         parallelRequests,
         suggestion: 'Use a positive integer number of parallel request slots',
@@ -158,10 +212,12 @@ export function normalizeContextConstraints(
 
   const totalMinimum =
     minimum !== undefined ? checkedMultiply(minimum, parallelRequests, 'minimum') : undefined;
+  const totalPreferred =
+    preferred !== undefined ? checkedMultiply(preferred, parallelRequests, 'preferred') : undefined;
   const totalMaximum =
     maximum !== undefined ? checkedMultiply(maximum, parallelRequests, 'maximum') : undefined;
 
-  if (input.contextSize !== undefined && options.allowExactWithRange) {
+  if (input.contextSize !== undefined && options.allowExactWithPolicy) {
     const effectiveConfigured = Math.floor(input.contextSize / parallelRequests);
     if (
       !Number.isSafeInteger(effectiveConfigured) ||
@@ -170,7 +226,7 @@ export function normalizeContextConstraints(
       (maximum !== undefined && effectiveConfigured > maximum)
     ) {
       throw new ContextConstraintError(
-        'The configured contextSize does not satisfy the retained per-slot context range',
+        'The configured contextSize does not satisfy the retained per-slot hard bounds',
         {
           reason: 'precomputed-context-out-of-range',
           stage: 'validation',
@@ -178,20 +234,23 @@ export function normalizeContextConstraints(
           configuredContextSize: input.contextSize,
           effectiveContextSize: effectiveConfigured,
           minimumContextSize: minimum,
+          preferredContextSize: preferred,
           maximumContextSize: maximum,
           parallelRequests,
-          suggestion: 'Re-run getOptimalConfig() with the desired range or adjust contextSize',
+          suggestion: 'Re-run getOptimalConfig() with the desired policy or adjust contextSize',
         }
       );
     }
   }
 
   return {
-    hasRange: true,
+    hasContextPolicy: true,
     minimumContextSize: minimum,
+    preferredContextSize: preferred,
     maximumContextSize: maximum,
     parallelRequests,
     totalMinimumContextSize: totalMinimum,
+    totalPreferredContextSize: totalPreferred,
     totalMaximumContextSize: totalMaximum,
   };
 }
@@ -225,6 +284,7 @@ export function validateModelContextRange(
         reason: 'minimum-exceeds-native',
         stage: 'sizing',
         minimumContextSize: minimum,
+        preferredContextSize: constraints.preferredContextSize,
         maximumContextSize: constraints.maximumContextSize,
         nativeContextSize: authoritativeNativeContext,
         parallelRequests: constraints.parallelRequests,
@@ -244,6 +304,7 @@ export function validateModelContextRange(
         reason: 'model-context-unknown',
         stage: 'sizing',
         minimumContextSize: minimum,
+        preferredContextSize: constraints.preferredContextSize,
         maximumContextSize: constraints.maximumContextSize,
         parallelRequests: constraints.parallelRequests,
         suggestion:
@@ -259,6 +320,7 @@ export function validateModelContextRange(
       reason: 'unsafe-total-capacity',
       stage: 'sizing',
       minimumContextSize: minimum,
+      preferredContextSize: constraints.preferredContextSize,
       maximumContextSize: constraints.maximumContextSize,
       nativeContextSize: nativeContextPerSlot,
       parallelRequests: constraints.parallelRequests,
