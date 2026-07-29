@@ -350,8 +350,33 @@ interface ServerInfo {
   loadTimeMs?: number;         // Last successful start duration, spawn → healthy (llama-server only)
   configuredContextSize?: number; // Configured total llama-server -c allocation
   effectiveContextSize?: number;  // Verified /props context per request slot
+  serverGeneration?: number;      // Last committed llama process generation (0 before first)
+  effectiveParallelRequests?: number; // Running /props slots or resolved configured count
 }
 ```
+
+The llama-specific generation is scoped to one Electron main-process lifetime and remains as the
+last-successful watermark after stop/crash. Effective capacity is present only while running.
+
+### LlamaServerReadyState
+
+Payload of the canonical llama-server `'ready'` event:
+
+```typescript
+interface LlamaServerReadyState {
+  serverGeneration: number;
+  modelId: string;
+  port: number;
+  configuredContextSize?: number;
+  effectiveContextSize: number;
+  effectiveParallelRequests: number;
+  startedAt: string;
+}
+```
+
+`effectiveParallelRequests` uses `/props.total_slots` when available and otherwise the resolved
+configured count (default `1`). Failed, cancelled, superseded, and stale startup attempts never
+receive a generation or emit this payload.
 
 ### KVCacheType
 
@@ -378,6 +403,7 @@ interface ServerConfig {
   threads?: number;
   contextSize?: number;             // Exact total llama-server -c allocation
   minimumContextSize?: number;      // Minimum effective context per request slot
+  preferredContextSize?: number;    // Soft sizing target per request slot
   maximumContextSize?: number;      // Maximum effective context per request slot
   gpuLayers?: number;
   parallelRequests?: number;
@@ -457,6 +483,7 @@ interface LlamaServerConfig extends ServerConfig {
 
 ```typescript
 type ServerEvent =
+  | 'ready'
   | 'started'
   | 'stopped'
   | 'crashed'
@@ -834,6 +861,7 @@ type OptimalConfigHints = Partial<
     LlamaServerConfig,
     | 'contextSize'
     | 'minimumContextSize'
+    | 'preferredContextSize'
     | 'maximumContextSize'
     | 'gpuLayers'
     | 'parallelRequests'
@@ -847,11 +875,12 @@ type OptimalConfigHints = Partial<
 >;
 ```
 
-`contextSize` is an exact total pin and is mutually exclusive with the range fields in
-`getOptimalConfig()`. Minimum/maximum values are inclusive effective capacities per parallel
-request slot; returned `contextSize` is the total allocation across all slots. A constrained
-result retains its range and caller-owned placement/cache hints for direct spread into
-`llamaServer.start()`.
+`contextSize` is an exact total pin and is mutually exclusive with the context-policy fields in
+`getOptimalConfig()`. Minimum/preferred/maximum values are effective capacities per parallel
+request slot; returned `contextSize` is the total allocation across all slots. Minimum and
+maximum are hard runtime bounds, while preferred is only a soft sizing cap. A policy-aware result
+retains all three values and caller-owned placement/cache hints for direct spread into
+`llamaServer.start()`. Runtime capacity above preferred is accepted.
 
 `getOptimalConfig` returns `Promise<Partial<LlamaServerConfig>>` (may include auto-selected
 `cacheTypeK`/`cacheTypeV`/`flashAttention`). The KV arithmetic is exported as
@@ -884,8 +913,11 @@ type ContextConstraintStage = 'validation' | 'sizing' | 'runtime';
 
 type ContextConstraintReason =
   | 'invalid-minimum'
+  | 'invalid-preferred'
   | 'invalid-maximum'
   | 'exact-range-conflict'
+  | 'minimum-exceeds-preferred'
+  | 'preferred-exceeds-maximum'
   | 'minimum-exceeds-maximum'
   | 'unsafe-total-capacity'
   | 'minimum-exceeds-native'
@@ -902,6 +934,7 @@ interface ContextConstraintDetails {
   stage: ContextConstraintStage;
   contextSize?: number;
   minimumContextSize?: number;
+  preferredContextSize?: number;
   maximumContextSize?: number;
   configuredContextSize?: number;
   effectiveContextSize?: number;
@@ -924,6 +957,7 @@ interface InsufficientResourcesDetails {
   available: string;
   suggestion?: string;
   minimumContextSize?: number;
+  preferredContextSize?: number;
   maximumContextSize?: number;
   configuredContextSize?: number;
   maxFeasibleContextSize?: number;

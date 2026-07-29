@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.15.0
+ * @version 0.16.0
  * @license MIT
  *
  * @example
@@ -289,6 +289,7 @@ export type {
   FlashAttentionSetting,
   ServerConfig,
   ServerInfo,
+  LlamaServerReadyState,
   LlamaServerConfig,
   ServerEvent,
   ServerEventData,

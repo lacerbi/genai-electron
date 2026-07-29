@@ -172,6 +172,7 @@ interface LlamaServerConfig extends ServerConfig {
   threads?: number;                // Optional - CPU threads (auto-detected if not specified)
   contextSize?: number;            // Optional - Exact total llama-server -c allocation
   minimumContextSize?: number;     // Optional - Minimum effective context per request slot
+  preferredContextSize?: number;   // Optional - Preferred effective context per slot (sizing only)
   maximumContextSize?: number;     // Optional - Maximum effective context per request slot
   gpuLayers?: number;              // Optional - Layers to offload to GPU (auto-detected if not specified)
   parallelRequests?: number;       // Optional - Concurrent request slots (default: 1)
@@ -221,18 +222,20 @@ algorithm.
 The KV cache is shared across all parallel request slots. With N slots and contextSize C, each slot gets approximately C/N tokens. For single-user Electron apps (interactive chat, writing assistance), use `parallelRequests: 1` (default) to avoid wasting context capacity. Only increase this for multi-user server deployments with concurrent requests.
 
 **About context capacity constraints:**
-`minimumContextSize` and `maximumContextSize` are inclusive **effective per-slot** constraints;
-`contextSize` is the configured **total** `-c` allocation. Use either an exact `contextSize` or a
-range with `systemInfo.getOptimalConfig()`. `start()` also accepts both when spreading a
-precomputed constrained result: it checks the selected total locally, retains the range for
-restart/auto-restart/orchestrator reload, and verifies the authoritative per-slot value through
-`/props`.
+`minimumContextSize`, `preferredContextSize`, and `maximumContextSize` are **effective per-slot**
+values; `contextSize` is the configured **total** `-c` allocation. Minimum and maximum are hard
+runtime bounds. Preferred is only a sizing target: it avoids allocating KV cache the application
+will not use, while effective runtime capacity above it is normal and accepted. Use either an
+exact `contextSize` or context policy with `systemInfo.getOptimalConfig()`. `start()` also accepts
+both when spreading a precomputed result: it checks the selected total against hard bounds,
+retains all policy fields for restart/auto-restart/orchestrator reload, and verifies authoritative
+per-slot capacity through `/props`.
 
 ```typescript
 const model = await modelManager.getModelInfo('llama-2-7b');
 const optimized = await systemInfo.getOptimalConfig(model, {
-  minimumContextSize: 12288,
-  maximumContextSize: 32768,
+  minimumContextSize: 6000,
+  preferredContextSize: 10000,
   parallelRequests: 1
 });
 
@@ -243,14 +246,17 @@ const info = await llamaServer.start({
 
 console.log(info.configuredContextSize); // total selected -c
 console.log(info.effectiveContextSize);  // verified /props n_ctx per slot
+// effectiveContextSize > 10000 is accepted because preferred is not a bound
 ```
 
 This is a server-capacity contract, not a request-budget policy. Derive the minimum from prompt
 budgets, output reserve, and safety allowance. When several workloads share the model, use the
 largest requirement, not their sum. A larger server window does not expand history, prompt, or
 output budgets automatically; the application or genai-lite must still enforce those budgets.
-`fit: 'on'` cannot be combined with an unresolved range—precompute a concrete `contextSize` first
-if llama-server fitting must remain enabled.
+Set `maximumContextSize` only when excess provider capacity is genuinely incompatible; unlike
+preferred, runtime capacity above maximum fails startup with `runtime-above-maximum`.
+`fit: 'on'` cannot be combined with unresolved context policy—precompute a concrete `contextSize`
+first if llama-server fitting must remain enabled.
 
 ---
 
@@ -300,13 +306,21 @@ console.log('Port:', info.port);           // resolved numeric port (even when s
 console.log('Load time (ms):', info.loadTimeMs); // spawn → healthy duration of the last start
 console.log('Configured total context:', info.configuredContextSize);
 console.log('Effective context per slot:', info.effectiveContextSize);
+console.log('Effective parallel slots:', info.effectiveParallelRequests);
+console.log('Successful process generation:', info.serverGeneration);
 ```
 
 `configuredContextSize` is the selected total `-c` value (undefined when fitting owns context).
-`effectiveContextSize` is present only after a successful verified start and is cleared on
-stop/crash/failure. It appears in `start()`, `getInfo()`, and lifecycle event payloads. Exact-only
-starts are not rejected merely because the runtime reports a different effective value; both
-values are exposed. The `health` field always returns `'unknown'` because health checks are
+`effectiveContextSize` and `effectiveParallelRequests` are present only while a successfully
+verified process is running and are cleared on stop/crash/failure. The slot count comes from
+`/props.total_slots` when available; otherwise it is the resolved configured `parallelRequests`
+(default `1`). Exact-only starts are not rejected merely because the runtime reports a different
+effective context; both values are exposed.
+
+`serverGeneration` is `0` before the first verified start and increases once for each different
+process that reaches readiness. It is not consumed by failed, cancelled, or stale starts. The last
+successful value remains visible after stop/crash as a watermark and resets when the Electron main
+process is relaunched. The `health` field always returns `'unknown'` because health checks are
 asynchronous; use `getHealthStatus()` for real-time health.
 
 ---
@@ -461,13 +475,31 @@ Rotation is configured at the `LogManager` level via `LogRotationOptions` (`maxF
 
 The `LlamaServerManager` extends `EventEmitter` and emits lifecycle events.
 
-### 'started'
+### 'ready'
 
-Emitted when server starts successfully.
+The canonical readiness event. It emits exactly once after a new llama-server process passes
+`/health` and `/props` verification and the manager commits its running state.
 
 ```typescript
-llamaServer.on('started', () => {
-  console.log('Server started successfully');
+llamaServer.on('ready', (state: LlamaServerReadyState) => {
+  console.log(
+    `Generation ${state.serverGeneration}: ${state.effectiveContextSize} context x ` +
+    `${state.effectiveParallelRequests} slots`
+  );
+});
+```
+
+Subscribe to `ready` when asynchronous consumers must reject stale lifecycle work. A late
+subscriber can reconcile with `getInfo()`, whose generation and effective-capacity fields match
+the latest ready payload while running.
+
+### 'started'
+
+An additional lifecycle notification emitted immediately after `ready`. It receives `ServerInfo`.
+
+```typescript
+llamaServer.on('started', (info: ServerInfo) => {
+  console.log('Server started successfully', info.serverGeneration);
 });
 ```
 
@@ -592,7 +624,10 @@ Set `autoRestart: true` to have the manager relaunch the server after an **unexp
 - **Resolved config reuse**: a restart reuses the previously *resolved* configuration, including the concrete port — a server started with `port: 'auto'` keeps the port it was assigned rather than picking a new one.
 - **Intentional stop never restarts**: calling `stop()` cancels any pending restart and is never treated as a crash.
 
-**Event order** for a successful auto-restart is `'crashed'` → `'started'` → `'restarted'` (`'started'` fires from the internal `start()`; `'restarted'` fires once it resolves).
+**Event order** for a successful auto-restart is `'crashed'` -> `'ready'` -> `'started'` ->
+`'restarted'`. An explicit `restart()` uses `'stopped'` -> `'ready'` -> `'started'` ->
+`'restarted'`. Resource-orchestrator restoration uses the same canonical `ready` event from its
+background `start()` call.
 
 ```typescript
 await llamaServer.start({

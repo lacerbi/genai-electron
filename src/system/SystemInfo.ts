@@ -355,9 +355,9 @@ export class SystemInfo {
    * Get optimal configuration for a model
    *
    * @param modelInfo - Model information
-   * @param hints - Exact context/placement hints or inclusive effective
-   * per-slot minimum/maximum context constraints. `contextSize` is mutually
-   * exclusive with the range fields.
+   * @param hints - Exact context/placement hints or effective per-slot
+   * minimum/preferred/maximum context policy. `contextSize` is mutually
+   * exclusive with the policy fields.
    * @returns Recommended server configuration
    *
    * @example
@@ -371,7 +371,7 @@ export class SystemInfo {
     hints: OptimalConfigHints = {}
   ): Promise<Partial<LlamaServerConfig>> {
     const constraints = normalizeContextConstraints(hints);
-    if (constraints.hasRange) {
+    if (constraints.hasContextPolicy) {
       return this.getConstrainedOptimalConfig(modelInfo, hints, constraints);
     }
 
@@ -571,9 +571,9 @@ export class SystemInfo {
   }
 
   /**
-   * Apply effective per-slot context constraints around the unchanged baseline
-   * optimizer. A maximum caps the baseline. A minimum only triggers a new
-   * placement search when the baseline effective capacity is too small.
+   * Apply effective per-slot context policy around the unchanged baseline
+   * optimizer. Preferred and maximum values cap sizing; only a minimum triggers
+   * a new placement search when baseline effective capacity is too small.
    */
   private async getConstrainedOptimalConfig(
     modelInfo: ModelInfo,
@@ -581,6 +581,7 @@ export class SystemInfo {
     constraints: NormalizedContextConstraints
   ): Promise<Partial<LlamaServerConfig>> {
     const minimum = constraints.minimumContextSize;
+    const preferred = constraints.preferredContextSize;
     const maximum = constraints.maximumContextSize;
     const parallelRequests = constraints.parallelRequests;
     const fallbackNativeContext = getContextLengthWithFallback(modelInfo);
@@ -589,11 +590,13 @@ export class SystemInfo {
     // Compute the current recommendation through the original no-range path.
     const baselineHints: OptimalConfigHints = { ...hints };
     delete baselineHints.minimumContextSize;
+    delete baselineHints.preferredContextSize;
     delete baselineHints.maximumContextSize;
     const baseline = await this.getOptimalConfig(modelInfo, baselineHints);
     const baselineContext =
       baseline.contextSize ?? Math.min(fallbackNativeContext, KV_SIZING.floorContextTokens);
     const totalMinimum = constraints.totalMinimumContextSize;
+    const totalPreferred = constraints.totalPreferredContextSize;
     const totalMaximum = constraints.totalMaximumContextSize;
 
     const attachContract = (config: Partial<LlamaServerConfig>): Partial<LlamaServerConfig> => {
@@ -622,6 +625,9 @@ export class SystemInfo {
       if (minimum !== undefined) {
         result.minimumContextSize = minimum;
       }
+      if (preferred !== undefined) {
+        result.preferredContextSize = preferred;
+      }
       if (maximum !== undefined) {
         result.maximumContextSize = maximum;
       }
@@ -629,7 +635,12 @@ export class SystemInfo {
     };
 
     const capContext = (contextTokens: number, requireMinimum: boolean): number => {
-      const cap = Math.min(contextTokens, totalMaximum ?? Infinity, totalNativeContext);
+      const cap = Math.min(
+        contextTokens,
+        totalPreferred ?? Infinity,
+        totalMaximum ?? Infinity,
+        totalNativeContext
+      );
       let selected = floorContextToGranularity(cap);
       if (selected <= 0) {
         selected = Math.floor(cap);
@@ -757,7 +768,12 @@ export class SystemInfo {
       if (totalMinimum === undefined) {
         return capContext(rawCapacity, false);
       }
-      const cap = Math.min(rawCapacity, totalMaximum ?? Infinity, totalNativeContext);
+      const cap = Math.min(
+        rawCapacity,
+        totalPreferred ?? Infinity,
+        totalMaximum ?? Infinity,
+        totalNativeContext
+      );
       if (cap < totalMinimum) {
         return undefined;
       }
@@ -850,7 +866,10 @@ export class SystemInfo {
 
     const maxFeasiblePerSlot = Math.max(
       0,
-      Math.floor(Math.min(bestRawContext, totalMaximum ?? Infinity) / parallelRequests)
+      Math.floor(
+        Math.min(bestRawContext, totalPreferred ?? Infinity, totalMaximum ?? Infinity) /
+          parallelRequests
+      )
     );
     throw new InsufficientResourcesError(
       `Cannot satisfy minimum context ${minimum} tokens per slot`,
@@ -858,6 +877,7 @@ export class SystemInfo {
         required: `${minimum} context tokens per slot (${totalMinimum} total across ${parallelRequests} slot${parallelRequests === 1 ? '' : 's'})`,
         available: `At most ${maxFeasiblePerSlot} context tokens per slot under the permitted placement`,
         minimumContextSize: minimum,
+        preferredContextSize: preferred,
         maximumContextSize: maximum,
         maxFeasibleContextSize: maxFeasiblePerSlot,
         parallelRequests,

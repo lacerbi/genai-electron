@@ -193,13 +193,17 @@ Inspect `error.details.reason`:
 
 | Reason | Meaning | Action |
 |---|---|---|
-| `invalid-minimum`, `invalid-maximum`, `minimum-exceeds-maximum` | The requested range is invalid | Use positive safe integers and an inclusive minimum ≤ maximum |
+| `invalid-minimum`, `invalid-preferred`, `invalid-maximum` | A context-policy value is invalid | Use positive safe integers |
+| `minimum-exceeds-preferred`, `preferred-exceeds-maximum`, `minimum-exceeds-maximum` | Context-policy values are out of order | Use minimum ≤ preferred ≤ maximum for the fields present |
 | `minimum-exceeds-native` | The per-slot minimum exceeds GGUF `context_length` | Lower the minimum or choose another model |
 | `model-context-unknown` | Native GGUF context metadata is missing and the requested minimum exceeds the conservative legacy limit | Refresh/redownload model metadata or lower the minimum |
 | `precomputed-context-out-of-range` | Configured total `contextSize / parallelRequests` is outside the retained range | Re-run `getOptimalConfig()` with the desired range |
 | `runtime-capacity-unavailable` | Mandatory post-health `GET /props` failed or had an incompatible shape | Check llama-server logs/version and the selected host/port |
 | `runtime-slots-mismatch` | `/props.total_slots` differs from `parallelRequests` | Check the emitted `-np` flag and fitting behavior |
 | `runtime-below-minimum`, `runtime-above-maximum` | `/props` reported an effective per-slot capacity outside the range | Adjust the range/configuration; the child has already been stopped |
+
+`preferredContextSize` is a sizing target, not a runtime bound. An effective capacity above
+preferred is accepted and does not produce a `ContextConstraintError`.
 
 ```typescript
 import { ContextConstraintError } from 'genai-electron';

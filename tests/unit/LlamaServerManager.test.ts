@@ -5,7 +5,7 @@
 
 import { jest } from '@jest/globals';
 import { EventEmitter } from 'events';
-import type { LlamaServerConfig, ModelInfo } from '../../src/types/index.js';
+import type { LlamaServerConfig, LlamaServerReadyState, ModelInfo } from '../../src/types/index.js';
 
 // Mock child_process
 const mockSpawn = jest.fn();
@@ -184,6 +184,7 @@ jest.unstable_mockModule('../../src/config/paths.js', () => ({
 
 // Import after mocking
 const { LlamaServerManager } = await import('../../src/managers/LlamaServerManager.js');
+const { ResourceOrchestrator } = await import('../../src/managers/ResourceOrchestrator.js');
 
 describe('LlamaServerManager', () => {
   let llamaServer: LlamaServerManager;
@@ -464,13 +465,153 @@ describe('LlamaServerManager', () => {
       await expect(llamaServer.start(mockConfig)).rejects.toThrow();
     });
 
-    it('should emit started event', async () => {
+    it('emits one canonical ready snapshot before started', async () => {
+      const readyHandler = jest.fn();
       const startedHandler = jest.fn();
-      llamaServer.on('started', startedHandler);
+      const lifecycle: string[] = [];
+      llamaServer.on('ready', (state: LlamaServerReadyState) => {
+        lifecycle.push('ready');
+        readyHandler(state);
+      });
+      llamaServer.on('started', (info) => {
+        lifecycle.push('started');
+        startedHandler(info);
+      });
+
+      expect(llamaServer.getInfo()).toMatchObject({
+        serverGeneration: 0,
+        effectiveParallelRequests: undefined,
+      });
+
+      const info = await llamaServer.start(mockConfig);
+
+      expect(lifecycle).toEqual(['ready', 'started']);
+      expect(readyHandler).toHaveBeenCalledTimes(1);
+      expect(readyHandler).toHaveBeenCalledWith({
+        serverGeneration: 1,
+        modelId: 'test-model',
+        port: 8080,
+        configuredContextSize: 4096,
+        effectiveContextSize: 4096,
+        effectiveParallelRequests: 4,
+        startedAt: expect.any(String),
+      });
+      expect(startedHandler).toHaveBeenCalledTimes(1);
+      expect(info).toMatchObject({
+        serverGeneration: 1,
+        effectiveContextSize: 4096,
+        effectiveParallelRequests: 4,
+      });
+      const readyState = readyHandler.mock.calls[0]![0] as LlamaServerReadyState;
+      expect(info).toMatchObject(readyState);
+      expect(llamaServer.getInfo()).toMatchObject(readyState);
+    });
+
+    it('does not increment or re-emit readiness when the running process is reused', async () => {
+      const readyHandler = jest.fn();
+      llamaServer.on('ready', readyHandler);
 
       await llamaServer.start(mockConfig);
+      const reusedInfo = llamaServer.getInfo();
+      const reusedAgain = llamaServer.getInfo();
+      await expect(llamaServer.start(mockConfig)).rejects.toThrow('already running');
 
-      expect(startedHandler).toHaveBeenCalled();
+      expect(reusedInfo).toMatchObject({ status: 'running', serverGeneration: 1 });
+      expect(reusedAgain).toMatchObject(reusedInfo);
+      expect(readyHandler).toHaveBeenCalledTimes(1);
+      expect(llamaServer.getInfo().serverGeneration).toBe(1);
+    });
+
+    it('does not emit stale started state when a ready listener stops the process', async () => {
+      const readyHandler = jest.fn();
+      const startedHandler = jest.fn();
+      let stopPromise: Promise<void> | undefined;
+      llamaServer.on('ready', (state: LlamaServerReadyState) => {
+        readyHandler(state);
+        stopPromise = llamaServer.stop();
+      });
+      llamaServer.on('started', startedHandler);
+
+      await expect(llamaServer.start(mockConfig)).rejects.toThrow(/stopped or was replaced/);
+      await stopPromise;
+
+      expect(readyHandler).toHaveBeenCalledTimes(1);
+      expect(readyHandler).toHaveBeenCalledWith(expect.objectContaining({ serverGeneration: 1 }));
+      expect(startedHandler).not.toHaveBeenCalled();
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'stopped',
+        serverGeneration: 1,
+        effectiveContextSize: undefined,
+        effectiveParallelRequests: undefined,
+      });
+    });
+
+    it('emits one higher generation when ResourceOrchestrator restores the real manager', async () => {
+      const readyStates: LlamaServerReadyState[] = [];
+      llamaServer.on('ready', (state: LlamaServerReadyState) => readyStates.push(state));
+      await llamaServer.start({
+        ...mockConfig,
+        contextSize: 4096,
+        gpuLayers: 35,
+        parallelRequests: 1,
+        occupancyCheck: 'off',
+      });
+      mockSystemInfo.getMemoryInfo.mockReturnValue({
+        total: 16 * 1024 ** 3,
+        available: 12 * 1024 ** 3,
+        used: 4 * 1024 ** 3,
+      });
+      mockSystemInfo.detect.mockResolvedValue({
+        cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+        memory: { total: 16 * 1024 ** 3, available: 12 * 1024 ** 3, used: 4 * 1024 ** 3 },
+        gpu: { available: true, type: 'nvidia', vram: 6 * 1024 ** 3 },
+        platform: 'linux',
+        recommendations: {
+          maxModelSize: '7B',
+          recommendedQuantization: ['Q4_K_M'],
+          threads: 7,
+          gpuLayers: 35,
+        },
+      });
+      const diffusionServer = {
+        getConfig: jest.fn(() => undefined),
+        executeImageGeneration: jest.fn(async () => ({
+          image: Buffer.from('fake-image'),
+          format: 'png' as const,
+          timeTaken: 100,
+          seed: 1,
+          width: 512,
+          height: 512,
+        })),
+      };
+      const orchestrator = new ResourceOrchestrator(
+        mockSystemInfo as any,
+        llamaServer,
+        diffusionServer as any,
+        mockModelManager as any
+      );
+
+      await orchestrator.orchestrateImageGeneration({
+        prompt: 'test',
+        width: 512,
+        height: 512,
+        steps: 1,
+      });
+      await orchestrator.waitForReload();
+
+      expect(readyStates).toHaveLength(2);
+      expect(readyStates.map((state) => state.serverGeneration)).toEqual([1, 2]);
+      expect(readyStates[1]).toMatchObject({
+        effectiveContextSize: 4096,
+        effectiveParallelRequests: 1,
+      });
+      expect(diffusionServer.executeImageGeneration).toHaveBeenCalledTimes(1);
+      expect(llamaServer.getInfo()).toMatchObject({
+        status: 'running',
+        serverGeneration: 2,
+        effectiveContextSize: 4096,
+        effectiveParallelRequests: 1,
+      });
     });
   });
 
@@ -480,6 +621,7 @@ describe('LlamaServerManager', () => {
       port: 8080,
       contextSize: 8192,
       minimumContextSize: 4096,
+      preferredContextSize: 4096,
       maximumContextSize: 4096,
       parallelRequests: 2,
       occupancyCheck: 'off',
@@ -498,10 +640,14 @@ describe('LlamaServerManager', () => {
         status: 'running',
         configuredContextSize: 8192,
         effectiveContextSize: 4096,
+        effectiveParallelRequests: 2,
+        serverGeneration: 1,
       });
       expect(llamaServer.getInfo()).toMatchObject({
         configuredContextSize: 8192,
         effectiveContextSize: 4096,
+        effectiveParallelRequests: 2,
+        serverGeneration: 1,
       });
       expect(startedHandler).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -512,9 +658,28 @@ describe('LlamaServerManager', () => {
       expect(llamaServer.getConfig()).toMatchObject({
         contextSize: 8192,
         minimumContextSize: 4096,
+        preferredContextSize: 4096,
         maximumContextSize: 4096,
         parallelRequests: 2,
       });
+    });
+
+    it('defaults effective parallel requests to one when config and /props omit it', async () => {
+      mockSystemInfo.getOptimalConfig.mockResolvedValueOnce({
+        threads: 7,
+        gpuLayers: 35,
+      });
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(2048) : notFoundResponse()
+      );
+
+      const info = await llamaServer.start({
+        ...mockConfig,
+        fit: 'on',
+        occupancyCheck: 'off',
+      });
+
+      expect(info.effectiveParallelRequests).toBe(1);
     });
 
     it('queries /props after health while the server is still starting', async () => {
@@ -538,6 +703,7 @@ describe('LlamaServerManager', () => {
         threads: 7,
         contextSize: 8192,
         minimumContextSize: 4096,
+        preferredContextSize: 6000,
         maximumContextSize: 8192,
         gpuLayers: 25,
         parallelRequests: 2,
@@ -554,6 +720,7 @@ describe('LlamaServerManager', () => {
         modelId: 'test-model',
         port: 8080,
         minimumContextSize: 4096,
+        preferredContextSize: 6000,
         maximumContextSize: 8192,
         parallelRequests: 2,
         occupancyCheck: 'off',
@@ -564,6 +731,7 @@ describe('LlamaServerManager', () => {
         expect.objectContaining({
           contextSize: undefined,
           minimumContextSize: 4096,
+          preferredContextSize: 6000,
           maximumContextSize: 8192,
           parallelRequests: 2,
         })
@@ -578,6 +746,31 @@ describe('LlamaServerManager', () => {
           cpuMoe: true,
         })
       );
+    });
+
+    it('accepts runtime capacity above the preferred sizing target', async () => {
+      mockFetch.mockImplementation(async (url: unknown) =>
+        String(url).endsWith('/props') ? propsResponse(4608, 2) : notFoundResponse()
+      );
+
+      const info = await llamaServer.start({
+        modelId: 'test-model',
+        port: 8080,
+        contextSize: 8192,
+        minimumContextSize: 4096,
+        preferredContextSize: 4096,
+        parallelRequests: 2,
+        occupancyCheck: 'off',
+      });
+
+      expect(info).toMatchObject({
+        configuredContextSize: 8192,
+        effectiveContextSize: 4608,
+      });
+      expect(llamaServer.getConfig()).toMatchObject({
+        preferredContextSize: 4096,
+      });
+      expect(mockProcessKill).not.toHaveBeenCalled();
     });
 
     it.each([
@@ -650,6 +843,8 @@ describe('LlamaServerManager', () => {
 
     it('fails unconstrained startup when mandatory runtime capacity is unavailable', async () => {
       mockFetch.mockImplementation(async () => notFoundResponse());
+      const readyHandler = jest.fn();
+      llamaServer.on('ready', readyHandler);
 
       await expect(
         llamaServer.start({
@@ -669,7 +864,10 @@ describe('LlamaServerManager', () => {
         status: 'stopped',
         port: 0,
         effectiveContextSize: undefined,
+        effectiveParallelRequests: undefined,
+        serverGeneration: 0,
       });
+      expect(readyHandler).not.toHaveBeenCalled();
       expect(llamaServer.getPid()).toBeUndefined();
     });
 
@@ -721,6 +919,7 @@ describe('LlamaServerManager', () => {
 
         expect(successfulLoadTime).toBe(10);
         expect(llamaServer.getInfo().loadTimeMs).toBe(successfulLoadTime);
+        expect(llamaServer.getInfo().serverGeneration).toBe(1);
       } finally {
         nowSpy.mockRestore();
       }
@@ -743,7 +942,9 @@ describe('LlamaServerManager', () => {
         return notFoundResponse();
       });
       const startedHandler = jest.fn();
+      const readyHandler = jest.fn();
       llamaServer.on('started', startedHandler);
+      llamaServer.on('ready', readyHandler);
 
       const startPromise = llamaServer.start(constrainedConfig);
       const rejectedStart = expect(startPromise).rejects.toThrow(/stopped or was replaced/);
@@ -753,12 +954,58 @@ describe('LlamaServerManager', () => {
       await rejectedStart;
 
       expect(startedHandler).not.toHaveBeenCalled();
+      expect(readyHandler).not.toHaveBeenCalled();
       expect(llamaServer.getInfo()).toMatchObject({
         status: 'stopped',
         port: 0,
         effectiveContextSize: undefined,
+        effectiveParallelRequests: undefined,
+        serverGeneration: 0,
       });
       expect(llamaServer.getPid()).toBeUndefined();
+    });
+
+    it('assigns only the newer successful process when a cancelled start is superseded', async () => {
+      let resolveFirstProps!: (response: ReturnType<typeof propsResponse>) => void;
+      let markFirstPropsRequested!: () => void;
+      let propsCalls = 0;
+      const firstPropsRequested = new Promise<void>((resolve) => {
+        markFirstPropsRequested = resolve;
+      });
+      const pendingFirstProps = new Promise<ReturnType<typeof propsResponse>>((resolve) => {
+        resolveFirstProps = resolve;
+      });
+      mockFetch.mockImplementation(async (url: unknown) => {
+        if (!String(url).endsWith('/props')) {
+          return notFoundResponse();
+        }
+        propsCalls++;
+        if (propsCalls === 1) {
+          markFirstPropsRequested();
+          return pendingFirstProps;
+        }
+        return propsResponse(4096, 2);
+      });
+      const readyHandler = jest.fn();
+      llamaServer.on('ready', readyHandler);
+
+      const firstStart = llamaServer.start(constrainedConfig);
+      const rejectedFirstStart = expect(firstStart).rejects.toThrow(/stopped or was replaced/);
+      await firstPropsRequested;
+      await llamaServer.stop();
+
+      const secondInfo = await llamaServer.start(constrainedConfig);
+      resolveFirstProps(propsResponse(4096, 2));
+      await rejectedFirstStart;
+
+      expect(readyHandler).toHaveBeenCalledTimes(1);
+      expect(readyHandler).toHaveBeenCalledWith(expect.objectContaining({ serverGeneration: 1 }));
+      expect(secondInfo).toMatchObject({
+        status: 'running',
+        serverGeneration: 1,
+        effectiveContextSize: 4096,
+        effectiveParallelRequests: 2,
+      });
     });
 
     it('does not become running when the child exits during /props verification', async () => {
@@ -892,6 +1139,8 @@ describe('LlamaServerManager', () => {
     it('ignores a late exit callback from an older process attempt', async () => {
       const exitCallbacks: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
       let nextPid = 12345;
+      const readyHandler = jest.fn();
+      llamaServer.on('ready', readyHandler);
       mockProcessSpawn.mockImplementation((_path, _args, callbacks) => {
         exitCallbacks.push(callbacks.onExit);
         return { pid: nextPid++ };
@@ -907,8 +1156,11 @@ describe('LlamaServerManager', () => {
         pid: 12346,
         port: 8080,
         effectiveContextSize: 4096,
+        effectiveParallelRequests: 2,
+        serverGeneration: 2,
       });
       expect(llamaServer.getPid()).toBe(12346);
+      expect(readyHandler).toHaveBeenCalledTimes(2);
     });
 
     it('reports an exact-only runtime difference without rejecting the legacy pin', async () => {
@@ -961,6 +1213,8 @@ describe('LlamaServerManager', () => {
         pid: undefined,
         port: 0,
         effectiveContextSize: undefined,
+        effectiveParallelRequests: undefined,
+        serverGeneration: 1,
       });
       expect(llamaServer.getPid()).toBeUndefined();
     });
@@ -980,6 +1234,7 @@ describe('LlamaServerManager', () => {
       });
       expect(llamaServer.getConfig()).toMatchObject({
         minimumContextSize: 4096,
+        preferredContextSize: 4096,
         maximumContextSize: 4096,
       });
       expect(mockFetch).toHaveBeenCalledTimes(2);
@@ -990,6 +1245,7 @@ describe('LlamaServerManager', () => {
         threads: 7,
         contextSize: 8192,
         minimumContextSize: 4096,
+        preferredContextSize: 4096,
         maximumContextSize: 4096,
         gpuLayers: 25,
         parallelRequests: 2,
@@ -1004,6 +1260,7 @@ describe('LlamaServerManager', () => {
 
       const optimized = await mockSystemInfo.getOptimalConfig(mockModelInfo, {
         minimumContextSize: 4096,
+        preferredContextSize: 4096,
         maximumContextSize: 4096,
         parallelRequests: 2,
       });
@@ -1066,6 +1323,16 @@ describe('LlamaServerManager', () => {
         details: { reason: 'invalid-minimum', stage: 'validation' },
       });
 
+      await expect(
+        llamaServer.start({
+          ...mockConfig,
+          preferredContextSize: 0,
+        })
+      ).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: { reason: 'invalid-preferred', stage: 'validation' },
+      });
+
       expect(mockModelManager.getModelInfo).not.toHaveBeenCalled();
       expect(mockEnsureLlamaBinary).not.toHaveBeenCalled();
       expect(mockFindFreePort).not.toHaveBeenCalled();
@@ -1078,6 +1345,23 @@ describe('LlamaServerManager', () => {
         llamaServer.start({
           ...mockConfig,
           minimumContextSize: 4096,
+          fit: 'on',
+        })
+      ).rejects.toMatchObject({
+        code: 'CONTEXT_CONSTRAINT_ERROR',
+        details: { reason: 'fit-range-conflict', stage: 'validation' },
+      });
+
+      expect(mockModelManager.getModelInfo).not.toHaveBeenCalled();
+      expect(mockEnsureLlamaBinary).not.toHaveBeenCalled();
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it("requires a concrete contextSize when fit: 'on' has a preferred target", async () => {
+      await expect(
+        llamaServer.start({
+          ...mockConfig,
+          preferredContextSize: 4096,
           fit: 'on',
         })
       ).rejects.toMatchObject({
@@ -1462,24 +1746,52 @@ describe('LlamaServerManager', () => {
 
         const crashedHandler = jest.fn();
         const restartedHandler = jest.fn();
-        llamaServer.on('crashed', crashedHandler);
-        llamaServer.on('restarted', restartedHandler);
+        const readyHandler = jest.fn();
+        const lifecycle: string[] = [];
+        llamaServer.on('crashed', (data) => {
+          lifecycle.push('crashed');
+          crashedHandler(data);
+        });
+        llamaServer.on('ready', (state: LlamaServerReadyState) => {
+          lifecycle.push('ready');
+          readyHandler(state);
+        });
+        llamaServer.on('started', () => lifecycle.push('started'));
+        llamaServer.on('restarted', (info) => {
+          lifecycle.push('restarted');
+          restartedHandler(info);
+        });
 
         mockProcess.emit('exit', 1, null);
 
         expect(crashedHandler).toHaveBeenCalled();
         expect(llamaServer.getStatus()).toBe('crashed');
         expect(llamaServer.getInfo().effectiveContextSize).toBeUndefined();
+        expect(llamaServer.getInfo()).toMatchObject({
+          serverGeneration: 1,
+          effectiveParallelRequests: undefined,
+        });
         expect(mockProcessSpawn).toHaveBeenCalledTimes(1);
 
         // Backoff: first attempt fires after 1s
         await jest.advanceTimersByTimeAsync(1000);
 
         expect(restartedHandler).toHaveBeenCalled();
+        expect(readyHandler).toHaveBeenCalledTimes(1);
+        expect(readyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            serverGeneration: 2,
+            effectiveContextSize: 4096,
+            effectiveParallelRequests: 2,
+          })
+        );
+        expect(lifecycle).toEqual(['crashed', 'ready', 'started', 'restarted']);
         expect(llamaServer.getStatus()).toBe('running');
         expect(llamaServer.getInfo()).toMatchObject({
           configuredContextSize: 8192,
           effectiveContextSize: 4096,
+          effectiveParallelRequests: 2,
+          serverGeneration: 2,
         });
         expect(llamaServer.getConfig()).toMatchObject({
           minimumContextSize: 4096,
@@ -1794,12 +2106,25 @@ describe('LlamaServerManager', () => {
       await llamaServer.start(mockConfig);
     });
 
-    it('should restart server', async () => {
+    it('orders explicit restart events and increments the successful generation', async () => {
       mockProcessIsRunning.mockReturnValueOnce(true).mockReturnValueOnce(false);
+      const lifecycle: string[] = [];
+      const readyHandler = jest.fn();
+      llamaServer.on('stopped', () => lifecycle.push('stopped'));
+      llamaServer.on('ready', (state: LlamaServerReadyState) => {
+        lifecycle.push('ready');
+        readyHandler(state);
+      });
+      llamaServer.on('started', () => lifecycle.push('started'));
+      llamaServer.on('restarted', () => lifecycle.push('restarted'));
 
       const info = await llamaServer.restart();
 
       expect(info.status).toBe('running');
+      expect(info.serverGeneration).toBe(2);
+      expect(readyHandler).toHaveBeenCalledTimes(1);
+      expect(readyHandler).toHaveBeenCalledWith(expect.objectContaining({ serverGeneration: 2 }));
+      expect(lifecycle).toEqual(['stopped', 'ready', 'started', 'restarted']);
       expect(mockProcessKill).toHaveBeenCalled();
       expect(mockWaitForHealthy).toHaveBeenCalledTimes(2); // Once for start, once for restart
     });
@@ -1898,6 +2223,8 @@ describe('LlamaServerManager', () => {
         pid: undefined,
         port: 0,
         effectiveContextSize: undefined,
+        effectiveParallelRequests: undefined,
+        serverGeneration: 1,
       });
     });
 

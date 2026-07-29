@@ -872,6 +872,47 @@ describe('SystemInfo', () => {
         expect(belowFloor.contextSize).toBe(2048);
       });
 
+      it('caps sizing at preferred while retaining a separate hard maximum', async () => {
+        const config = await systemInfo.getOptimalConfig(makeModel(), {
+          preferredContextSize: 10000,
+          maximumContextSize: 12288,
+        });
+
+        expect(config).toMatchObject({
+          contextSize: 9216,
+          preferredContextSize: 10000,
+          maximumContextSize: 12288,
+        });
+      });
+
+      it('supports minimum plus preferred without a maximum and never rounds below minimum', async () => {
+        const config = await systemInfo.getOptimalConfig(makeModel(), {
+          minimumContextSize: 9500,
+          preferredContextSize: 10000,
+        });
+
+        expect(config).toMatchObject({
+          contextSize: 9500,
+          minimumContextSize: 9500,
+          preferredContextSize: 10000,
+        });
+        expect(config.maximumContextSize).toBeUndefined();
+      });
+
+      it('treats preferred as per-slot and floors the total multi-slot allocation', async () => {
+        const config = await systemInfo.getOptimalConfig(makeModel(), {
+          preferredContextSize: 10000,
+          parallelRequests: 2,
+        });
+
+        expect(config).toMatchObject({
+          contextSize: 18432,
+          preferredContextSize: 10000,
+          parallelRequests: 2,
+        });
+        expect(Math.floor(config.contextSize! / 2)).toBe(9216);
+      });
+
       it('selects inside a narrow inclusive range without rounding below its minimum', async () => {
         jest.spyOn(systemInfo, 'detect').mockResolvedValue({
           ...gpuCapabilities,
@@ -930,6 +971,36 @@ describe('SystemInfo', () => {
 
         await expect(
           systemInfo.getOptimalConfig(makeModel(), {
+            contextSize: 16384,
+            preferredContextSize: 8192,
+          })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: { reason: 'exact-range-conflict', stage: 'validation' },
+        });
+
+        await expect(
+          systemInfo.getOptimalConfig(makeModel(), {
+            minimumContextSize: 10000,
+            preferredContextSize: 9000,
+          })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: { reason: 'minimum-exceeds-preferred' },
+        });
+
+        await expect(
+          systemInfo.getOptimalConfig(makeModel(), {
+            preferredContextSize: 10000,
+            maximumContextSize: 9000,
+          })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: { reason: 'preferred-exceeds-maximum' },
+        });
+
+        await expect(
+          systemInfo.getOptimalConfig(makeModel(), {
             minimumContextSize: 16384,
             maximumContextSize: 8192,
           })
@@ -947,12 +1018,28 @@ describe('SystemInfo', () => {
           code: 'CONTEXT_CONSTRAINT_ERROR',
           details: { reason: 'unsafe-total-capacity' },
         });
+
+        await expect(
+          systemInfo.getOptimalConfig(makeModel(), {
+            preferredContextSize: Number.MAX_SAFE_INTEGER,
+            parallelRequests: 2,
+          })
+        ).rejects.toMatchObject({
+          code: 'CONTEXT_CONSTRAINT_ERROR',
+          details: {
+            reason: 'unsafe-total-capacity',
+            preferredContextSize: Number.MAX_SAFE_INTEGER,
+          },
+        });
       });
 
       it.each([
         ['minimumContextSize', 0, 'invalid-minimum'],
         ['minimumContextSize', 1.5, 'invalid-minimum'],
         ['minimumContextSize', Number.NaN, 'invalid-minimum'],
+        ['preferredContextSize', 0, 'invalid-preferred'],
+        ['preferredContextSize', 1.5, 'invalid-preferred'],
+        ['preferredContextSize', Number.NaN, 'invalid-preferred'],
         ['maximumContextSize', -1, 'invalid-maximum'],
         ['maximumContextSize', Number.POSITIVE_INFINITY, 'invalid-maximum'],
       ] as const)('rejects invalid %s value %s', async (field, value, reason) => {

@@ -41,8 +41,11 @@ export type ContextConstraintStage = 'validation' | 'sizing' | 'runtime';
  */
 export type ContextConstraintReason =
   | 'invalid-minimum'
+  | 'invalid-preferred'
   | 'invalid-maximum'
   | 'exact-range-conflict'
+  | 'minimum-exceeds-preferred'
+  | 'preferred-exceeds-maximum'
   | 'minimum-exceeds-maximum'
   | 'unsafe-total-capacity'
   | 'minimum-exceeds-native'
@@ -62,6 +65,7 @@ export interface ContextConstraintDetails {
   stage: ContextConstraintStage;
   contextSize?: number;
   minimumContextSize?: number;
+  preferredContextSize?: number;
   maximumContextSize?: number;
   configuredContextSize?: number;
   effectiveContextSize?: number;
@@ -139,6 +143,7 @@ export interface InsufficientResourcesDetails {
   available: string;
   suggestion?: string;
   minimumContextSize?: number;
+  preferredContextSize?: number;
   maximumContextSize?: number;
   configuredContextSize?: number;
   maxFeasibleContextSize?: number;

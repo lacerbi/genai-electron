@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.15.0 (constraint-aware context sizing and verified runtime capacity)
+> **Version**: 0.16.0 (preferred context sizing and revisioned llama readiness)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.15.x to v0.16.0](migration-0-15-to-0-16.md)** - Soft preferred context sizing, canonical revisioned llama readiness, and effective parallel-capacity reporting
 - **[Migrating from v0.14.x to v0.15.0](migration-0-14-to-0-15.md)** - Minimum/maximum context-capacity contracts, configured/effective reporting, and mandatory llama-server `/props` verification
 - **[Migrating from v0.13.x to v0.14.0](migration-0-13-to-0-14.md)** - Additive extraction progress plus worker-thread ZIP extraction, dependency reuse, recovery hardening, validation parity, and durable provisioning logs
 - **[Migrating from v0.12.x to v0.13.0](migration-0-12-to-0-13.md)** - Additive provenance APIs and Hugging Face revision pinning; sd.cpp binary compatibility re-verification required

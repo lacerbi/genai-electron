@@ -106,7 +106,7 @@ export function formatErrorForUI(error: unknown): UIErrorFormat {
       message: error.message,
       remediation:
         error.details.suggestion ||
-        'Review the requested context range, parallel request count, and available model metadata.',
+        'Review the requested context policy, parallel request count, and available model metadata.',
     };
   }
 

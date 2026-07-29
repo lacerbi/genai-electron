@@ -18,6 +18,7 @@ import { parseLlamaCppLogLevel, stripLlamaCppFormatting } from '../process/llama
 import type {
   ServerConfig,
   ServerInfo,
+  LlamaServerReadyState,
   LlamaServerConfig,
   HealthStatus,
   ModelInfo,
@@ -80,6 +81,7 @@ export class LlamaServerManager extends ServerManager {
     'threads',
     'contextSize',
     'minimumContextSize',
+    'preferredContextSize',
     'maximumContextSize',
     'gpuLayers',
     'parallelRequests',
@@ -117,6 +119,10 @@ export class LlamaServerManager extends ServerManager {
   private _loadTimeMs?: number;
   /** Effective per-slot context reported by llama-server /props */
   private _effectiveContextSize?: number;
+  /** Effective request slots reported by /props or resolved from configuration */
+  private _effectiveParallelRequests?: number;
+  /** Monotonic count of successfully committed llama-server processes */
+  private serverGeneration = 0;
   /** Monotonic identity for the active startup/process attempt. */
   private processGeneration = 0;
   /** Startup generations explicitly cancelled by stop(), awaiting rejection. */
@@ -198,7 +204,7 @@ export class LlamaServerManager extends ServerManager {
     );
     const llamaConfig = config as LlamaServerConfig;
     const contextConstraints = normalizeContextConstraints(llamaConfig, {
-      allowExactWithRange: true,
+      allowExactWithPolicy: true,
     });
 
     // A manual start resets the auto-restart budget and cancels any pending
@@ -209,6 +215,7 @@ export class LlamaServerManager extends ServerManager {
     }
 
     this._effectiveContextSize = undefined;
+    this._effectiveParallelRequests = undefined;
     const startupGeneration = ++this.processGeneration;
     let startupPid: number | undefined;
     this.setStatus('starting');
@@ -236,7 +243,7 @@ export class LlamaServerManager extends ServerManager {
       let finalConfig: ResolvedLlamaServerConfig | undefined;
       let canRun: Awaited<ReturnType<SystemInfo['canRunModel']>>;
 
-      if (contextConstraints.hasRange) {
+      if (contextConstraints.hasContextPolicy) {
         // Validate model limits and resolve the constrained placement before
         // provisioning. The legacy unresolved preflight can otherwise reject a
         // configuration that fits through GPU/MoE offload or quantized KV.
@@ -274,6 +281,7 @@ export class LlamaServerManager extends ServerManager {
             )}GB`,
             suggestion: canRun.suggestion || canRun.reason || 'Try a smaller model',
             minimumContextSize: contextConstraints.minimumContextSize,
+            preferredContextSize: contextConstraints.preferredContextSize,
             maximumContextSize: contextConstraints.maximumContextSize,
             configuredContextSize: finalConfig?.contextSize,
             parallelRequests: contextConstraints.parallelRequests,
@@ -297,7 +305,7 @@ export class LlamaServerManager extends ServerManager {
       );
       this.assertStartupAttemptActive(startupGeneration);
 
-      // 5. Auto-configure if needed (ranged starts were resolved before provisioning)
+      // 5. Auto-configure if needed (policy-aware starts were resolved before provisioning)
       finalConfig ??= await this.autoConfigureIfNeeded(
         { ...config, port: resolvedPort },
         modelInfo
@@ -413,6 +421,7 @@ export class LlamaServerManager extends ServerManager {
             reason: 'runtime-below-minimum',
             stage: 'runtime',
             minimumContextSize: contextConstraints.minimumContextSize,
+            preferredContextSize: contextConstraints.preferredContextSize,
             maximumContextSize: contextConstraints.maximumContextSize,
             configuredContextSize: finalConfig.contextSize,
             effectiveContextSize: runtimeCapacity.effectiveContextSize,
@@ -434,6 +443,7 @@ export class LlamaServerManager extends ServerManager {
             reason: 'runtime-above-maximum',
             stage: 'runtime',
             minimumContextSize: contextConstraints.minimumContextSize,
+            preferredContextSize: contextConstraints.preferredContextSize,
             maximumContextSize: contextConstraints.maximumContextSize,
             configuredContextSize: finalConfig.contextSize,
             effectiveContextSize: runtimeCapacity.effectiveContextSize,
@@ -458,6 +468,7 @@ export class LlamaServerManager extends ServerManager {
       // Commit verified state only after every asynchronous startup operation.
       // The synchronous tail cannot be interleaved with stop() or a newer start.
       this._effectiveContextSize = effectiveContextSize;
+      this._effectiveParallelRequests = effectiveParallelRequests;
       this._loadTimeMs = loadTimeMs;
       this._startedAt = new Date();
       this.setStatus('running');
@@ -469,10 +480,28 @@ export class LlamaServerManager extends ServerManager {
       // Clear system info cache so subsequent memory checks use fresh data
       this.systemInfo.clearCache();
 
-      // Emit started event
-      this.emitEvent('started', this.getInfo());
+      // Assign a public generation only after the process is verified and all
+      // synchronous commit work has succeeded. Capture both event payloads
+      // before listeners can synchronously alter lifecycle state.
+      this.serverGeneration++;
+      const readyState: LlamaServerReadyState = {
+        serverGeneration: this.serverGeneration,
+        modelId: finalConfig.modelId,
+        port: finalConfig.port,
+        configuredContextSize: finalConfig.contextSize,
+        effectiveContextSize,
+        effectiveParallelRequests,
+        startedAt: this._startedAt.toISOString(),
+      };
+      const serverInfo = this.getInfo();
 
-      return this.getInfo();
+      this.emitEvent('ready', readyState);
+      // A ready listener may synchronously stop or restart the manager. Do not
+      // follow that transition with a stale started notification.
+      this.assertStartupAttemptActive(startupGeneration, pid, 'running');
+      this.emitEvent('started', serverInfo);
+
+      return serverInfo;
     } catch (error) {
       // A stop, exit, or newer start owns lifecycle state now. Reject this
       // stale start without clearing or stopping the newer attempt.
@@ -491,6 +520,7 @@ export class LlamaServerManager extends ServerManager {
         this._pid = undefined;
         this._port = 0;
         this._effectiveContextSize = undefined;
+        this._effectiveParallelRequests = undefined;
 
         if (pidToKill && this.processManager.isRunning(pidToKill)) {
           try {
@@ -536,6 +566,7 @@ export class LlamaServerManager extends ServerManager {
     this._pid = undefined;
     this._port = 0;
     this._effectiveContextSize = undefined;
+    this._effectiveParallelRequests = undefined;
     this.setStatus('stopping');
 
     try {
@@ -580,6 +611,8 @@ export class LlamaServerManager extends ServerManager {
       loadTimeMs: this._loadTimeMs,
       configuredContextSize: config?.contextSize,
       effectiveContextSize: this._effectiveContextSize,
+      serverGeneration: this.serverGeneration,
+      effectiveParallelRequests: this._effectiveParallelRequests,
     };
   }
 
@@ -661,11 +694,12 @@ export class LlamaServerManager extends ServerManager {
     debugLog('[LlamaServer] autoConfigureIfNeeded input:', JSON.stringify(config));
 
     const llamaConfig = config as LlamaServerConfig & { port: number };
-    const useRangeForSizing = llamaConfig.contextSize === undefined;
+    const usePolicyForSizing = llamaConfig.contextSize === undefined;
     const optimalConfig = await this.systemInfo.getOptimalConfig(modelInfo, {
       contextSize: llamaConfig.contextSize,
-      minimumContextSize: useRangeForSizing ? llamaConfig.minimumContextSize : undefined,
-      maximumContextSize: useRangeForSizing ? llamaConfig.maximumContextSize : undefined,
+      minimumContextSize: usePolicyForSizing ? llamaConfig.minimumContextSize : undefined,
+      preferredContextSize: usePolicyForSizing ? llamaConfig.preferredContextSize : undefined,
+      maximumContextSize: usePolicyForSizing ? llamaConfig.maximumContextSize : undefined,
       gpuLayers: llamaConfig.gpuLayers,
       parallelRequests: llamaConfig.parallelRequests,
       flashAttention: llamaConfig.flashAttention,
@@ -966,6 +1000,7 @@ export class LlamaServerManager extends ServerManager {
     this._pid = undefined;
     this._port = 0;
     this._effectiveContextSize = undefined;
+    this._effectiveParallelRequests = undefined;
 
     // Update status
     if (wasRunning && ((code !== 0 && code !== null) || killedByWatchdog)) {
