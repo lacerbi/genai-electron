@@ -1,20 +1,20 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.15.0 published; preferred context sizing and revisioned llama readiness
-> are unreleased (2026-07-29)
+> **Current Status**: v0.16.0 release candidate — preferred context sizing and revisioned llama
+> readiness (2026-07-29)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 709/709 passing (28 suites)
-- **Branch:** `main`
-- **Last Updated:** 2026-07-29
+- **Tests:** ✅ 714/714 passing (28 suites)
+- **Branch:** `release/v0.16.0`
+- **Last Updated:** 2026-07-29 (v0.16.0 release preparation)
 
 ---
 
-## Unreleased
+## v0.16.0: Preferred Context and Revisioned Llama Readiness (2026-07-29)
 
 - Added `preferredContextSize` as an effective per-slot soft sizing target. It caps recommended KV
   allocation with the same granularity and multi-slot accounting as `maximumContextSize`, while
@@ -31,11 +31,15 @@
   configured count (default `1`). Initial start, explicit/automatic restart, and orchestrator
   restoration share the same readiness path with documented event ordering.
 
-**Validation:** Repository formatting, TypeScript build, and `git diff --check` pass. ESLint passes
-with 0 errors and the existing 61 warnings. Jest passes 714/714 tests across 28 suites, including
-the open-handle verification run; 284 focused tests pass across the 5 affected suites.
+**Release validation:** `prepublishOnly` passes with a clean build and 714/714 tests across 28
+suites; the open-handle verification run also passes. ESLint passes with 0 errors and the existing
+61 warnings, repository formatting and `git diff --check` pass, and 284 focused tests pass across
+the 5 affected suites. The v0.16.0 package dry-run contains 171 files, and the production
+dependency audit reports 0 vulnerabilities.
 
-**Release status:** Unreleased on `main`; no version bump or release preparation performed.
+**Release status:** Release candidate on `release/v0.16.0`. Version metadata and the v0.15.x-to-v0.16.0
+migration guide are included in the release PR; merge, tag, GitHub release, and maintainer-side
+`npm publish` remain pending.
 
 ---
 
