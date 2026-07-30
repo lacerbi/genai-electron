@@ -1,0 +1,6 @@
+# Keep text files byte-consistent across Windows, Linux, and WSL.
+* text=auto eol=lf
+
+# Preserve conventional line endings for native Windows command scripts.
+*.bat text eol=crlf
+*.cmd text eol=crlf
