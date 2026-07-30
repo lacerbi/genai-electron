@@ -20,6 +20,9 @@ publication to the user unless they separately and explicitly authorize it.
   metadata.
 - Never commit release preparation directly to `main`.
 - Prepare one release commit and PR after the implementation is complete.
+- Use exactly one pull request for a release. Resolve and archive any completed
+  root issue/plan records in that release-preparation commit and PR. Never open
+  a follow-up pull request solely for post-release archival.
 - Update all current-version surfaces: `package.json`, the root package entries
   in `package-lock.json`, the README version/status line, the documentation
   index version and migration link, `src/index.ts`'s `@version`, and the
@@ -130,6 +133,14 @@ structural reference. Explain public API changes, compatibility, required
 consumer actions, the pre-1.0 dependency-range consequence when relevant, and
 verification or rollback guidance warranted by the change.
 
+Close any root issue/plan records completed by the release: set their resolved
+or complete status with the target date/version, tick acceptance and tracking
+items, add the required resolution text, move them to the repository's
+established archive under `docs/dev/`, and update references. Describe the
+target release honestly; do not claim that GitHub or npm publication has
+already occurred. Include these changes in the same release-preparation commit
+and PR.
+
 Keep implementation changes out of the release-preparation edit. Confirm every
 current-version surface contains the target, stale current-version text is
 gone from those locations, links resolve, and the diff contains no unrelated
@@ -183,6 +194,7 @@ Otherwise create a PR targeting `main` with:
 - A title such as `release: vX.Y.Z: concise theme`
 - A concise summary of implementation and release preparation
 - Compatibility and migration guidance with the guide path
+- Any issue/plan resolution and archival included in the release
 - Actual local verification results
 - Any justified platform-specific or live-smoke results
 
@@ -197,6 +209,10 @@ report the checks that actually run instead of hard-coding a count.
 Keep the user updated while jobs are pending. Investigate and fix any failure,
 rerun relevant local checks, commit the scoped fix, push, and wait for
 replacement CI. Do not merge until every required check is green.
+
+Confirm that any completed release issue/plan records are already resolved and
+archived in this PR. Do not merge with the intention of opening a separate
+archival PR afterward.
 
 Merge with `gh pr merge <PR> --merge`. Verify the PR state is `MERGED` and
 record the exact release merge commit SHA for synchronization and tagging.
@@ -279,8 +295,13 @@ optionally verify it with `npm view genai-electron@X.Y.Z version`.
 Only publish to npm when the user separately and explicitly authorizes that
 external action and npm authentication is available.
 
+Do not edit archived release records or open another pull request merely to
+record later npm publication; report and verify that external state in the
+release handoff.
+
 ## 12. Report completion
 
 Report the version and classification, PR and release URLs, merge commit,
 annotated tag, migration guide, branch cleanup, clean synchronized `main`,
-local and CI verification, and npm publication status or handoff.
+local and CI verification, npm publication status or handoff, and confirmation
+that release records were archived in the single release PR.
