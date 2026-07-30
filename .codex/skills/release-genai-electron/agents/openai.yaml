@@ -1,0 +1,7 @@
+interface:
+  display_name: 'Release genai-electron'
+  short_description: 'Run a guarded patch or minor release'
+  default_prompt: 'Use $release-genai-electron to prepare and publish a guarded genai-electron release.'
+
+policy:
+  allow_implicit_invocation: false
