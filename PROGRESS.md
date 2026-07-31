@@ -1,20 +1,20 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.17.0 release candidate — full-size SWA prompt-cache control
-> (2026-07-30)
+> **Current Status**: v0.18.0 release candidate — automated LLM runtime calibration
+> (2026-07-31)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 716/716 passing (28 suites)
-- **Branch:** `release/v0.17.0`
-- **Last Updated:** 2026-07-30 (v0.17.0 release preparation)
+- **Tests:** ✅ 764/764 passing (32 suites)
+- **Branch:** `release/v0.18.0`
+- **Last Updated:** 2026-07-31 (v0.18.0 release preparation)
 
 ---
 
-## Unreleased
+## v0.18.0: LLM Runtime Calibration (2026-07-31)
 
 - Added `LlamaServerManager.calibrate()` / `isCalibrating()` for serial, lifecycle-neutral
   benchmarking of a bounded llama-server flag set at one exact total context and slot profile.
@@ -39,6 +39,16 @@ about 443 ms. A final pinned-binary parser smoke also confirmed the slot-erase a
 the protocol only, not portable defaults. A subsequent normal manager `start()` with the resolved
 full-SWA config reached healthy with the exact 6,144-token capacity, retained all applied flags,
 and stopped cleanly; the existing orchestration test also verifies exact config restoration.
+
+**Release validation:** `prepublishOnly` passes with a clean build and 764/764 tests across 32
+suites; the earlier full open-handle diagnostic run also passes. ESLint passes with 0 errors and
+75 warnings, repository formatting and `git diff --check` pass, and the production dependency
+audit reports 0 vulnerabilities. The v0.18.0 package dry-run contains 195 files (165,757 bytes
+packed; 849,425 bytes unpacked).
+
+**Release status:** Release candidate on `release/v0.18.0`. Version metadata, the resolved issue
+archive, and the v0.17.x-to-v0.18.0 migration guide are included and all local release gates pass;
+PR merge, tag, GitHub release, and maintainer-side `npm publish` remain pending.
 
 ---
 

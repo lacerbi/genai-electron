@@ -3,6 +3,7 @@
 Created: 2026-07-31
 Updated: 2026-07-31 (implemented and verified)
 Status: RESOLVED
+Resolved in: v0.18.0
 Package: genai-electron
 Filed from: palimpsest-engine (consumer), after adopting v0.17.0
 Plan: [`PLAN-llm-runtime-calibration.md`](../plans/PLAN-llm-runtime-calibration.md)

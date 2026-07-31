@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.17.0 | **Status**: Production Ready - full-size SWA prompt-cache control
+> **Version**: 0.18.0 | **Status**: Production Ready - automated LLM runtime calibration
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 

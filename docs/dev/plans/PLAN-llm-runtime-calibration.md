@@ -2,6 +2,7 @@
 
 Created: 2026-07-31
 Status: COMPLETE (approved and implemented 2026-07-31)
+Target release: v0.18.0
 Source: `docs/dev/issues/ISSUE-llm-runtime-calibration.md` + design discussion on 2026-07-31
 
 ## Summary
