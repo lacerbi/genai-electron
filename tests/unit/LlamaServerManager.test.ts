@@ -1470,7 +1470,14 @@ describe('LlamaServerManager', () => {
       await llamaServer.start(mockConfig);
 
       const args = spawnArgs();
-      for (const flag of ['--alias', '-b', '--no-cont-batching', '--no-mmap', '--mlock']) {
+      for (const flag of [
+        '--alias',
+        '-b',
+        '--no-cont-batching',
+        '--no-mmap',
+        '--mlock',
+        '--swa-full',
+      ]) {
         expect(args).not.toContain(flag);
       }
     });
@@ -1506,6 +1513,16 @@ describe('LlamaServerManager', () => {
     it('should omit -fa when flashAttention is unset (server decides)', async () => {
       await llamaServer.start(mockConfig);
       expect(spawnArgs()).not.toContain('-fa');
+    });
+
+    it('should pass --swa-full only when swaFull is true', async () => {
+      await llamaServer.start({ ...mockConfig, swaFull: true });
+      expect(spawnArgs()).toContain('--swa-full');
+
+      await llamaServer.stop();
+      mockProcessSpawn.mockClear();
+      await llamaServer.start({ ...mockConfig, swaFull: false });
+      expect(spawnArgs()).not.toContain('--swa-full');
     });
 
     it('should pass -fit off by default and honor fit: on', async () => {
@@ -1590,6 +1607,7 @@ describe('LlamaServerManager', () => {
         threads: 4,
         contextSize: 2048,
         minimumContextSize: 1024,
+        preferredContextSize: 2048,
         maximumContextSize: 4096,
         gpuLayers: 10,
         parallelRequests: 1,
@@ -1605,6 +1623,7 @@ describe('LlamaServerManager', () => {
         jinja: true,
         cacheTypeK: 'q8_0',
         cacheTypeV: 'q8_0',
+        swaFull: true,
         overrideTensors: 'exps=CPU',
         cacheRam: 1024,
         cpuMoe: false,

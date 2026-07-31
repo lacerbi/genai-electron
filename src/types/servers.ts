@@ -252,6 +252,14 @@ export interface LlamaServerConfig extends ServerConfig {
   cacheTypeV?: KVCacheType;
 
   /**
+   * Use a full-context cache for sliding-window-attention layers (--swa-full).
+   *
+   * Improves prompt-cache reuse for SWA models at the cost of additional KV
+   * memory that scales with context size. Default: unset/false (server default).
+   */
+  swaFull?: boolean;
+
+  /**
    * Tensor buffer-type overrides (-ot / --override-tensor)
    * e.g. 'exps=CPU' keeps MoE expert weights on CPU to fit large MoE models in VRAM.
    */

@@ -190,6 +190,7 @@ interface LlamaServerConfig extends ServerConfig {
   jinja?: boolean;                 // Optional - Use the model's Jinja chat template (--jinja). Default: true; false → --no-jinja
   cacheTypeK?: KVCacheType;        // Optional - KV-cache quantization for keys (--cache-type-k). Default: unset (f16)
   cacheTypeV?: KVCacheType;        // Optional - KV-cache quantization for values (--cache-type-v). Quantized V auto-upgrades flash attention to 'on'; throws if flashAttention is explicitly 'off'/false
+  swaFull?: boolean;               // Optional - Full-context cache for SWA layers (--swa-full). Default: unset/false
   overrideTensors?: string;        // Optional - Tensor buffer-type overrides (-ot), e.g. 'exps=CPU' to keep MoE experts on CPU
   cacheRam?: number;               // Optional - Max CPU-side prompt/KV cache in MiB (--cache-ram). -1 = no limit, 0 = disable
   cpuMoe?: boolean;                // Optional - Keep ALL MoE expert weights on CPU (--cpu-moe)
@@ -214,6 +215,14 @@ comfortably fits. Opt out with `cacheTypeK/V: 'f16'` or `flashAttention: 'off'`;
 `cpuMoe: true` automatically when the dense trunk fits. Models without GGUF metadata keep the
 legacy unconstrained recommendation. See [System Detection](system-detection.md) for the full
 algorithm.
+
+**About `swaFull`:**
+Set `swaFull: true` to pass `--swa-full`, which can preserve prompt-cache reuse on
+sliding-window-attention models when requests share a prefix. The full SWA cache consumes additional
+KV memory proportional to context size, so the option remains opt-in. Metadata-backed automatic
+sizing already prices sliding-window layers as full-context and is therefore conservative for this
+mode. Models without GGUF metadata use the legacy sizing path; refresh their metadata with
+`modelManager.updateModelMetadata()` before relying on automatic placement.
 
 **About `port` and `'auto'`:**
 `port` is optional and defaults to 8080. Pass `'auto'` to have the OS assign a free port — useful when 8080 may already be taken. The resolved numeric port is reported on `ServerInfo.port` (from `getInfo()`) and on `getPort()`. Reliability features such as auto-restart reuse the resolved port rather than re-running `'auto'`.

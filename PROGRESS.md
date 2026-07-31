@@ -1,16 +1,39 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.16.0 release candidate — preferred context sizing and revisioned llama
-> readiness (2026-07-29)
+> **Current Status**: v0.17.0 release candidate — full-size SWA prompt-cache control
+> (2026-07-30)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 714/714 passing (28 suites)
-- **Branch:** `release/v0.16.0`
-- **Last Updated:** 2026-07-29 (v0.16.0 release preparation)
+- **Tests:** ✅ 716/716 passing (28 suites)
+- **Branch:** `release/v0.17.0`
+- **Last Updated:** 2026-07-30 (v0.17.0 release preparation)
+
+---
+
+## v0.17.0: Full-Size SWA Cache Control (2026-07-30)
+
+- Added opt-in `LlamaServerConfig.swaFull`; `true` emits llama.cpp's `--swa-full` to preserve
+  prompt-cache reuse on sliding-window-attention models, while false/unset preserve existing argv.
+- Specialized `LlamaServerManager.start()` to accept `LlamaServerConfig`, making llama-specific
+  fields type-safe in direct object literals as already documented.
+- Documented that metadata-backed auto-sizing conservatively prices SWA layers as full-context and
+  added regression coverage for heterogeneous Gemma-style cache dimensions. Automatic enablement,
+  checkpoint controls, and raw argument passthrough remain out of scope.
+
+**Release validation:** `prepublishOnly` passes with a clean build and 716/716 tests across 28
+suites. Jest still reports its worker force-exit warning after the successful run. ESLint passes
+with 0 errors and the existing 61 warnings, repository formatting and `git diff --check` pass,
+the generated declarations contain the new public config/signature, and the production dependency
+audit reports 0 vulnerabilities. The v0.17.0 package dry-run contains 171 files (135,963 bytes
+packed; 694,703 bytes unpacked).
+
+**Release status:** Release candidate on `release/v0.17.0`. Version metadata, the resolved issue
+archive, and the v0.16.x-to-v0.17.0 migration guide are included in the release PR; merge, tag,
+GitHub release, and maintainer-side `npm publish` remain pending.
 
 ---
 

@@ -466,6 +466,7 @@ interface LlamaServerConfig extends ServerConfig {
   jinja?: boolean;                   // Use embedded Jinja chat template (--jinja). Default: true; false → --no-jinja
   cacheTypeK?: KVCacheType;          // --cache-type-k (default: unset → f16)
   cacheTypeV?: KVCacheType;          // --cache-type-v; quantized V auto-upgrades flash attention to 'on' (throws if explicitly 'off')
+  swaFull?: boolean;                 // --swa-full; full-context SWA cache (default: unset/false)
   overrideTensors?: string;          // -ot / --override-tensor, e.g. 'exps=CPU'
   cacheRam?: number;                 // --cache-ram (MiB); -1 = no limit, 0 = disable
   cpuMoe?: boolean;                  // --cpu-moe (keep ALL MoE experts on CPU)
