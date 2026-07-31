@@ -8,9 +8,21 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 714/714 passing (28 suites)
+- **Tests:** ✅ 716/716 passing (28 suites)
 - **Branch:** `release/v0.16.0`
-- **Last Updated:** 2026-07-29 (v0.16.0 release preparation)
+- **Last Updated:** 2026-07-30 (unreleased SWA prompt-cache control)
+
+---
+
+## Unreleased
+
+- Added opt-in `LlamaServerConfig.swaFull`; `true` emits llama.cpp's `--swa-full` to preserve
+  prompt-cache reuse on sliding-window-attention models, while false/unset preserve existing argv.
+- Specialized `LlamaServerManager.start()` to accept `LlamaServerConfig`, making llama-specific
+  fields type-safe in direct object literals as already documented.
+- Documented that metadata-backed auto-sizing conservatively prices SWA layers as full-context and
+  added regression coverage for heterogeneous Gemma-style cache dimensions. Automatic enablement,
+  checkpoint controls, and raw argument passthrough remain out of scope.
 
 ---
 

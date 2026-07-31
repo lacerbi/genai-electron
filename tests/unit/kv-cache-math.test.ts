@@ -97,7 +97,7 @@ describe('kv-cache-math', () => {
       architecture: 'gemma4',
       block_count: 30,
       attention_head_count: 16,
-      // 25 full-attention layers with 8 KV heads, 5 sliding-window with 2
+      // 25 sliding-window layers with 8 KV heads, 5 full-attention with 2
       attention_head_count_kv: [
         8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2,
       ],
@@ -108,6 +108,33 @@ describe('kv-cache-math', () => {
     // mean kvHeads = (25x8 + 5x2)/30 = 7 → exact summed KV cost
     expect(estimateKVBytesPerToken(model)).toBe(30 * 7 * 512 * 4);
     expect(Number.isFinite(estimateKVBytesPerToken(model, 'q8_0', 'q8_0'))).toBe(true);
+  });
+
+  it('conservatively covers a full-size heterogeneous SWA cache', () => {
+    const model = baseModel({
+      architecture: 'gemma4',
+      block_count: 30,
+      attention_head_count: 16,
+      // Twenty-five SWA layers use 8 heads and a smaller per-head dimension;
+      // five full-attention layers use 2 heads and the base dimension.
+      attention_head_count_kv: [
+        8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2, 8, 8, 8, 8, 8, 2,
+      ],
+      attention_key_length: 512,
+      context_length: 262144,
+      raw: {
+        'gemma4.attention.key_length_swa': 256,
+        'gemma4.attention.value_length_swa': 256,
+      },
+    });
+
+    const estimated = estimateKVBytesPerToken(model, 'q8_0', 'q8_0');
+    const q8BytesPerKVElement = 2 * KV_CACHE_BYTES_PER_ELEMENT.q8_0;
+    const exactFullSwa = (25 * 8 * 256 + 5 * 2 * 512) * q8BytesPerKVElement;
+
+    // The generic estimator intentionally applies the full-attention dimension
+    // to every layer, so it cannot under-budget --swa-full.
+    expect(estimated).toBeGreaterThanOrEqual(exactFullSwa);
   });
 
   describe('floorContextToGranularity()', () => {

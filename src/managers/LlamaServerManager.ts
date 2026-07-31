@@ -97,6 +97,7 @@ export class LlamaServerManager extends ServerManager {
     'host',
     'cacheTypeK',
     'cacheTypeV',
+    'swaFull',
     'overrideTensors',
     'cacheRam',
     'cpuMoe',
@@ -176,7 +177,7 @@ export class LlamaServerManager extends ServerManager {
    * unsupported by model metadata, or cannot be verified at runtime
    * @throws {ServerError} If server fails to start
    */
-  async start(config: ServerConfig): Promise<ServerInfo> {
+  async start(config: LlamaServerConfig): Promise<ServerInfo> {
     // Prevent concurrent starts from sharing binary provisioning artifacts.
     if (this._status === 'running' || this._status === 'starting' || this._status === 'stopping') {
       throw new ServerError(
@@ -818,6 +819,9 @@ export class LlamaServerManager extends ServerManager {
     }
     if (config.cacheTypeV !== undefined) {
       args.push('--cache-type-v', config.cacheTypeV);
+    }
+    if (config.swaFull === true) {
+      args.push('--swa-full');
     }
 
     // MoE / tensor placement
