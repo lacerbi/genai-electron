@@ -60,6 +60,7 @@ genai-electron manages the runtime infrastructure for running local AI models (l
 - ✅ **Artifact provenance** - Persist configured source locators and caller-supplied license declarations
 - ✅ **GGUF metadata extraction** - Accurate model information (layer count, context length, architecture) extracted before download
 - ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
+- ✅ **LLM runtime calibration** - Benchmark a bounded caller-shaped flag set for one exact context/slot profile
 - ✅ **Reasoning model support** - Automatic detection and configuration for reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS)
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
 - ✅ **Async image generation API** - HTTP endpoints with polling pattern for non-blocking generation

@@ -177,6 +177,38 @@ function toScalarMean(value: unknown): number | undefined {
 }
 
 /**
+ * Get the positive sliding-attention window advertised by the model.
+ *
+ * Heterogeneous arrays can contain zero for full-attention layers. The largest
+ * positive value is the meaningful SWA boundary for deciding whether an
+ * explicit `--swa-full` comparison is relevant. No estimate is manufactured
+ * when metadata is absent.
+ */
+export function getSlidingWindow(modelInfo: ModelInfo): number | undefined {
+  const meta = modelInfo.ggufMetadata;
+  const normalize = (value: unknown): number | undefined => {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+      return value;
+    }
+    if (Array.isArray(value)) {
+      const positive = value.filter(
+        (entry): entry is number => typeof entry === 'number' && Number.isFinite(entry) && entry > 0
+      );
+      return positive.length > 0 ? Math.max(...positive) : undefined;
+    }
+    return undefined;
+  };
+
+  const typed = normalize(meta?.attention_sliding_window);
+  if (typed !== undefined) {
+    return typed;
+  }
+
+  const arch = meta?.architecture;
+  return arch && meta?.raw ? normalize(meta.raw[`${arch}.attention.sliding_window`]) : undefined;
+}
+
+/**
  * Get KV-head count (GQA) with fallback
  *
  * Priority:

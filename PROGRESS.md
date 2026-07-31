@@ -14,6 +14,34 @@
 
 ---
 
+## Unreleased
+
+- Added `LlamaServerManager.calibrate()` / `isCalibrating()` for serial, lifecycle-neutral
+  benchmarking of a bounded llama-server flag set at one exact total context and slot profile.
+  Callers provide production workloads, may replace the generated core candidates, and receive
+  per-workload samples, reproducibility identities, failure diagnostics, and a directly applicable
+  but never auto-persisted recommendation.
+- Added model-aware GPU/SWA/MoE candidate generation, caller-controlled optional KV comparison with
+  a configurable precision window, strict `/props` capacity verification, controlled slot erase and
+  shared-prefix bursts, abort/progress support, and fatal orphan protection after unconfirmed
+  teardown. Normal lifecycle state and events remain unchanged during calibration.
+- Added normalized sliding-window GGUF metadata, shared launch-argument/cache validation helpers,
+  public calibration types/defaults, focused policy/runner/client/manager coverage, and public API
+  documentation. The complete suite passes with 764/764 tests across 32 suites, including the
+  open-handle diagnostic run; build and lint pass with zero errors.
+
+**Live smoke:** The GUI-provisioned Windows CUDA b9860 binary and Gemma 4 12B model completed a
+two-candidate shared-prefix sweep at exact total context 6,144 / one slot. Both runs returned
+observable cache counts and cleaned up without lifecycle events or a remaining healthy server;
+on this machine-specific one-sample workload, windowed SWA measured about 1,132 ms and full SWA
+about 443 ms. A final pinned-binary parser smoke also confirmed the slot-erase acknowledgement,
+`timings.cache_n` semantics, exact four-token output, and cleanup. These numbers are evidence for
+the protocol only, not portable defaults. A subsequent normal manager `start()` with the resolved
+full-SWA config reached healthy with the exact 6,144-token capacity, retained all applied flags,
+and stopped cleanly; the existing orchestration test also verifies exact config restoration.
+
+---
+
 ## v0.17.0: Full-Size SWA Cache Control (2026-07-30)
 
 - Added opt-in `LlamaServerConfig.swaFull`; `true` emits llama.cpp's `--swa-full` to preserve

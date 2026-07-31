@@ -7,6 +7,7 @@ Complete type definitions for genai-electron. The library is TypeScript-first wi
 - [System Types](#system-types)
 - [Model Types](#model-types)
 - [Server Types](#server-types)
+- [LLM Calibration Types](#llm-calibration-types)
 - [Image Generation Types](#image-generation-types)
 - [Async Generation Types](#async-generation-types)
 - [Logging Types](#logging-types)
@@ -564,6 +565,148 @@ function normalizeHealthHost(host?: string): string;
 
 ---
 
+## LLM Calibration Types
+
+### LlamaCalibrationConfig
+
+```typescript
+interface LlamaCalibrationProfile {
+  contextSize: number;       // exact total llama-server -c
+  parallelRequests: number;  // exact llama-server -np
+}
+
+type LlamaCalibrationOverrides = Partial<Pick<LlamaServerConfig,
+  | 'gpuLayers' | 'swaFull' | 'cacheTypeK' | 'cacheTypeV' | 'flashAttention'
+  | 'cpuMoe' | 'nCpuMoe' | 'overrideTensors' | 'threads' | 'batchSize' | 'cacheRam'
+>>;
+
+type LlamaCalibrationFixedConfig = LlamaCalibrationOverrides & Partial<Pick<
+  LlamaServerConfig,
+  'continuousBatching' | 'useMmap' | 'useMlock'
+>>;
+
+interface LlamaCalibrationCombo {
+  label?: string;
+  overrides: LlamaCalibrationOverrides;
+}
+
+type LlamaCalibrationWorkload =
+  | {
+      id: string;
+      kind: 'cold-prefill';
+      prompt: string;
+      nPredict: number;
+      weight?: number;
+    }
+  | {
+      id: string;
+      kind: 'shared-prefix';
+      sharedPrefix: string;
+      suffixes: readonly string[]; // at least 2; first primes, remaining form timed burst
+      nPredict: number;
+      weight?: number;
+    };
+
+interface LlamaCalibrationConfig {
+  modelId: string;
+  profile: LlamaCalibrationProfile;
+  fixedConfig?: LlamaCalibrationFixedConfig;
+  workloads: readonly LlamaCalibrationWorkload[];
+  combos?: readonly LlamaCalibrationCombo[]; // replaces generated defaults
+  includeKvCacheComparison?: boolean;        // default false
+  kvPrecisionPreferencePct?: number;         // default 10
+  samples?: number;                          // default 3
+  seed?: number;                             // default 42
+  startupTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  onProgress?: (progress: LlamaCalibrationProgress) => void;
+  signal?: AbortSignal;
+}
+```
+
+### Progress and report
+
+```typescript
+type LlamaCalibrationPhase =
+  | 'preparing' | 'starting' | 'warmup' | 'sampling' | 'stopping' | 'done';
+
+interface LlamaCalibrationProgress {
+  overallPercent: number;
+  phase: LlamaCalibrationPhase;
+  comboIndex: number;
+  comboCount: number;
+  combo?: LlamaCalibrationCombo;
+  workloadIndex?: number;
+  workloadCount: number;
+  sampleIndex?: number;
+  sampleCount: number;
+}
+
+type LlamaCalibrationStatus =
+  | 'ok' | 'oom' | 'startup-timeout' | 'request-timeout' | 'crashed' | 'error';
+
+type ResolvedLlamaCalibrationConfig = LlamaCalibrationProfile &
+  LlamaCalibrationFixedConfig & LlamaCalibrationOverrides;
+
+interface LlamaCalibrationRun {
+  combo: LlamaCalibrationCombo;
+  resolvedConfig: ResolvedLlamaCalibrationConfig;
+  status: LlamaCalibrationStatus;
+  loadTimeMs?: number;
+  effectiveContextSize?: number;       // verified per slot
+  effectiveParallelRequests?: number;
+  workloadResults: readonly LlamaCalibrationWorkloadResult[];
+  scoreMs?: number;
+  error?: string;
+  stderrTail?: string;
+}
+
+interface LlamaCalibrationReport {
+  schemaVersion: 1;
+  policyVersion: string;
+  createdAt: string;
+  model: LlamaCalibrationModelIdentity;
+  binary: LlamaCalibrationBinaryIdentity;
+  machine: LlamaCalibrationMachineIdentity;
+  cacheability: { level: 'stable' | 'best-effort'; reasons: readonly string[] };
+  profile: LlamaCalibrationProfile;
+  fixedConfig: LlamaCalibrationFixedConfig;
+  verifiedProfile?: {
+    effectiveContextSize: number;
+    effectiveParallelRequests: number;
+  };
+  workloads: readonly LlamaCalibrationWorkloadSignature[];
+  methodology: {
+    samples: number;
+    warmups: 1;
+    seed: number;
+    startupTimeoutMs: number;
+    requestTimeoutMs: number;
+    resourceCooldownMs: number;
+    tieTolerancePct: number;
+    includeKvCacheComparison: boolean;
+    kvPrecisionPreferencePct: number;
+    scoreUnit: 'scenario-median-wall-ms';
+  };
+  comboSource: 'default' | 'custom';
+  combos: readonly LlamaCalibrationCombo[];
+  skippedCombos: readonly { combo: LlamaCalibrationCombo; reason: string }[];
+  runs: readonly LlamaCalibrationRun[];
+  recommended?: {
+    combo: LlamaCalibrationCombo;
+    startConfig: ResolvedLlamaCalibrationConfig;
+    scoreMs: number;
+  };
+}
+```
+
+`LlamaCalibrationRequestTiming`, `LlamaCalibrationSample`,
+`LlamaCalibrationWorkloadResult`, the workload signature, and model/binary/machine identity types
+are also exported from the package root. See [LLM Runtime Calibration](llm-server.md#runtime-calibration)
+for scoring, persistence invalidation, and examples.
+
+---
+
 ## Image Generation Types
 
 ### ImageGenerationConfig
@@ -1046,6 +1189,29 @@ type CleanupFunction = () => void | Promise<void>;
 ---
 
 ## Constants
+
+### LLAMA_CALIBRATION_DEFAULTS
+
+Protocol and policy defaults for [LLM runtime calibration](llm-server.md#runtime-calibration).
+Generated candidate objects are model- and machine-dependent and are therefore not stored in this
+constant.
+
+```typescript
+const LLAMA_CALIBRATION_DEFAULTS = {
+  samples: 3,
+  seed: 42,
+  tieTolerancePct: 5,
+  includeKvCacheComparison: false,
+  kvPrecisionPreferencePct: 10,
+  policyVersion: 'llama-runtime-v1',
+  startupTimeoutMs: 120_000,
+  requestTimeoutMs: 120_000,
+  resourceCooldownMs: 750,
+  stderrMaxBytes: 16 * 1024,
+  maxCandidates: 10,
+  oomPatterns: /* readonly RegExp[] */
+} as const;
+```
 
 ### DIFFUSION_COMPONENT_FLAGS
 

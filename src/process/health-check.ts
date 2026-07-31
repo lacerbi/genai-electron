@@ -10,6 +10,22 @@
 import type { HealthStatus } from '../types/index.js';
 import { ServerError } from '../errors/index.js';
 
+function delayWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
 /**
  * Health check response from llama-server
  */
@@ -51,14 +67,16 @@ export function formatHttpHost(host: string): string {
 export async function checkHealth(
   port: number,
   timeout = 5000,
-  host = '127.0.0.1'
+  host = '127.0.0.1',
+  signal?: AbortSignal
 ): Promise<HealthCheckResponse> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeout);
+  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
 
   try {
     const response = await fetch(`http://${formatHttpHost(host)}:${port}/health`, {
-      signal: controller.signal,
+      signal: requestSignal,
       headers: {
         Accept: 'application/json',
       },
@@ -128,17 +146,19 @@ export async function waitForHealthy(
   timeout = 120000,
   initialDelay = 100,
   maxDelay = 2000,
-  host = '127.0.0.1'
+  host = '127.0.0.1',
+  signal?: AbortSignal
 ): Promise<void> {
   const startTime = Date.now();
   let delay = initialDelay;
   let attempt = 0;
 
   while (Date.now() - startTime < timeout) {
+    signal?.throwIfAborted();
     attempt++;
 
     try {
-      const health = await checkHealth(port, 5000, host);
+      const health = await checkHealth(port, 5000, host, signal);
 
       if (health.status === 'ok') {
         return; // Success!
@@ -156,7 +176,7 @@ export async function waitForHealthy(
     }
 
     // Wait before next attempt (exponential backoff)
-    await new Promise((resolve) => setTimeout(resolve, delay));
+    await delayWithSignal(delay, signal);
 
     // Increase delay for next attempt (exponential backoff with max cap)
     delay = Math.min(delay * 1.5, maxDelay);

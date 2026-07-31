@@ -1100,6 +1100,10 @@ export class ModelManager {
       file_type: parsedGGUF.metadata['general.file_type'] as number | undefined,
       block_count: getArchField(parsedGGUF.metadata, 'block_count') as number | undefined,
       context_length: getArchField(parsedGGUF.metadata, 'context_length') as number | undefined,
+      attention_sliding_window: getArchField(parsedGGUF.metadata, 'attention.sliding_window') as
+        | number
+        | number[]
+        | undefined,
       attention_head_count: getArchField(parsedGGUF.metadata, 'attention.head_count') as
         | number
         | number[]

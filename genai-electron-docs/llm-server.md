@@ -12,6 +12,7 @@ The `LlamaServerManager` class manages the llama-server process lifecycle for ru
   - [start()](#start)
   - [stop()](#stop)
   - [restart()](#restart)
+  - [calibrate()](#runtime-calibration)
 - [Configuration Options](#configuration-options)
 - [Status and Health](#status-and-health)
   - [getStatus()](#getstatus)
@@ -477,6 +478,151 @@ logs.forEach(entry => {
 Server logs are rotated by size so a long-running server never fills the disk. By default the active log rotates once it exceeds **5 MB**, keeping **2** archives (`server.log.1`, `server.log.2`); the oldest is dropped as newer ones shift up. Rotation is best-effort — a rotation failure never takes the server down.
 
 Rotation is configured at the `LogManager` level via `LogRotationOptions` (`maxFileSize`, `maxArchives`); the defaults come from `DEFAULT_LOG_ROTATION`. With `maxArchives: 0` the active log is truncated in place instead of archived. See [TypeScript Reference](typescript-reference.md) for `LogRotationOptions`.
+
+---
+
+## Runtime Calibration
+
+`llamaServer.calibrate()` benchmarks a bounded set of real `llama-server` configurations on the
+current machine. One call fixes an exact total `contextSize` (`-c`) and exact
+`parallelRequests` (`-np`) across every candidate. The verified effective capacity per slot is
+`floor(contextSize / parallelRequests)`; `contextSize` is not a per-slot value and is not swept
+inside a call.
+
+The server must be stopped. Calibration uses isolated loopback-only processes, runs all candidates
+and requests serially, returns a report, and leaves the normal manager stopped. It does not apply or
+persist the winner. Stop diffusion generation and other competing GPU work first so the timings
+describe the intended production environment.
+
+```typescript
+const report = await llamaServer.calibrate({
+  modelId: 'gemma-3-12b',
+  profile: {
+    contextSize: 12_288,       // exact total -c
+    parallelRequests: 2        // two slots, verified as 6,144 tokens per slot
+  },
+  fixedConfig: {
+    threads: 8,
+    cacheTypeK: 'q8_0',
+    cacheTypeV: 'q8_0',
+    flashAttention: 'on'
+  },
+  workloads: [
+    {
+      id: 'chat',
+      kind: 'cold-prefill',
+      prompt: productionChatPrompt,
+      nPredict: 128,
+      weight: 8
+    },
+    {
+      id: 'evaluation-burst',
+      kind: 'shared-prefix',
+      sharedPrefix: productionEvaluationContext,
+      suffixes: [primeQuestion, questionA, questionB],
+      nPredict: 32,
+      weight: 2
+    }
+  ],
+  samples: 3,
+  onProgress: progress => sendToRenderer('llm-calibration-progress', progress)
+});
+
+if (report.recommended) {
+  await llamaServer.start({
+    modelId: report.model.id,
+    ...report.recommended.startConfig
+  });
+  // Persist this config in the consumer app if desired; the library does not.
+}
+```
+
+A sole workload may omit `weight` and then resolves to `1`. With multiple workloads, every
+workload needs a finite positive weight. A weight is the relative production frequency of the
+complete scenario: one cold request or one entire shared-prefix burst. Per-workload samples and
+diagnostics are always returned; prompt content is hashed and omitted from the report.
+
+### Candidate selection and scoring
+
+The generated core policy is deliberately bounded to at most ten candidates. It tests a baseline,
+nearby GPU-layer headroom/aggressive placements, and full offload where the backend supports them;
+adds SWA-full pairs only when model metadata and a shared-prefix workload make that comparison
+relevant; and may add one measured-MoE counterfactual. It is not a Cartesian sweep over every
+llama.cpp flag.
+
+`fixedConfig` is inherited by every run and cannot be overridden by a candidate. Passing `combos`
+replaces generated candidates completely and preserves caller order:
+
+```typescript
+const report = await llamaServer.calibrate({
+  modelId: 'gemma-3-12b',
+  profile: { contextSize: 12_288, parallelRequests: 1 },
+  fixedConfig: { threads: 8 },
+  workloads: [{ id: 'eval', kind: 'cold-prefill', prompt, nPredict: 32 }],
+  combos: [
+    { label: 'windowed-q8', overrides: {
+      gpuLayers: 34, swaFull: false,
+      cacheTypeK: 'q8_0', cacheTypeV: 'q8_0', flashAttention: 'on'
+    } },
+    { label: 'full-swa-f16', overrides: {
+      gpuLayers: 34, swaFull: true,
+      cacheTypeK: 'f16', cacheTypeV: 'f16', flashAttention: 'on'
+    } }
+  ],
+  kvPrecisionPreferencePct: 5
+});
+```
+
+KV-cache quantization is supported but stays caller-controlled: generated defaults pin the
+baseline K/V types and do not vary them. Set `includeKvCacheComparison: true` to add one bounded
+f16/q8 counterfactual, or provide explicit custom KV combos as above. The default
+`kvPrecisionPreferencePct: 10` allows the larger KV element footprint to win when it is no more
+than 10% slower than the fastest candidate; set it to `0` to remove that extra precision slack.
+
+Each workload uses the median successful scenario wall time. The score is the normalized weighted
+sum of those medians. After the precision rule, candidates within the ordinary 5% robustness
+window prefer fewer explicitly forced fields and then stable candidate order. Load time does not
+enter the score. If every candidate fails, the method still returns the diagnostic report with no
+`recommended` field.
+
+### Comparing context sizes
+
+Run independent calibrations when context capacity is itself a product choice. This keeps each
+measurement and recommendation tied to an exact deployable profile:
+
+```typescript
+const reports = [];
+for (const contextSize of [8192, 10_240, 12_288]) {
+  reports.push(await llamaServer.calibrate({
+    modelId: 'gemma-3-12b',
+    profile: { contextSize, parallelRequests: 1 },
+    workloads: productionWorkloads,
+    // Pass the same custom combos here when a flag-for-flag comparison is required.
+  }));
+}
+
+// The consumer chooses the capacity/performance tradeoff from the separate reports.
+```
+
+Calls must be serial because calibration requires exclusive machine resources.
+
+### Progress, cancellation, and persistence
+
+Progress is delivered to `onProgress` and the `'calibration-progress'` event. Phases are
+`preparing`, `starting`, `warmup`, `sampling`, `stopping`, and `done`. Abort with an
+`AbortController`; an abort rejects with `ServerError.details.code === 'CALIBRATION_ABORTED'` and
+includes completed runs. Initial binary download/extraction/validation can only observe abort
+before and after provisioning in this version.
+
+Other setup codes include `CALIBRATION_INVALID_CONFIG`, `CALIBRATION_SERVER_RUNNING`,
+`CALIBRATION_BUSY`, `CALIBRATION_RESOURCE_BUSY`, `CALIBRATION_SLOTS_UNAVAILABLE`,
+`CALIBRATION_PREPARATION_FAILED`, and `CALIBRATION_CLEANUP_FAILED`. Candidate failures remain in
+the report as `oom`, `startup-timeout`, `request-timeout`, `crashed`, or `error`.
+
+Invalidate a saved recommendation when the model files/revision, binary version/backend/checksum,
+hardware/OS/driver/runtime, exact profile, fixed config, workload hashes/weights, sample method, or
+policy version changes. Reports marked `best-effort` lack part of that identity and should be
+recalibrated conservatively.
 
 ---
 

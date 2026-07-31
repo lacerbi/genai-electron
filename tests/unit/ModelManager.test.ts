@@ -136,6 +136,7 @@ const defaultGGUFResponse = {
     'llama.block_count': 32,
     'llama.context_length': 4096,
     'llama.attention.head_count': 32,
+    'llama.attention.sliding_window': 2048,
     'llama.embedding_length': 4096,
     'llama.feed_forward_length': 11008,
     'llama.vocab_size': 32000,
@@ -771,6 +772,7 @@ describe('ModelManager', () => {
       const saved = mockStorageManager.saveModelMetadata.mock.calls[0][0] as any;
       // exps deltas: (1100-100) + (2200-1200) = 2000; shexp and last excluded
       expect(saved.ggufMetadata.expert_weights_bytes).toBe(2000);
+      expect(saved.ggufMetadata.attention_sliding_window).toBe(2048);
     });
 
     it('leaves expert_weights_bytes undefined for dense models', async () => {

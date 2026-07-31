@@ -160,6 +160,9 @@ export interface GGUFMetadata {
   /** Context length (maximum sequence length) */
   context_length?: number;
 
+  /** Sliding-attention window size; may be stored per layer by heterogeneous models. */
+  attention_sliding_window?: number | number[];
+
   /**
    * Number of attention heads. Architectures with per-layer heterogeneous
    * attention (e.g. Gemma 4's alternating full/sliding-window layers) store

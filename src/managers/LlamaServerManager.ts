@@ -8,12 +8,21 @@
  */
 
 import { ServerManager } from './ServerManager.js';
+import os from 'node:os';
+import path from 'node:path';
 import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
 import { ProcessManager } from '../process/ProcessManager.js';
 import { checkHealth, waitForHealthy, normalizeHealthHost } from '../process/health-check.js';
 import { findFreePort } from '../process/port-utils.js';
 import { fetchLlamaRuntimeCapacity } from '../process/llama-props.js';
+import { LlamaCalibrationClient } from '../process/llama-calibration-client.js';
+import { startLlamaServerRunner, type LlamaServerRunner } from '../process/llama-server-runner.js';
+import {
+  buildLlamaServerArgs,
+  normalizeLlamaVCacheConfig,
+  type ResolvedLlamaServerConfig,
+} from '../process/llama-server-args.js';
 import { parseLlamaCppLogLevel, stripLlamaCppFormatting } from '../process/llama-log-parser.js';
 import type {
   ServerConfig,
@@ -21,25 +30,84 @@ import type {
   LlamaServerReadyState,
   LlamaServerConfig,
   HealthStatus,
-  ModelInfo,
+  LlamaCalibrationCombo,
+  LlamaCalibrationConfig,
+  LlamaCalibrationProgress,
+  LlamaCalibrationReport,
+  LlamaCalibrationRun,
+  LlamaCalibrationSample,
+  LlamaCalibrationWorkloadResult,
+  ResolvedLlamaCalibrationConfig,
 } from '../types/index.js';
 import {
   ContextConstraintError,
   ServerError,
   InsufficientResourcesError,
 } from '../errors/index.js';
-import { BINARY_VERSIONS, DEFAULT_PORTS, DEFAULT_TIMEOUTS } from '../config/defaults.js';
+import {
+  BINARY_VERSIONS,
+  DEFAULT_PORTS,
+  DEFAULT_TIMEOUTS,
+  LLAMA_CALIBRATION_DEFAULTS,
+} from '../config/defaults.js';
 import { fileExists } from '../utils/file-utils.js';
 import { debugLog } from '../utils/debug-log.js';
+import { getInstalledBinaryIdentity } from '../utils/binary-identity.js';
+import {
+  extractLlamaCalibrationOverrides,
+  generateDefaultLlamaCalibrationCombos,
+  median,
+  recommendLlamaCalibrationRun,
+  resolveLlamaCalibrationConfig,
+  validateLlamaCalibrationConfig,
+  weightedCalibrationScore,
+  workloadSignature,
+  type ValidatedLlamaCalibrationConfig,
+} from '../utils/llama-calibration.js';
+import {
+  getExpertWeightsBytesWithFallback,
+  getLayerCountWithFallback,
+  getSlidingWindow,
+} from '../utils/model-metadata-helpers.js';
 import {
   normalizeContextConstraints,
   validateModelContextRange,
 } from '../utils/context-constraints.js';
 
-/**
- * Internal config shape after the port has been resolved to a concrete number
- */
-type ResolvedLlamaServerConfig = LlamaServerConfig & { port: number };
+function calibrationErrorCode(error: unknown): string | undefined {
+  if (!(error instanceof ServerError) || typeof error.details !== 'object' || !error.details) {
+    return undefined;
+  }
+  const code = (error.details as Record<string, unknown>).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+function calibrationErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function calibrationErrorDetail(error: unknown, key: string): unknown {
+  if (!(error instanceof ServerError) || typeof error.details !== 'object' || !error.details) {
+    return undefined;
+  }
+  return (error.details as Record<string, unknown>)[key];
+}
+
+function calibrationDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    const abort = () => {
+      clearTimeout(timer);
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
 
 /**
  * LlamaServerManager class
@@ -144,6 +212,10 @@ export class LlamaServerManager extends ServerManager {
   private watchdogKill = false;
   /** Reentrancy guard: true while a watchdog health check is in flight */
   private watchdogCheckInFlight = false;
+  /** True while an isolated LLM runtime-calibration sweep is in flight. */
+  private calibrating = false;
+  /** Unsafe process left behind by a failed candidate teardown. */
+  private calibrationOrphan?: { pid: number; stderrTail?: string };
 
   /**
    * Create a new LlamaServerManager
@@ -178,6 +250,13 @@ export class LlamaServerManager extends ServerManager {
    * @throws {ServerError} If server fails to start
    */
   async start(config: LlamaServerConfig): Promise<ServerInfo> {
+    await this.assertNoCalibrationOrphan();
+    if (this.calibrating) {
+      throw new ServerError('Cannot start server while LLM calibration is in progress', {
+        code: 'CALIBRATION_BUSY',
+        suggestion: 'Wait for calibrate() to finish, or abort it via its AbortSignal',
+      });
+    }
     // Prevent concurrent starts from sharing binary provisioning artifacts.
     if (this._status === 'running' || this._status === 'starting' || this._status === 'stopping') {
       throw new ServerError(
@@ -313,24 +392,11 @@ export class LlamaServerManager extends ServerManager {
       );
       this.assertStartupAttemptActive(startupGeneration);
 
-      // 5b. Quantized V-cache requires flash attention ON (llama.cpp runtime constraint)
-      const quantizedVCache =
-        finalConfig.cacheTypeV !== undefined &&
-        finalConfig.cacheTypeV !== 'f16' &&
-        finalConfig.cacheTypeV !== 'bf16';
-      if (quantizedVCache) {
-        if (finalConfig.flashAttention === undefined || finalConfig.flashAttention === 'auto') {
-          debugLog('[LlamaServer] cacheTypeV is quantized - forcing flashAttention on');
-          finalConfig.flashAttention = 'on';
-        } else if (finalConfig.flashAttention === false || finalConfig.flashAttention === 'off') {
-          throw new ServerError(
-            `Quantized V-cache (cacheTypeV: '${finalConfig.cacheTypeV}') requires flash attention`,
-            {
-              suggestion:
-                "Set flashAttention to 'on' (or leave it unset) when using a quantized cacheTypeV, or use cacheTypeV: 'f16'",
-            }
-          );
-        }
+      // 5b. Normalize the shared llama.cpp quantized-V/flash-attention constraint.
+      const requestedFlashAttention = finalConfig.flashAttention;
+      finalConfig = normalizeLlamaVCacheConfig(finalConfig);
+      if (requestedFlashAttention !== finalConfig.flashAttention) {
+        debugLog('[LlamaServer] cacheTypeV is quantized - forcing flashAttention on');
       }
 
       // 6. Save final configuration (AFTER auto-configuration)
@@ -341,7 +407,7 @@ export class LlamaServerManager extends ServerManager {
       this.assertStartupAttemptActive(startupGeneration);
 
       // 8. Build command-line arguments
-      const args = this.buildCommandLineArgs(finalConfig, modelInfo);
+      const args = buildLlamaServerArgs(finalConfig, modelInfo);
 
       // 9. Verify binary exists before spawning
       if (!this.binaryPath) {
@@ -602,6 +668,637 @@ export class LlamaServerManager extends ServerManager {
     }
   }
 
+  override async restart(): Promise<ServerInfo> {
+    await this.assertNoCalibrationOrphan();
+    if (this.calibrating) {
+      throw new ServerError('Cannot restart server while LLM calibration is in progress', {
+        code: 'CALIBRATION_BUSY',
+        suggestion: 'Wait for calibrate() to finish, or abort it via its AbortSignal',
+      });
+    }
+    return super.restart();
+  }
+
+  /** True while an isolated LLM runtime-calibration sweep is running. */
+  isCalibrating(): boolean {
+    return this.calibrating;
+  }
+
+  /**
+   * Benchmark a bounded set of llama-server configurations for one exact
+   * total-context and slot profile. Candidates and requests run serially; the
+   * manager remains publicly stopped and the result is never auto-applied.
+   */
+  async calibrate(config: LlamaCalibrationConfig): Promise<LlamaCalibrationReport> {
+    await this.assertNoCalibrationOrphan();
+    if (this._status !== 'stopped') {
+      throw new ServerError('Cannot calibrate while the server is not stopped', {
+        code: 'CALIBRATION_SERVER_RUNNING',
+        suggestion: 'Stop the server with stop() before calibrating',
+      });
+    }
+    if (this.calibrating) {
+      throw new ServerError('An LLM calibration is already in progress', {
+        code: 'CALIBRATION_BUSY',
+        suggestion: 'Wait for the current calibrate() call to finish',
+      });
+    }
+
+    const validated = validateLlamaCalibrationConfig(config);
+    const savedBinaryPath = this.binaryPath;
+    const savedLogManager = this.logManager;
+    const runs: LlamaCalibrationRun[] = [];
+    let activeRunner: LlamaServerRunner | undefined;
+    let lastProgress = 0;
+    this.calibrating = true;
+
+    const progress = (
+      phase: LlamaCalibrationProgress['phase'],
+      comboIndex: number,
+      comboCount: number,
+      combo?: LlamaCalibrationCombo,
+      workloadIndex?: number,
+      sampleIndex?: number
+    ) => {
+      const fractionByPhase: Record<LlamaCalibrationProgress['phase'], number> = {
+        preparing: 0,
+        starting: 0.05,
+        warmup: 0.15,
+        sampling:
+          0.2 +
+          (0.7 * ((workloadIndex ?? 0) * validated.samples + (sampleIndex ?? 0))) /
+            Math.max(1, validated.workloads.length * validated.samples),
+        stopping: 0.95,
+        done: 1,
+      };
+      const calculated =
+        phase === 'done'
+          ? 100
+          : comboCount === 0
+            ? 0
+            : ((comboIndex + fractionByPhase[phase]) / comboCount) * 100;
+      lastProgress = Math.max(lastProgress, Math.min(100, calculated));
+      const payload: LlamaCalibrationProgress = {
+        overallPercent: lastProgress,
+        phase,
+        comboIndex,
+        comboCount,
+        combo,
+        workloadIndex,
+        workloadCount: validated.workloads.length,
+        sampleIndex,
+        sampleCount: validated.samples,
+      };
+      try {
+        validated.onProgress?.(payload);
+      } catch (error) {
+        debugLog('[LlamaCalibration] progress callback threw:', error);
+      }
+      try {
+        this.emit('calibration-progress', payload);
+      } catch (error) {
+        debugLog('[LlamaCalibration] calibration-progress listener threw:', error);
+      }
+    };
+
+    try {
+      progress('preparing', 0, 0);
+      validated.signal?.throwIfAborted();
+      const model = await this.modelManager.getModelInfo(validated.modelId);
+      validated.signal?.throwIfAborted();
+      if (model.type !== 'llm') {
+        throw new ServerError('LLM calibration requires an LLM model', {
+          code: 'CALIBRATION_INVALID_CONFIG',
+          modelId: model.id,
+        });
+      }
+
+      await this.initializeLogManager(
+        'llama-server.log',
+        `LLM runtime calibration starting for model ${model.id}`
+      );
+      validated.signal?.throwIfAborted();
+
+      try {
+        await this.runOccupancyCheck('strict', 0);
+        validated.signal?.throwIfAborted();
+      } catch (error) {
+        if (validated.signal?.aborted) throw error;
+        throw new ServerError('Another llama-server may already be using machine resources', {
+          code: 'CALIBRATION_RESOURCE_BUSY',
+          cause: calibrationErrorMessage(error),
+          suggestion: 'Stop other llama-server and GPU workloads before calibrating',
+        });
+      }
+
+      let capabilities: Awaited<ReturnType<SystemInfo['detect']>>;
+      try {
+        capabilities = await this.systemInfo.detect(true);
+        validated.signal?.throwIfAborted();
+      } catch (error) {
+        if (validated.signal?.aborted) throw error;
+        throw new ServerError('Could not inspect machine capabilities for calibration', {
+          code: 'CALIBRATION_PREPARATION_FAILED',
+          cause: calibrationErrorMessage(error),
+        });
+      }
+      const baselineStartConfig: LlamaServerConfig & { port: number } = {
+        modelId: model.id,
+        port: 0,
+        contextSize: validated.profile.contextSize,
+        parallelRequests: validated.profile.parallelRequests,
+        ...validated.fixedConfig,
+        fit: 'off',
+      };
+      const baselineServer = normalizeLlamaVCacheConfig(
+        await this.autoConfigureIfNeeded(baselineStartConfig, model)
+      );
+      validated.signal?.throwIfAborted();
+      const baseline = resolveLlamaCalibrationConfig(
+        validated.profile,
+        validated.fixedConfig,
+        extractLlamaCalibrationOverrides(
+          baselineServer as unknown as ResolvedLlamaCalibrationConfig,
+          validated.fixedConfig
+        )
+      );
+
+      const baselineOverrides = extractLlamaCalibrationOverrides(baseline, validated.fixedConfig);
+      const resolveCandidate = (combo: LlamaCalibrationCombo) => {
+        const resolvedConfig = normalizeLlamaVCacheConfig(
+          resolveLlamaCalibrationConfig(validated.profile, validated.fixedConfig, {
+            ...baselineOverrides,
+            ...combo.overrides,
+          })
+        );
+        const argvKey = JSON.stringify(
+          buildLlamaServerArgs(
+            {
+              modelId: model.id,
+              port: 0,
+              host: '127.0.0.1',
+              fit: 'off',
+              ...resolvedConfig,
+            },
+            model
+          )
+        );
+        return { combo, resolvedConfig, argvKey };
+      };
+      let customCandidates: readonly ReturnType<typeof resolveCandidate>[] | undefined;
+      if (validated.combos) {
+        customCandidates = validated.combos.map(resolveCandidate);
+        const seen = new Set<string>();
+        for (const candidate of customCandidates) {
+          if (seen.has(candidate.argvKey)) {
+            throw new ServerError(
+              'Custom calibration combos resolve to duplicate server arguments',
+              {
+                code: 'CALIBRATION_INVALID_CONFIG',
+                combo: candidate.combo,
+              }
+            );
+          }
+          seen.add(candidate.argvKey);
+        }
+      }
+
+      validated.signal?.throwIfAborted();
+      this.binaryPath = await this.ensureBinary(model.path);
+      validated.signal?.throwIfAborted();
+      const binaryIdentity = await getInstalledBinaryIdentity(
+        'llama',
+        this.binaryPath,
+        BINARY_VERSIONS.llamaServer.version
+      );
+      const generated = customCandidates
+        ? {
+            combos: customCandidates.map((candidate) => candidate.combo),
+            skippedCombos: [] as const,
+          }
+        : generateDefaultLlamaCalibrationCombos({
+            baseline,
+            fixedConfig: validated.fixedConfig,
+            totalLayers: getLayerCountWithFallback(model),
+            gpuAvailable: capabilities.gpu.available && binaryIdentity.variant !== 'cpu',
+            slidingWindow: getSlidingWindow(model),
+            hasSharedPrefixWorkload: validated.workloads.some(
+              (workload) => workload.kind === 'shared-prefix'
+            ),
+            exactExpertWeightsBytes: model.ggufMetadata?.expert_weights_bytes,
+            moeCounterfactualFeasible: getExpertWeightsBytesWithFallback(model) !== undefined,
+            includeKvCacheComparison: validated.includeKvCacheComparison,
+          });
+      const skippedCombos = [...generated.skippedCombos];
+      const candidates = customCandidates ? [...customCandidates] : [];
+      if (!customCandidates) {
+        const seen = new Set<string>();
+        for (const combo of generated.combos) {
+          const candidate = resolveCandidate(combo);
+          if (seen.has(candidate.argvKey)) {
+            skippedCombos.push({ combo, reason: 'duplicate-resolved-config' });
+            continue;
+          }
+          seen.add(candidate.argvKey);
+          candidates.push(candidate);
+        }
+      }
+      const combos = candidates.map((candidate) => candidate.combo);
+      let verifiedProfile: LlamaCalibrationReport['verifiedProfile'];
+      const observedPromptTokenCounts = new Map<string, readonly number[]>();
+
+      for (let comboIndex = 0; comboIndex < candidates.length; comboIndex++) {
+        const { combo, resolvedConfig } = candidates[comboIndex]!;
+        const workloadResults: LlamaCalibrationWorkloadResult[] = [];
+        let status: LlamaCalibrationRun['status'] = 'ok';
+        let errorText: string | undefined;
+        let loadTimeMs: number | undefined;
+        let effectiveContextSize: number | undefined;
+        let effectiveParallelRequests: number | undefined;
+        let stderrTail: string | undefined;
+        let fatalCandidateError: unknown;
+        let cleanupFailure: unknown;
+
+        progress('starting', comboIndex, combos.length, combo);
+        try {
+          validated.signal?.throwIfAborted();
+          activeRunner = await startLlamaServerRunner({
+            binaryPath: this.binaryPath,
+            model,
+            config: { modelId: model.id, ...resolvedConfig },
+            contextSize: validated.profile.contextSize,
+            parallelRequests: validated.profile.parallelRequests,
+            startupTimeoutMs: validated.startupTimeoutMs,
+            signal: validated.signal,
+          });
+          loadTimeMs = activeRunner.loadTimeMs;
+          effectiveContextSize = activeRunner.capacity!.effectiveContextSize;
+          effectiveParallelRequests = activeRunner.capacity!.totalSlots;
+          verifiedProfile ??= {
+            effectiveContextSize,
+            effectiveParallelRequests: effectiveParallelRequests!,
+          };
+          const client = new LlamaCalibrationClient(
+            activeRunner,
+            validated.requestTimeoutMs,
+            validated.signal
+          );
+          const candidateTokenCounts = await this.validateCalibrationPromptCapacity(
+            client,
+            validated.workloads,
+            effectiveContextSize
+          );
+          for (const [workloadId, tokenCounts] of candidateTokenCounts) {
+            if (!observedPromptTokenCounts.has(workloadId)) {
+              observedPromptTokenCounts.set(workloadId, tokenCounts);
+            }
+          }
+
+          progress('warmup', comboIndex, combos.length, combo);
+          for (const workload of validated.workloads) {
+            await this.runCalibrationScenario(client, workload, validated.seed);
+          }
+
+          for (let workloadIndex = 0; workloadIndex < validated.workloads.length; workloadIndex++) {
+            const workload = validated.workloads[workloadIndex]!;
+            const samples: LlamaCalibrationSample[] = [];
+            for (let sampleIndex = 0; sampleIndex < validated.samples; sampleIndex++) {
+              progress('sampling', comboIndex, combos.length, combo, workloadIndex, sampleIndex);
+              samples.push(await this.runCalibrationScenario(client, workload, validated.seed));
+            }
+            workloadResults.push({
+              workloadId: workload.id,
+              kind: workload.kind,
+              workloadHash: workloadSignature(workload).hash,
+              weight: workload.weight,
+              samples,
+              medianWallTimeMs: median(samples.map((sample) => sample.wallTimeMs)),
+            });
+          }
+        } catch (error) {
+          const code = calibrationErrorCode(error);
+          if (
+            code === 'CALIBRATION_ABORTED' ||
+            code === 'CALIBRATION_CLEANUP_FAILED' ||
+            code === 'CALIBRATION_INVALID_CONFIG' ||
+            code === 'CALIBRATION_SLOTS_UNAVAILABLE' ||
+            validated.signal?.aborted
+          ) {
+            if (code === 'CALIBRATION_CLEANUP_FAILED') {
+              const orphanPid = calibrationErrorDetail(error, 'pid');
+              const errorStderr = calibrationErrorDetail(error, 'stderrTail');
+              if (typeof orphanPid === 'number' && Number.isSafeInteger(orphanPid)) {
+                this.calibrationOrphan = {
+                  pid: orphanPid,
+                  stderrTail: typeof errorStderr === 'string' ? errorStderr : undefined,
+                };
+              }
+            }
+            fatalCandidateError = error;
+          } else {
+            errorText = calibrationErrorMessage(error);
+            const errorStderr = calibrationErrorDetail(error, 'stderrTail');
+            stderrTail =
+              activeRunner?.stderrTail ??
+              (typeof errorStderr === 'string' ? errorStderr : undefined);
+            status = this.classifyCalibrationFailure(error, stderrTail ?? '');
+          }
+        } finally {
+          progress('stopping', comboIndex, combos.length, combo);
+          if (activeRunner) {
+            try {
+              await activeRunner.stop();
+            } catch (error) {
+              if (activeRunner.pid) {
+                this.calibrationOrphan = {
+                  pid: activeRunner.pid,
+                  stderrTail: activeRunner.stderrTail,
+                };
+              }
+              cleanupFailure = error;
+            }
+          }
+        }
+        if (cleanupFailure) throw cleanupFailure;
+        if (fatalCandidateError) throw fatalCandidateError;
+
+        const resultById = new Map(workloadResults.map((result) => [result.workloadId, result]));
+        const completeWorkloadResults = validated.workloads.map(
+          (workload): LlamaCalibrationWorkloadResult =>
+            resultById.get(workload.id) ?? {
+              workloadId: workload.id,
+              kind: workload.kind,
+              workloadHash: workloadSignature(workload).hash,
+              weight: workload.weight,
+              samples: [],
+              error: errorText,
+            }
+        );
+        const scoreMs =
+          status === 'ok' ? weightedCalibrationScore(completeWorkloadResults) : undefined;
+        runs.push({
+          combo,
+          resolvedConfig,
+          status: scoreMs === undefined && status === 'ok' ? 'error' : status,
+          loadTimeMs,
+          effectiveContextSize,
+          effectiveParallelRequests,
+          workloadResults: completeWorkloadResults,
+          scoreMs,
+          error: errorText,
+          stderrTail,
+        });
+        activeRunner = undefined;
+        this.systemInfo.clearCache();
+        try {
+          const currentMemory = this.systemInfo.getMemoryInfo();
+          const currentGpu = await this.systemInfo.getGPUInfo();
+          if (
+            currentMemory.available < capabilities.memory.available * 0.75 ||
+            (capabilities.gpu.vramAvailable !== undefined &&
+              currentGpu.vramAvailable !== undefined &&
+              currentGpu.vramAvailable < capabilities.gpu.vramAvailable * 0.75)
+          ) {
+            debugLog(
+              '[LlamaCalibration] available resources drifted by more than 25% during the sweep'
+            );
+          }
+        } catch (error) {
+          debugLog('[LlamaCalibration] resource drift snapshot failed:', error);
+        }
+        if (comboIndex < combos.length - 1) {
+          await calibrationDelay(LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs, validated.signal);
+        }
+      }
+
+      const modelFiles = model.shards?.length
+        ? model.shards.map((file) => ({
+            name: path.basename(file.path),
+            size: file.size,
+            checksum: file.checksum,
+            sourceRevision: model.source.revision,
+          }))
+        : [
+            {
+              name: path.basename(model.path),
+              size: model.size,
+              checksum: model.checksum,
+              sourceRevision: model.source.revision,
+            },
+          ];
+      const cacheabilityReasons: string[] = [];
+      if (modelFiles.some((file) => !file.checksum)) {
+        cacheabilityReasons.push('One or more model files have no stored checksum');
+      }
+      if (binaryIdentity.variant === 'unknown') {
+        cacheabilityReasons.push('Installed binary backend variant is unknown');
+      }
+      if (model.source.type === 'huggingface' && !model.source.revision) {
+        cacheabilityReasons.push('Hugging Face source revision is unknown');
+      }
+      if (capabilities.gpu.available) {
+        cacheabilityReasons.push('GPU driver/runtime version is not discoverable');
+      }
+      const report: LlamaCalibrationReport = {
+        schemaVersion: 1,
+        policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+        createdAt: new Date().toISOString(),
+        model: {
+          id: model.id,
+          name: model.name,
+          architecture: model.ggufMetadata?.architecture,
+          size: model.size,
+          checksum: model.checksum,
+          sourceRevision: model.source.revision,
+          files: modelFiles,
+        },
+        binary: binaryIdentity,
+        machine: {
+          platform: capabilities.platform,
+          architecture: capabilities.cpu.architecture,
+          osRelease: os.release(),
+          cpuModel: capabilities.cpu.model,
+          cpuCores: capabilities.cpu.cores,
+          totalMemoryBytes: capabilities.memory.total,
+          availableMemoryBytes: capabilities.memory.available,
+          gpu: capabilities.gpu.available
+            ? [
+                {
+                  name: capabilities.gpu.name ?? 'unknown',
+                  vendor: capabilities.gpu.type ?? 'unknown',
+                  memoryBytes: capabilities.gpu.vram,
+                  availableMemoryBytes: capabilities.gpu.vramAvailable,
+                },
+              ]
+            : [],
+        },
+        cacheability: {
+          level: cacheabilityReasons.length === 0 ? 'stable' : 'best-effort',
+          reasons: cacheabilityReasons,
+        },
+        profile: validated.profile,
+        fixedConfig: validated.fixedConfig,
+        verifiedProfile,
+        workloads: validated.workloads.map((workload) => ({
+          ...workloadSignature(workload),
+          promptTokenCounts: observedPromptTokenCounts.get(workload.id),
+        })),
+        methodology: {
+          samples: validated.samples,
+          warmups: 1,
+          seed: validated.seed,
+          startupTimeoutMs: validated.startupTimeoutMs,
+          requestTimeoutMs: validated.requestTimeoutMs,
+          resourceCooldownMs: LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
+          tieTolerancePct: LLAMA_CALIBRATION_DEFAULTS.tieTolerancePct,
+          includeKvCacheComparison: validated.includeKvCacheComparison,
+          kvPrecisionPreferencePct: validated.kvPrecisionPreferencePct,
+          scoreUnit: 'scenario-median-wall-ms',
+        },
+        comboSource: validated.combos ? 'custom' : 'default',
+        combos,
+        skippedCombos,
+        runs,
+        recommended: recommendLlamaCalibrationRun(runs, validated.kvPrecisionPreferencePct),
+      };
+      progress('done', combos.length, combos.length);
+      return report;
+    } catch (error) {
+      if (validated.signal?.aborted || calibrationErrorCode(error) === 'CALIBRATION_ABORTED') {
+        throw new ServerError('LLM calibration aborted', {
+          code: 'CALIBRATION_ABORTED',
+          runs,
+          cause: validated.signal?.reason ?? calibrationErrorMessage(error),
+        });
+      }
+      throw error;
+    } finally {
+      if (activeRunner) {
+        try {
+          await activeRunner.stop();
+        } catch {
+          if (activeRunner.pid) {
+            this.calibrationOrphan = {
+              pid: activeRunner.pid,
+              stderrTail: activeRunner.stderrTail,
+            };
+          }
+        }
+      }
+      this.binaryPath = savedBinaryPath;
+      this.logManager = savedLogManager;
+      this.systemInfo.clearCache();
+      this.calibrating = false;
+    }
+  }
+
+  private async validateCalibrationPromptCapacity(
+    client: LlamaCalibrationClient,
+    workloads: ValidatedLlamaCalibrationConfig['workloads'],
+    effectiveContextSize: number
+  ): Promise<Map<string, readonly number[]>> {
+    const result = new Map<string, readonly number[]>();
+    for (const workload of workloads) {
+      const prompts =
+        workload.kind === 'cold-prefill'
+          ? [workload.prompt]
+          : workload.suffixes.map((suffix) => workload.sharedPrefix + suffix);
+      const tokenCounts: number[] = [];
+      for (const prompt of prompts) {
+        const promptTokens = await client.tokenize(prompt);
+        tokenCounts.push(promptTokens);
+        if (promptTokens + workload.nPredict > effectiveContextSize) {
+          throw new ServerError(
+            'A calibration workload does not fit the verified per-slot context',
+            {
+              code: 'CALIBRATION_INVALID_CONFIG',
+              workloadId: workload.id,
+              promptTokens,
+              nPredict: workload.nPredict,
+              effectiveContextSize,
+            }
+          );
+        }
+      }
+      result.set(workload.id, tokenCounts);
+    }
+    return result;
+  }
+
+  private async runCalibrationScenario(
+    client: LlamaCalibrationClient,
+    workload: ValidatedLlamaCalibrationConfig['workloads'][number],
+    seed: number
+  ): Promise<LlamaCalibrationSample> {
+    const slotId = 0;
+    await client.eraseSlot(slotId);
+    if (workload.kind === 'cold-prefill') {
+      const request = await client.complete({
+        prompt: workload.prompt,
+        nPredict: workload.nPredict,
+        seed,
+        slotId,
+        cachePrompt: false,
+        requireCacheObservation: false,
+      });
+      return { wallTimeMs: request.wallTimeMs, requests: [request] };
+    }
+
+    await client.complete({
+      prompt: workload.sharedPrefix + workload.suffixes[0]!,
+      nPredict: workload.nPredict,
+      seed,
+      slotId,
+      cachePrompt: true,
+      requireCacheObservation: false,
+    });
+    const startedAt = performance.now();
+    const requests = [];
+    for (const suffix of workload.suffixes.slice(1)) {
+      requests.push(
+        await client.complete({
+          prompt: workload.sharedPrefix + suffix,
+          nPredict: workload.nPredict,
+          seed,
+          slotId,
+          cachePrompt: true,
+          requireCacheObservation: true,
+        })
+      );
+    }
+    return { wallTimeMs: performance.now() - startedAt, requests };
+  }
+
+  private classifyCalibrationFailure(
+    error: unknown,
+    stderrTail: string
+  ): LlamaCalibrationRun['status'] {
+    const code = calibrationErrorCode(error);
+    const message = `${calibrationErrorMessage(error)}\n${stderrTail}`;
+    if (LLAMA_CALIBRATION_DEFAULTS.oomPatterns.some((pattern) => pattern.test(message))) {
+      return 'oom';
+    }
+    if (code === 'CALIBRATION_CANDIDATE_CRASHED') return 'crashed';
+    if (code === 'CALIBRATION_REQUEST_TIMEOUT') return 'request-timeout';
+    if (/health check timeout/i.test(message)) return 'startup-timeout';
+    return 'error';
+  }
+
+  private async assertNoCalibrationOrphan(): Promise<void> {
+    const orphan = this.calibrationOrphan;
+    if (!orphan) return;
+    if (!this.processManager.isRunning(orphan.pid)) {
+      this.calibrationOrphan = undefined;
+      return;
+    }
+    throw new ServerError('A previous calibration process could not be cleaned up', {
+      code: 'CALIBRATION_CLEANUP_FAILED',
+      pid: orphan.pid,
+      stderrTail: orphan.stderrTail,
+      suggestion: 'Terminate the process before starting or calibrating again',
+    });
+  }
+
   /**
    * Get current server information (includes loadTimeMs of the last start)
    */
@@ -733,142 +1430,6 @@ export class LlamaServerManager extends ServerManager {
     debugLog('[LlamaServer] Final config:', JSON.stringify(finalConfig));
 
     return finalConfig;
-  }
-
-  /**
-   * Build command-line arguments for llama-server
-   *
-   * --jinja is passed unconditionally (unless config.jinja === false): the
-   * model's embedded chat template is required for chat_template_kwargs
-   * features (e.g. genai-lite's reasoning toggle on hybrid models). Reasoning
-   * extraction itself is left to the server default (--reasoning-format auto).
-   *
-   * @param config - Server configuration (port already resolved)
-   * @param modelInfo - Model information (includes path)
-   * @returns Array of command-line arguments
-   * @private
-   */
-  private buildCommandLineArgs(config: ResolvedLlamaServerConfig, modelInfo: ModelInfo): string[] {
-    const args: string[] = [];
-
-    // Model path
-    args.push('-m', modelInfo.path);
-
-    // Use the model's embedded Jinja chat template (default: on)
-    // --jinja is the b9860 server default; both flags are passed explicitly to
-    // pin behavior regardless of the binary's own default.
-    if (config.jinja !== false) {
-      args.push('--jinja');
-    } else {
-      args.push('--no-jinja');
-    }
-
-    // Host binding (server default: 127.0.0.1)
-    if (config.host !== undefined) {
-      args.push('--host', config.host);
-    }
-
-    // Port
-    args.push('--port', String(config.port));
-
-    // Threads
-    if (config.threads !== undefined) {
-      args.push('--threads', String(config.threads));
-    }
-
-    // Context size
-    if (config.contextSize !== undefined) {
-      args.push('-c', String(config.contextSize));
-    }
-
-    // Max predict tokens (-1 = unlimited, respect per-request max_tokens from API)
-    // Without this flag, llama-server caps at contextSize/4 by default
-    args.push('-n', '-1');
-
-    // GPU layers — emitted even for 0: the b9860 server default is auto-offload,
-    // so omitting -ngl for a CPU-only config would silently offload to GPU
-    if (config.gpuLayers !== undefined) {
-      args.push('-ngl', String(config.gpuLayers));
-    }
-
-    // Parallel requests
-    if (config.parallelRequests !== undefined) {
-      args.push('-np', String(config.parallelRequests));
-    }
-
-    // Flash attention tri-state (boolean accepted: true → on, false → off);
-    // unset → omit and let the server decide ('auto')
-    if (config.flashAttention !== undefined) {
-      const fa =
-        config.flashAttention === true
-          ? 'on'
-          : config.flashAttention === false
-            ? 'off'
-            : config.flashAttention;
-      args.push('-fa', fa);
-    }
-
-    // Auto-fit of unset args to device memory. Default OFF: genai-electron
-    // passes explicit values from its own auto-configuration, and auto-fit
-    // has hung on some GPUs. fit: 'on' delegates sizing to llama-server.
-    args.push('-fit', config.fit ?? 'off');
-
-    // KV-cache quantization
-    if (config.cacheTypeK !== undefined) {
-      args.push('--cache-type-k', config.cacheTypeK);
-    }
-    if (config.cacheTypeV !== undefined) {
-      args.push('--cache-type-v', config.cacheTypeV);
-    }
-    if (config.swaFull === true) {
-      args.push('--swa-full');
-    }
-
-    // MoE / tensor placement
-    if (config.overrideTensors !== undefined) {
-      args.push('-ot', config.overrideTensors);
-    }
-    if (config.cacheRam !== undefined) {
-      args.push('--cache-ram', String(config.cacheRam));
-    }
-    if (config.cpuMoe === true) {
-      args.push('--cpu-moe');
-    }
-    if (config.nCpuMoe !== undefined) {
-      args.push('--n-cpu-moe', String(config.nCpuMoe));
-    }
-
-    // Reasoning-content extraction (server default: auto)
-    if (config.reasoningFormat !== undefined) {
-      args.push('--reasoning-format', config.reasoningFormat);
-    }
-
-    // Model alias reported by the API (see LlamaServerConfig.modelAlias warning)
-    if (config.modelAlias !== undefined) {
-      args.push('--alias', config.modelAlias);
-    }
-
-    // Logical batch size
-    if (config.batchSize !== undefined) {
-      args.push('-b', String(config.batchSize));
-    }
-
-    // Continuous batching is the server default; only the opt-out is emitted
-    if (config.continuousBatching === false) {
-      args.push('--no-cont-batching');
-    }
-
-    // mmap is the server default; only the opt-out is emitted
-    if (config.useMmap === false) {
-      args.push('--no-mmap');
-    }
-
-    // Lock model in memory
-    if (config.useMlock === true) {
-      args.push('--mlock');
-    }
-
-    return args;
   }
 
   /**

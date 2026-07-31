@@ -1,4 +1,8 @@
-import { BINARY_VERSIONS, type BinaryVariantConfig } from '../../src/config/defaults.js';
+import {
+  BINARY_VERSIONS,
+  LLAMA_CALIBRATION_DEFAULTS,
+  type BinaryVariantConfig,
+} from '../../src/config/defaults.js';
 
 describe('binary defaults', () => {
   it('keeps every stable-diffusion.cpp asset on the configured release with a SHA-256 pin', () => {
@@ -30,5 +34,18 @@ describe('binary defaults', () => {
         expect(dependency.checksum).toMatch(/^[a-f0-9]{64}$/);
       }
     }
+  });
+});
+
+describe('LLM calibration defaults', () => {
+  it('keeps the core sweep bounded and KV comparison caller-controlled', () => {
+    expect(LLAMA_CALIBRATION_DEFAULTS).toMatchObject({
+      samples: 3,
+      seed: 42,
+      tieTolerancePct: 5,
+      includeKvCacheComparison: false,
+      kvPrecisionPreferencePct: 10,
+      maxCandidates: 10,
+    });
   });
 });

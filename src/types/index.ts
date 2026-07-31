@@ -47,6 +47,32 @@ export type {
   OptimalConfigHints,
 } from './servers.js';
 
+// LLM runtime-calibration types
+export type {
+  LlamaCalibrationProfile,
+  LlamaCalibrationOverrides,
+  LlamaCalibrationFixedConfig,
+  LlamaCalibrationCombo,
+  LlamaColdPrefillWorkload,
+  LlamaSharedPrefixWorkload,
+  LlamaCalibrationWorkload,
+  LlamaCalibrationPhase,
+  LlamaCalibrationProgress,
+  LlamaCalibrationConfig,
+  LlamaCalibrationStatus,
+  LlamaCalibrationRequestTiming,
+  LlamaCalibrationSample,
+  LlamaCalibrationWorkloadResult,
+  ResolvedLlamaCalibrationConfig,
+  LlamaCalibrationRun,
+  LlamaCalibrationRecommendation,
+  LlamaCalibrationWorkloadSignature,
+  LlamaCalibrationModelIdentity,
+  LlamaCalibrationBinaryIdentity,
+  LlamaCalibrationMachineIdentity,
+  LlamaCalibrationReport,
+} from './llm-calibration.js';
+
 // Image generation types
 export type {
   ImageSampler,
