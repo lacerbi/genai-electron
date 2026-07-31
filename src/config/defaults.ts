@@ -5,6 +5,29 @@
 
 import type { DiffusionComponentRole, DiffusionOffloadCombo } from '../types/index.js';
 
+/** Stable policy and protocol defaults for LLM runtime calibration. */
+export const LLAMA_CALIBRATION_DEFAULTS = {
+  samples: 3,
+  seed: 42,
+  tieTolerancePct: 5,
+  includeKvCacheComparison: false,
+  kvPrecisionPreferencePct: 10,
+  policyVersion: 'llama-runtime-v1',
+  startupTimeoutMs: 120_000,
+  requestTimeoutMs: 120_000,
+  resourceCooldownMs: 750,
+  stderrMaxBytes: 16 * 1024,
+  maxCandidates: 10,
+  oomPatterns: [
+    /out of memory/i,
+    /cudaMalloc/i,
+    /CUDA error/i,
+    /ErrorOutOfDeviceMemory/i,
+    /failed to allocate/i,
+    /not enough memory/i,
+  ] as readonly RegExp[],
+} as const;
+
 /**
  * Default ports for different server types
  */

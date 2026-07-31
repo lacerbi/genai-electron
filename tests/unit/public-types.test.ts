@@ -6,6 +6,8 @@ import type {
   ContextConstraintStage,
   InsufficientResourcesDetails,
   LlamaServerReadyState,
+  LlamaCalibrationConfig,
+  LlamaCalibrationReport,
   OptimalConfigHints,
   ServerEvent,
   ServerInfo,
@@ -54,7 +56,24 @@ describe('public context-capacity types', () => {
     };
     const errorTypeCheck = (error: ContextConstraintError): ContextConstraintDetails =>
       error.details;
+    const calibration: LlamaCalibrationConfig = {
+      modelId: 'test-model',
+      profile: { contextSize: 12_288, parallelRequests: 2 },
+      workloads: [{ id: 'chat', kind: 'cold-prefill', prompt: 'hello', nPredict: 32 }],
+      fixedConfig: { cacheTypeK: 'q8_0', cacheTypeV: 'q8_0' },
+    };
+    const reportTypeCheck = (report: LlamaCalibrationReport) => report.recommended?.startConfig;
 
-    expect({ details, hints, info, ready, readyEvent, resources, errorTypeCheck }).toBeDefined();
+    expect({
+      details,
+      hints,
+      info,
+      ready,
+      readyEvent,
+      resources,
+      errorTypeCheck,
+      calibration,
+      reportTypeCheck,
+    }).toBeDefined();
   });
 });

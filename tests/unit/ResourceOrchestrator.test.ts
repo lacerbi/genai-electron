@@ -4,7 +4,11 @@
  */
 
 import { jest } from '@jest/globals';
-import type { ServerConfig, ImageGenerationConfig } from '../../src/types/index.js';
+import type {
+  ServerConfig,
+  LlamaServerConfig,
+  ImageGenerationConfig,
+} from '../../src/types/index.js';
 
 // Mock SystemInfo
 const mockSystemInfo = {
@@ -248,7 +252,7 @@ describe('ResourceOrchestrator', () => {
     it('should preserve LLM configuration during offload/reload', async () => {
       mockLlamaServer.isRunning.mockReturnValue(true);
 
-      const llmConfig: ServerConfig = {
+      const llmConfig: LlamaServerConfig = {
         modelId: 'llama-2-7b',
         port: 8080,
         threads: 8,
@@ -258,7 +262,10 @@ describe('ResourceOrchestrator', () => {
         preferredContextSize: 1536,
         maximumContextSize: 2048,
         parallelRequests: 4,
-        flashAttention: true,
+        flashAttention: 'on',
+        cacheTypeK: 'q8_0',
+        cacheTypeV: 'q8_0',
+        swaFull: true,
       };
 
       mockLlamaServer.getConfig.mockReturnValue(llmConfig);

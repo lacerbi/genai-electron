@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.17.0
+ * @version 0.18.0
  * @license MIT
  *
  * @example
@@ -254,6 +254,7 @@ export {
   DIFFUSION_COMPONENT_FLAGS,
   DIFFUSION_COMPONENT_ORDER,
   DIFFUSION_CALIBRATION_DEFAULTS,
+  LLAMA_CALIBRATION_DEFAULTS,
 } from './config/defaults.js';
 
 // ============================================================================
@@ -296,6 +297,29 @@ export type {
   BinaryLogEvent,
   BinaryProgressEvent,
   OptimalConfigHints,
+  // LLM runtime-calibration types
+  LlamaCalibrationProfile,
+  LlamaCalibrationOverrides,
+  LlamaCalibrationFixedConfig,
+  LlamaCalibrationCombo,
+  LlamaColdPrefillWorkload,
+  LlamaSharedPrefixWorkload,
+  LlamaCalibrationWorkload,
+  LlamaCalibrationPhase,
+  LlamaCalibrationProgress,
+  LlamaCalibrationConfig,
+  LlamaCalibrationStatus,
+  LlamaCalibrationRequestTiming,
+  LlamaCalibrationSample,
+  LlamaCalibrationWorkloadResult,
+  ResolvedLlamaCalibrationConfig,
+  LlamaCalibrationRun,
+  LlamaCalibrationRecommendation,
+  LlamaCalibrationWorkloadSignature,
+  LlamaCalibrationModelIdentity,
+  LlamaCalibrationBinaryIdentity,
+  LlamaCalibrationMachineIdentity,
+  LlamaCalibrationReport,
   // Image generation types (Phase 2)
   ImageSampler,
   ImageGenerationStage,

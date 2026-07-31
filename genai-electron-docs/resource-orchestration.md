@@ -300,6 +300,14 @@ Restarts the LLM server from the saved state, retrying once after a short delay.
 
 ---
 
+### Applied LLM calibration configs
+
+An LLM calibration report is not applied automatically. If the caller starts the normal server with
+`report.recommended.startConfig`, `ResourceOrchestrator` saves and restores that resolved config
+through its existing offload/reload path just like any other normal start configuration. Run
+calibration only while both managed servers and other GPU work are idle; usage details belong in
+[LLM Runtime Calibration](llm-server.md#runtime-calibration).
+
 ## See Also
 
 - [Image Generation](image-generation.md) - DiffusionServerManager API

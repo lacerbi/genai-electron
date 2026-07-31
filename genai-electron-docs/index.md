@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.17.0 (full-size SWA prompt-cache control)
+> **Version**: 0.18.0 (automated LLM runtime calibration)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.17.x to v0.18.0](migration-0-17-to-0-18.md)** - Fixed-profile, caller-shaped llama-server runtime calibration and report-only recommendations
 - **[Migrating from v0.16.x to v0.17.0](migration-0-16-to-0-17.md)** - Opt-in full-size SWA cache control, conservative KV sizing, and direct llama-config typing
 - **[Migrating from v0.15.x to v0.16.0](migration-0-15-to-0-16.md)** - Soft preferred context sizing, canonical revisioned llama readiness, and effective parallel-capacity reporting
 - **[Migrating from v0.14.x to v0.15.0](migration-0-14-to-0-15.md)** - Minimum/maximum context-capacity contracts, configured/effective reporting, and mandatory llama-server `/props` verification
@@ -60,6 +61,7 @@ genai-electron manages the runtime infrastructure for running local AI models (l
 - ✅ **Artifact provenance** - Persist configured source locators and caller-supplied license declarations
 - ✅ **GGUF metadata extraction** - Accurate model information (layer count, context length, architecture) extracted before download
 - ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
+- ✅ **LLM runtime calibration** - Benchmark a bounded caller-shaped flag set for one exact context/slot profile
 - ✅ **Reasoning model support** - Automatic detection and configuration for reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS)
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
 - ✅ **Async image generation API** - HTTP endpoints with polling pattern for non-blocking generation

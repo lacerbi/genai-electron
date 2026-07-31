@@ -477,6 +477,43 @@ if (await llamaServer.isHealthy()) {
 
 ---
 
+## LLM Calibration Problems
+
+### Calibration says the server or resources are busy
+
+Stop the normal LLM server before calling `llamaServer.calibrate()`. Also stop diffusion generation,
+other llama-server processes, and unrelated GPU-heavy work. `CALIBRATION_SERVER_RUNNING`,
+`CALIBRATION_BUSY`, and `CALIBRATION_RESOURCE_BUSY` are setup failures; no candidate timing should
+be trusted until the conflict is gone.
+
+### Slots or context cannot be verified
+
+`CALIBRATION_SLOTS_UNAVAILABLE` means the pinned server did not expose compatible `/props`
+evidence, reported a different slot count, or did not allocate exactly
+`floor(profile.contextSize / profile.parallelRequests)` tokens per slot. Check the binary version
+and logs. Calibration deliberately refuses to guess capacity.
+
+### A workload is rejected before timing
+
+Every complete prompt must fit in the verified per-slot context together with `nPredict`.
+Shared-prefix workloads need at least two suffixes. A single workload may omit its weight; multiple
+workloads must all provide finite positive weights. Reduce the prompt/output size or run a separate
+calibration at a larger exact total `contextSize`.
+
+### A calibration was aborted or cleanup failed
+
+`CALIBRATION_ABORTED` includes completed partial runs. The manager remains stopped and can normally
+calibrate again. `CALIBRATION_CLEANUP_FAILED` is different: the candidate PID could not be confirmed
+dead, so later start/restart/calibration calls remain blocked until that process exits. Terminate the
+reported PID, then retry.
+
+### When is a saved recommendation stale?
+
+Recalibrate after changes to model files/revision, llama.cpp version/backend, OS/GPU driver/runtime,
+hardware, exact context/slot profile, fixed launch values, workload definitions/weights, sample
+method, or calibration policy. Treat a report whose `cacheability.level` is `best-effort` more
+conservatively because part of that identity was unavailable.
+
 ## FAQ
 
 ### Can I use custom llama.cpp builds?

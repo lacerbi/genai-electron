@@ -35,15 +35,17 @@ export async function fetchLlamaRuntimeCapacity(
   port: number,
   host: string,
   parallelRequests: number,
-  timeout = 5000
+  timeout = 5000,
+  signal?: AbortSignal
 ): Promise<LlamaRuntimeCapacity> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeout);
+  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal;
   const url = `http://${formatHttpHost(host)}:${port}/props`;
 
   try {
     const response = await fetch(url, {
-      signal: controller.signal,
+      signal: requestSignal,
       headers: { Accept: 'application/json' },
     });
 
