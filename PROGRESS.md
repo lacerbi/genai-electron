@@ -38,7 +38,7 @@
 - Completed a three-reviewer final audit covering policy/statistics, lifecycle cleanup, and public
   contract/documentation consistency; all reported implementation defects have regression fixes.
 - Completed Phase 6 hardware validation on the Windows CUDA / Gemma 4 12B IQ4_XS reference machine
-  and fixed four defects that only live running exposed:
+  and fixed five defects that only live running exposed:
   - a cell was pruned on its interim low-layer reference because an unconverged bracket counted as a
     directly observed boundary, which contradicts the policy's explicit rule and abandoned a cell
     after one probe while reporting `complete`;
@@ -50,14 +50,14 @@
     probe's own released mappings look like a 32-35% availability drop that scaled with host
     footprint and rejected the heaviest cells;
   - the drift reference never re-anchored, so one settled step change (a user opening a browser)
-    invalidated every later probe for the rest of a run.
-- Added `SystemInfo.refreshMemoryTelemetry()`, confirmed-step drift re-anchoring with per-probe
-  `resourceRegime` tagging and same-regime reproduction, and documented the machine conditions a host
-  application should ask users to maintain during a calibration.
+    invalidated every later probe for the rest of a run;
   - the adaptive early-stop cap reached `AbortSignal.timeout()` as a fractional value derived from
     `performance.now()` deltas, so healthy probes failed with a spurious `error` that consumed the
     point's ambiguity repeat, forced a one-layer step-down, and inverted a two-context product
     decision; integer-only unit fixtures could not surface it.
+- Added `SystemInfo.refreshMemoryTelemetry()`, confirmed-step drift re-anchoring with per-probe
+  `resourceRegime` tagging and same-regime reproduction, and documented the machine conditions a host
+  application should ask users to maintain during a calibration.
 - Live results (post-fix): a one-profile 12,288-token run completes in 4.9 minutes over 5 probes and
   a two-context 12,288 + 16,384 run completes in 4.4 minutes over 6 probes, both on default budgets
   and with no failed launch. Each reproduces its selection across independent fresh launches, and the

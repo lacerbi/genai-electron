@@ -1098,6 +1098,24 @@ describe('pure adaptive LLM calibration policy', () => {
     expect(resolved).toMatchObject({ status: 'stable' });
     expect(resolved.recommendationScoreMs).toBe(105);
     expect(resolved.evidenceIndices).toEqual([2, 3]);
+
+    // If the ONLY launch in the current regime was itself materially drifting,
+    // the comparable set is empty and the point must ask for a fresh launch -
+    // never fall back to the pre-step pair, which was measured elsewhere.
+    const driftedIntoNewRegime = [
+      ...before,
+      evidence(2, {
+        cellId,
+        gpuLayers: 40,
+        fidelity: 'full',
+        scoreMs: 103,
+        resourceRegime: 1,
+        resourceDriftStatus: 'material',
+      }),
+    ];
+    expect(assessMixedFidelityStability(driftedIntoNewRegime)).toMatchObject({
+      status: 'insufficient',
+    });
   });
 
   it('explores a second cell rather than pruning it on a slow low-layer reference', () => {
@@ -1112,6 +1130,10 @@ describe('pure adaptive LLM calibration policy', () => {
       ...basePolicyConfig,
       profiles: [{ ...basePolicyConfig.profiles[0]!, autoGpuLayers: 19 }],
     };
+    // The window cell reproduces at row 3 because spread(3205, 3834) = 19.6% is
+    // just inside searchNoiseAllowancePct (20). Lowering that default, or nudging
+    // these two scores apart, makes the cell demand another launch and both
+    // traces fail for an unrelated reason.
     const rows: readonly AdaptiveTraceRow[] = [
       [windowCell, 19, 'reference', 'search', 'ok', 10_102, 'admissible'],
       [windowCell, 48, 'ceiling', 'search', 'ok', 3_205, 'admissible'],
@@ -1144,6 +1166,7 @@ describe('pure adaptive LLM calibration policy', () => {
       ...basePolicyConfig,
       profiles: [{ ...basePolicyConfig.profiles[0]!, autoGpuLayers: 19 }],
     };
+    // Same 19.6% / 20% reproduction coupling as the trace above.
     const rows: readonly AdaptiveTraceRow[] = [
       [windowCell, 19, 'reference', 'search', 'ok', 10_102, 'admissible'],
       [windowCell, 48, 'ceiling', 'search', 'ok', 3_205, 'admissible'],

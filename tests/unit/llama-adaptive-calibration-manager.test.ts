@@ -627,6 +627,29 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(ensureBinary).not.toHaveBeenCalled();
     });
 
+    it('floors the derived adaptive completion cap to an integer', async () => {
+      // Observed request times are fractional, and the cap is derived from them.
+      // AbortSignal.timeout() rejects a non-integer delay, which surfaced live as
+      // a spurious `error` on a healthy probe. Scripted timings are normally
+      // whole numbers, so without a fractional score here the floor is a no-op
+      // and the guard is untested.
+      const caps: number[] = [];
+      executor.mockImplementation(async (options) => {
+        caps.push(options.completionTimeoutMs);
+        return observation(options, { scoreMs: 12_345.678_9 });
+      });
+
+      await settleCalibration(manager.calibrate(baseConfig));
+
+      // The first probe has no comparable reference and uses the caller timeout;
+      // later probes derive their cap from the fractional observation above.
+      const derived = caps.filter((cap) => cap !== baseConfig.startupTimeoutMs);
+      expect(derived.length).toBeGreaterThan(0);
+      for (const cap of caps) {
+        expect(Number.isInteger(cap)).toBe(true);
+      }
+    });
+
     it('still attempts the first probe when the configured estimate exceeds the budget', async () => {
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
@@ -648,15 +671,23 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         expect.stringContaining('configured conservative first-probe estimate'),
       ]);
       expect(executor).toHaveBeenCalled();
-      expect(report.probes.length).toBeGreaterThan(0);
+      expect(report.probes).toHaveLength(1);
       expect(report.probes[0]).toMatchObject({ purpose: 'reference', probeIndex: 0 });
       // The budget really is too small for this workload, so it still exhausts
       // honestly - but now after one probe of real evidence instead of zero.
+      // The scripted executor is instantaneous under fake timers, so no launch
+      // has a positive duration and the estimate stays at the configured
+      // conservative value - which is exactly why one probe is all it affords.
       expect(report.status).toBe('budget-exhausted');
       expect(report.budget).toMatchObject({
-        completedProbes: report.probes.length,
+        completedProbes: 1,
         maxWallTimeMs: 400_000,
+        timeAdmission: {
+          policy: 'configured-conservative-estimate',
+          estimatedNextProbeDurationMs: expect.any(Number),
+        },
       });
+      expect(report.budget.timeAdmission.estimatedNextProbeDurationMs).toBeGreaterThan(400_000);
     });
 
     it('warns against the maximum possible default cell budget before provisioning', async () => {
@@ -682,6 +713,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
       // The warning resolves against the maximum possible cell-count default
       // (1,800,000 ms) even though this run enumerates one cell (1,350,000 ms).
+      expect(report.status).toBe('budget-exhausted');
       expect(report.budget.maxWallTimeMs).toBe(1_350_000);
       expect(report.warnings).toEqual([
         expect.stringContaining('pre-provisioning wall-time allowance (1800000 ms)'),
@@ -777,13 +809,19 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
           'persistent decision-relevant resource drift prevented comparable evidence',
         ])
       );
-      // Every host snapshot must be preceded by a telemetry refresh so the
+      // Every host snapshot must be PRECEDED by a telemetry refresh so the
       // baseline and each probe reading share one measurement regime. Without
       // it the Windows standby-aware TTL expires mid-run and later snapshots
       // silently drop to os.freemem(), which excludes reclaimable standby pages.
-      expect(refreshMemoryTelemetry.mock.calls.length).toBeGreaterThanOrEqual(
-        getMemoryInfo.mock.calls.length
-      );
+      // Counts alone would pass vacuously if host telemetry were ever dropped,
+      // so interleave the invocation order instead.
+      const refreshOrder = refreshMemoryTelemetry.mock.invocationCallOrder;
+      const snapshotOrder = getMemoryInfo.mock.invocationCallOrder;
+      expect(snapshotOrder.length).toBeGreaterThan(0);
+      expect(refreshOrder.length).toBe(snapshotOrder.length);
+      for (const [index, snapshotAt] of snapshotOrder.entries()) {
+        expect(refreshOrder[index]).toBeLessThan(snapshotAt);
+      }
     });
 
     it('resolves a one-off material drift after clean reproducible launches', async () => {

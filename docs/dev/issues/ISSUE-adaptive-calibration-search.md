@@ -1,6 +1,6 @@
 # ISSUE — Adaptive boundary search for LLM runtime calibration
 
-**Status: RESOLVED (unreleased, 2026-08-02).** Implemented as the default adaptive strategy for
+**Status: RESOLVED in v0.19.0 (2026-08-02).** Implemented as the default adaptive strategy for
 `calibrate()`; see `docs/dev/plans/PLAN-adaptive-llm-calibration.md` for the delivered contract and
 the hardware-validation record, and `genai-electron-docs/llm-server.md` for public usage. The
 cell-local requirements below were adopted essentially as filed: per-cell references, a cell-local

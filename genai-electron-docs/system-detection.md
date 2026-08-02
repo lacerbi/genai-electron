@@ -11,6 +11,7 @@ The `SystemInfo` class provides system capability detection and intelligent conf
 - [Methods](#methods)
   - [detect()](#detect)
   - [getMemoryInfo()](#getmemoryinfo)
+  - [refreshMemoryTelemetry()](#refreshmemorytelemetry)
   - [getGPUInfo()](#getgpuinfo)
   - [canRunModel()](#canrunmodel)
   - [getOptimalConfig()](#getoptimalconfig)
@@ -102,7 +103,7 @@ console.log('GPU Layers:', capabilities.recommendations.gpuLayers);
 
 ### getMemoryInfo()
 
-Gets current memory usage information (not cached, real-time).
+Gets current memory usage information, read at call time.
 
 **Signature**:
 ```typescript
@@ -123,7 +124,42 @@ const usagePercent = (memory.used / memory.total) * 100;
 console.log('Memory usage:', usagePercent.toFixed(1), '%');
 ```
 
-**Use Case**: Real-time memory monitoring, especially when running multiple servers or during image generation. Unlike `detect()`, this method always returns fresh data.
+**Use Case**: Real-time memory monitoring, especially when running multiple servers or during image generation. Unlike `detect()`, this method re-reads the OS on every call rather than serving the `detect()` cache.
+
+**Windows caveat**: `os.freemem()` reports only the free list and excludes the standby cache, so it
+can understate available memory by many gigabytes. To compensate, this method prefers a
+standby-aware reading when one is fresh — but that reading has a 60-second TTL and is refreshed only
+by `detect()` or [`refreshMemoryTelemetry()`](#refreshmemorytelemetry). Once it expires, the value
+silently reverts to `os.freemem()`. Callers that sample memory repeatedly over minutes should
+refresh it explicitly, or successive readings will not be comparable with each other.
+
+---
+
+### refreshMemoryTelemetry()
+
+Refreshes the platform available-memory reading that backs `getMemoryInfo()`.
+
+**Signature**:
+```typescript
+refreshMemoryTelemetry(): Promise<void>
+```
+
+**Returns**: `Promise<void>` - resolves whether or not the platform probe succeeded; it never rejects
+
+**Example**:
+```typescript
+// Keep a long series of samples in one measurement regime
+await systemInfo.refreshMemoryTelemetry();
+const memory = systemInfo.getMemoryInfo();
+```
+
+**Use Case**: long-running work that samples memory repeatedly without re-running `detect()` — LLM
+calibration probes do this before every snapshot. Without it, readings taken more than 60 seconds
+apart on Windows can come from two different measurement regimes, making a process's own released
+file-backed pages look like a large drop in available memory.
+
+**Note**: `clearCache()` does *not* refresh this value; it only clears the `detect()` capabilities
+cache.
 
 ---
 

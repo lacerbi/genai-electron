@@ -899,29 +899,49 @@ export function classifyAdaptiveObservation(
   return { boundaryDecision: 'admissible', reason: 'completed-within-cliff-limit' };
 }
 
+/**
+ * The launches at one point that may be compared with each other.
+ *
+ * A material-drift launch is intentionally retained in the chronological trail, but it is not a
+ * comparable timing observation. The controller permits one clean repeat; persistent drift is
+ * terminated by the manager before recommendation. Excluding only explicitly material launches
+ * avoids making a single resolved telemetry disturbance permanently poison an otherwise stable
+ * point while preserving every ordinary operational conflict.
+ *
+ * Reproduction may also never span a confirmed resource-regime change, so the set is confined to
+ * the newest regime present: it describes the environment the run is now in, and requiring fresh
+ * launches there is the conservative reading — older evidence stays in the trail but cannot
+ * reproduce a point on its own.
+ *
+ * Every caller that counts or scores launches at a point must use this one subset. A gate that
+ * counted a wider set than the assessment scored would see enough launches while the assessment
+ * saw too few, and would stop scheduling the very launch needed to resolve the point.
+ */
+function comparableLaunchEvidence(
+  evidence: readonly AdaptiveEvidence[]
+): readonly AdaptiveEvidence[] {
+  // The newest regime is taken over ALL evidence, not just the drift-free subset.
+  // If the only launch in the current regime was itself materially drifting, the
+  // comparable set is empty and the point reports `insufficient`, scheduling a
+  // fresh launch under present conditions. Deriving the regime from the drift-free
+  // subset instead would silently fall back to the pre-step regime and let stale
+  // evidence reproduce the point.
+  const activeRegime = evidence.reduce(
+    (latest, item) => Math.max(latest, item.resourceRegime ?? 0),
+    0
+  );
+  return evidence.filter(
+    (item) => item.resourceDriftStatus !== 'material' && (item.resourceRegime ?? 0) === activeRegime
+  );
+}
+
 /** Assess launch-level stability without ever mixing search scores into the recommendation score. */
 export function assessMixedFidelityStability(
   evidence: readonly AdaptiveEvidence[],
   searchNoiseAllowancePct = ADAPTIVE_POLICY_DEFAULTS.searchNoiseAllowancePct,
   stabilityTolerancePct = ADAPTIVE_POLICY_DEFAULTS.stabilityTolerancePct
 ): MixedFidelityAssessment {
-  // A material-drift launch is intentionally retained in the chronological trail, but it is not a
-  // comparable timing observation. The controller permits one clean repeat; persistent drift is
-  // terminated by the manager before recommendation. Excluding only explicitly material launches
-  // avoids making a single resolved telemetry disturbance permanently poison an otherwise stable
-  // point while preserving every ordinary operational conflict.
-  const driftFree = evidence.filter((item) => item.resourceDriftStatus !== 'material');
-  // Reproduction may never span a confirmed resource-regime change. Assess the
-  // newest regime present: it describes the environment the run is now in, and
-  // requiring fresh launches there is the conservative reading - older evidence
-  // stays in the trail but cannot reproduce a point on its own.
-  const activeRegime = driftFree.reduce(
-    (latest, item) => Math.max(latest, item.resourceRegime ?? 0),
-    0
-  );
-  const comparableEvidence = driftFree.filter(
-    (item) => (item.resourceRegime ?? 0) === activeRegime
-  );
+  const comparableEvidence = comparableLaunchEvidence(evidence);
   const nonOk = comparableEvidence.filter((item) => item.operationalStatus !== 'ok');
   if (nonOk.length > 0) {
     return {
@@ -1322,9 +1342,11 @@ function candidateAtPoint(
   policy: Readonly<AdaptivePolicyDefaults>
 ): { candidate?: AdaptiveCandidate; action?: AdaptiveProbeAction; unstable?: boolean } {
   const point = pointEvidenceForStability(evidence, cell.id, gpuLayers);
-  const fullAttempts = point.filter(
-    (item) => item.fidelity === 'full' && item.resourceDriftStatus !== 'material'
-  );
+  // Must be the same subset `assessMixedFidelityStability` scores below: counting
+  // full launches from a superseded resource regime here would satisfy the
+  // "enough attempts" gate while the assessment still reported `insufficient`,
+  // leaving the point permanently unresolvable.
+  const fullAttempts = comparableLaunchEvidence(point).filter((item) => item.fidelity === 'full');
   if (fullAttempts.length === 0) {
     return {
       action: probeAction(

@@ -118,6 +118,10 @@ describe('LlamaServerManager.calibrate', () => {
       clearCache: jest.fn(),
       getMemoryInfo: jest.fn(() => capabilities.memory),
       getGPUInfo: jest.fn(async () => capabilities.gpu),
+      // Required by calibration snapshots. Omitting it does not fail loudly -
+      // the manager guards the call - so the suite would silently exercise the
+      // degraded-telemetry path instead of the normal one.
+      refreshMemoryTelemetry: jest.fn(async () => undefined),
     };
     manager = new LlamaServerManager(modelManager as never, systemInfo as never);
     (manager as unknown as { initializeLogManager: () => Promise<void> }).initializeLogManager =

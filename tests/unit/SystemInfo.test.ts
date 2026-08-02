@@ -134,6 +134,37 @@ describe('SystemInfo', () => {
     });
   });
 
+  describe('refreshMemoryTelemetry()', () => {
+    it('refreshes the reading behind getMemoryInfo() without throwing', async () => {
+      // Long-running callers that sample memory repeatedly (LLM calibration
+      // probes) need this to keep every reading in one measurement regime; on
+      // Windows the standby-aware value otherwise expires and silently degrades
+      // to os.freemem(). It must never reject, whatever the platform does.
+      //
+      // The Windows branch keys off the real `process.platform`, not the mocked
+      // `node:os`, so on a Windows host it does spawn the probe. Answer the
+      // callback whatever its arity, otherwise the promisified exec never
+      // settles; on other platforms the method is a no-op and this is unused.
+      // The cached reading lives at module scope with a 60 s TTL that
+      // clearAllMocks cannot reset, so report a value BELOW freemem: the
+      // standby-aware reading only ever raises `available` via Math.max, and a
+      // higher one here would leak into every later test in this file.
+      mockExec.mockImplementation((...args: unknown[]) => {
+        const callback = args[args.length - 1] as (
+          error: unknown,
+          result: { stdout: string; stderr: string }
+        ) => void;
+        callback(null, { stdout: `${4 * 1024 * 1024 * 1024}\n`, stderr: '' });
+      });
+
+      await expect(systemInfo.refreshMemoryTelemetry()).resolves.toBeUndefined();
+
+      const memInfo = systemInfo.getMemoryInfo();
+      expect(memInfo.total).toBe(16 * 1024 * 1024 * 1024);
+      expect(memInfo.available).toBe(8 * 1024 * 1024 * 1024);
+    });
+  });
+
   describe('canRunModel()', () => {
     beforeEach(async () => {
       mockExec.mockImplementation((cmd: string, callback: Function) => {

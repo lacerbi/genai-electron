@@ -86,6 +86,13 @@ describe('public context-capacity types', () => {
         ? report.selected?.startConfig
         : undefined;
     };
+    const probeTypeCheck = (report: LlamaCalibrationReport) =>
+      report.probes.map((probe) => ({
+        // Adaptive probes carry the settled resource level they were measured
+        // under; exact probes omit it.
+        regime: probe.resourceRegime ?? 0,
+        boundary: probe.boundaryDecision.classification,
+      }));
     const progressTypeCheck = (progress: LlamaCalibrationProgress) => {
       if (progress.phase === 'done') return progress.terminalStatus;
       if (progress.strategy === 'adaptive') return progress.budget.resolved;
@@ -102,6 +109,7 @@ describe('public context-capacity types', () => {
       errorTypeCheck,
       calibration,
       reportTypeCheck,
+      probeTypeCheck,
       progressTypeCheck,
     }).toBeDefined();
   });
