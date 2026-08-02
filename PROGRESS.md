@@ -1,6 +1,6 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.19.0 — adaptive LLM runtime calibration
+> **Current Status**: v0.19.1 — adaptive LLM runtime calibration correctness patch
 > (2026-08-02)
 
 ---
@@ -8,8 +8,53 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 881/881 passing (35 suites), including serial open-handle diagnostics
-- **Last Updated:** 2026-08-02 (v0.19.0 release preparation)
+- **Tests:** ✅ 883/883 passing (35 suites), including serial open-handle diagnostics
+- **Last Updated:** 2026-08-02 (v0.19.1 release preparation)
+
+---
+
+## v0.19.1: Adaptive Calibration Correctness Patch (2026-08-02)
+
+- Corrected five issues found by a post-release double-check of v0.19.0, four of them introduced by
+  that release's own drift re-anchoring work. No API changes: no new or removed exports, no changed
+  signatures, no report shape changes.
+  - reproduction could strand a point after a resource-regime change, because the check deciding
+    whether to schedule another launch counted launches across all regimes while the assessment
+    scored only the newest one. The point became unresolvable and its boundary silently dropped a
+    layer. Both now read one shared comparable-evidence subset;
+  - the active regime is taken over all evidence rather than the drift-free subset, so a regime whose
+    only launch was itself materially drifting asks for a fresh launch instead of falling back to
+    pre-step evidence;
+  - "settled at a new level" used the same 25% band as "material drop", so a steadily declining
+    machine re-anchored every probe and never registered as persistent drift. Settling now uses the
+    new frozen `resourceSettledTolerancePct` (5%);
+  - a failed platform telemetry refresh was silent, and two consecutive failures produce two
+    mutually consistent degraded readings that would re-anchor the drift reference onto an
+    instrument artifact. Degraded readings are now reported and can never re-anchor;
+  - `resourceRegime` was missing from the cleanup-unconfirmed and deadline-interrupted probe records.
+- Closed test gaps the same review exposed: the fractional adaptive-cap floor now has protection
+  verified to fail without the fix, assertions dropped during the v0.19.0 work are restored, the
+  telemetry-refresh check asserts snapshot ordering rather than counts, a test double that silently
+  exercised the degraded-telemetry path is fixed, and `SystemInfo.refreshMemoryTelemetry()` plus the
+  public `resourceRegime` field gained direct coverage.
+- Corrected documentation that contradicted the code: the v0.18-to-v0.19 guide told exact-mode
+  callers nothing changed when `recommended` had become `selected` and `comboSource` was removed —
+  a silent `undefined` for the one caller class it told to relax. Also fixed the returned-report
+  status list, documented `refreshMemoryTelemetry()` in the SystemInfo reference, added
+  `resourceRegime` to the TypeScript reference, and corrected the "always fresh" claim for
+  `getMemoryInfo()` on Windows.
+- Filed two deferred findings as root `ISSUE-*.md` proposals rather than folding them into a patch:
+  finalist starvation under the launch reserve, and regime isolation covering reproduction but not
+  cross-cell score comparison. Both change search behaviour and want their own validation.
+
+**Release validation:** `prepublishOnly` passes with a clean build and 883/883 tests across 35
+suites; the unconditional open-handle diagnostic run also passes. ESLint passes with 0 errors and
+109 warnings, repository formatting and `git diff --check` pass, and the production dependency audit
+reports 0 vulnerabilities. The v0.19.1 package dry-run contains 203 files.
+
+**Release status:** Release preparation on `fix/calibration-doublecheck-followups`. Version metadata
+and the v0.19.0-to-v0.19.1 migration guide are included; PR merge, tag, GitHub release, and
+maintainer-side `npm publish` follow.
 
 ---
 
@@ -79,9 +124,9 @@ and 109 warnings, repository formatting and `git diff --check` pass, the generat
 contain `refreshMemoryTelemetry` and `resourceRegime`, and the production dependency audit reports 0
 vulnerabilities. The v0.19.0 package dry-run contains 203 files (1.2 MB unpacked).
 
-**Release status:** Release preparation on `feat/adaptive-llm-calibration`. Version metadata, the
-v0.18.x-to-v0.19.0 migration guide, and the archived plan are included; PR merge, tag, GitHub
-release, and maintainer-side `npm publish` follow.
+**Release status:** Tagged `v0.19.0` with a published GitHub release, but superseded by v0.19.1
+before npm publication and therefore never published to npm. Consumers upgrading from v0.18.x go
+directly to v0.19.1; the v0.18.x-to-v0.19.0 migration guide still applies in full.
 
 ---
 
