@@ -2,6 +2,9 @@
 
 - Created: 2026-08-01
 - Status: PROPOSAL — read and confirm with the user before implementation
+- Implementation status: DEFERRED RESEARCH — the approved
+  `PLAN-adaptive-llm-calibration.md` cell-local implementation is proceeding first; GQBR remains a
+  separate future validation/research track.
 - Package: genai-electron
 - Affected API: `LlamaServerManager.calibrate()`
 - Proposed policy: Global Quantile Boundary Racing (GQBR)

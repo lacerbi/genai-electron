@@ -36,9 +36,17 @@ export class LlamaCalibrationClient {
     this.baseUrl = `http://127.0.0.1:${runner.port}`;
   }
 
-  private async request(path: string, init: RequestInit): Promise<unknown> {
+  private async request(
+    path: string,
+    init: RequestInit,
+    requestTimeoutMs = this.requestTimeoutMs
+  ): Promise<unknown> {
     this.signal?.throwIfAborted();
-    const timeout = AbortSignal.timeout(this.requestTimeoutMs);
+    // AbortSignal.timeout() rejects a non-integer delay. Adaptive completion caps
+    // are derived from performance.now() deltas and are therefore fractional, so
+    // normalize here as well as at the source: a caller passing a float must not
+    // turn a healthy probe into a spurious operational failure.
+    const timeout = AbortSignal.timeout(Math.max(1, Math.floor(requestTimeoutMs)));
     const signal = this.signal ? AbortSignal.any([timeout, this.signal]) : timeout;
     try {
       const response = await this.runner.raceWithExit(
@@ -71,7 +79,7 @@ export class LlamaCalibrationClient {
         throw new ServerError(`llama-server ${path} timed out`, {
           code: 'CALIBRATION_REQUEST_TIMEOUT',
           path,
-          timeoutMs: this.requestTimeoutMs,
+          timeoutMs: requestTimeoutMs,
         });
       }
       throw error;
@@ -119,25 +127,32 @@ export class LlamaCalibrationClient {
     }
   }
 
-  async complete(options: CompletionOptions): Promise<LlamaCalibrationRequestTiming> {
+  async complete(
+    options: CompletionOptions,
+    completionTimeoutMs = this.requestTimeoutMs
+  ): Promise<LlamaCalibrationRequestTiming> {
     const startedAt = performance.now();
-    const payload = await this.request('/completion', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-      body: JSON.stringify({
-        prompt: options.prompt,
-        n_predict: options.nPredict,
-        seed: options.seed,
-        temperature: 0,
-        top_k: 1,
-        top_p: 1,
-        min_p: 0,
-        stream: false,
-        ignore_eos: true,
-        cache_prompt: options.cachePrompt,
-        id_slot: options.slotId,
-      }),
-    });
+    const payload = await this.request(
+      '/completion',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({
+          prompt: options.prompt,
+          n_predict: options.nPredict,
+          seed: options.seed,
+          temperature: 0,
+          top_k: 1,
+          top_p: 1,
+          min_p: 0,
+          stream: false,
+          ignore_eos: true,
+          cache_prompt: options.cachePrompt,
+          id_slot: options.slotId,
+        }),
+      },
+      completionTimeoutMs
+    );
     const wallTimeMs = performance.now() - startedAt;
     if (!isRecord(payload) || !isRecord(payload.timings)) {
       throw new ServerError('llama-server /completion returned invalid timing data', {

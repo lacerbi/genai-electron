@@ -16,8 +16,13 @@ import { ProcessManager } from '../process/ProcessManager.js';
 import { checkHealth, waitForHealthy, normalizeHealthHost } from '../process/health-check.js';
 import { findFreePort } from '../process/port-utils.js';
 import { fetchLlamaRuntimeCapacity } from '../process/llama-props.js';
-import { LlamaCalibrationClient } from '../process/llama-calibration-client.js';
-import { startLlamaServerRunner, type LlamaServerRunner } from '../process/llama-server-runner.js';
+import {
+  createCalibrationPromptRedactor,
+  redactCalibrationError,
+  runCalibrationProbe,
+  type RunCalibrationProbeObservation,
+  type RunCalibrationProbeOptions,
+} from '../process/llama-calibration-probe.js';
 import {
   buildLlamaServerArgs,
   normalizeLlamaVCacheConfig,
@@ -32,11 +37,12 @@ import type {
   HealthStatus,
   LlamaCalibrationCombo,
   LlamaCalibrationConfig,
+  LlamaAdaptiveActiveProbe,
+  LlamaAdaptiveProgressBudget,
   LlamaCalibrationProgress,
+  LlamaCalibrationProbe,
   LlamaCalibrationReport,
   LlamaCalibrationRun,
-  LlamaCalibrationSample,
-  LlamaCalibrationWorkloadResult,
   ResolvedLlamaCalibrationConfig,
 } from '../types/index.js';
 import {
@@ -49,26 +55,36 @@ import {
   DEFAULT_PORTS,
   DEFAULT_TIMEOUTS,
   LLAMA_CALIBRATION_DEFAULTS,
+  resolveLlamaCalibrationBudgetDefaults,
 } from '../config/defaults.js';
 import { fileExists } from '../utils/file-utils.js';
 import { debugLog } from '../utils/debug-log.js';
 import { getInstalledBinaryIdentity } from '../utils/binary-identity.js';
 import {
   extractLlamaCalibrationOverrides,
-  generateDefaultLlamaCalibrationCombos,
-  median,
   recommendLlamaCalibrationRun,
   resolveLlamaCalibrationConfig,
   validateLlamaCalibrationConfig,
-  weightedCalibrationScore,
   workloadSignature,
-  type ValidatedLlamaCalibrationConfig,
+  type ValidatedLlamaAdaptiveCalibrationConfig,
 } from '../utils/llama-calibration.js';
 import {
-  getExpertWeightsBytesWithFallback,
-  getLayerCountWithFallback,
-  getSlidingWindow,
-} from '../utils/model-metadata-helpers.js';
+  applyAdaptivePolicyObservation,
+  classifyAdaptiveObservation,
+  createAdaptivePolicyState,
+  deriveCeilingHints,
+  estimateConfiguredProbeDuration,
+  nextAdaptivePolicyAction,
+  summarizeAdaptiveCellStates,
+  summarizeAdaptiveTimingAdmission,
+  type AdaptiveCandidate,
+  type AdaptiveCell,
+  type AdaptivePolicyState,
+  type AdaptiveProbeAction,
+  type AdaptiveTerminalAction,
+} from '../utils/llama-adaptive-calibration-policy.js';
+import { getLayerCountWithFallback, getSlidingWindow } from '../utils/model-metadata-helpers.js';
+import { estimateKVBytesPerToken } from '../utils/kv-cache-math.js';
 import {
   normalizeContextConstraints,
   validateModelContextRange,
@@ -107,6 +123,53 @@ function calibrationDelay(ms: number, signal?: AbortSignal): Promise<void> {
     };
     signal.addEventListener('abort', abort, { once: true });
   });
+}
+
+function calibrationScenarioRequestCount(
+  workload: ValidatedLlamaAdaptiveCalibrationConfig['workloads'][number]
+): number {
+  const completions = workload.kind === 'cold-prefill' ? 1 : workload.suffixes.length;
+  return 1 + completions; // slot erase plus completion request(s)
+}
+
+function plannedCalibrationRequestCount(
+  workloads: ValidatedLlamaAdaptiveCalibrationConfig['workloads'],
+  samples: number,
+  includeTokenization: boolean
+): number {
+  const tokenizations = includeTokenization
+    ? workloads.reduce(
+        (total, workload) =>
+          total + (workload.kind === 'cold-prefill' ? 1 : workload.suffixes.length),
+        0
+      )
+    : 0;
+  const perPass = workloads.reduce(
+    (total, workload) => total + calibrationScenarioRequestCount(workload),
+    0
+  );
+  return tokenizations + perPass * (1 + samples); // one warmup plus timed repetitions
+}
+
+function minimumAggregateLowerBoundAtCap(
+  workloads: ValidatedLlamaAdaptiveCalibrationConfig['workloads'],
+  capMs: number
+): number {
+  if (workloads.length === 0) return 0;
+  const totalWeight = workloads.reduce((total, workload) => total + workload.weight, 0);
+  const minimumWeight = Math.min(...workloads.map((workload) => workload.weight));
+  return (minimumWeight / totalWeight) * capMs;
+}
+
+function adaptiveProgressPhase(
+  purpose: AdaptiveProbeAction['purpose']
+): Exclude<LlamaCalibrationProgress, { strategy: 'exact' }>['phase'] {
+  if (purpose === 'reference' || purpose === 'reference-guard') return 'finding-reference';
+  if (purpose === 'ceiling') return 'establishing-ceiling';
+  if (purpose === 'boundary' || purpose === 'ambiguity-repeat') return 'bisecting';
+  if (purpose === 'finalist') return 'validating-finalist';
+  if (purpose === 'winner-validation') return 'validating-winner';
+  return 'validating-fallback';
 }
 
 /**
@@ -181,6 +244,9 @@ export class LlamaServerManager extends ServerManager {
   private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
+  private readonly calibrationProbeExecutor: (
+    options: RunCalibrationProbeOptions
+  ) => Promise<RunCalibrationProbeObservation>;
   private binaryPath?: string;
   /** Host used for health checks (config.host normalized; 0.0.0.0/:: → 127.0.0.1) */
   private healthHost = '127.0.0.1';
@@ -225,12 +291,16 @@ export class LlamaServerManager extends ServerManager {
    */
   constructor(
     modelManager: ModelManager = ModelManager.getInstance(),
-    systemInfo: SystemInfo = SystemInfo.getInstance()
+    systemInfo: SystemInfo = SystemInfo.getInstance(),
+    calibrationProbeExecutor: (
+      options: RunCalibrationProbeOptions
+    ) => Promise<RunCalibrationProbeObservation> = runCalibrationProbe
   ) {
     super();
     this.processManager = new ProcessManager();
     this.modelManager = modelManager;
     this.systemInfo = systemInfo;
+    this.calibrationProbeExecutor = calibrationProbeExecutor;
   }
 
   /**
@@ -685,9 +755,9 @@ export class LlamaServerManager extends ServerManager {
   }
 
   /**
-   * Benchmark a bounded set of llama-server configurations for one exact
-   * total-context and slot profile. Candidates and requests run serially; the
-   * manager remains publicly stopped and the result is never auto-applied.
+   * Calibrate llama-server with either the default adaptive boundary search or
+   * an explicit exact combo list. Fresh launches run serially; the manager
+   * remains publicly stopped and the result is never auto-applied.
    */
   async calibrate(config: LlamaCalibrationConfig): Promise<LlamaCalibrationReport> {
     await this.assertNoCalibrationOrphan();
@@ -705,24 +775,42 @@ export class LlamaServerManager extends ServerManager {
     }
 
     const validated = validateLlamaCalibrationConfig(config);
+    const redactCalibrationText = createCalibrationPromptRedactor(validated.workloads);
     const savedBinaryPath = this.binaryPath;
     const savedLogManager = this.logManager;
     const runs: LlamaCalibrationRun[] = [];
-    let activeRunner: LlamaServerRunner | undefined;
+    const probes: LlamaCalibrationProbe[] = [];
     let lastProgress = 0;
+    let exactCandidateCount = 0;
+    let adaptiveProgressSnapshot: {
+      overallPercent: number;
+      budget: LlamaAdaptiveProgressBudget;
+    } = { overallPercent: 0, budget: { resolved: false } };
+    const calibrationStartedAt = performance.now();
     this.calibrating = true;
 
-    const progress = (
-      phase: LlamaCalibrationProgress['phase'],
+    const exactProgress = (
+      phase:
+        | 'preparing'
+        | 'starting'
+        | 'capacity-check'
+        | 'warmup'
+        | 'sampling'
+        | 'stopping'
+        | 'done',
       comboIndex: number,
       comboCount: number,
       combo?: LlamaCalibrationCombo,
+      resolvedConfig?: ResolvedLlamaCalibrationConfig,
       workloadIndex?: number,
-      sampleIndex?: number
+      sampleIndex?: number,
+      terminalStatus?: 'complete' | 'no-viable-candidate' | 'aborted' | 'failed'
     ) => {
-      const fractionByPhase: Record<LlamaCalibrationProgress['phase'], number> = {
+      if (validated.strategy !== 'exact') return;
+      const fractionByPhase = {
         preparing: 0,
         starting: 0.05,
+        'capacity-check': 0.1,
         warmup: 0.15,
         sampling:
           0.2 +
@@ -733,36 +821,73 @@ export class LlamaServerManager extends ServerManager {
       };
       const calculated =
         phase === 'done'
-          ? 100
+          ? terminalStatus === 'aborted' || terminalStatus === 'failed'
+            ? lastProgress
+            : 100
           : comboCount === 0
             ? 0
             : ((comboIndex + fractionByPhase[phase]) / comboCount) * 100;
       lastProgress = Math.max(lastProgress, Math.min(100, calculated));
-      const payload: LlamaCalibrationProgress = {
-        overallPercent: lastProgress,
-        phase,
-        comboIndex,
-        comboCount,
-        combo,
-        workloadIndex,
-        workloadCount: validated.workloads.length,
-        sampleIndex,
-        sampleCount: validated.samples,
-      };
+      const candidates =
+        comboCount === 0
+          ? ({ resolved: false } as const)
+          : ({ resolved: true, comboCount } as const);
+      const payload: LlamaCalibrationProgress =
+        phase === 'done'
+          ? {
+              strategy: 'exact',
+              phase,
+              terminalStatus: terminalStatus ?? 'failed',
+              overallPercent: lastProgress,
+              elapsedMs: performance.now() - calibrationStartedAt,
+              candidates,
+            }
+          : {
+              strategy: 'exact',
+              phase,
+              overallPercent: lastProgress,
+              elapsedMs: performance.now() - calibrationStartedAt,
+              candidates,
+              ...(combo && resolvedConfig
+                ? {
+                    activeCandidate: {
+                      comboIndex,
+                      combo,
+                      resolvedConfig,
+                      gpuLayers: resolvedConfig.gpuLayers ?? 0,
+                    },
+                  }
+                : {}),
+              workloadIndex,
+              workloadCount: validated.workloads.length,
+              sampleIndex,
+              sampleCount: validated.samples,
+            };
       try {
-        validated.onProgress?.(payload);
+        validated.onProgress?.(structuredClone(payload));
       } catch (error) {
         debugLog('[LlamaCalibration] progress callback threw:', error);
       }
       try {
-        this.emit('calibration-progress', payload);
+        this.emit('calibration-progress', structuredClone(payload));
       } catch (error) {
         debugLog('[LlamaCalibration] calibration-progress listener threw:', error);
       }
     };
 
     try {
-      progress('preparing', 0, 0);
+      if (validated.strategy === 'adaptive') {
+        return await this.runAdaptiveCalibration(
+          validated,
+          calibrationStartedAt,
+          probes,
+          (snapshot) => {
+            adaptiveProgressSnapshot = snapshot;
+          }
+        );
+      }
+
+      exactProgress('preparing', 0, 0);
       validated.signal?.throwIfAborted();
       const model = await this.modelManager.getModelInfo(validated.modelId);
       validated.signal?.throwIfAborted();
@@ -845,210 +970,206 @@ export class LlamaServerManager extends ServerManager {
         );
         return { combo, resolvedConfig, argvKey };
       };
-      let customCandidates: readonly ReturnType<typeof resolveCandidate>[] | undefined;
-      if (validated.combos) {
-        customCandidates = validated.combos.map(resolveCandidate);
-        const seen = new Set<string>();
-        for (const candidate of customCandidates) {
-          if (seen.has(candidate.argvKey)) {
-            throw new ServerError(
-              'Custom calibration combos resolve to duplicate server arguments',
-              {
-                code: 'CALIBRATION_INVALID_CONFIG',
-                combo: candidate.combo,
-              }
-            );
-          }
-          seen.add(candidate.argvKey);
+      const customCandidates = validated.combos.map(resolveCandidate);
+      const seenCandidates = new Set<string>();
+      for (const candidate of customCandidates) {
+        if (seenCandidates.has(candidate.argvKey)) {
+          throw new ServerError('Custom calibration combos resolve to duplicate server arguments', {
+            code: 'CALIBRATION_INVALID_CONFIG',
+            combo: candidate.combo,
+          });
         }
+        seenCandidates.add(candidate.argvKey);
       }
 
       validated.signal?.throwIfAborted();
       this.binaryPath = await this.ensureBinary(model.path);
       validated.signal?.throwIfAborted();
+      const calibrationBinaryPath = this.binaryPath;
       const binaryIdentity = await getInstalledBinaryIdentity(
         'llama',
-        this.binaryPath,
+        calibrationBinaryPath,
         BINARY_VERSIONS.llamaServer.version
       );
-      const generated = customCandidates
-        ? {
-            combos: customCandidates.map((candidate) => candidate.combo),
-            skippedCombos: [] as const,
-          }
-        : generateDefaultLlamaCalibrationCombos({
-            baseline,
-            fixedConfig: validated.fixedConfig,
-            totalLayers: getLayerCountWithFallback(model),
-            gpuAvailable: capabilities.gpu.available && binaryIdentity.variant !== 'cpu',
-            slidingWindow: getSlidingWindow(model),
-            hasSharedPrefixWorkload: validated.workloads.some(
-              (workload) => workload.kind === 'shared-prefix'
-            ),
-            exactExpertWeightsBytes: model.ggufMetadata?.expert_weights_bytes,
-            moeCounterfactualFeasible: getExpertWeightsBytesWithFallback(model) !== undefined,
-            includeKvCacheComparison: validated.includeKvCacheComparison,
-          });
-      const skippedCombos = [...generated.skippedCombos];
-      const candidates = customCandidates ? [...customCandidates] : [];
-      if (!customCandidates) {
-        const seen = new Set<string>();
-        for (const combo of generated.combos) {
-          const candidate = resolveCandidate(combo);
-          if (seen.has(candidate.argvKey)) {
-            skippedCombos.push({ combo, reason: 'duplicate-resolved-config' });
-            continue;
-          }
-          seen.add(candidate.argvKey);
-          candidates.push(candidate);
-        }
-      }
+      const skippedCombos: { combo: LlamaCalibrationCombo; reason: string }[] = [];
+      const candidates = [...customCandidates];
       const combos = candidates.map((candidate) => candidate.combo);
-      let verifiedProfile: LlamaCalibrationReport['verifiedProfile'];
+      exactCandidateCount = combos.length;
+      let verifiedProfile:
+        | { effectiveContextSize: number; effectiveParallelRequests: number }
+        | undefined;
       const observedPromptTokenCounts = new Map<string, readonly number[]>();
 
       for (let comboIndex = 0; comboIndex < candidates.length; comboIndex++) {
-        const { combo, resolvedConfig } = candidates[comboIndex]!;
-        const workloadResults: LlamaCalibrationWorkloadResult[] = [];
-        let status: LlamaCalibrationRun['status'] = 'ok';
-        let errorText: string | undefined;
-        let loadTimeMs: number | undefined;
-        let effectiveContextSize: number | undefined;
-        let effectiveParallelRequests: number | undefined;
-        let stderrTail: string | undefined;
-        let fatalCandidateError: unknown;
-        let cleanupFailure: unknown;
-
-        progress('starting', comboIndex, combos.length, combo);
+        const { combo, resolvedConfig, argvKey } = candidates[comboIndex]!;
+        const probeStartedAt = performance.now();
         try {
-          validated.signal?.throwIfAborted();
-          activeRunner = await startLlamaServerRunner({
-            binaryPath: this.binaryPath,
+          const observation = await this.calibrationProbeExecutor({
+            binaryPath: calibrationBinaryPath,
             model,
-            config: { modelId: model.id, ...resolvedConfig },
-            contextSize: validated.profile.contextSize,
-            parallelRequests: validated.profile.parallelRequests,
+            combo,
+            resolvedConfig,
+            workloads: validated.workloads,
+            purpose: 'exact',
+            fidelity: 'full',
+            sampleCount: validated.samples,
+            seed: validated.seed,
             startupTimeoutMs: validated.startupTimeoutMs,
+            requestTimeoutMs: validated.requestTimeoutMs,
+            completionTimeoutMs: validated.requestTimeoutMs,
+            cachedPromptTokenCounts: observedPromptTokenCounts,
             signal: validated.signal,
+            onProgress: ({ phase, workloadIndex, sampleIndex }) => {
+              exactProgress(
+                phase,
+                comboIndex,
+                combos.length,
+                combo,
+                resolvedConfig,
+                workloadIndex,
+                sampleIndex
+              );
+            },
           });
-          loadTimeMs = activeRunner.loadTimeMs;
-          effectiveContextSize = activeRunner.capacity!.effectiveContextSize;
-          effectiveParallelRequests = activeRunner.capacity!.totalSlots;
-          verifiedProfile ??= {
-            effectiveContextSize,
-            effectiveParallelRequests: effectiveParallelRequests!,
-          };
-          const client = new LlamaCalibrationClient(
-            activeRunner,
-            validated.requestTimeoutMs,
-            validated.signal
-          );
-          const candidateTokenCounts = await this.validateCalibrationPromptCapacity(
-            client,
-            validated.workloads,
-            effectiveContextSize
-          );
-          for (const [workloadId, tokenCounts] of candidateTokenCounts) {
+          const { run } = observation;
+          if (
+            verifiedProfile === undefined &&
+            run.effectiveContextSize !== undefined &&
+            run.effectiveParallelRequests !== undefined
+          ) {
+            verifiedProfile = {
+              effectiveContextSize: run.effectiveContextSize,
+              effectiveParallelRequests: run.effectiveParallelRequests,
+            };
+          }
+          for (const [workloadId, tokenCounts] of observation.promptTokenCounts) {
             if (!observedPromptTokenCounts.has(workloadId)) {
               observedPromptTokenCounts.set(workloadId, tokenCounts);
             }
           }
-
-          progress('warmup', comboIndex, combos.length, combo);
-          for (const workload of validated.workloads) {
-            await this.runCalibrationScenario(client, workload, validated.seed);
-          }
-
-          for (let workloadIndex = 0; workloadIndex < validated.workloads.length; workloadIndex++) {
-            const workload = validated.workloads[workloadIndex]!;
-            const samples: LlamaCalibrationSample[] = [];
-            for (let sampleIndex = 0; sampleIndex < validated.samples; sampleIndex++) {
-              progress('sampling', comboIndex, combos.length, combo, workloadIndex, sampleIndex);
-              samples.push(await this.runCalibrationScenario(client, workload, validated.seed));
-            }
-            workloadResults.push({
-              workloadId: workload.id,
-              kind: workload.kind,
-              workloadHash: workloadSignature(workload).hash,
-              weight: workload.weight,
-              samples,
-              medianWallTimeMs: median(samples.map((sample) => sample.wallTimeMs)),
+          runs.push(run);
+          probes.push({
+            probeIndex: probes.length,
+            strategy: 'exact',
+            purpose: 'exact',
+            fidelity: 'full',
+            independentLaunchIndex: 1,
+            profileIndex: 0,
+            profileOrdinal: 0,
+            comboIndex,
+            combo,
+            resolvedConfig,
+            argvKey,
+            operationalStatus: run.status,
+            memoryEvidence: observation.memoryEvidence,
+            boundaryDecision: {
+              classification: 'not-applicable',
+              reason: 'Exact candidates do not participate in adaptive boundary search.',
+            },
+            loadTimeMs: run.loadTimeMs,
+            effectiveContextSize: run.effectiveContextSize,
+            effectiveParallelRequests: run.effectiveParallelRequests,
+            workloadResults: run.workloadResults,
+            scoreMs: run.scoreMs,
+            durationMs: performance.now() - probeStartedAt,
+            error: run.error,
+            stderrTail: run.stderrTail,
+            cleanup: observation.cleanup,
+          });
+        } catch (error) {
+          const sanitized = redactCalibrationError(error, redactCalibrationText);
+          const fatalObservation = calibrationErrorDetail(sanitized, 'probeObservation') as
+            | RunCalibrationProbeObservation
+            | undefined;
+          if (fatalObservation?.run && fatalObservation.cleanup?.confirmed) {
+            const { run } = fatalObservation;
+            runs.push(run);
+            probes.push({
+              probeIndex: probes.length,
+              strategy: 'exact',
+              purpose: 'exact',
+              fidelity: 'full',
+              independentLaunchIndex: 1,
+              profileIndex: 0,
+              profileOrdinal: 0,
+              comboIndex,
+              combo,
+              resolvedConfig,
+              argvKey,
+              operationalStatus: run.status,
+              memoryEvidence: fatalObservation.memoryEvidence,
+              boundaryDecision: {
+                classification: 'not-applicable',
+                reason: 'Exact candidates do not participate in adaptive boundary search.',
+              },
+              loadTimeMs: run.loadTimeMs,
+              effectiveContextSize: run.effectiveContextSize,
+              effectiveParallelRequests: run.effectiveParallelRequests,
+              workloadResults: run.workloadResults,
+              scoreMs: run.scoreMs,
+              durationMs: performance.now() - probeStartedAt,
+              terminationReason: calibrationErrorCode(sanitized) ?? 'fatal-probe-validation',
+              error: run.error,
+              stderrTail: run.stderrTail,
+              cleanup: fatalObservation.cleanup,
             });
           }
-        } catch (error) {
-          const code = calibrationErrorCode(error);
-          if (
-            code === 'CALIBRATION_ABORTED' ||
-            code === 'CALIBRATION_CLEANUP_FAILED' ||
-            code === 'CALIBRATION_INVALID_CONFIG' ||
-            code === 'CALIBRATION_SLOTS_UNAVAILABLE' ||
-            validated.signal?.aborted
-          ) {
-            if (code === 'CALIBRATION_CLEANUP_FAILED') {
-              const orphanPid = calibrationErrorDetail(error, 'pid');
-              const errorStderr = calibrationErrorDetail(error, 'stderrTail');
-              if (typeof orphanPid === 'number' && Number.isSafeInteger(orphanPid)) {
-                this.calibrationOrphan = {
-                  pid: orphanPid,
-                  stderrTail: typeof errorStderr === 'string' ? errorStderr : undefined,
-                };
-              }
+          if (calibrationErrorCode(sanitized) === 'CALIBRATION_CLEANUP_FAILED') {
+            const orphanPid = calibrationErrorDetail(sanitized, 'pid');
+            const errorStderr = calibrationErrorDetail(sanitized, 'stderrTail');
+            const cleanup = calibrationErrorDetail(sanitized, 'cleanup');
+            if (typeof orphanPid === 'number' && Number.isSafeInteger(orphanPid)) {
+              this.calibrationOrphan = {
+                pid: orphanPid,
+                stderrTail: typeof errorStderr === 'string' ? errorStderr : undefined,
+              };
             }
-            fatalCandidateError = error;
-          } else {
-            errorText = calibrationErrorMessage(error);
-            const errorStderr = calibrationErrorDetail(error, 'stderrTail');
-            stderrTail =
-              activeRunner?.stderrTail ??
-              (typeof errorStderr === 'string' ? errorStderr : undefined);
-            status = this.classifyCalibrationFailure(error, stderrTail ?? '');
+            probes.push({
+              probeIndex: probes.length,
+              strategy: 'exact',
+              purpose: 'exact',
+              fidelity: 'full',
+              independentLaunchIndex: 1,
+              profileIndex: 0,
+              profileOrdinal: 0,
+              comboIndex,
+              combo,
+              resolvedConfig,
+              argvKey,
+              operationalStatus: 'error',
+              memoryEvidence: {
+                classification: 'unknown',
+                reason: 'Probe cleanup could not be confirmed.',
+                source: 'process-exit',
+              },
+              boundaryDecision: {
+                classification: 'not-applicable',
+                reason: 'Exact candidates do not participate in adaptive boundary search.',
+              },
+              workloadResults: validated.workloads.map((workload) => ({
+                workloadId: workload.id,
+                kind: workload.kind,
+                workloadHash: workloadSignature(workload).hash,
+                weight: workload.weight,
+                samples: [],
+                error: 'cleanup-unconfirmed',
+              })),
+              durationMs: performance.now() - probeStartedAt,
+              error: calibrationErrorMessage(sanitized),
+              stderrTail: typeof errorStderr === 'string' ? errorStderr : undefined,
+              cleanup:
+                cleanup && typeof cleanup === 'object'
+                  ? (cleanup as LlamaCalibrationProbe['cleanup'])
+                  : {
+                      confirmed: false,
+                      durationMs: 0,
+                      pid: typeof orphanPid === 'number' ? orphanPid : undefined,
+                      error: calibrationErrorMessage(sanitized),
+                    },
+            });
           }
-        } finally {
-          progress('stopping', comboIndex, combos.length, combo);
-          if (activeRunner) {
-            try {
-              await activeRunner.stop();
-            } catch (error) {
-              if (activeRunner.pid) {
-                this.calibrationOrphan = {
-                  pid: activeRunner.pid,
-                  stderrTail: activeRunner.stderrTail,
-                };
-              }
-              cleanupFailure = error;
-            }
-          }
+          throw sanitized;
         }
-        if (cleanupFailure) throw cleanupFailure;
-        if (fatalCandidateError) throw fatalCandidateError;
-
-        const resultById = new Map(workloadResults.map((result) => [result.workloadId, result]));
-        const completeWorkloadResults = validated.workloads.map(
-          (workload): LlamaCalibrationWorkloadResult =>
-            resultById.get(workload.id) ?? {
-              workloadId: workload.id,
-              kind: workload.kind,
-              workloadHash: workloadSignature(workload).hash,
-              weight: workload.weight,
-              samples: [],
-              error: errorText,
-            }
-        );
-        const scoreMs =
-          status === 'ok' ? weightedCalibrationScore(completeWorkloadResults) : undefined;
-        runs.push({
-          combo,
-          resolvedConfig,
-          status: scoreMs === undefined && status === 'ok' ? 'error' : status,
-          loadTimeMs,
-          effectiveContextSize,
-          effectiveParallelRequests,
-          workloadResults: completeWorkloadResults,
-          scoreMs,
-          error: errorText,
-          stderrTail,
-        });
-        activeRunner = undefined;
         this.systemInfo.clearCache();
         try {
           const currentMemory = this.systemInfo.getMemoryInfo();
@@ -1099,10 +1220,13 @@ export class LlamaServerManager extends ServerManager {
       if (capabilities.gpu.available) {
         cacheabilityReasons.push('GPU driver/runtime version is not discoverable');
       }
+      const selected = recommendLlamaCalibrationRun(runs, validated.kvPrecisionPreferencePct);
       const report: LlamaCalibrationReport = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
         createdAt: new Date().toISOString(),
+        strategy: 'exact',
+        status: selected ? 'complete' : 'no-viable-candidate',
         model: {
           id: model.id,
           name: model.name,
@@ -1144,47 +1268,172 @@ export class LlamaServerManager extends ServerManager {
           promptTokenCounts: observedPromptTokenCounts.get(workload.id),
         })),
         methodology: {
+          layerCount: getLayerCountWithFallback(model),
+          layerCountSource: model.ggufMetadata?.block_count ? 'metadata' : 'fallback',
           samples: validated.samples,
+          searchSamples: LLAMA_CALIBRATION_DEFAULTS.searchSamples,
           warmups: 1,
           seed: validated.seed,
           startupTimeoutMs: validated.startupTimeoutMs,
           requestTimeoutMs: validated.requestTimeoutMs,
           resourceCooldownMs: LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
           tieTolerancePct: LLAMA_CALIBRATION_DEFAULTS.tieTolerancePct,
-          includeKvCacheComparison: validated.includeKvCacheComparison,
+          grossRegressionMultiplier: LLAMA_CALIBRATION_DEFAULTS.grossRegressionMultiplier,
+          stabilityTolerancePct: LLAMA_CALIBRATION_DEFAULTS.stabilityTolerancePct,
+          searchNoiseAllowancePct: LLAMA_CALIBRATION_DEFAULTS.searchNoiseAllowancePct,
+          nonMonotoneTriggerPct: LLAMA_CALIBRATION_DEFAULTS.nonMonotoneTriggerPct,
+          includeKvCacheComparison: false,
           kvPrecisionPreferencePct: validated.kvPrecisionPreferencePct,
           scoreUnit: 'scenario-median-wall-ms',
         },
-        comboSource: validated.combos ? 'custom' : 'default',
         combos,
         skippedCombos,
         runs,
-        recommended: recommendLlamaCalibrationRun(runs, validated.kvPrecisionPreferencePct),
+        probes,
+        warnings: [],
+        selected,
+        ...(selected ? { selectionEvidence: 'single-launch-measurement' as const } : {}),
+        confidence: 'single-launch-measurement',
       };
-      progress('done', combos.length, combos.length);
+      exactProgress(
+        'done',
+        combos.length,
+        combos.length,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        report.status
+      );
       return report;
     } catch (error) {
-      if (validated.signal?.aborted || calibrationErrorCode(error) === 'CALIBRATION_ABORTED') {
+      const sanitized = redactCalibrationError(error, redactCalibrationText);
+      if (validated.strategy === 'adaptive') {
+        if (calibrationErrorDetail(sanitized, 'partialReport') !== undefined) {
+          throw sanitized;
+        }
+        const terminalStatus = validated.signal?.aborted ? 'aborted' : 'failed';
+        const payload: LlamaCalibrationProgress = {
+          strategy: 'adaptive',
+          phase: 'done',
+          terminalStatus,
+          overallPercent: adaptiveProgressSnapshot.overallPercent,
+          elapsedMs: performance.now() - calibrationStartedAt,
+          completedProbes: probes.length,
+          budget: adaptiveProgressSnapshot.budget,
+        };
+        try {
+          validated.onProgress?.(payload);
+        } catch (progressError) {
+          debugLog('[LlamaCalibration] adaptive terminal callback threw:', progressError);
+        }
+        try {
+          this.emit('calibration-progress', { ...payload });
+        } catch (progressError) {
+          debugLog('[LlamaCalibration] adaptive terminal event listener threw:', progressError);
+        }
+        throw new ServerError(
+          terminalStatus === 'aborted'
+            ? 'LLM calibration aborted'
+            : 'Adaptive LLM calibration failed',
+          {
+            ...(sanitized instanceof ServerError &&
+            typeof sanitized.details === 'object' &&
+            sanitized.details
+              ? (sanitized.details as Record<string, unknown>)
+              : {}),
+            code:
+              terminalStatus === 'aborted'
+                ? 'CALIBRATION_ABORTED'
+                : (calibrationErrorCode(sanitized) ?? 'CALIBRATION_FAILED'),
+            cause: redactCalibrationText(calibrationErrorMessage(sanitized)),
+            partialReport: {
+              schemaVersion: 2,
+              policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+              strategy: 'adaptive',
+              status: terminalStatus,
+              createdAt: new Date().toISOString(),
+              probes,
+              warnings: [],
+              cleanupConfirmed: calibrationErrorCode(sanitized) !== 'CALIBRATION_CLEANUP_FAILED',
+            },
+          }
+        );
+      }
+      const cleanupConfirmed = calibrationErrorCode(sanitized) !== 'CALIBRATION_CLEANUP_FAILED';
+      if (validated.signal?.aborted || calibrationErrorCode(sanitized) === 'CALIBRATION_ABORTED') {
+        exactProgress(
+          'done',
+          exactCandidateCount,
+          exactCandidateCount,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'aborted'
+        );
         throw new ServerError('LLM calibration aborted', {
           code: 'CALIBRATION_ABORTED',
           runs,
-          cause: validated.signal?.reason ?? calibrationErrorMessage(error),
+          cause: redactCalibrationText(
+            validated.signal?.reason === undefined
+              ? calibrationErrorMessage(sanitized)
+              : String(validated.signal.reason)
+          ),
+          partialReport: {
+            schemaVersion: 2,
+            policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+            strategy: 'exact',
+            status: 'aborted',
+            createdAt: new Date().toISOString(),
+            probes,
+            warnings: [],
+            cleanupConfirmed,
+          },
         });
       }
-      throw error;
-    } finally {
-      if (activeRunner) {
-        try {
-          await activeRunner.stop();
-        } catch {
-          if (activeRunner.pid) {
-            this.calibrationOrphan = {
-              pid: activeRunner.pid,
-              stderrTail: activeRunner.stderrTail,
-            };
-          }
-        }
+      exactProgress(
+        'done',
+        exactCandidateCount,
+        exactCandidateCount,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'failed'
+      );
+      if (sanitized instanceof ServerError) {
+        throw new ServerError(sanitized.message.replace(/^Server error: /, ''), {
+          ...(typeof sanitized.details === 'object' && sanitized.details
+            ? (sanitized.details as Record<string, unknown>)
+            : {}),
+          partialReport: {
+            schemaVersion: 2,
+            policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+            strategy: 'exact',
+            status: 'failed',
+            createdAt: new Date().toISOString(),
+            probes,
+            warnings: [],
+            cleanupConfirmed,
+          },
+        });
       }
+      throw new ServerError('LLM calibration failed', {
+        code: 'CALIBRATION_FAILED',
+        cause: calibrationErrorMessage(sanitized),
+        partialReport: {
+          schemaVersion: 2,
+          policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+          strategy: 'exact',
+          status: 'failed',
+          createdAt: new Date().toISOString(),
+          probes,
+          warnings: [],
+          cleanupConfirmed,
+        },
+      });
+    } finally {
       this.binaryPath = savedBinaryPath;
       this.logManager = savedLogManager;
       this.systemInfo.clearCache();
@@ -1192,96 +1441,1464 @@ export class LlamaServerManager extends ServerManager {
     }
   }
 
-  private async validateCalibrationPromptCapacity(
-    client: LlamaCalibrationClient,
-    workloads: ValidatedLlamaCalibrationConfig['workloads'],
-    effectiveContextSize: number
-  ): Promise<Map<string, readonly number[]>> {
-    const result = new Map<string, readonly number[]>();
-    for (const workload of workloads) {
-      const prompts =
-        workload.kind === 'cold-prefill'
-          ? [workload.prompt]
-          : workload.suffixes.map((suffix) => workload.sharedPrefix + suffix);
-      const tokenCounts: number[] = [];
-      for (const prompt of prompts) {
-        const promptTokens = await client.tokenize(prompt);
-        tokenCounts.push(promptTokens);
-        if (promptTokens + workload.nPredict > effectiveContextSize) {
-          throw new ServerError(
-            'A calibration workload does not fit the verified per-slot context',
-            {
-              code: 'CALIBRATION_INVALID_CONFIG',
-              workloadId: workload.id,
-              promptTokens,
-              nPredict: workload.nPredict,
-              effectiveContextSize,
+  private async runAdaptiveCalibration(
+    validated: ValidatedLlamaAdaptiveCalibrationConfig,
+    calibrationStartedAt: number,
+    publicProbes: LlamaCalibrationProbe[],
+    onProgressSnapshot: (snapshot: {
+      overallPercent: number;
+      budget: LlamaAdaptiveProgressBudget;
+    }) => void
+  ): Promise<LlamaCalibrationReport> {
+    const redact = createCalibrationPromptRedactor(validated.workloads);
+    const warnings: string[] = [];
+    const tokenCounts = new Map<string, readonly number[]>();
+    const verifiedProfiles = new Map<
+      number,
+      { effectiveContextSize: number; effectiveParallelRequests: number }
+    >();
+    let lastProgress = 0;
+    let progressBudget: LlamaAdaptiveProgressBudget = { resolved: false };
+    const policyTiming: { readyAt?: number } = {};
+    let state: AdaptivePolicyState | undefined;
+
+    const resolvedProgressBudget = (): LlamaAdaptiveProgressBudget => {
+      if (!state || policyTiming.readyAt === undefined) return progressBudget;
+      const remainingWallTimeMs = Math.max(
+        0,
+        state.budgets.maxWallTimeMs - (performance.now() - policyTiming.readyAt)
+      );
+      return {
+        resolved: true,
+        targetProbes: state.budgets.targetProbes,
+        maxProbes: state.budgets.maxProbes,
+        finalistReserve: state.budgets.finalistReserve,
+        maxWallTimeMs: state.budgets.maxWallTimeMs,
+        finalistTimeReserveMs: state.budgets.finalistTimeReserveMs,
+        remainingWallTimeMs,
+        probeReserveActive:
+          state.budgets.maxProbes - publicProbes.length <= state.budgets.finalistReserve,
+        timeReserveActive: remainingWallTimeMs <= state.budgets.finalistTimeReserveMs,
+      };
+    };
+
+    const emitProgress = (
+      phase:
+        | 'preparing'
+        | 'policy-ready'
+        | 'finding-reference'
+        | 'establishing-ceiling'
+        | 'bisecting'
+        | 'validating-finalist'
+        | 'validating-winner'
+        | 'validating-fallback'
+        | 'stopping'
+        | 'done',
+      options: {
+        terminalStatus?:
+          | 'complete'
+          | 'budget-exhausted'
+          | 'no-viable-candidate'
+          | 'aborted'
+          | 'failed';
+        activeProbe?: LlamaAdaptiveActiveProbe;
+        workloadIndex?: number;
+        sampleIndex?: number;
+        sampleCount?: number;
+      } = {}
+    ): void => {
+      progressBudget = resolvedProgressBudget();
+      const maxProbes = progressBudget.resolved ? progressBudget.maxProbes : 1;
+      const phaseFraction: Record<string, number> = {
+        starting: 0.05,
+        'capacity-check': 0.1,
+        warmup: 0.15,
+        sampling:
+          0.2 +
+          (0.7 *
+            ((options.workloadIndex ?? 0) * (options.sampleCount ?? validated.samples) +
+              (options.sampleIndex ?? 0))) /
+            Math.max(1, validated.workloads.length * (options.sampleCount ?? validated.samples)),
+        stopping: 0.95,
+      };
+      const activeFraction = options.activeProbe?.probePhase
+        ? (phaseFraction[options.activeProbe.probePhase] ?? 0)
+        : 0;
+      const calculated =
+        phase === 'done'
+          ? options.terminalStatus === 'aborted' || options.terminalStatus === 'failed'
+            ? lastProgress
+            : 100
+          : progressBudget.resolved
+            ? ((publicProbes.length + activeFraction) / maxProbes) * 100
+            : 0;
+      lastProgress = Math.max(lastProgress, Math.min(100, calculated));
+      const payload: LlamaCalibrationProgress =
+        phase === 'done'
+          ? {
+              strategy: 'adaptive',
+              phase,
+              terminalStatus: options.terminalStatus ?? 'failed',
+              overallPercent: lastProgress,
+              elapsedMs: performance.now() - calibrationStartedAt,
+              completedProbes: publicProbes.length,
+              budget: progressBudget,
             }
-          );
-        }
+          : {
+              strategy: 'adaptive',
+              phase,
+              overallPercent: lastProgress,
+              elapsedMs: performance.now() - calibrationStartedAt,
+              completedProbes: publicProbes.length,
+              budget: progressBudget,
+              activeProbe: options.activeProbe,
+              workloadIndex: options.workloadIndex,
+              workloadCount: validated.workloads.length,
+              sampleIndex: options.sampleIndex,
+              sampleCount: options.sampleCount ?? validated.samples,
+            };
+      onProgressSnapshot({ overallPercent: lastProgress, budget: progressBudget });
+      try {
+        validated.onProgress?.(structuredClone(payload));
+      } catch (error) {
+        debugLog('[LlamaCalibration] adaptive progress callback threw:', error);
       }
-      result.set(workload.id, tokenCounts);
-    }
-    return result;
-  }
+      try {
+        this.emit('calibration-progress', structuredClone(payload));
+      } catch (error) {
+        debugLog('[LlamaCalibration] adaptive calibration-progress listener threw:', error);
+      }
+    };
 
-  private async runCalibrationScenario(
-    client: LlamaCalibrationClient,
-    workload: ValidatedLlamaCalibrationConfig['workloads'][number],
-    seed: number
-  ): Promise<LlamaCalibrationSample> {
-    const slotId = 0;
-    await client.eraseSlot(slotId);
-    if (workload.kind === 'cold-prefill') {
-      const request = await client.complete({
-        prompt: workload.prompt,
-        nPredict: workload.nPredict,
-        seed,
-        slotId,
-        cachePrompt: false,
-        requireCacheObservation: false,
-      });
-      return { wallTimeMs: request.wallTimeMs, requests: [request] };
-    }
+    emitProgress('preparing');
+    validated.signal?.throwIfAborted();
 
-    await client.complete({
-      prompt: workload.sharedPrefix + workload.suffixes[0]!,
-      nPredict: workload.nPredict,
-      seed,
-      slotId,
-      cachePrompt: true,
-      requireCacheObservation: false,
+    const firstProbeRequestCount = plannedCalibrationRequestCount(
+      validated.workloads,
+      LLAMA_CALIBRATION_DEFAULTS.searchSamples,
+      true
+    );
+    const configuredDurationEstimate = estimateConfiguredProbeDuration({
+      startupTimeoutMs: validated.startupTimeoutMs,
+      requestTimeoutMs: validated.requestTimeoutMs,
+      serverStopTimeoutMs: DEFAULT_TIMEOUTS.serverStop,
+      plannedPostStartupRequestCount: firstProbeRequestCount,
+      maxRunnerStartAttempts: LLAMA_CALIBRATION_DEFAULTS.maxRunnerStartAttempts,
+      capacityCheckTimeoutCapMs: LLAMA_CALIBRATION_DEFAULTS.capacityCheckTimeoutCapMs,
+      processExitConfirmationMs: LLAMA_CALIBRATION_DEFAULTS.processExitConfirmationMs,
+      processExitSettleGraceMs: LLAMA_CALIBRATION_DEFAULTS.processExitSettleGraceMs,
     });
-    const startedAt = performance.now();
-    const requests = [];
-    for (const suffix of workload.suffixes.slice(1)) {
-      requests.push(
-        await client.complete({
-          prompt: workload.sharedPrefix + suffix,
-          nPredict: workload.nPredict,
-          seed,
-          slotId,
-          cachePrompt: true,
-          requireCacheObservation: true,
-        })
+    const maximumEnumeratedCellCount =
+      validated.profiles.length *
+      (validated.fixedConfig.swaFull === undefined ? 2 : 1) *
+      (validated.includeKvCacheComparison ? 2 : 1);
+    const preProvisioningWallTimeMs =
+      validated.maxWallTimeMs ??
+      resolveLlamaCalibrationBudgetDefaults(maximumEnumeratedCellCount).maxWallTimeMs;
+    if (configuredDurationEstimate.estimateMs > preProvisioningWallTimeMs) {
+      warnings.push(
+        `The configured conservative first-probe estimate (${Math.round(
+          configuredDurationEstimate.estimateMs
+        )} ms) exceeds the pre-provisioning wall-time allowance (${preProvisioningWallTimeMs} ms); calibration may end budget-exhausted before search evidence is available.`
       );
     }
-    return { wallTimeMs: performance.now() - startedAt, requests };
-  }
 
-  private classifyCalibrationFailure(
-    error: unknown,
-    stderrTail: string
-  ): LlamaCalibrationRun['status'] {
-    const code = calibrationErrorCode(error);
-    const message = `${calibrationErrorMessage(error)}\n${stderrTail}`;
-    if (LLAMA_CALIBRATION_DEFAULTS.oomPatterns.some((pattern) => pattern.test(message))) {
-      return 'oom';
+    const model = await this.modelManager.getModelInfo(validated.modelId);
+    validated.signal?.throwIfAborted();
+    if (model.type !== 'llm') {
+      throw new ServerError('LLM calibration requires an LLM model', {
+        code: 'CALIBRATION_INVALID_CONFIG',
+        modelId: model.id,
+      });
     }
-    if (code === 'CALIBRATION_CANDIDATE_CRASHED') return 'crashed';
-    if (code === 'CALIBRATION_REQUEST_TIMEOUT') return 'request-timeout';
-    if (/health check timeout/i.test(message)) return 'startup-timeout';
-    return 'error';
+    const preflightHasSharedPrefix = validated.workloads.some(
+      (workload) => workload.kind === 'shared-prefix'
+    );
+    const preflightSlidingWindow = getSlidingWindow(model);
+    const preflightStructuralCellCount = validated.profiles.reduce((count, profile) => {
+      const swaRelevant =
+        validated.fixedConfig.swaFull === undefined &&
+        preflightHasSharedPrefix &&
+        preflightSlidingWindow !== undefined &&
+        Math.floor(profile.contextSize / profile.parallelRequests) > preflightSlidingWindow;
+      return count + (swaRelevant ? 2 : 1);
+    }, 0);
+    const preflightCellCount =
+      preflightStructuralCellCount * (validated.includeKvCacheComparison ? 2 : 1);
+    const preflightBudgetDefaults = resolveLlamaCalibrationBudgetDefaults(preflightCellCount);
+    const preflightMaxProbes = validated.maxProbes ?? preflightBudgetDefaults.maxProbes;
+    const preflightMaxWallTimeMs = validated.maxWallTimeMs ?? preflightBudgetDefaults.maxWallTimeMs;
+    if (preflightMaxProbes <= preflightBudgetDefaults.finalistReserve) {
+      throw new ServerError('maxProbes must exceed the resolved finalist reserve', {
+        code: 'CALIBRATION_INVALID_CONFIG',
+        maxProbes: preflightMaxProbes,
+        finalistReserve: preflightBudgetDefaults.finalistReserve,
+        cellCount: preflightCellCount,
+      });
+    }
+    if (preflightMaxWallTimeMs <= preflightBudgetDefaults.finalistTimeReserveMs) {
+      throw new ServerError('maxWallTimeMs must exceed the resolved finalist time reserve', {
+        code: 'CALIBRATION_INVALID_CONFIG',
+        maxWallTimeMs: preflightMaxWallTimeMs,
+        finalistTimeReserveMs: preflightBudgetDefaults.finalistTimeReserveMs,
+        cellCount: preflightCellCount,
+      });
+    }
+    await this.initializeLogManager(
+      'llama-server.log',
+      `Adaptive LLM runtime calibration starting for model ${model.id}`
+    );
+    validated.signal?.throwIfAborted();
+    try {
+      await this.runOccupancyCheck('strict', 0);
+      validated.signal?.throwIfAborted();
+    } catch (error) {
+      if (validated.signal?.aborted) throw error;
+      throw new ServerError('Another llama-server may already be using machine resources', {
+        code: 'CALIBRATION_RESOURCE_BUSY',
+        cause: redact(calibrationErrorMessage(error)),
+        suggestion: 'Stop other llama-server and GPU workloads before calibrating',
+      });
+    }
+
+    let capabilities: Awaited<ReturnType<SystemInfo['detect']>>;
+    try {
+      capabilities = await this.systemInfo.detect(true);
+      validated.signal?.throwIfAborted();
+    } catch (error) {
+      if (validated.signal?.aborted) throw error;
+      throw new ServerError('Could not inspect machine capabilities for calibration', {
+        code: 'CALIBRATION_PREPARATION_FAILED',
+        cause: redact(calibrationErrorMessage(error)),
+      });
+    }
+
+    this.binaryPath = await this.ensureBinary(model.path);
+    validated.signal?.throwIfAborted();
+    const calibrationBinaryPath = this.binaryPath;
+    const binaryIdentity = await getInstalledBinaryIdentity(
+      'llama',
+      calibrationBinaryPath,
+      BINARY_VERSIONS.llamaServer.version
+    );
+    validated.signal?.throwIfAborted();
+    const gpuAvailable = capabilities.gpu.available && binaryIdentity.variant !== 'cpu';
+    const totalLayers = getLayerCountWithFallback(model);
+    const schedulingProfiles = validated.profiles
+      .map((profile, profileIndex) => ({ profile, profileIndex }))
+      .sort(
+        (left, right) =>
+          left.profile.contextSize - right.profile.contextSize ||
+          left.profileIndex - right.profileIndex
+      );
+    const smallest = schedulingProfiles[0]!;
+    const canonicalStartConfig: LlamaServerConfig & { port: number } = {
+      modelId: model.id,
+      port: 0,
+      contextSize: smallest.profile.contextSize,
+      parallelRequests: smallest.profile.parallelRequests,
+      ...validated.fixedConfig,
+      fit: 'off',
+    };
+    const canonicalServer = normalizeLlamaVCacheConfig(
+      await this.autoConfigureIfNeeded(canonicalStartConfig, model)
+    );
+    validated.signal?.throwIfAborted();
+    const canonicalResolved = resolveLlamaCalibrationConfig(
+      smallest.profile,
+      validated.fixedConfig,
+      extractLlamaCalibrationOverrides(
+        canonicalServer as unknown as ResolvedLlamaCalibrationConfig,
+        validated.fixedConfig
+      )
+    );
+    const canonicalOverrides = extractLlamaCalibrationOverrides(
+      canonicalResolved,
+      validated.fixedConfig
+    );
+    const invariantOverrides: Record<string, unknown> = { ...canonicalOverrides };
+    delete invariantOverrides.gpuLayers;
+    delete invariantOverrides.swaFull;
+    if (validated.includeKvCacheComparison) {
+      delete invariantOverrides.cacheTypeK;
+      delete invariantOverrides.cacheTypeV;
+      delete invariantOverrides.flashAttention;
+    }
+
+    const profileInputs = [];
+    for (let profileIndex = 0; profileIndex < validated.profiles.length; profileIndex++) {
+      const profile = validated.profiles[profileIndex]!;
+      const profileStartConfig: LlamaServerConfig & { port: number } = {
+        modelId: model.id,
+        port: 0,
+        contextSize: profile.contextSize,
+        parallelRequests: profile.parallelRequests,
+        ...validated.fixedConfig,
+        ...invariantOverrides,
+        fit: 'off',
+      };
+      const profileServer =
+        profileIndex === smallest.profileIndex
+          ? canonicalServer
+          : normalizeLlamaVCacheConfig(await this.autoConfigureIfNeeded(profileStartConfig, model));
+      validated.signal?.throwIfAborted();
+      profileInputs.push({
+        profileIndex,
+        contextSize: profile.contextSize,
+        parallelRequests: profile.parallelRequests,
+        autoGpuLayers: gpuAvailable
+          ? Math.min(
+              totalLayers,
+              Math.max(0, Number(profileServer.gpuLayers ?? canonicalResolved.gpuLayers ?? 0))
+            )
+          : 0,
+        normalizedInvariantKey: JSON.stringify(invariantOverrides),
+      });
+    }
+
+    const baselineKvPrecision =
+      canonicalResolved.cacheTypeK === 'f16' && canonicalResolved.cacheTypeV === 'f16'
+        ? 'f16'
+        : canonicalResolved.cacheTypeK === 'q8_0' && canonicalResolved.cacheTypeV === 'q8_0'
+          ? 'q8_0'
+          : 'baseline';
+    const hasSharedPrefixWorkload = validated.workloads.some(
+      (workload) => workload.kind === 'shared-prefix'
+    );
+    const slidingWindow = getSlidingWindow(model);
+    const anySwaRelevant = validated.profiles.some(
+      (profile) =>
+        validated.fixedConfig.swaFull === undefined &&
+        slidingWindow !== undefined &&
+        hasSharedPrefixWorkload &&
+        Math.floor(profile.contextSize / profile.parallelRequests) > slidingWindow
+    );
+    state = createAdaptivePolicyState({
+      profiles: profileInputs,
+      totalLayers,
+      gpuAvailable,
+      fixedGpuLayers: validated.fixedConfig.gpuLayers,
+      fixedSwaFull:
+        validated.fixedConfig.swaFull ??
+        (!anySwaRelevant ? (canonicalResolved.swaFull ?? false) : undefined),
+      slidingWindow,
+      hasSharedPrefixWorkload,
+      includeKvCacheComparison: validated.includeKvCacheComparison,
+      baselineKvPrecision,
+      kvTransferCompatible:
+        validated.includeKvCacheComparison &&
+        (canonicalResolved.flashAttention === true || canonicalResolved.flashAttention === 'on'),
+      contextPreferencePct: validated.contextPreferencePct,
+      kvPrecisionPreferencePct: validated.kvPrecisionPreferencePct,
+      tieTolerancePct: LLAMA_CALIBRATION_DEFAULTS.tieTolerancePct,
+      budgetOverrides: {
+        targetProbes: validated.targetProbes,
+        maxProbes: validated.maxProbes,
+        maxWallTimeMs: validated.maxWallTimeMs,
+      },
+      unobservedProbeDurationEstimateMs: configuredDurationEstimate.estimateMs,
+      policy: {
+        grossRegressionMultiplier: LLAMA_CALIBRATION_DEFAULTS.grossRegressionMultiplier,
+        tieTolerancePct: LLAMA_CALIBRATION_DEFAULTS.tieTolerancePct,
+        contextPreferencePct: LLAMA_CALIBRATION_DEFAULTS.contextPreferencePct,
+        kvPrecisionPreferencePct: LLAMA_CALIBRATION_DEFAULTS.kvPrecisionPreferencePct,
+        searchNoiseAllowancePct: LLAMA_CALIBRATION_DEFAULTS.searchNoiseAllowancePct,
+        nonMonotoneTriggerPct: LLAMA_CALIBRATION_DEFAULTS.nonMonotoneTriggerPct,
+        guardDistanceMinLayers: LLAMA_CALIBRATION_DEFAULTS.guardDistanceMinLayers,
+        guardDistanceFraction: LLAMA_CALIBRATION_DEFAULTS.guardDistanceFraction,
+        stabilityTolerancePct: LLAMA_CALIBRATION_DEFAULTS.stabilityTolerancePct,
+        maxRunnerStartAttempts: LLAMA_CALIBRATION_DEFAULTS.maxRunnerStartAttempts,
+        capacityCheckTimeoutCapMs: LLAMA_CALIBRATION_DEFAULTS.capacityCheckTimeoutCapMs,
+        processExitConfirmationMs: LLAMA_CALIBRATION_DEFAULTS.processExitConfirmationMs,
+        processExitSettleGraceMs: LLAMA_CALIBRATION_DEFAULTS.processExitSettleGraceMs,
+      },
+    });
+    if (state.budgets.maxProbes <= state.budgets.finalistReserve) {
+      throw new ServerError('maxProbes must exceed the resolved finalist reserve', {
+        code: 'CALIBRATION_INVALID_CONFIG',
+        maxProbes: state.budgets.maxProbes,
+        finalistReserve: state.budgets.finalistReserve,
+      });
+    }
+    if (state.budgets.maxWallTimeMs <= state.budgets.finalistTimeReserveMs) {
+      throw new ServerError('maxWallTimeMs must exceed the resolved finalist time reserve', {
+        code: 'CALIBRATION_INVALID_CONFIG',
+        maxWallTimeMs: state.budgets.maxWallTimeMs,
+        finalistTimeReserveMs: state.budgets.finalistTimeReserveMs,
+      });
+    }
+    const policyReadyAt = performance.now();
+    policyTiming.readyAt = policyReadyAt;
+    progressBudget = resolvedProgressBudget();
+    emitProgress('policy-ready');
+
+    const cellById = new Map(state.cells.map((cell) => [cell.id, cell]));
+    const profileByIndex = new Map(
+      validated.profiles.map((profile, profileIndex) => [profileIndex, profile])
+    );
+    const resolveCellConfig = (
+      cell: AdaptiveCell,
+      gpuLayers: number
+    ): ResolvedLlamaCalibrationConfig => {
+      const profile = profileByIndex.get(cell.profileIndex)!;
+      const overrides: LlamaCalibrationCombo['overrides'] = {
+        ...(invariantOverrides as LlamaCalibrationCombo['overrides']),
+        gpuLayers,
+        swaFull: cell.swaFull,
+      };
+      if (validated.includeKvCacheComparison) {
+        if (cell.kvPrecision === 'baseline') {
+          throw new ServerError('Adaptive KV comparison produced an invalid baseline cell', {
+            code: 'CALIBRATION_INVARIANT_FAILED',
+            cellId: cell.id,
+          });
+        }
+        overrides.cacheTypeK = cell.kvPrecision;
+        overrides.cacheTypeV = cell.kvPrecision;
+        overrides.flashAttention =
+          cell.kvPrecision === 'q8_0' ? 'on' : (canonicalResolved.flashAttention ?? 'auto');
+      }
+      return normalizeLlamaVCacheConfig(
+        resolveLlamaCalibrationConfig(profile, validated.fixedConfig, overrides)
+      );
+    };
+    const resolveCellInvariantConfig = (cell: AdaptiveCell) => {
+      const resolved = { ...resolveCellConfig(cell, cell.initialGpuLayers) };
+      delete resolved.gpuLayers;
+      return resolved;
+    };
+    const argvKeyFor = (resolvedConfig: ResolvedLlamaCalibrationConfig): string =>
+      JSON.stringify(
+        buildLlamaServerArgs(
+          {
+            modelId: model.id,
+            port: 0,
+            host: '127.0.0.1',
+            fit: 'off',
+            ...resolvedConfig,
+          },
+          model
+        )
+      );
+    const captureAvailableResources = async (
+      signal?: AbortSignal
+    ): Promise<{
+      hostAvailableBytes?: number;
+      gpuAvailableBytes?: number;
+    }> => {
+      const capture = async () => {
+        let hostAvailableBytes: number | undefined;
+        let gpuAvailableBytes: number | undefined;
+        try {
+          // Keep every snapshot in one measurement regime. The Windows
+          // standby-aware reading has a 60 s TTL refreshed only by detect(),
+          // which calibration calls once at preparation; after it expires
+          // getMemoryInfo() falls back to os.freemem(), which excludes the
+          // standby list. A probe's own released mmap pages then read as a large
+          // availability drop against a standby-aware baseline, and the drift
+          // guard rejects the heaviest cells for a purely instrumental reason.
+          await this.systemInfo.refreshMemoryTelemetry();
+        } catch (error) {
+          debugLog('[LlamaCalibration] memory telemetry refresh failed:', error);
+        }
+        try {
+          hostAvailableBytes = this.systemInfo.getMemoryInfo().available;
+        } catch (error) {
+          debugLog('[LlamaCalibration] host-memory snapshot unavailable:', error);
+        }
+        try {
+          gpuAvailableBytes = (await this.systemInfo.getGPUInfo()).vramAvailable;
+        } catch (error) {
+          debugLog('[LlamaCalibration] GPU-memory snapshot unavailable:', error);
+        }
+        return { hostAvailableBytes, gpuAvailableBytes };
+      };
+      if (!signal) return capture();
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = (snapshot: {
+          hostAvailableBytes?: number;
+          gpuAvailableBytes?: number;
+        }): void => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener('abort', onAbort);
+          resolve(snapshot);
+        };
+        const onAbort = (): void => finish({});
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        void capture().then(finish);
+      });
+    };
+    const resourceMetric = (beforeBytes?: number, afterBytes?: number) => {
+      if (
+        beforeBytes === undefined ||
+        afterBytes === undefined ||
+        !Number.isFinite(beforeBytes) ||
+        !Number.isFinite(afterBytes) ||
+        beforeBytes <= 0
+      ) {
+        return {
+          beforeBytes,
+          afterBytes,
+          comparability: 'unavailable' as const,
+        };
+      }
+      const decreasePct = ((beforeBytes - afterBytes) / beforeBytes) * 100;
+      return {
+        beforeBytes,
+        afterBytes,
+        comparability:
+          decreasePct > LLAMA_CALIBRATION_DEFAULTS.resourceDriftThresholdPct
+            ? ('material' as const)
+            : ('available' as const),
+        decreasePct,
+      };
+    };
+    /**
+     * Whether two availability readings describe the same settled level. Used to
+     * tell a one-off step change (tolerable: re-anchor and continue) from an
+     * environment that is still moving (not tolerable: the launches are not
+     * comparable). Metrics missing from either reading are skipped; if nothing is
+     * comparable the levels cannot be called settled.
+     */
+    const comparableResourceLevels = (
+      previous: { hostAvailableBytes?: number; gpuAvailableBytes?: number },
+      current: { hostAvailableBytes?: number; gpuAvailableBytes?: number }
+    ): boolean => {
+      const pairs: [number | undefined, number | undefined][] = [
+        [previous.hostAvailableBytes, current.hostAvailableBytes],
+        [previous.gpuAvailableBytes, current.gpuAvailableBytes],
+      ];
+      let compared = 0;
+      for (const [left, right] of pairs) {
+        if (left === undefined || right === undefined) continue;
+        if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0) continue;
+        compared += 1;
+        const changePct = (Math.abs(right - left) / left) * 100;
+        if (changePct > LLAMA_CALIBRATION_DEFAULTS.resourceDriftThresholdPct) return false;
+      }
+      return compared > 0;
+    };
+    const adaptiveCapFor = (action: AdaptiveProbeAction): number => {
+      if (action.timeoutMode === 'full') return validated.requestTimeoutMs;
+      const priorRequests = publicProbes
+        .filter(
+          (probe) =>
+            probe.cellId === action.cellId && probe.boundaryDecision.classification === 'admissible'
+        )
+        .flatMap((probe) => probe.workloadResults)
+        .flatMap((result) => result.samples)
+        .flatMap((sample) => sample.requests)
+        .map((request) => request.wallTimeMs);
+      if (priorRequests.length === 0) return validated.requestTimeoutMs;
+      // Observed request times are fractional, so floor the derived cap: timer
+      // APIs downstream require an integer delay, and an unclamped float made
+      // healthy probes fail with a spurious `error` status that then consumed the
+      // point's ambiguity repeat and shifted its boundary.
+      return Math.floor(
+        Math.min(
+          validated.requestTimeoutMs,
+          Math.max(
+            LLAMA_CALIBRATION_DEFAULTS.minimumAdaptiveRequestTimeoutMs,
+            LLAMA_CALIBRATION_DEFAULTS.earlyStopMultiplier * Math.max(...priorRequests)
+          )
+        )
+      );
+    };
+
+    const materialDriftAttempts = new Map<string, number>();
+    const materialDriftReadings = new Map<
+      string,
+      { hostAvailableBytes?: number; gpuAvailableBytes?: number }
+    >();
+    // Re-anchorable reference level. A confirmed one-off step change (the user
+    // opens a browser mid-run) shifts every later reading against a t=0 anchor
+    // even though those readings remain comparable with each other. Probes carry
+    // the regime they were measured in so reproduction never spans a step.
+    let resourceRegime = 0;
+    const resourceBaseline: {
+      hostAvailableBytes?: number;
+      gpuAvailableBytes?: number;
+    } = {};
+    const inheritedCeilingByCell = new Map<
+      string,
+      { gpuLayers: number; sourceCellId: string; reason: string }
+    >();
+    let terminal: AdaptiveTerminalAction | undefined;
+    while (!terminal) {
+      const action = nextAdaptivePolicyAction(state);
+      if (action.kind === 'terminal') {
+        terminal = action;
+        break;
+      }
+      const cell = cellById.get(action.cellId)!;
+      if (action.inheritedCeiling) {
+        inheritedCeilingByCell.set(cell.id, {
+          gpuLayers: action.inheritedCeiling.gpuLayers,
+          sourceCellId: action.inheritedCeiling.sourceCellId,
+          reason: `${action.inheritedCeiling.kind}:${action.inheritedCeiling.axis}`,
+        });
+      }
+      if (tokenCounts.size === 0 && cell.profileIndex !== smallest.profileIndex) {
+        terminal = {
+          kind: 'terminal',
+          status: 'budget-exhausted',
+          reason: 'smallest-profile workload-capacity preflight was not completed',
+        };
+        warnings.push(terminal.reason);
+        break;
+      }
+      const resolvedConfig = resolveCellConfig(cell, action.gpuLayers);
+      const argvKey = argvKeyFor(resolvedConfig);
+      const combo: LlamaCalibrationCombo = {
+        label: `${action.purpose}:${cell.id}:g${action.gpuLayers}`,
+        overrides: extractLlamaCalibrationOverrides(resolvedConfig, validated.fixedConfig),
+      };
+      let completionTimeoutMs = adaptiveCapFor(action);
+      const bestDirectScore = Math.min(
+        ...state.evidence
+          .filter(
+            (evidence) =>
+              evidence.boundaryDecision === 'admissible' &&
+              evidence.resourceDriftStatus !== 'material'
+          )
+          .map((evidence) => evidence.scoreMs)
+          .filter(
+            (score): score is number => score !== undefined && Number.isFinite(score) && score > 0
+          )
+      );
+      const activePreferencePct = Math.max(
+        LLAMA_CALIBRATION_DEFAULTS.tieTolerancePct,
+        validated.profiles.length > 1 ? validated.contextPreferencePct : 0,
+        validated.includeKvCacheComparison ? validated.kvPrecisionPreferencePct : 0
+      );
+      const competitiveObservedRatio =
+        ((1 + activePreferencePct / 100) *
+          (1 + LLAMA_CALIBRATION_DEFAULTS.searchNoiseAllowancePct / 100)) /
+        (1 - LLAMA_CALIBRATION_DEFAULTS.searchNoiseAllowancePct / 100);
+      if (
+        action.timeoutMode !== 'full' &&
+        (!Number.isFinite(bestDirectScore) ||
+          minimumAggregateLowerBoundAtCap(validated.workloads, completionTimeoutMs) <=
+            bestDirectScore * competitiveObservedRatio)
+      ) {
+        completionTimeoutMs = validated.requestTimeoutMs;
+      }
+      if (action.timeoutMode === 'adaptive-with-full-continuation') {
+        const hypotheticalCapDecision = classifyAdaptiveObservation(state.evidence, {
+          cellId: action.cellId,
+          gpuLayers: action.gpuLayers,
+          purpose: action.purpose,
+          fidelity: action.fidelity,
+          operationalStatus: 'request-timeout',
+          memoryEvidence: 'unknown',
+          terminatedAtAdaptiveCap: true,
+          aggregateLowerBoundMs: minimumAggregateLowerBoundAtCap(
+            validated.workloads,
+            completionTimeoutMs
+          ),
+          durationMs: completionTimeoutMs,
+        });
+        if (hypotheticalCapDecision.boundaryDecision !== 'unsuitable') {
+          completionTimeoutMs = validated.requestTimeoutMs;
+        }
+      }
+      const sampleCount =
+        action.fidelity === 'search' ? LLAMA_CALIBRATION_DEFAULTS.searchSamples : validated.samples;
+      const activeProbe: LlamaAdaptiveActiveProbe = {
+        profileIndex: cell.profileIndex,
+        profileOrdinal: cell.profileOrdinal,
+        cellId: cell.id,
+        purpose: action.purpose,
+        gpuLayers: action.gpuLayers,
+        fidelity: action.fidelity,
+        resolvedConfig,
+        argvKey,
+      };
+      const outerPhase = adaptiveProgressPhase(action.purpose);
+      emitProgress(outerPhase, { activeProbe, sampleCount });
+      const probeStartedAt = performance.now();
+      const remainingWallTimeMs = Math.max(
+        1,
+        state.budgets.maxWallTimeMs - (performance.now() - policyReadyAt)
+      );
+      const deadlineController = new AbortController();
+      const deadlineTimer = setTimeout(
+        () => deadlineController.abort(new DOMException('Calibration deadline', 'TimeoutError')),
+        remainingWallTimeMs
+      );
+      const probeSignal = validated.signal
+        ? AbortSignal.any([validated.signal, deadlineController.signal])
+        : deadlineController.signal;
+      const resourcesBefore = await captureAvailableResources(probeSignal);
+      resourceBaseline.hostAvailableBytes ??= resourcesBefore.hostAvailableBytes;
+      resourceBaseline.gpuAvailableBytes ??= resourcesBefore.gpuAvailableBytes;
+      try {
+        const observation = await this.calibrationProbeExecutor({
+          binaryPath: calibrationBinaryPath,
+          model,
+          combo,
+          resolvedConfig,
+          workloads: validated.workloads,
+          purpose: action.purpose,
+          fidelity: action.fidelity,
+          sampleCount,
+          seed: validated.seed,
+          startupTimeoutMs: validated.startupTimeoutMs,
+          requestTimeoutMs: validated.requestTimeoutMs,
+          completionTimeoutMs,
+          cachedPromptTokenCounts: tokenCounts,
+          signal: probeSignal,
+          onProgress: ({ phase, workloadIndex, sampleIndex }) => {
+            emitProgress(outerPhase, {
+              activeProbe: { ...activeProbe, probePhase: phase },
+              workloadIndex,
+              sampleIndex,
+              sampleCount,
+            });
+          },
+        });
+        const durationMs = performance.now() - probeStartedAt;
+        // Let process teardown and OS/GPU accounting settle before treating an
+        // availability delta as environmental drift. An immediate snapshot is
+        // dominated by the probe's own model mappings on Windows.
+        const remainingForCooldownMs =
+          state.budgets.maxWallTimeMs - (performance.now() - policyReadyAt);
+        const cooldownCompleted =
+          remainingForCooldownMs >= LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs;
+        if (cooldownCompleted) {
+          await calibrationDelay(LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs);
+          this.systemInfo.clearCache();
+        }
+        const resourcesAfter = cooldownCompleted
+          ? await captureAvailableResources(probeSignal)
+          : {};
+        const run = observation.run;
+        if (run.effectiveContextSize !== undefined && run.effectiveParallelRequests !== undefined) {
+          verifiedProfiles.set(cell.profileIndex, {
+            effectiveContextSize: run.effectiveContextSize,
+            effectiveParallelRequests: run.effectiveParallelRequests,
+          });
+        }
+        if (cell.profileIndex === smallest.profileIndex) {
+          for (const [workloadId, counts] of observation.promptTokenCounts) {
+            if (!tokenCounts.has(workloadId)) tokenCounts.set(workloadId, counts);
+          }
+        }
+        const terminatedAtAdaptiveCap =
+          run.status === 'request-timeout' && observation.aggregateScoreLowerBoundMs !== undefined;
+        const aggregateLowerBoundMs = terminatedAtAdaptiveCap
+          ? observation.aggregateScoreLowerBoundMs
+          : undefined;
+        const currentMinimum = (before?: number, after?: number): number | undefined =>
+          before === undefined || after === undefined ? undefined : Math.min(before, after);
+        const currentReading = {
+          hostAvailableBytes: currentMinimum(
+            resourcesBefore.hostAvailableBytes,
+            resourcesAfter.hostAvailableBytes
+          ),
+          gpuAvailableBytes: currentMinimum(
+            resourcesBefore.gpuAvailableBytes,
+            resourcesAfter.gpuAvailableBytes
+          ),
+        };
+        const measureAgainstBaseline = () => ({
+          host: resourceMetric(
+            resourceBaseline.hostAvailableBytes,
+            currentReading.hostAvailableBytes
+          ),
+          gpu: resourceMetric(resourceBaseline.gpuAvailableBytes, currentReading.gpuAvailableBytes),
+        });
+        let measured = measureAgainstBaseline();
+        const driftKey = `${cell.id}:${action.gpuLayers}`;
+        const priorDriftAttempts = materialDriftAttempts.get(driftKey) ?? 0;
+        const isMaterial = () =>
+          measured.host.comparability === 'material' || measured.gpu.comparability === 'material';
+        const regimeChangeWarnings: string[] = [];
+        // A repeat that reproduces the same new level is a settled environment,
+        // not an unstable one: re-anchor to it, start a new regime, and keep
+        // searching. Readings that are still moving stay material and terminate
+        // the run as before.
+        if (
+          isMaterial() &&
+          observation.memoryEvidence.classification !== 'confirmed' &&
+          priorDriftAttempts >= LLAMA_CALIBRATION_DEFAULTS.resourceDriftRetries
+        ) {
+          const previous = materialDriftReadings.get(driftKey);
+          if (previous && comparableResourceLevels(previous, currentReading)) {
+            if (currentReading.hostAvailableBytes !== undefined) {
+              resourceBaseline.hostAvailableBytes = currentReading.hostAvailableBytes;
+            }
+            if (currentReading.gpuAvailableBytes !== undefined) {
+              resourceBaseline.gpuAvailableBytes = currentReading.gpuAvailableBytes;
+            }
+            resourceRegime += 1;
+            measured = measureAgainstBaseline();
+            materialDriftAttempts.delete(driftKey);
+            materialDriftReadings.delete(driftKey);
+            regimeChangeWarnings.push(
+              `Available resources settled at a new level; calibration re-anchored and continued in resource regime ${resourceRegime}. Launches are only reproduced within one regime.`
+            );
+          }
+        }
+        const hostAvailableMemory = measured.host;
+        const gpuAvailableMemory = measured.gpu;
+        const diagnosticWarnings: string[] = [...regimeChangeWarnings];
+        if (hostAvailableMemory.comparability === 'unavailable') {
+          diagnosticWarnings.push(
+            'Host available-memory telemetry was unavailable for one or both probe snapshots.'
+          );
+        }
+        if (gpuAvailableMemory.comparability === 'unavailable') {
+          diagnosticWarnings.push(
+            'GPU available-memory telemetry was unavailable for one or both probe snapshots.'
+          );
+        }
+        if (!cooldownCompleted) {
+          diagnosticWarnings.push(
+            'Post-probe resource telemetry was skipped because the hard deadline did not leave a complete cooldown interval.'
+          );
+        }
+        const materialResourceDrift =
+          hostAvailableMemory.comparability === 'material' ||
+          gpuAvailableMemory.comparability === 'material';
+        if (materialResourceDrift) {
+          diagnosticWarnings.push(
+            `Available resources fell by more than ${LLAMA_CALIBRATION_DEFAULTS.resourceDriftThresholdPct}% during this decision-relevant probe.`
+          );
+        }
+        for (const warning of diagnosticWarnings) {
+          if (!warnings.includes(warning)) warnings.push(warning);
+        }
+        const diagnostics = {
+          kvBytesEstimate:
+            estimateKVBytesPerToken(model, resolvedConfig.cacheTypeK, resolvedConfig.cacheTypeV) *
+            resolvedConfig.contextSize,
+          modelBytes: model.size,
+          expertWeightBytes: model.ggufMetadata?.expert_weights_bytes,
+          hostAvailableBytes: resourcesAfter.hostAvailableBytes,
+          gpuAvailableBytes: resourcesAfter.gpuAvailableBytes,
+          measurementAvailability: {
+            hostAvailableBytes:
+              hostAvailableMemory.comparability === 'unavailable'
+                ? ('unavailable' as const)
+                : ('available' as const),
+            gpuAvailableBytes:
+              gpuAvailableMemory.comparability === 'unavailable'
+                ? ('unavailable' as const)
+                : ('available' as const),
+          },
+          warnings: diagnosticWarnings,
+        };
+        const driftCanInvalidateDecision =
+          materialResourceDrift && observation.memoryEvidence.classification !== 'confirmed';
+        if (driftCanInvalidateDecision) {
+          materialDriftAttempts.set(driftKey, priorDriftAttempts + 1);
+          materialDriftReadings.set(driftKey, currentReading);
+        }
+        const persistentResourceDrift =
+          driftCanInvalidateDecision &&
+          priorDriftAttempts >= LLAMA_CALIBRATION_DEFAULTS.resourceDriftRetries;
+        const resourceDriftStatus = materialResourceDrift
+          ? ('material' as const)
+          : hostAvailableMemory.comparability === 'unavailable' &&
+              gpuAvailableMemory.comparability === 'unavailable'
+            ? ('unavailable' as const)
+            : ('available' as const);
+        const policyObservation = {
+          cellId: cell.id,
+          gpuLayers: action.gpuLayers,
+          purpose: action.purpose,
+          fidelity: action.fidelity,
+          operationalStatus: run.status,
+          memoryEvidence: observation.memoryEvidence.classification,
+          scoreMs: run.scoreMs,
+          terminatedAtAdaptiveCap,
+          aggregateLowerBoundMs,
+          resourceDriftStatus,
+          resourceRegime,
+          durationMs,
+          diagnostics,
+        } as const;
+        let evidence:
+          | AdaptivePolicyState['evidence'][number]
+          | {
+              index: number;
+              boundaryDecision: 'ambiguous';
+              decisionReason: string;
+            };
+        if (persistentResourceDrift) {
+          evidence = {
+            index: state.evidence.length,
+            boundaryDecision: 'ambiguous',
+            decisionReason: 'persistent-resource-drift',
+          };
+          terminal = {
+            kind: 'terminal',
+            status: 'budget-exhausted',
+            reason: 'persistent decision-relevant resource drift prevented comparable evidence',
+          };
+          if (!warnings.includes(terminal.reason)) warnings.push(terminal.reason);
+        } else {
+          const nextState = applyAdaptivePolicyObservation(state, policyObservation);
+          // Admission is based on the whole adaptive search clock, including cooldown and resource
+          // snapshots, while the probe record's duration remains the launch/workload duration.
+          state = {
+            ...nextState,
+            elapsedMs: Math.max(nextState.elapsedMs, performance.now() - policyReadyAt),
+          };
+          evidence = state.evidence.at(-1)!;
+        }
+        publicProbes.push({
+          probeIndex: publicProbes.length,
+          strategy: 'adaptive',
+          purpose: action.purpose,
+          fidelity: action.fidelity,
+          independentLaunchIndex:
+            publicProbes.filter((probe) => probe.cellId === cell.id && probe.argvKey === argvKey)
+              .length + 1,
+          profileIndex: cell.profileIndex,
+          profileOrdinal: cell.profileOrdinal,
+          cellId: cell.id,
+          resolvedConfig,
+          argvKey,
+          operationalStatus: run.status,
+          memoryEvidence: observation.memoryEvidence,
+          boundaryDecision: {
+            classification: evidence.boundaryDecision,
+            reason: evidence.decisionReason,
+          },
+          resourceRegime,
+          loadTimeMs: run.loadTimeMs,
+          effectiveContextSize: run.effectiveContextSize,
+          effectiveParallelRequests: run.effectiveParallelRequests,
+          workloadResults: run.workloadResults,
+          scoreMs: run.scoreMs,
+          aggregateLowerBoundMs,
+          durationMs,
+          capped: terminatedAtAdaptiveCap,
+          diagnostics: {
+            kvBytesEstimate: diagnostics.kvBytesEstimate,
+            modelBytes: diagnostics.modelBytes,
+            expertWeightBytes: diagnostics.expertWeightBytes,
+            hostAvailableMemory,
+            gpuAvailableMemory,
+            warnings: diagnosticWarnings,
+          },
+          error: run.error,
+          stderrTail: run.stderrTail,
+          cleanup: observation.cleanup,
+        });
+      } catch (error) {
+        const sanitized = redactCalibrationError(error, redact);
+        const sanitizedCode = calibrationErrorCode(sanitized);
+        const fatalObservation = calibrationErrorDetail(sanitized, 'probeObservation') as
+          | RunCalibrationProbeObservation
+          | undefined;
+        if (fatalObservation?.run && fatalObservation.cleanup?.confirmed) {
+          const { run } = fatalObservation;
+          publicProbes.push({
+            probeIndex: publicProbes.length,
+            strategy: 'adaptive',
+            purpose: action.purpose,
+            fidelity: action.fidelity,
+            independentLaunchIndex:
+              publicProbes.filter((probe) => probe.cellId === cell.id && probe.argvKey === argvKey)
+                .length + 1,
+            profileIndex: cell.profileIndex,
+            profileOrdinal: cell.profileOrdinal,
+            cellId: cell.id,
+            resolvedConfig,
+            argvKey,
+            operationalStatus: run.status,
+            memoryEvidence: fatalObservation.memoryEvidence,
+            boundaryDecision: {
+              classification: 'ambiguous',
+              reason: sanitizedCode ?? 'fatal-probe-validation',
+            },
+            resourceRegime,
+            loadTimeMs: run.loadTimeMs,
+            effectiveContextSize: run.effectiveContextSize,
+            effectiveParallelRequests: run.effectiveParallelRequests,
+            workloadResults: run.workloadResults,
+            scoreMs: run.scoreMs,
+            durationMs: performance.now() - probeStartedAt,
+            terminationReason: sanitizedCode ?? 'fatal-probe-validation',
+            error: run.error,
+            stderrTail: run.stderrTail,
+            cleanup: fatalObservation.cleanup,
+          });
+        }
+        if (sanitizedCode === 'CALIBRATION_CLEANUP_FAILED') {
+          const orphanPid = calibrationErrorDetail(sanitized, 'pid');
+          const errorStderr = calibrationErrorDetail(sanitized, 'stderrTail');
+          const cleanup = calibrationErrorDetail(sanitized, 'cleanup');
+          if (typeof orphanPid === 'number' && Number.isSafeInteger(orphanPid)) {
+            this.calibrationOrphan = {
+              pid: orphanPid,
+              stderrTail: typeof errorStderr === 'string' ? errorStderr : undefined,
+            };
+          }
+          publicProbes.push({
+            probeIndex: publicProbes.length,
+            strategy: 'adaptive',
+            purpose: action.purpose,
+            fidelity: action.fidelity,
+            independentLaunchIndex:
+              publicProbes.filter((probe) => probe.cellId === cell.id && probe.argvKey === argvKey)
+                .length + 1,
+            profileIndex: cell.profileIndex,
+            profileOrdinal: cell.profileOrdinal,
+            cellId: cell.id,
+            resolvedConfig,
+            argvKey,
+            operationalStatus: 'error',
+            memoryEvidence: {
+              classification: 'unknown',
+              reason: 'The fresh calibration process could not be confirmed stopped.',
+              source: 'broad-operational-diagnostic',
+            },
+            boundaryDecision: {
+              classification: 'ambiguous',
+              reason: 'cleanup-unconfirmed',
+            },
+            workloadResults: validated.workloads.map((workload) => ({
+              workloadId: workload.id,
+              kind: workload.kind,
+              workloadHash: workloadSignature(workload).hash,
+              weight: workload.weight,
+              samples: [],
+              error: 'cleanup-unconfirmed',
+            })),
+            durationMs: performance.now() - probeStartedAt,
+            terminationReason: 'cleanup-unconfirmed',
+            error: calibrationErrorMessage(sanitized),
+            stderrTail: typeof errorStderr === 'string' ? errorStderr : undefined,
+            cleanup:
+              cleanup && typeof cleanup === 'object'
+                ? (cleanup as LlamaCalibrationProbe['cleanup'])
+                : { confirmed: false, durationMs: 0, pid: this.calibrationOrphan?.pid },
+          });
+          emitProgress('done', { terminalStatus: 'failed' });
+          throw new ServerError('Adaptive LLM calibration cleanup failed', {
+            code: 'CALIBRATION_CLEANUP_FAILED',
+            cause: calibrationErrorMessage(sanitized),
+            partialReport: {
+              schemaVersion: 2,
+              policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+              strategy: 'adaptive',
+              status: 'failed',
+              createdAt: new Date().toISOString(),
+              probes: publicProbes,
+              warnings,
+              cleanupConfirmed: false,
+            },
+          });
+        }
+        const interruptedByCaller = validated.signal?.aborted === true;
+        const interruptedByDeadline = deadlineController.signal.aborted;
+        if (
+          (interruptedByCaller || interruptedByDeadline) &&
+          sanitizedCode !== 'CALIBRATION_CLEANUP_FAILED'
+        ) {
+          publicProbes.push({
+            probeIndex: publicProbes.length,
+            strategy: 'adaptive',
+            purpose: action.purpose,
+            fidelity: action.fidelity,
+            independentLaunchIndex:
+              publicProbes.filter((probe) => probe.cellId === cell.id && probe.argvKey === argvKey)
+                .length + 1,
+            profileIndex: cell.profileIndex,
+            profileOrdinal: cell.profileOrdinal,
+            cellId: cell.id,
+            resolvedConfig,
+            argvKey,
+            operationalStatus: interruptedByDeadline ? 'request-timeout' : 'error',
+            memoryEvidence: {
+              classification: 'unknown',
+              reason: interruptedByDeadline
+                ? 'The internal calibration deadline interrupted this launch.'
+                : 'The caller aborted this launch.',
+              source: 'timeout',
+            },
+            boundaryDecision: {
+              classification: 'ambiguous',
+              reason: interruptedByDeadline ? 'internal-deadline' : 'caller-abort',
+            },
+            workloadResults: validated.workloads.map((workload) => ({
+              workloadId: workload.id,
+              kind: workload.kind,
+              workloadHash: workloadSignature(workload).hash,
+              weight: workload.weight,
+              samples: [],
+              error: interruptedByDeadline ? 'internal-deadline' : 'caller-abort',
+            })),
+            durationMs: performance.now() - probeStartedAt,
+            terminationReason: interruptedByDeadline ? 'internal-deadline' : 'caller-abort',
+            cleanup: { confirmed: true, durationMs: 0 },
+          });
+        }
+        if (validated.signal?.aborted) {
+          emitProgress('done', { terminalStatus: 'aborted' });
+          throw new ServerError('LLM calibration aborted', {
+            code: 'CALIBRATION_ABORTED',
+            cause: redact(String(validated.signal.reason ?? calibrationErrorMessage(sanitized))),
+            partialReport: {
+              schemaVersion: 2,
+              policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+              strategy: 'adaptive',
+              status: 'aborted',
+              createdAt: new Date().toISOString(),
+              probes: publicProbes,
+              warnings,
+              cleanupConfirmed: sanitizedCode !== 'CALIBRATION_CLEANUP_FAILED',
+            },
+          });
+        }
+        if (deadlineController.signal.aborted) {
+          terminal = {
+            kind: 'terminal',
+            status: 'budget-exhausted',
+            reason: 'the internal calibration wall-time deadline interrupted the active probe',
+          };
+          warnings.push(terminal.reason);
+          break;
+        }
+        emitProgress('done', { terminalStatus: 'failed' });
+        throw new ServerError('Adaptive LLM calibration failed', {
+          code: calibrationErrorCode(sanitized) ?? 'CALIBRATION_FAILED',
+          cause: calibrationErrorMessage(sanitized),
+          partialReport: {
+            schemaVersion: 2,
+            policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+            strategy: 'adaptive',
+            status: 'failed',
+            createdAt: new Date().toISOString(),
+            probes: publicProbes,
+            warnings,
+            cleanupConfirmed: sanitizedCode !== 'CALIBRATION_CLEANUP_FAILED',
+          },
+        });
+      } finally {
+        clearTimeout(deadlineTimer);
+      }
+      this.systemInfo.clearCache();
+      validated.signal?.throwIfAborted();
+      if (performance.now() - policyReadyAt >= state.budgets.maxWallTimeMs) {
+        terminal = {
+          kind: 'terminal',
+          status: 'budget-exhausted',
+          reason: 'the adaptive calibration wall-time budget was exhausted',
+        };
+        break;
+      }
+    }
+
+    terminal ??= nextAdaptivePolicyAction(state) as AdaptiveTerminalAction;
+    const candidateToRecommendation = (
+      candidate: AdaptiveCandidate | undefined
+    ): LlamaCalibrationReport extends infer _Report
+      ?
+          | {
+              profileIndex: number;
+              cellId: string;
+              startConfig: ResolvedLlamaCalibrationConfig;
+              scoreMs: number;
+            }
+          | undefined
+      : never => {
+      if (!candidate) return undefined;
+      const cell = cellById.get(candidate.cellId)!;
+      return {
+        profileIndex: candidate.profileIndex,
+        cellId: candidate.cellId,
+        startConfig: resolveCellConfig(cell, candidate.gpuLayers),
+        scoreMs: candidate.scoreMs,
+      };
+    };
+    const selected = candidateToRecommendation(terminal.selected);
+    const provisional = candidateToRecommendation(terminal.provisional);
+    const fallback = terminal.fallback
+      ? terminal.fallback.validated &&
+        terminal.fallback.evidenceIndex !== undefined &&
+        state.evidence[terminal.fallback.evidenceIndex]?.scoreMs !== undefined
+        ? {
+            profileIndex: cellById.get(terminal.fallback.cellId)!.profileIndex,
+            cellId: terminal.fallback.cellId,
+            startConfig: resolveCellConfig(
+              cellById.get(terminal.fallback.cellId)!,
+              terminal.fallback.gpuLayers
+            ),
+            scoreMs: state.evidence[terminal.fallback.evidenceIndex]!.scoreMs!,
+            evidence: 'direct-measurement' as const,
+          }
+        : {
+            profileIndex: cellById.get(terminal.fallback.cellId)!.profileIndex,
+            cellId: terminal.fallback.cellId,
+            startConfig: resolveCellConfig(
+              cellById.get(terminal.fallback.cellId)!,
+              terminal.fallback.gpuLayers
+            ),
+            evidence: 'unvalidated-option' as const,
+          }
+      : undefined;
+    const preference = terminal.preferenceResolution;
+    const cellStateSummaries = new Map(
+      summarizeAdaptiveCellStates(state).map((summary) => [summary.cell.id, summary])
+    );
+    const finalCeilingHints = deriveCeilingHints(state.cells, state.evidence);
+    const profileReports = validated.profiles.map((profile, profileIndex) => {
+      const profileCells = state!.cells.filter((cell) => cell.profileIndex === profileIndex);
+      const profileCellSummaries = profileCells.map((cell) => cellStateSummaries.get(cell.id)!);
+      const profileEvidence = state!.evidence.filter((evidence) =>
+        profileCells.some((cell) => cell.id === evidence.cellId)
+      );
+      return {
+        profileIndex,
+        profileOrdinal: schedulingProfiles.findIndex(
+          (entry) => entry.profileIndex === profileIndex
+        ),
+        profile,
+        state:
+          profileEvidence.length === 0
+            ? ('unstarted' as const)
+            : terminal.status === 'complete'
+              ? profileCellSummaries.every((summary) =>
+                  ['resolved', 'no-viable-point'].includes(summary.phase)
+                )
+                ? ('resolved' as const)
+                : ('tested' as const)
+              : terminal.status === 'no-viable-candidate'
+                ? ('no-viable-point' as const)
+                : ('unresolved' as const),
+        verified: verifiedProfiles.get(profileIndex),
+        bestCellId: preference?.eligible
+          .filter((candidate) => candidate.profileIndex === profileIndex)
+          .sort((left, right) => left.scoreMs - right.scoreMs)[0]?.cellId,
+        warnings: [] as string[],
+      };
+    });
+    const cellReports = state.cells.map((cell) => {
+      const summary = cellStateSummaries.get(cell.id)!;
+      const evidence = state!.evidence.filter((item) => item.cellId === cell.id);
+      const admissible = evidence.filter((item) => item.boundaryDecision === 'admissible');
+      const unsuitable = evidence.filter((item) => item.boundaryDecision === 'unsuitable');
+      const lowGpuLayers = admissible.length
+        ? Math.max(...admissible.map((item) => item.gpuLayers))
+        : undefined;
+      const highGpuLayers = unsuitable.length
+        ? Math.min(...unsuitable.map((item) => item.gpuLayers))
+        : undefined;
+      const nonMonotoneCandidates = summary.candidates.filter(
+        (candidate) => candidate.source === 'non-monotone'
+      );
+      const candidateLayers = summary.candidates.map((candidate) => candidate.gpuLayers);
+      const measuredLayers = new Set(evidence.map((item) => item.gpuLayers));
+      const unmeasuredGaps =
+        nonMonotoneCandidates.length > 0 && candidateLayers.length > 1
+          ? Array.from(
+              {
+                length: Math.max(...candidateLayers) - Math.min(...candidateLayers) + 1,
+              },
+              (_, offset) => Math.min(...candidateLayers) + offset
+            ).filter((gpuLayers) => !measuredLayers.has(gpuLayers))
+          : [];
+      const inheritedCeiling =
+        inheritedCeilingByCell.get(cell.id) ??
+        finalCeilingHints
+          .filter((hint) => hint.receivingCellId === cell.id)
+          .map((hint) => ({
+            gpuLayers: hint.gpuLayers,
+            sourceCellId: hint.sourceCellId,
+            reason: `${hint.kind}:${hint.axis}`,
+          }))[0];
+      return {
+        cellId: cell.id,
+        profileIndex: cell.profileIndex,
+        profileOrdinal: cell.profileOrdinal,
+        structuralOrder: cell.order,
+        resolvedConfig: resolveCellInvariantConfig(cell),
+        state: summary.phase,
+        referenceGpuLayers: evidence.find((item) => item.purpose === 'reference')?.gpuLayers,
+        lowGpuLayers,
+        highGpuLayers,
+        provisionalBoundaryGpuLayers: lowGpuLayers,
+        finalistGpuLayers: preference?.eligible.find((candidate) => candidate.cellId === cell.id)
+          ?.gpuLayers,
+        inheritedCeiling,
+        nonMonotoneWarning: nonMonotoneCandidates.length > 0,
+        unmeasuredGaps,
+        warnings: summary.unresolvedReason ? [summary.unresolvedReason] : [],
+      };
+    });
+    const modelFiles = model.shards?.length
+      ? model.shards.map((file) => ({
+          name: path.basename(file.path),
+          size: file.size,
+          checksum: file.checksum,
+          sourceRevision: model.source.revision,
+        }))
+      : [
+          {
+            name: path.basename(model.path),
+            size: model.size,
+            checksum: model.checksum,
+            sourceRevision: model.source.revision,
+          },
+        ];
+    const cacheabilityReasons: string[] = [];
+    if (modelFiles.some((file) => !file.checksum)) {
+      cacheabilityReasons.push('One or more model files have no stored checksum');
+    }
+    if (binaryIdentity.variant === 'unknown') {
+      cacheabilityReasons.push('Installed binary backend variant is unknown');
+    }
+    if (model.source.type === 'huggingface' && !model.source.revision) {
+      cacheabilityReasons.push('Hugging Face source revision is unknown');
+    }
+    if (capabilities.gpu.available) {
+      cacheabilityReasons.push('GPU driver/runtime version is not discoverable');
+    }
+    const budgetDefaults = resolveLlamaCalibrationBudgetDefaults(state.cells.length);
+    const timingAdmission = summarizeAdaptiveTimingAdmission(state);
+    const budgetElapsedMs = performance.now() - policyReadyAt;
+    const report: LlamaCalibrationReport = {
+      schemaVersion: 2,
+      policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+      createdAt: new Date().toISOString(),
+      strategy: 'adaptive',
+      status: terminal.status,
+      terminalReason: terminal.reason,
+      model: {
+        id: model.id,
+        name: model.name,
+        architecture: model.ggufMetadata?.architecture,
+        size: model.size,
+        checksum: model.checksum,
+        sourceRevision: model.source.revision,
+        files: modelFiles,
+      },
+      binary: binaryIdentity,
+      machine: {
+        platform: capabilities.platform,
+        architecture: capabilities.cpu.architecture,
+        osRelease: os.release(),
+        cpuModel: capabilities.cpu.model,
+        cpuCores: capabilities.cpu.cores,
+        totalMemoryBytes: capabilities.memory.total,
+        availableMemoryBytes: capabilities.memory.available,
+        gpu: capabilities.gpu.available
+          ? [
+              {
+                name: capabilities.gpu.name ?? 'unknown',
+                vendor: capabilities.gpu.type ?? 'unknown',
+                memoryBytes: capabilities.gpu.vram,
+                availableMemoryBytes: capabilities.gpu.vramAvailable,
+              },
+            ]
+          : [],
+      },
+      cacheability: {
+        level: cacheabilityReasons.length === 0 ? 'stable' : 'best-effort',
+        reasons: cacheabilityReasons,
+      },
+      fixedConfig: validated.fixedConfig,
+      workloads: validated.workloads.map((workload) => ({
+        ...workloadSignature(workload),
+        promptTokenCounts: tokenCounts.get(workload.id),
+      })),
+      methodology: {
+        layerCount: totalLayers,
+        layerCountSource: model.ggufMetadata?.block_count ? 'metadata' : 'fallback',
+        samples: validated.samples,
+        searchSamples: LLAMA_CALIBRATION_DEFAULTS.searchSamples,
+        warmups: 1,
+        seed: validated.seed,
+        startupTimeoutMs: validated.startupTimeoutMs,
+        requestTimeoutMs: validated.requestTimeoutMs,
+        resourceCooldownMs: LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
+        tieTolerancePct: LLAMA_CALIBRATION_DEFAULTS.tieTolerancePct,
+        grossRegressionMultiplier: LLAMA_CALIBRATION_DEFAULTS.grossRegressionMultiplier,
+        stabilityTolerancePct: LLAMA_CALIBRATION_DEFAULTS.stabilityTolerancePct,
+        searchNoiseAllowancePct: LLAMA_CALIBRATION_DEFAULTS.searchNoiseAllowancePct,
+        nonMonotoneTriggerPct: LLAMA_CALIBRATION_DEFAULTS.nonMonotoneTriggerPct,
+        includeKvCacheComparison: validated.includeKvCacheComparison,
+        kvPrecisionPreferencePct: validated.kvPrecisionPreferencePct,
+        contextPreferencePct: validated.contextPreferencePct,
+        scoreUnit: 'scenario-median-wall-ms',
+      },
+      probes: publicProbes,
+      warnings,
+      profiles: profileReports,
+      schedulingProfileIndexes: schedulingProfiles.map((entry) => entry.profileIndex),
+      workloadComparability: tokenCounts.size > 0 ? 'verified' : 'unverified',
+      cells: cellReports,
+      budget: {
+        formulaVersion: budgetDefaults.formulaVersion,
+        cellCount: state.cells.length,
+        targetProbes: state.budgets.targetProbes,
+        maxProbes: state.budgets.maxProbes,
+        finalistReserve: state.budgets.finalistReserve,
+        maxWallTimeMs: state.budgets.maxWallTimeMs,
+        finalistTimeReserveMs: state.budgets.finalistTimeReserveMs,
+        effectiveFinalistTimeReserveMs: timingAdmission.effectiveFinalistTimeReserveMs,
+        completedProbes: publicProbes.length,
+        elapsedMs: budgetElapsedMs,
+        cleanupOverrunMs: Math.max(0, budgetElapsedMs - state.budgets.maxWallTimeMs),
+        overrides: [
+          ...(validated.targetProbes !== undefined ? (['targetProbes'] as const) : []),
+          ...(validated.maxProbes !== undefined ? (['maxProbes'] as const) : []),
+          ...(validated.maxWallTimeMs !== undefined ? (['maxWallTimeMs'] as const) : []),
+        ],
+        timeAdmission: {
+          policy: timingAdmission.policy,
+          estimatedNextProbeDurationMs: timingAdmission.estimatedNextProbeDurationMs,
+          plannedPostStartupRequestCount: configuredDurationEstimate.plannedPostStartupRequestCount,
+          maxRunnerStartAttempts: configuredDurationEstimate.maxRunnerStartAttempts,
+          startupTimeoutMs: validated.startupTimeoutMs,
+          resolvedCapacityCheckTimeoutMs: configuredDurationEstimate.resolvedCapacityCheckTimeoutMs,
+          configuredAttemptTeardownMs: configuredDurationEstimate.configuredAttemptTeardownMs,
+          caveat:
+            timingAdmission.policy === 'observed-comparable-launches'
+              ? 'Observed timing is the median of complete comparable fresh launches; future launch duration can still vary and remains bounded by the hard deadline.'
+              : 'This deterministic conservative estimate is not a formal wall-clock upper bound; filesystem and OS scheduling can add delay.',
+        },
+      },
+      globalFastestScoreMs: preference?.globalFastestScore,
+      contextBandMaxScoreMs: preference?.contextBand,
+      kvBandMaxScoreMs: preference?.kvBand,
+      contextPreferenceResolution:
+        validated.profiles.length === 1
+          ? 'single-profile'
+          : preference?.selectedContextSize ===
+              Math.max(...validated.profiles.map((profile) => profile.contextSize))
+            ? 'largest-in-band'
+            : preference?.selected
+              ? 'fastest-only'
+              : 'unresolved',
+      kvPrecisionPreferenceResolution:
+        preference?.kvPrecisionPreferenceResolution === 'preferred-within-joint-band'
+          ? 'largest-in-joint-band'
+          : preference?.kvPrecisionPreferenceResolution === 'fallback-no-joint-eligible'
+            ? 'fallback-no-joint-eligible'
+            : validated.includeKvCacheComparison
+              ? 'unresolved'
+              : 'disabled',
+      selected,
+      provisional,
+      fallback,
+      ...(selected ? { selectionEvidence: 'independent-reproduction' as const } : {}),
+      confidence: 'empirical-reproducibility',
+      pinnedMoePlacement: true,
+    };
+    emitProgress('done', { terminalStatus: terminal.status });
+    return report;
   }
 
   private async assertNoCalibrationOrphan(): Promise<void> {

@@ -16,7 +16,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 ### Core APIs
 - **[System Detection](system-detection.md)** - SystemInfo API for hardware capability detection
 - **[Model Management](model-management.md)** - ModelManager API for downloading and managing GGUF models
-- **[LLM Server](llm-server.md)** - LlamaServerManager API for running local LLMs
+- **[LLM Server](llm-server.md)** - LlamaServerManager lifecycle, configuration, and adaptive/exact runtime calibration
 - **[Image Generation](image-generation.md)** - DiffusionServerManager API for local image generation
 - **[Resource Orchestration](resource-orchestration.md)** - ResourceOrchestrator for managing both LLM and image servers
 
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.18.x to v0.19.0](migration-0-18-to-0-19.md)** - Adaptive cell-local `gpuLayers` boundary search, one-or-two comparable context profiles, and schema-v2 calibration reports
 - **[Migrating from v0.17.x to v0.18.0](migration-0-17-to-0-18.md)** - Fixed-profile, caller-shaped llama-server runtime calibration and report-only recommendations
 - **[Migrating from v0.16.x to v0.17.0](migration-0-16-to-0-17.md)** - Opt-in full-size SWA cache control, conservative KV sizing, and direct llama-config typing
 - **[Migrating from v0.15.x to v0.16.0](migration-0-15-to-0-16.md)** - Soft preferred context sizing, canonical revisioned llama readiness, and effective parallel-capacity reporting
@@ -61,7 +62,7 @@ genai-electron manages the runtime infrastructure for running local AI models (l
 - ✅ **Artifact provenance** - Persist configured source locators and caller-supplied license declarations
 - ✅ **GGUF metadata extraction** - Accurate model information (layer count, context length, architecture) extracted before download
 - ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
-- ✅ **LLM runtime calibration** - Benchmark a bounded caller-shaped flag set for one exact context/slot profile
+- ✅ **LLM runtime calibration** - Adaptively find reproducible GPU-layer boundaries across one or two comparable context profiles, with exact caller-supplied combos as a diagnostic mode
 - ✅ **Reasoning model support** - Automatic detection and configuration for reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS)
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
 - ✅ **Async image generation API** - HTTP endpoints with polling pattern for non-blocking generation

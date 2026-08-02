@@ -13,6 +13,20 @@ function runner(): LlamaServerRunner {
 describe('LlamaCalibrationClient', () => {
   afterEach(() => jest.restoreAllMocks());
 
+  it('accepts a fractional request timeout', async () => {
+    // Adaptive completion caps are derived from performance.now() deltas, so they
+    // are fractional. AbortSignal.timeout() rejects a non-integer delay, which
+    // previously surfaced as a spurious operational `error` on a healthy probe
+    // ("The value of \"delay\" is out of range... Received 30709.872999999963"),
+    // consuming that point's ambiguity repeat and shifting its boundary.
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ tokens: [1, 2, 3] })));
+    const client = new LlamaCalibrationClient(runner(), 30_709.872999999963);
+
+    await expect(client.tokenize('prompt')).resolves.toBe(3);
+  });
+
   it('tokenizes, erases the controlled slot, and sends deterministic completions', async () => {
     const fetchMock = jest
       .spyOn(globalThis, 'fetch')
@@ -168,5 +182,46 @@ describe('LlamaCalibrationClient', () => {
       details: expect.objectContaining({ code: 'CALIBRATION_REQUEST_TIMEOUT' }),
     });
     expect(String(caught)).not.toContain('PRIVATE-CONTENT');
+  });
+
+  it('applies an explicit completion timeout without changing the control timeout', async () => {
+    const fetchMock = jest.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
+      if (String(url).endsWith('/tokenize')) {
+        return Promise.resolve(new Response(JSON.stringify({ tokens: [1, 2] })));
+      }
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () =>
+          reject(new DOMException('Aborted', 'AbortError'))
+        );
+      });
+    });
+    const client = new LlamaCalibrationClient(runner(), 1_000);
+
+    let caught: unknown;
+    try {
+      await client.complete(
+        {
+          prompt: 'prompt',
+          nPredict: 2,
+          seed: 42,
+          slotId: 0,
+          cachePrompt: false,
+          requireCacheObservation: false,
+        },
+        5
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toMatchObject({
+      details: expect.objectContaining({
+        code: 'CALIBRATION_REQUEST_TIMEOUT',
+        path: '/completion',
+        timeoutMs: 5,
+      }),
+    });
+    await expect(client.tokenize('prompt')).resolves.toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

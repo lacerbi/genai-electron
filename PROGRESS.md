@@ -1,16 +1,87 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.18.0 release candidate — automated LLM runtime calibration
-> (2026-07-31)
+> **Current Status**: v0.19.0 — adaptive LLM runtime calibration
+> (2026-08-02)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 764/764 passing (32 suites)
-- **Branch:** `release/v0.18.0`
-- **Last Updated:** 2026-07-31 (v0.18.0 release preparation)
+- **Tests:** ✅ 881/881 passing (35 suites), including serial open-handle diagnostics
+- **Last Updated:** 2026-08-02 (v0.19.0 release preparation)
+
+---
+
+## v0.19.0: Adaptive LLM Runtime Calibration (2026-08-02)
+
+- Replaced the omitted-`combos` generated ladder with a bounded cell-local adaptive strategy.
+  Adaptive callers pass one or two comparable `profiles`; the policy searches each relevant
+  context/SWA/KV cell at its own `gpuLayers` boundary, independently reproduces the selected exact
+  configuration, and records a measured lower-layer fallback when evidence and budget permit.
+- Retained singular `profile` plus non-empty `combos` as a caller-ordered, full-fidelity exact
+  diagnostic strategy. The runtime validator now discriminates these modes before provisioning and
+  gives targeted migration errors for the former singular-profile default call shape.
+- Added globally anchored larger-context and f16 preference bands, explicit operational/memory/
+  boundary evidence separation, conservative ambiguity and non-monotonicity handling, resource
+  drift diagnostics, completion-only early-stop seams, prompt redaction, token-count reuse with
+  per-launch `/props` checks, and fatal orphan protection. Adaptive MoE placement remains pinned;
+  advanced MoE comparisons use exact combos.
+- Added cell-count-scaled probe and wall-time budgets with finalist reserves, honest
+  `budget-exhausted`/`no-viable-candidate` outcomes, strategy-discriminated monotonic progress, typed
+  partial reports for abort/failure, and schema-v2 reports containing chronological fresh-launch
+  probes, cell/profile states, preference resolution, cleanup, confidence, selected/provisional/
+  fallback distinctions, and directly applicable exact start configs.
+- Updated current README, LLM server/type reference, troubleshooting documentation, and resource
+  orchestration cross-reference for the new contract. The v0.18 release record and migration
+  documentation remain historical snapshots.
+- Completed a three-reviewer final audit covering policy/statistics, lifecycle cleanup, and public
+  contract/documentation consistency; all reported implementation defects have regression fixes.
+- Completed Phase 6 hardware validation on the Windows CUDA / Gemma 4 12B IQ4_XS reference machine
+  and fixed four defects that only live running exposed:
+  - a cell was pruned on its interim low-layer reference because an unconverged bracket counted as a
+    directly observed boundary, which contradicts the policy's explicit rule and abandoned a cell
+    after one probe while reporting `complete`;
+  - the first probe could be refused outright, because the frozen conservative estimate prices every
+    planned request at the full request timeout and exceeded the default two-cell wall budget,
+    returning a zero-probe report;
+  - resource-drift snapshots mixed measurement regimes, since the Windows standby-aware reading is
+    refreshed only by `detect()` and later snapshots silently fell back to `os.freemem()`, making a
+    probe's own released mappings look like a 32-35% availability drop that scaled with host
+    footprint and rejected the heaviest cells;
+  - the drift reference never re-anchored, so one settled step change (a user opening a browser)
+    invalidated every later probe for the rest of a run.
+- Added `SystemInfo.refreshMemoryTelemetry()`, confirmed-step drift re-anchoring with per-probe
+  `resourceRegime` tagging and same-regime reproduction, and documented the machine conditions a host
+  application should ask users to maintain during a calibration.
+  - the adaptive early-stop cap reached `AbortSignal.timeout()` as a fractional value derived from
+    `performance.now()` deltas, so healthy probes failed with a spurious `error` that consumed the
+    point's ambiguity repeat, forced a one-layer step-down, and inverted a two-context product
+    decision; integer-only unit fixtures could not surface it.
+- Live results (post-fix): a one-profile 12,288-token run completes in 4.9 minutes over 5 probes and
+  a two-context 12,288 + 16,384 run completes in 4.4 minutes over 6 probes, both on default budgets
+  and with no failed launch. Each reproduces its selection across independent fresh launches, and the
+  two-context run resolves `largest-in-band`, selecting 16,384 at 2,830 ms. Both apply the selected
+  exact `startConfig` to a normal manager start that verifies capacity and stops cleanly. Midpoint
+  bisection remains covered by golden traces only: on this card the boundary sits adjacent to the
+  physical ceiling, so it is reached by ceiling probe rather than by halving an interval.
+
+**Breaking change:** `LlamaServerManager.calibrate()` only. The config is a discriminated union —
+adaptive mode takes one or two `profiles` and no `combos`; exact diagnostic mode keeps the singular
+`profile` plus non-empty caller-ordered `combos`. Callers on the v0.18 default wrap their `profile`
+in `profiles: [ ... ]`; `combos` callers are unchanged. Reports are schema v2 and persisted v0.18
+reports should be discarded rather than migrated. See `genai-electron-docs/migration-0-18-to-0-19.md`.
+
+**Release validation:** `prepublishOnly` passes with a clean build and 881/881 tests across 35
+suites; the unconditional open-handle diagnostic run also passes. Jest still reports its worker
+force-exit warning after the successful plain run, as in prior releases. ESLint passes with 0 errors
+and 109 warnings, repository formatting and `git diff --check` pass, the generated declarations
+contain `refreshMemoryTelemetry` and `resourceRegime`, and the production dependency audit reports 0
+vulnerabilities. The v0.19.0 package dry-run contains 203 files (1.2 MB unpacked).
+
+**Release status:** Release preparation on `feat/adaptive-llm-calibration`. Version metadata, the
+v0.18.x-to-v0.19.0 migration guide, and the archived plan are included; PR merge, tag, GitHub
+release, and maintainer-side `npm publish` follow.
 
 ---
 
@@ -46,9 +117,7 @@ suites; the earlier full open-handle diagnostic run also passes. ESLint passes w
 audit reports 0 vulnerabilities. The v0.18.0 package dry-run contains 195 files (165,757 bytes
 packed; 849,425 bytes unpacked).
 
-**Release status:** Release candidate on `release/v0.18.0`. Version metadata, the resolved issue
-archive, and the v0.17.x-to-v0.18.0 migration guide are included and all local release gates pass;
-PR merge, tag, GitHub release, and maintainer-side `npm publish` remain pending.
+**Release status:** Published as v0.18.0 (tagged `v0.18.0`; live on npm).
 
 ---
 
@@ -69,9 +138,7 @@ the generated declarations contain the new public config/signature, and the prod
 audit reports 0 vulnerabilities. The v0.17.0 package dry-run contains 171 files (135,963 bytes
 packed; 694,703 bytes unpacked).
 
-**Release status:** Release candidate on `release/v0.17.0`. Version metadata, the resolved issue
-archive, and the v0.16.x-to-v0.17.0 migration guide are included in the release PR; merge, tag,
-GitHub release, and maintainer-side `npm publish` remain pending.
+**Release status:** Published as v0.17.0 (tagged `v0.17.0`).
 
 ---
 
@@ -98,9 +165,7 @@ suites; the open-handle verification run also passes. ESLint passes with 0 error
 the 5 affected suites. The v0.16.0 package dry-run contains 171 files, and the production
 dependency audit reports 0 vulnerabilities.
 
-**Release status:** Release candidate on `release/v0.16.0`. Version metadata and the v0.15.x-to-v0.16.0
-migration guide are included in the release PR; merge, tag, GitHub release, and maintainer-side
-`npm publish` remain pending.
+**Release status:** Published as v0.16.0 (tagged `v0.16.0`).
 
 ---
 
@@ -169,9 +234,7 @@ The final follow-up double-check identified the install-before-manifest recovery
 window; the corrected manifest-aware cleanup policy and its regressions passed
 re-review with no remaining blocker.
 
-**Release status:** Release candidate on `release/v0.14.0`. Version metadata and migration guide
-are included in the release PR; merge, tag, GitHub release, and maintainer-side `npm publish`
-remain pending.
+**Release status:** Published as v0.14.0 (tagged `v0.14.0`).
 
 ---
 

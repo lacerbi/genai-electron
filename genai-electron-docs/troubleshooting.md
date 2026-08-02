@@ -486,33 +486,116 @@ other llama-server processes, and unrelated GPU-heavy work. `CALIBRATION_SERVER_
 `CALIBRATION_BUSY`, and `CALIBRATION_RESOURCE_BUSY` are setup failures; no candidate timing should
 be trusted until the conflict is gone.
 
+### A formerly valid calibration call now fails validation
+
+The adaptive default uses `profiles: [profile]` and does not accept `combos`. Caller-ordered exact
+mode uses one singular `profile` plus a non-empty `combos` tuple. The legacy singular `profile`
+without `combos`, `profiles` together with `combos`, and a request containing both `profile` and
+`profiles` are rejected before binary provisioning.
+
+Adaptive mode accepts one or two unique context sizes with the same `parallelRequests`. Its
+`targetProbes`, `maxProbes`, `maxWallTimeMs`, `contextPreferencePct`, and
+`includeKvCacheComparison` fields cannot be used with exact combos.
+
 ### Slots or context cannot be verified
 
 `CALIBRATION_SLOTS_UNAVAILABLE` means the pinned server did not expose compatible `/props`
 evidence, reported a different slot count, or did not allocate exactly
-`floor(profile.contextSize / profile.parallelRequests)` tokens per slot. Check the binary version
-and logs. Calibration deliberately refuses to guess capacity.
+`floor(profile.contextSize / profile.parallelRequests)` tokens per slot. Every fresh launch is
+checked. Verify the binary version and logs; calibration deliberately refuses to guess capacity.
 
 ### A workload is rejected before timing
 
 Every complete prompt must fit in the verified per-slot context together with `nPredict`.
 Shared-prefix workloads need at least two suffixes. A single workload may omit its weight; multiple
 workloads must all provide finite positive weights. Reduce the prompt/output size or run a separate
-calibration at a larger exact total `contextSize`.
+calibration at a larger exact total `contextSize`. In a two-profile adaptive call, every workload
+must fit the smallest verified profile; larger profiles cannot use different or longer workloads in
+the same call.
+
+### Adaptive calibration returns `budget-exhausted`
+
+This is an honest result, not a crash. Decision-relevant uncertainty remained when the hard launch
+or wall-time budget ended, so `selected` is intentionally absent. Inspect `provisional`, `cells`,
+`profiles`, `probes`, `warnings`, and `budget.timeAdmission` to see what remained unresolved.
+
+The default budget scales with the actual profile × SWA × KV cell count. Adding a second context or
+enabling `includeKvCacheComparison` can approximately double the cells. Retry under a quieter
+machine state, increase `maxProbes` or `maxWallTimeMs`, remove a product comparison that you do not
+need, or use exact combos for a small targeted comparison. Do not automatically deploy
+`provisional` as if it had independent-reproduction evidence.
+
+### The apparent boundary is unstable or steps down
+
+Search samples guide the bracket; they do not certify a winner. A competitive finalist must be
+observed successfully on at least two fresh processes, including one full-fidelity launch. A
+conflicting failure, excessive cross-launch spread, non-monotone interior result, or ambiguous
+performance cliff can trigger another full-fidelity launch or a direct test one GPU layer lower.
+
+Check each probe's `operationalStatus`, `memoryEvidence`, and `boundaryDecision` separately. A broad
+CUDA error, timeout, crash, or slow result does not by itself prove memory exhaustion. A reported
+`fallback` is validated only when it carries `evidence: 'direct-measurement'`; an unvalidated
+lower-layer possibility remains diagnostic rather than a fallback guarantee.
+
+### No reference or viable candidate was found
+
+The controller descends from the auto-configured layer starting point and directly tests `g=0`
+before resolving a cell as `no-viable-point`. `no-viable-candidate` means all requested cells were
+resolved and none produced an admissible point. If a still-relevant cell could not be searched or
+resolved, the correct result is `budget-exhausted` instead.
+
+Inspect startup diagnostics and confirm that the model can run at `gpuLayers: 0` with the exact
+profile and pinned fixed/MoE placement. If not, reduce context/slots, use a smaller model, or change
+the pinned placement with an explicit exact-combo calibration.
+
+### A search probe stopped earlier than `requestTimeoutMs`
+
+After a cell has an admissible reference, adaptive search may cap a completion when its partial
+aggregate lower bound is already outside every active decision band. Such a probe records
+`capped: true`, an aggregate lower bound, and a termination reason. The first capped observation is
+ambiguous and cannot close a competitive boundary by itself. Decision-relevant repeats use the
+full caller timeout unless the conservative two-launch lower-bound rule can establish an unsuitable
+point. Tokenization, slot control, finalist probes, and exact combos always retain the full caller
+timeout.
 
 ### A calibration was aborted or cleanup failed
 
-`CALIBRATION_ABORTED` includes completed partial runs. The manager remains stopped and can normally
-calibrate again. `CALIBRATION_CLEANUP_FAILED` is different: the candidate PID could not be confirmed
-dead, so later start/restart/calibration calls remain blocked until that process exits. Terminate the
-reported PID, then retry.
+Caller cancellation rejects with `details.code === 'CALIBRATION_ABORTED'`. Preparation, invariant,
+or cleanup failures reject as failed. In both cases, inspect `details.partialReport` for the typed
+schema-v2 chronological probes, warnings, terminal status, and `cleanupConfirmed` flag.
+
+An internal adaptive deadline is different from caller cancellation: after confirmed cleanup it
+returns a `budget-exhausted` report, and cleanup overrun is recorded separately. A
+`CALIBRATION_CLEANUP_FAILED` rejection means the candidate PID could not be confirmed dead. Later
+start/restart/calibration calls remain blocked while that process is alive; terminate the reported
+PID, then retry. Do not discard the partial report when escalating a cleanup problem.
+
+### The report warns about resource drift
+
+Calibration compares available host RAM and GPU-memory snapshots when those metrics exist. A drop
+greater than the versioned threshold (25% by default) triggers cooldown and at most one reference
+repeat. If the repeat confirms the same new level, the run re-anchors to it and continues in a new
+resource regime — `probe.resourceRegime` records which level each launch was measured under, and
+reproduction never spans regimes. Only drift that is still moving on the repeat ends as
+`budget-exhausted`. Missing telemetry is reported as unavailable rather than treated as stable.
+
+Close competing workloads and retry. Resource snapshots are diagnostics only: they do not estimate
+a hidden memory threshold or determine the winner.
+
+To prevent it, run calibration on an otherwise idle machine and have the host application ask the
+user not to start heavy work while it runs — see
+[Machine conditions during a run](llm-server.md#machine-conditions-during-a-run). Light desktop use
+is fine; starting another model server, an image generation, or a large build partway through a run
+is what makes launches incomparable.
 
 ### When is a saved recommendation stale?
 
 Recalibrate after changes to model files/revision, llama.cpp version/backend, OS/GPU driver/runtime,
-hardware, exact context/slot profile, fixed launch values, workload definitions/weights, sample
-method, or calibration policy. Treat a report whose `cacheability.level` is `best-effort` more
-conservatively because part of that identity was unavailable.
+hardware, requested profiles/slot count, fixed launch values (including pinned MoE placement),
+workload definitions/weights/order, samples/timeouts, adaptive budgets/preferences, report schema,
+or calibration policy. Persistent resource-drift warnings also justify recalibration. Treat a report
+whose `cacheability.level` is `best-effort` more conservatively because part of that identity was
+unavailable.
 
 ## FAQ
 

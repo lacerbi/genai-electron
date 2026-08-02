@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.18.0 | **Status**: Production Ready - automated LLM runtime calibration
+> **Version**: 0.19.0 | **Status**: Production Ready - adaptive LLM runtime calibration
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 
@@ -9,7 +9,7 @@ Electron-specific library for managing local AI model servers (llama.cpp, stable
 - ✅ **System detection** - Auto-detect RAM, CPU, GPU, VRAM capabilities
 - ✅ **Model management** - Download GGUF models with pinned Hugging Face revisions, persisted provenance, progress tracking, and metadata extraction
 - ✅ **LLM server** - Manage llama-server lifecycle with auto-configuration
-- ✅ **LLM runtime calibration** - Benchmark a bounded, caller-shaped set of llama-server flags for an exact context/slot profile
+- ✅ **LLM runtime calibration** - Adaptively find reproducible GPU-layer boundaries across one or two comparable context profiles, with exact caller-supplied combos as a diagnostic mode
 - ✅ **Image generation** - Local image generation via stable-diffusion.cpp
 - ✅ **Multi-component diffusion models** - Flux 2, SDXL split components with aggregate checksum validation
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when memory constrained

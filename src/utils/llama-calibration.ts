@@ -6,8 +6,10 @@ import { LLAMA_CALIBRATION_DEFAULTS } from '../config/defaults.js';
 import { ServerError } from '../errors/index.js';
 import type {
   KVCacheType,
+  LlamaAdaptiveCalibrationConfig,
   LlamaCalibrationCombo,
   LlamaCalibrationConfig,
+  LlamaCalibrationProgress,
   LlamaCalibrationFixedConfig,
   LlamaCalibrationOverrides,
   LlamaCalibrationProfile,
@@ -53,21 +55,39 @@ const KV_CACHE_TYPES = new Set<KVCacheType>([
 
 type NormalizedWorkload = LlamaCalibrationWorkload & { weight: number };
 
-export interface ValidatedLlamaCalibrationConfig {
+interface ValidatedLlamaCalibrationConfigBase {
   modelId: string;
-  profile: LlamaCalibrationProfile;
   fixedConfig: LlamaCalibrationFixedConfig;
   workloads: readonly NormalizedWorkload[];
-  combos?: readonly LlamaCalibrationCombo[];
-  includeKvCacheComparison: boolean;
   kvPrecisionPreferencePct: number;
   samples: number;
   seed: number;
   startupTimeoutMs: number;
   requestTimeoutMs: number;
-  onProgress?: LlamaCalibrationConfig['onProgress'];
+  onProgress?: (progress: LlamaCalibrationProgress) => void;
   signal?: AbortSignal;
 }
+
+export interface ValidatedLlamaAdaptiveCalibrationConfig
+  extends ValidatedLlamaCalibrationConfigBase {
+  strategy: 'adaptive';
+  profiles: LlamaAdaptiveCalibrationConfig['profiles'];
+  includeKvCacheComparison: boolean;
+  contextPreferencePct: number;
+  targetProbes?: number;
+  maxProbes?: number;
+  maxWallTimeMs?: number;
+}
+
+export interface ValidatedLlamaExactCalibrationConfig extends ValidatedLlamaCalibrationConfigBase {
+  strategy: 'exact';
+  profile: LlamaCalibrationProfile;
+  combos: readonly [LlamaCalibrationCombo, ...LlamaCalibrationCombo[]];
+}
+
+export type ValidatedLlamaCalibrationConfig =
+  | ValidatedLlamaAdaptiveCalibrationConfig
+  | ValidatedLlamaExactCalibrationConfig;
 
 export interface LlamaDefaultCandidateInput {
   baseline: ResolvedLlamaCalibrationConfig;
@@ -211,38 +231,34 @@ function validateOverrides(
   }
 }
 
-/** Validate and normalize a public calibration request before provisioning. */
-export function validateLlamaCalibrationConfig(
-  config: LlamaCalibrationConfig
-): ValidatedLlamaCalibrationConfig {
-  if (!config || typeof config !== 'object') {
-    throw invalid('Calibration config is required');
+function validateProfile(value: unknown, path: string): LlamaCalibrationProfile {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw invalid(`${path} is required`, { path });
   }
-  if (typeof config.modelId !== 'string' || config.modelId.trim().length === 0) {
-    throw invalid('modelId must be a non-empty string', { path: 'modelId' });
+  const profile = value as Record<string, unknown>;
+  validateKnownKeys(profile, ['contextSize', 'parallelRequests'], path);
+  requirePositiveSafeInteger(profile.contextSize, `${path}.contextSize`);
+  requirePositiveSafeInteger(profile.parallelRequests, `${path}.parallelRequests`);
+  if (profile.parallelRequests > profile.contextSize) {
+    throw invalid(`${path}.parallelRequests cannot exceed contextSize`, { path });
   }
-  requirePositiveSafeInteger(config.profile?.contextSize, 'profile.contextSize');
-  requirePositiveSafeInteger(config.profile?.parallelRequests, 'profile.parallelRequests');
-  if (config.profile.parallelRequests > config.profile.contextSize) {
-    throw invalid('parallelRequests cannot exceed the total contextSize', { path: 'profile' });
-  }
+  return {
+    contextSize: profile.contextSize,
+    parallelRequests: profile.parallelRequests,
+  };
+}
 
-  const fixedConfig = { ...(config.fixedConfig ?? {}) };
-  validateKnownKeys(fixedConfig as Record<string, unknown>, FIXED_KEYS, 'fixedConfig');
-  validateOverrides(fixedConfig, 'fixedConfig');
-  for (const key of ['continuousBatching', 'useMmap', 'useMlock'] as const) {
-    const value = fixedConfig[key];
-    if (value !== undefined && typeof value !== 'boolean') {
-      throw invalid(`fixedConfig.${key} must be boolean`, { path: `fixedConfig.${key}` });
-    }
-  }
-
-  if (!Array.isArray(config.workloads) || config.workloads.length === 0) {
+function normalizeWorkloads(value: unknown): readonly NormalizedWorkload[] {
+  if (!Array.isArray(value) || value.length === 0) {
     throw invalid('workloads must contain at least one production scenario', { path: 'workloads' });
   }
   const ids = new Set<string>();
-  const workloads = config.workloads.map((workload, index): NormalizedWorkload => {
+  return value.map((raw, index): NormalizedWorkload => {
     const path = `workloads[${index}]`;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw invalid(`${path} must be an object`, { path });
+    }
+    const workload = raw as LlamaCalibrationWorkload;
     if (typeof workload.id !== 'string' || workload.id.trim().length === 0) {
       throw invalid(`${path}.id must be non-empty`, { path: `${path}.id` });
     }
@@ -251,7 +267,7 @@ export function validateLlamaCalibrationConfig(
     }
     ids.add(workload.id);
     requirePositiveSafeInteger(workload.nPredict, `${path}.nPredict`);
-    if (config.workloads.length > 1 && workload.weight === undefined) {
+    if (value.length > 1 && workload.weight === undefined) {
       throw invalid(`${path}.weight is required when multiple workloads are provided`, {
         path: `${path}.weight`,
       });
@@ -263,18 +279,25 @@ export function validateLlamaCalibrationConfig(
         value: weight,
       });
     }
-
     if (workload.kind === 'cold-prefill') {
+      validateKnownKeys(
+        raw as Record<string, unknown>,
+        ['id', 'kind', 'prompt', 'nPredict', 'weight'],
+        path
+      );
       if (typeof workload.prompt !== 'string' || workload.prompt.length === 0) {
         throw invalid(`${path}.prompt must be non-empty`, { path: `${path}.prompt` });
       }
       return { ...workload, weight };
     }
     if (workload.kind === 'shared-prefix') {
+      validateKnownKeys(
+        raw as Record<string, unknown>,
+        ['id', 'kind', 'sharedPrefix', 'suffixes', 'nPredict', 'weight'],
+        path
+      );
       if (typeof workload.sharedPrefix !== 'string' || workload.sharedPrefix.length === 0) {
-        throw invalid(`${path}.sharedPrefix must be non-empty`, {
-          path: `${path}.sharedPrefix`,
-        });
+        throw invalid(`${path}.sharedPrefix must be non-empty`, { path: `${path}.sharedPrefix` });
       }
       if (
         !Array.isArray(workload.suffixes) ||
@@ -289,42 +312,166 @@ export function validateLlamaCalibrationConfig(
     }
     throw invalid(`${path}.kind is unsupported`, { path: `${path}.kind` });
   });
+}
 
-  let combos: readonly LlamaCalibrationCombo[] | undefined;
-  if (config.combos !== undefined) {
-    if (!Array.isArray(config.combos) || config.combos.length === 0) {
-      throw invalid('combos must be non-empty when supplied', { path: 'combos' });
+function normalizeCombos(
+  value: unknown,
+  fixedConfig: LlamaCalibrationFixedConfig
+): readonly [LlamaCalibrationCombo, ...LlamaCalibrationCombo[]] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw invalid('combos must be non-empty when supplied', { path: 'combos' });
+  }
+  const seen = new Set<string>();
+  const combos = value.map((raw, index): LlamaCalibrationCombo => {
+    const path = `combos[${index}]`;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      throw invalid(`${path} must be an object`, { path });
     }
-    const seen = new Set<string>();
-    combos = config.combos.map((combo, index) => {
-      const path = `combos[${index}]`;
-      if (!combo || typeof combo !== 'object' || !combo.overrides) {
-        throw invalid(`${path}.overrides is required`, { path });
-      }
-      if (combo.label !== undefined && (typeof combo.label !== 'string' || !combo.label.trim())) {
-        throw invalid(`${path}.label must be non-empty when supplied`, { path: `${path}.label` });
-      }
-      validateOverrides(combo.overrides, `${path}.overrides`, fixedConfig);
-      const key = canonical(combo.overrides);
-      if (seen.has(key)) {
-        throw invalid(`${path} duplicates an earlier normalized candidate`, { path });
-      }
-      seen.add(key);
-      return { ...(combo.label ? { label: combo.label } : {}), overrides: { ...combo.overrides } };
+    const combo = raw as LlamaCalibrationCombo;
+    validateKnownKeys(raw as Record<string, unknown>, ['label', 'overrides'], path);
+    if (!combo.overrides || typeof combo.overrides !== 'object' || Array.isArray(combo.overrides)) {
+      throw invalid(`${path}.overrides is required`, { path });
+    }
+    if (combo.label !== undefined && (typeof combo.label !== 'string' || !combo.label.trim())) {
+      throw invalid(`${path}.label must be non-empty when supplied`, { path: `${path}.label` });
+    }
+    validateOverrides(combo.overrides, `${path}.overrides`, fixedConfig);
+    const key = canonical(combo.overrides);
+    if (seen.has(key)) {
+      throw invalid(`${path} duplicates an earlier normalized candidate`, { path });
+    }
+    seen.add(key);
+    return { ...(combo.label ? { label: combo.label } : {}), overrides: { ...combo.overrides } };
+  });
+  return combos as unknown as readonly [LlamaCalibrationCombo, ...LlamaCalibrationCombo[]];
+}
+
+function requireFiniteNonNegative(value: unknown, path: string): asserts value is number {
+  if (!Number.isFinite(value) || (value as number) < 0) {
+    throw invalid(`${path} must be finite and non-negative`, { path, value });
+  }
+}
+
+/** Validate and normalize a public calibration request before provisioning. */
+export function validateLlamaCalibrationConfig(
+  config: LlamaCalibrationConfig
+): ValidatedLlamaCalibrationConfig {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw invalid('Calibration config is required');
+  }
+  const raw = config as unknown as Record<string, unknown>;
+  const hasProfile = Object.hasOwn(raw, 'profile');
+  const hasProfiles = Object.hasOwn(raw, 'profiles');
+  const hasCombos = Object.hasOwn(raw, 'combos');
+  if (hasProfile && hasProfiles) {
+    throw invalid('Use either profile or profiles, not both', {
+      path: 'profile',
+      suggestion:
+        'Use profiles: [profile] for adaptive calibration or profile with combos for exact mode',
     });
+  }
+  if (hasProfiles && hasCombos) {
+    throw invalid('Exact custom-combo mode requires singular profile, not profiles', {
+      path: 'profiles',
+      suggestion: 'Replace profiles with one singular profile when supplying combos',
+    });
+  }
+  if (hasProfile && !hasCombos) {
+    throw invalid('Adaptive calibration now requires profiles: [profile]', {
+      path: 'profile',
+      suggestion: 'Rename profile to profiles and wrap it in a one-element array',
+    });
+  }
+  if (!hasProfile && !hasProfiles) {
+    throw invalid('Adaptive mode requires profiles; exact mode requires profile and combos', {
+      path: 'profiles',
+    });
+  }
+  if (typeof raw.modelId !== 'string' || raw.modelId.trim().length === 0) {
+    throw invalid('modelId must be a non-empty string', { path: 'modelId' });
   }
 
-  const includeKvCacheComparison =
-    config.includeKvCacheComparison ?? LLAMA_CALIBRATION_DEFAULTS.includeKvCacheComparison;
-  if (typeof includeKvCacheComparison !== 'boolean') {
-    throw invalid('includeKvCacheComparison must be boolean', {
-      path: 'includeKvCacheComparison',
+  const fixedConfig = { ...((raw.fixedConfig as LlamaCalibrationFixedConfig | undefined) ?? {}) };
+  validateKnownKeys(fixedConfig as Record<string, unknown>, FIXED_KEYS, 'fixedConfig');
+  validateOverrides(fixedConfig, 'fixedConfig');
+  for (const key of ['continuousBatching', 'useMmap', 'useMlock'] as const) {
+    const value = fixedConfig[key];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw invalid(`fixedConfig.${key} must be boolean`, { path: `fixedConfig.${key}` });
+    }
+  }
+  const workloads = normalizeWorkloads(raw.workloads);
+  const kvPrecisionPreferencePct =
+    (raw.kvPrecisionPreferencePct as number | undefined) ??
+    LLAMA_CALIBRATION_DEFAULTS.kvPrecisionPreferencePct;
+  requireFiniteNonNegative(kvPrecisionPreferencePct, 'kvPrecisionPreferencePct');
+  const samples = (raw.samples as number | undefined) ?? LLAMA_CALIBRATION_DEFAULTS.samples;
+  requirePositiveSafeInteger(samples, 'samples');
+  const seed = (raw.seed as number | undefined) ?? LLAMA_CALIBRATION_DEFAULTS.seed;
+  if (!Number.isSafeInteger(seed)) {
+    throw invalid('seed must be a safe integer', { path: 'seed', value: seed });
+  }
+  const startupTimeoutMs =
+    (raw.startupTimeoutMs as number | undefined) ?? LLAMA_CALIBRATION_DEFAULTS.startupTimeoutMs;
+  const requestTimeoutMs =
+    (raw.requestTimeoutMs as number | undefined) ?? LLAMA_CALIBRATION_DEFAULTS.requestTimeoutMs;
+  requirePositiveSafeInteger(startupTimeoutMs, 'startupTimeoutMs');
+  requirePositiveSafeInteger(requestTimeoutMs, 'requestTimeoutMs');
+  if (raw.onProgress !== undefined && typeof raw.onProgress !== 'function') {
+    throw invalid('onProgress must be a function', { path: 'onProgress' });
+  }
+
+  const common = {
+    modelId: raw.modelId,
+    fixedConfig,
+    workloads,
+    kvPrecisionPreferencePct,
+    samples,
+    seed,
+    startupTimeoutMs,
+    requestTimeoutMs,
+    onProgress: raw.onProgress as ((progress: LlamaCalibrationProgress) => void) | undefined,
+    signal: raw.signal as AbortSignal | undefined,
+  };
+
+  if (hasProfile) {
+    for (const field of [
+      'includeKvCacheComparison',
+      'contextPreferencePct',
+      'targetProbes',
+      'maxProbes',
+      'maxWallTimeMs',
+    ]) {
+      if (raw[field] !== undefined) {
+        throw invalid(`${field} is adaptive-only and cannot be used with exact combos`, {
+          path: field,
+        });
+      }
+    }
+    const profile = validateProfile(raw.profile, 'profile');
+    const combos = normalizeCombos(raw.combos, fixedConfig);
+    return { strategy: 'exact', ...common, profile, combos };
+  }
+
+  if (!Array.isArray(raw.profiles) || raw.profiles.length < 1 || raw.profiles.length > 2) {
+    throw invalid('profiles must contain one or two profiles', { path: 'profiles' });
+  }
+  const profiles = raw.profiles.map((profile, index) =>
+    validateProfile(profile, `profiles[${index}]`)
+  );
+  if (new Set(profiles.map((profile) => profile.contextSize)).size !== profiles.length) {
+    throw invalid('adaptive profile contextSize values must be unique', { path: 'profiles' });
+  }
+  if (new Set(profiles.map((profile) => profile.parallelRequests)).size !== 1) {
+    throw invalid('adaptive profiles must use the same parallelRequests value', {
+      path: 'profiles',
     });
   }
-  if (includeKvCacheComparison && combos) {
-    throw invalid('includeKvCacheComparison cannot be combined with custom combos', {
-      path: 'includeKvCacheComparison',
-    });
+  const includeKvCacheComparison =
+    (raw.includeKvCacheComparison as boolean | undefined) ??
+    LLAMA_CALIBRATION_DEFAULTS.includeKvCacheComparison;
+  if (typeof includeKvCacheComparison !== 'boolean') {
+    throw invalid('includeKvCacheComparison must be boolean', { path: 'includeKvCacheComparison' });
   }
   if (
     includeKvCacheComparison &&
@@ -336,40 +483,33 @@ export function validateLlamaCalibrationConfig(
       path: 'includeKvCacheComparison',
     });
   }
-
-  const kvPrecisionPreferencePct =
-    config.kvPrecisionPreferencePct ?? LLAMA_CALIBRATION_DEFAULTS.kvPrecisionPreferencePct;
-  if (!Number.isFinite(kvPrecisionPreferencePct) || kvPrecisionPreferencePct < 0) {
-    throw invalid('kvPrecisionPreferencePct must be finite and non-negative', {
-      path: 'kvPrecisionPreferencePct',
-      value: kvPrecisionPreferencePct,
-    });
+  const contextPreferencePct =
+    (raw.contextPreferencePct as number | undefined) ??
+    (LLAMA_CALIBRATION_DEFAULTS as { contextPreferencePct?: number }).contextPreferencePct ??
+    10;
+  requireFiniteNonNegative(contextPreferencePct, 'contextPreferencePct');
+  const targetProbes = raw.targetProbes as number | undefined;
+  const maxProbes = raw.maxProbes as number | undefined;
+  const maxWallTimeMs = raw.maxWallTimeMs as number | undefined;
+  if (targetProbes !== undefined) requirePositiveSafeInteger(targetProbes, 'targetProbes');
+  if (maxProbes !== undefined) requirePositiveSafeInteger(maxProbes, 'maxProbes');
+  if (maxWallTimeMs !== undefined) requirePositiveSafeInteger(maxWallTimeMs, 'maxWallTimeMs');
+  if (targetProbes !== undefined && maxProbes !== undefined && targetProbes > maxProbes) {
+    throw invalid('targetProbes cannot exceed maxProbes', { path: 'targetProbes' });
   }
-  const samples = config.samples ?? LLAMA_CALIBRATION_DEFAULTS.samples;
-  requirePositiveSafeInteger(samples, 'samples');
-  const seed = config.seed ?? LLAMA_CALIBRATION_DEFAULTS.seed;
-  if (!Number.isSafeInteger(seed)) {
-    throw invalid('seed must be a safe integer', { path: 'seed', value: seed });
+  if (maxProbes !== undefined && maxProbes <= 2) {
+    throw invalid('maxProbes must leave room for the finalist reserve', { path: 'maxProbes' });
   }
-  const startupTimeoutMs = config.startupTimeoutMs ?? LLAMA_CALIBRATION_DEFAULTS.startupTimeoutMs;
-  const requestTimeoutMs = config.requestTimeoutMs ?? LLAMA_CALIBRATION_DEFAULTS.requestTimeoutMs;
-  requirePositiveSafeInteger(startupTimeoutMs, 'startupTimeoutMs');
-  requirePositiveSafeInteger(requestTimeoutMs, 'requestTimeoutMs');
 
   return {
-    modelId: config.modelId,
-    profile: { ...config.profile },
-    fixedConfig,
-    workloads,
-    combos,
+    strategy: 'adaptive',
+    ...common,
+    profiles: profiles as unknown as LlamaAdaptiveCalibrationConfig['profiles'],
     includeKvCacheComparison,
-    kvPrecisionPreferencePct,
-    samples,
-    seed,
-    startupTimeoutMs,
-    requestTimeoutMs,
-    onProgress: config.onProgress,
-    signal: config.signal,
+    contextPreferencePct,
+    targetProbes,
+    maxProbes,
+    maxWallTimeMs,
   };
 }
 
