@@ -247,6 +247,75 @@ function resourceStabilityMessage(boundary: ResourceBoundaryKind, result: Resour
     : `Machine resource stability could not be verified ${where}: ${metrics}`;
 }
 
+/** Append guard/baseline warnings to a run's warning list without duplicating them. */
+function mergeCalibrationWarnings(target: string[], incoming: readonly string[] = []): void {
+  for (const warning of incoming) {
+    if (!target.includes(warning)) target.push(warning);
+  }
+}
+
+/**
+ * Build the partial report attached to a resource-stability rejection.
+ *
+ * Shared by both strategies so the chronological trail, cleanup state, resource diagnostics, and
+ * the candidate's usability marker cannot diverge between them. The candidate itself is
+ * strategy-specific evidence (adaptive requires independent reproduction, exact accepts its
+ * single-clean-launch rule), so the caller supplies the already-derived value or nothing.
+ */
+function resourceStabilityPartialReport(options: {
+  strategy: 'adaptive' | 'exact';
+  probes: readonly LlamaCalibrationProbe[];
+  warnings: readonly string[];
+  resourceFailure: LlamaCalibrationResourceFailure;
+  diagnosticCandidate?: LlamaCalibrationDiagnosticCandidate;
+}): LlamaCalibrationResourceFailurePartialReport {
+  return {
+    schemaVersion: 2,
+    policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+    strategy: options.strategy,
+    status: 'failed',
+    createdAt: new Date().toISOString(),
+    probes: options.probes,
+    warnings: options.warnings,
+    // Cleanup precedence: an unconfirmed teardown rejects with its own code before any resource
+    // classification happens, so a resource rejection always describes a confirmed-clean teardown.
+    cleanupConfirmed: true,
+    resourceFailure: options.resourceFailure,
+    ...(options.diagnosticCandidate ? { diagnosticCandidate: options.diagnosticCandidate } : {}),
+  };
+}
+
+/**
+ * Build the typed rejection for a boundary the guard refused to admit.
+ *
+ * `warnings` is the run's live warning list and is merged in place before the report is built, so
+ * the attached partial report explains the boundary it rejects.
+ */
+function buildResourceStabilityError(options: {
+  boundary: ResourceBoundaryKind;
+  result: ResourceBoundaryResult;
+  probeIndex?: number;
+  strategy: 'adaptive' | 'exact';
+  probes: readonly LlamaCalibrationProbe[];
+  warnings: string[];
+  diagnosticCandidate?: LlamaCalibrationDiagnosticCandidate;
+}): LlamaCalibrationResourceStabilityError {
+  const { boundary, result } = options;
+  const resourceFailure = resourceFailureRecord(boundary, result, options.probeIndex);
+  mergeCalibrationWarnings(options.warnings, result.warnings);
+  return new LlamaCalibrationResourceStabilityError(resourceStabilityMessage(boundary, result), {
+    code: resourceStabilityCode(result),
+    suggestion: CALIBRATION_RESOURCE_SUGGESTION,
+    partialReport: resourceStabilityPartialReport({
+      strategy: options.strategy,
+      probes: options.probes,
+      warnings: options.warnings,
+      resourceFailure,
+      ...(options.diagnosticCandidate ? { diagnosticCandidate: options.diagnosticCandidate } : {}),
+    }),
+  });
+}
+
 function calibrationScenarioRequestCount(
   workload: ValidatedLlamaAdaptiveCalibrationConfig['workloads'][number]
 ): number {
@@ -1121,9 +1190,93 @@ export class LlamaServerManager extends ServerManager {
         | { effectiveContextSize: number; effectiveParallelRequests: number }
         | undefined;
       const observedPromptTokenCounts = new Map<string, readonly number[]>();
+      const warnings: string[] = [];
+      // Candidate resolution and binary readiness are complete and no combo has launched yet: the
+      // same baseline placement plan decision 2 gives adaptive mode. A metric with too few trusted
+      // samples is disabled for the whole run and says so in the report warnings.
+      const resourceGuard = this.createCalibrationResourceGuard();
+      const resourceBaseline = await this.collectCalibrationResourceBaseline(
+        resourceGuard,
+        validated.signal
+      );
+      mergeCalibrationWarnings(warnings, resourceBaseline.warnings);
+      /**
+       * Public probe index of each clean run, positionally aligned with `runs`.
+       *
+       * `runs` is the clean-evidence collection - the only input to ranking - while `probes` is the
+       * chronological trail that may additionally end with one invalidated observation. The two
+       * index spaces therefore diverge and can only be crossed through this map.
+       */
+      const cleanRunProbeIndexes: number[] = [];
+      /**
+       * Exact mode's diagnostic-only candidate.
+       *
+       * Exact ranking is a single-clean-launch rule, so ranking the clean runs collected before the
+       * failure already yields the defensible candidate; only the winner's public probe index is
+       * exposed. A first-run post-cleanup rejection yields nothing, because that contaminated run
+       * never entered the clean collection.
+       */
+      const exactDiagnosticCandidate = (): LlamaCalibrationDiagnosticCandidate | undefined => {
+        const winner = recommendLlamaCalibrationRun(runs, validated.kvPrecisionPreferencePct);
+        if (!winner) return undefined;
+        const runIndex = runs.findIndex(
+          (run) => run.combo === winner.combo && run.resolvedConfig === winner.startConfig
+        );
+        const probeIndex = runIndex === -1 ? undefined : cleanRunProbeIndexes[runIndex];
+        if (probeIndex === undefined) return undefined;
+        return {
+          sourceProbeIndexes: [probeIndex],
+          evidenceLevel: 'single-launch-measurement',
+          usability: 'diagnostic-only',
+        };
+      };
+      /**
+       * Terminal resource rejection: emit the single `done`/`terminalStatus: 'failed'` payload and
+       * build the typed error. The outer catch recognises the error class, so it never emits a
+       * second terminal payload nor rebuilds the rejection as a generic exact failure.
+       */
+      const resourceStabilityRejection = (
+        boundary: ResourceBoundaryKind,
+        result: ResourceBoundaryResult,
+        probeIndex?: number
+      ): LlamaCalibrationResourceStabilityError => {
+        exactProgress(
+          'done',
+          exactCandidateCount,
+          exactCandidateCount,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'failed'
+        );
+        const diagnosticCandidate = exactDiagnosticCandidate();
+        return buildResourceStabilityError({
+          boundary,
+          result,
+          ...(probeIndex !== undefined ? { probeIndex } : {}),
+          strategy: 'exact',
+          probes,
+          warnings,
+          ...(diagnosticCandidate ? { diagnosticCandidate } : {}),
+        });
+      };
 
       for (let comboIndex = 0; comboIndex < candidates.length; comboIndex++) {
         const { combo, resolvedConfig, argvKey } = candidates[comboIndex]!;
+        // Pre-launch guard: a confirmed or unverifiable boundary rejects here, before the executor
+        // is invoked and before any progress payload announces this candidate, so a disturbed
+        // machine never costs a launch. The confirmation runs on the caller's signal.
+        const preLaunchBoundary = await this.checkCalibrationResourceBoundary(
+          resourceGuard,
+          resourceBaseline,
+          'pre-launch',
+          validated.signal
+        );
+        if (preLaunchBoundary && preLaunchBoundary.conclusion !== 'admitted') {
+          throw resourceStabilityRejection('pre-launch', preLaunchBoundary);
+        }
+        mergeCalibrationWarnings(warnings, preLaunchBoundary?.warnings);
         const probeStartedAt = performance.now();
         try {
           const observation = await this.calibrationProbeExecutor({
@@ -1154,6 +1307,61 @@ export class LlamaServerManager extends ServerManager {
             },
           });
           const { run } = observation;
+          const durationMs = performance.now() - probeStartedAt;
+          // Teardown is confirmed (the executor resolved) and `durationMs` is already fixed, so the
+          // post-cleanup guard is measured from the real teardown instant without inflating the
+          // recorded probe duration.
+          const postCleanupBoundary = await this.settleAndCheckPostCleanupResourceBoundary(
+            resourceGuard,
+            resourceBaseline,
+            validated.signal
+          );
+          mergeCalibrationWarnings(warnings, postCleanupBoundary?.warnings);
+          /** Everything about the probe record that does not depend on its resource validity. */
+          const probeRecord = {
+            probeIndex: probes.length,
+            strategy: 'exact' as const,
+            purpose: 'exact' as const,
+            fidelity: 'full' as const,
+            independentLaunchIndex: 1,
+            profileIndex: 0,
+            profileOrdinal: 0,
+            comboIndex,
+            combo,
+            resolvedConfig,
+            argvKey,
+            operationalStatus: run.status,
+            memoryEvidence: observation.memoryEvidence,
+            boundaryDecision: {
+              classification: 'not-applicable' as const,
+              reason: 'Exact candidates do not participate in adaptive boundary search.',
+            },
+            loadTimeMs: run.loadTimeMs,
+            effectiveContextSize: run.effectiveContextSize,
+            effectiveParallelRequests: run.effectiveParallelRequests,
+            workloadResults: run.workloadResults,
+            scoreMs: run.scoreMs,
+            durationMs,
+            error: run.error,
+            stderrTail: run.stderrTail,
+            cleanup: observation.cleanup,
+          };
+          // Nothing above has mutated the verified profile, the prompt token-count cache, or the
+          // clean-run ranking input: an observation whose post-cleanup boundary cannot be admitted
+          // is quarantined, so it must not leave a trace in any of them. Only the chronological
+          // trail keeps it, and only as explicitly invalidated evidence.
+          if (postCleanupBoundary && postCleanupBoundary.conclusion !== 'admitted') {
+            probes.push({
+              ...probeRecord,
+              resourceValidity: 'invalidated-by-resource-stability',
+              terminationReason: 'invalidated-by-resource-stability',
+            });
+            throw resourceStabilityRejection(
+              'post-cleanup',
+              postCleanupBoundary,
+              probes.length - 1
+            );
+          }
           if (
             verifiedProfile === undefined &&
             run.effectiveContextSize !== undefined &&
@@ -1169,48 +1377,24 @@ export class LlamaServerManager extends ServerManager {
               observedPromptTokenCounts.set(workloadId, tokenCounts);
             }
           }
+          cleanRunProbeIndexes.push(probeRecord.probeIndex);
           runs.push(run);
-          probes.push({
-            probeIndex: probes.length,
-            strategy: 'exact',
-            purpose: 'exact',
-            fidelity: 'full',
-            independentLaunchIndex: 1,
-            profileIndex: 0,
-            profileOrdinal: 0,
-            comboIndex,
-            combo,
-            resolvedConfig,
-            argvKey,
-            operationalStatus: run.status,
-            memoryEvidence: observation.memoryEvidence,
-            boundaryDecision: {
-              classification: 'not-applicable',
-              reason: 'Exact candidates do not participate in adaptive boundary search.',
-            },
-            loadTimeMs: run.loadTimeMs,
-            effectiveContextSize: run.effectiveContextSize,
-            effectiveParallelRequests: run.effectiveParallelRequests,
-            workloadResults: run.workloadResults,
-            scoreMs: run.scoreMs,
-            durationMs: performance.now() - probeStartedAt,
-            error: run.error,
-            stderrTail: run.stderrTail,
-            cleanup: observation.cleanup,
-          });
+          probes.push({ ...probeRecord, resourceValidity: 'accepted' });
         } catch (error) {
+          // A resource-stability rejection raised above is already the terminal decision, complete
+          // with its partial report and its single terminal progress payload.
+          if (error instanceof LlamaCalibrationResourceStabilityError) throw error;
           const sanitized = redactCalibrationError(error, redactCalibrationText);
           const fatalObservation = calibrationErrorDetail(sanitized, 'probeObservation') as
             | RunCalibrationProbeObservation
             | undefined;
           if (fatalObservation?.run && fatalObservation.cleanup?.confirmed) {
             const { run } = fatalObservation;
-            runs.push(run);
-            probes.push({
+            const fatalProbe = {
               probeIndex: probes.length,
-              strategy: 'exact',
-              purpose: 'exact',
-              fidelity: 'full',
+              strategy: 'exact' as const,
+              purpose: 'exact' as const,
+              fidelity: 'full' as const,
               independentLaunchIndex: 1,
               profileIndex: 0,
               profileOrdinal: 0,
@@ -1221,7 +1405,7 @@ export class LlamaServerManager extends ServerManager {
               operationalStatus: run.status,
               memoryEvidence: fatalObservation.memoryEvidence,
               boundaryDecision: {
-                classification: 'not-applicable',
+                classification: 'not-applicable' as const,
                 reason: 'Exact candidates do not participate in adaptive boundary search.',
               },
               loadTimeMs: run.loadTimeMs,
@@ -1234,7 +1418,34 @@ export class LlamaServerManager extends ServerManager {
               error: run.error,
               stderrTail: run.stderrTail,
               cleanup: fatalObservation.cleanup,
-            });
+            };
+            // Teardown was confirmed even though the probe failed fatally, so plan decision 8 still
+            // owes this launch a post-cleanup boundary, on the caller's signal. Skipped only for a
+            // caller abort, which keeps its own higher-priority contract, and for an unconfirmed
+            // cleanup, which is decided first below.
+            const fatalBoundary =
+              calibrationErrorCode(sanitized) === 'CALIBRATION_CLEANUP_FAILED' ||
+              validated.signal?.aborted === true
+                ? undefined
+                : await this.settleAndCheckPostCleanupResourceBoundary(
+                    resourceGuard,
+                    resourceBaseline,
+                    validated.signal
+                  );
+            mergeCalibrationWarnings(warnings, fatalBoundary?.warnings);
+            if (fatalBoundary && fatalBoundary.conclusion !== 'admitted') {
+              // Precedence: with cleanup confirmed, a resource failure supersedes the probe's own
+              // operational/OOM outcome, because that outcome is no longer interpretable. The
+              // original failure survives inside the invalidated probe record.
+              probes.push({
+                ...fatalProbe,
+                resourceValidity: 'invalidated-by-resource-stability',
+              });
+              throw resourceStabilityRejection('post-cleanup', fatalBoundary, probes.length - 1);
+            }
+            cleanRunProbeIndexes.push(fatalProbe.probeIndex);
+            runs.push(run);
+            probes.push({ ...fatalProbe, resourceValidity: 'accepted' });
           }
           if (calibrationErrorCode(sanitized) === 'CALIBRATION_CLEANUP_FAILED') {
             const orphanPid = calibrationErrorDetail(sanitized, 'pid');
@@ -1292,12 +1503,8 @@ export class LlamaServerManager extends ServerManager {
           }
           throw sanitized;
         }
-        // Exact mode gains the shared fixed-baseline resource guard in plan Phase 3; until then it
-        // keeps its v0.19 behaviour, minus the removed debug-only 25 % post-run log whose threshold
-        // key no longer exists.
-        if (comboIndex < combos.length - 1) {
-          await calibrationDelay(LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs, validated.signal);
-        }
+        // No separate inter-combo cooldown: every completed launch already paid one before its
+        // post-cleanup boundary, which is exactly the spacing the next candidate needs.
       }
 
       const modelFiles = model.shards?.length
@@ -1398,7 +1605,7 @@ export class LlamaServerManager extends ServerManager {
         skippedCombos,
         runs,
         probes,
-        warnings: [],
+        warnings,
         selected,
         ...(selected ? { selectionEvidence: 'single-launch-measurement' as const } : {}),
         confidence: 'single-launch-measurement',
@@ -1416,6 +1623,11 @@ export class LlamaServerManager extends ServerManager {
       return report;
     } catch (error) {
       const sanitized = redactCalibrationError(error, redactCalibrationText);
+      // A resource-stability rejection from either strategy is already the terminal decision, with
+      // its typed details, its partial report, and its single terminal progress payload. Redaction
+      // preserved the class; rebuilding it as a generic `ServerError` would destroy the contract
+      // hosts branch on, and emitting another terminal payload would break the one-payload rule.
+      if (sanitized instanceof LlamaCalibrationResourceStabilityError) throw sanitized;
       if (validated.strategy === 'adaptive') {
         if (calibrationErrorDetail(sanitized, 'partialReport') !== undefined) {
           throw sanitized;
@@ -1935,35 +2147,16 @@ export class LlamaServerManager extends ServerManager {
         finalistTimeReserveMs: state.budgets.finalistTimeReserveMs,
       });
     }
-    /**
-     * Bounded, abortable telemetry capture for the fixed-baseline resource guard.
-     *
-     * The refresh-then-read ordering inside the adapter keeps every snapshot in one measurement
-     * regime: the Windows standby-aware reading has a TTL, and a stale fallback to `os.freemem()`
-     * would read a probe's own released mmap pages as a large availability drop. A failed refresh
-     * yields an untrusted host reading rather than a comparable-looking number.
-     */
-    const resourceGuard: ResourceGuardDependencies = {
-      captureSnapshot: createTelemetrySnapshotCapture(this.systemInfo, {
-        telemetryTimeoutMs: LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs,
-        onDiagnostic: (message, error) => debugLog(`[LlamaCalibration] ${message}`, error),
-      }),
-      delay: abortableDelay,
-    };
+    const resourceGuard = this.createCalibrationResourceGuard();
     // Provisioning, profile/cell preparation, and binary readiness are complete and the adaptive
     // probe wall clock has not started yet: plan decision 2's baseline placement. The fixed settle
     // delay and the bounded cooldown-spaced samples are therefore paid before `policyReadyAt` and
-    // never out of the probe budget. A metric with too few trusted samples is disabled for the
-    // whole run with a warning; nothing here loops waiting for telemetry to become trustworthy.
-    const resourceBaseline: ResourceBaseline = await collectBaseline(resourceGuard, {
-      cooldownMs: LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
-      samples: LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples,
-      settleMs: LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSettleMs,
-      ...(validated.signal ? { signal: validated.signal } : {}),
-    });
-    for (const warning of resourceBaseline.warnings) {
-      if (!warnings.includes(warning)) warnings.push(warning);
-    }
+    // never out of the probe budget.
+    const resourceBaseline: ResourceBaseline = await this.collectCalibrationResourceBaseline(
+      resourceGuard,
+      validated.signal
+    );
+    mergeCalibrationWarnings(warnings, resourceBaseline.warnings);
     const policyReadyAt = performance.now();
     policyTiming.readyAt = policyReadyAt;
     progressBudget = resolvedProgressBudget();
@@ -2017,27 +2210,15 @@ export class LlamaServerManager extends ServerManager {
           model
         )
       );
-    /**
-     * Evaluate one launch boundary against the run's ONE fixed baseline.
-     *
-     * Always driven by the caller's signal, never by the internal per-probe deadline: plan
-     * decision 8 makes post-check correctness outrank an expired probe deadline, and decision 6
-     * requires a triggered confirmation to finish even past the adaptive wall budget. Confirmation
-     * is telemetry only, so it consumes no launch or probe budget by construction.
-     */
     const checkResourceBoundary = async (
       boundary: ResourceBoundaryKind
-    ): Promise<ResourceBoundaryResult | undefined> => {
-      if (resourceBaseline.enabledMetrics.length === 0) return undefined;
-      return checkBoundary(resourceGuard, {
-        baseline: resourceBaseline,
-        thresholds: CALIBRATION_RESOURCE_THRESHOLDS,
-        cooldownMs: LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
-        confirmationReads: LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads,
+    ): Promise<ResourceBoundaryResult | undefined> =>
+      this.checkCalibrationResourceBoundary(
+        resourceGuard,
+        resourceBaseline,
         boundary,
-        ...(validated.signal ? { signal: validated.signal } : {}),
-      });
-    };
+        validated.signal
+      );
     const adaptiveCapFor = (action: AdaptiveProbeAction): number => {
       if (action.timeoutMode === 'full') return validated.requestTimeoutMs;
       const priorRequests = publicProbes
@@ -2072,10 +2253,11 @@ export class LlamaServerManager extends ServerManager {
      * candidate can only be translated into public probe indexes through this map.
      */
     const probeIndexByEvidenceIndex = new Map<number, number>();
-    /** Build the partial report attached to a resource-stability rejection. */
-    const resourceFailurePartialReport = (
-      resourceFailure: LlamaCalibrationResourceFailure
-    ): LlamaCalibrationResourceFailurePartialReport => {
+    /**
+     * Adaptive's diagnostic-only candidate: clean evidence that already met the normal independent
+     * reproduction rule, translated from policy-evidence indexes into public probe indexes.
+     */
+    const adaptiveDiagnosticCandidate = (): LlamaCalibrationDiagnosticCandidate | undefined => {
       const diagnostic = deriveAdaptiveDiagnosticCandidate(state!);
       const sourceProbeIndexes = (diagnostic?.candidate.evidenceIndices ?? [])
         .map((evidenceIndex) => probeIndexByEvidenceIndex.get(evidenceIndex))
@@ -2083,26 +2265,13 @@ export class LlamaServerManager extends ServerManager {
         .sort((left, right) => left - right);
       // Only a candidate whose every supporting launch is still resolvable to an accepted public
       // probe may be reported; a partially mapped candidate would understate its own evidence.
-      const diagnosticCandidate: LlamaCalibrationDiagnosticCandidate | undefined =
-        diagnostic && sourceProbeIndexes.length === diagnostic.candidate.evidenceIndices.length
-          ? {
-              sourceProbeIndexes,
-              evidenceLevel: diagnostic.evidenceLevel,
-              usability: 'diagnostic-only',
-            }
-          : undefined;
-      return {
-        schemaVersion: 2,
-        policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
-        strategy: 'adaptive',
-        status: 'failed',
-        createdAt: new Date().toISOString(),
-        probes: publicProbes,
-        warnings,
-        cleanupConfirmed: true,
-        resourceFailure,
-        ...(diagnosticCandidate ? { diagnosticCandidate } : {}),
-      };
+      return diagnostic && sourceProbeIndexes.length === diagnostic.candidate.evidenceIndices.length
+        ? {
+            sourceProbeIndexes,
+            evidenceLevel: diagnostic.evidenceLevel,
+            usability: 'diagnostic-only',
+          }
+        : undefined;
     };
     /** Build the typed rejection for a boundary the guard refused to admit. */
     const resourceStabilityError = (
@@ -2110,18 +2279,16 @@ export class LlamaServerManager extends ServerManager {
       result: ResourceBoundaryResult,
       probeIndex?: number
     ): LlamaCalibrationResourceStabilityError => {
-      const failure = resourceFailureRecord(boundary, result, probeIndex);
-      for (const warning of result.warnings) {
-        if (!warnings.includes(warning)) warnings.push(warning);
-      }
-      return new LlamaCalibrationResourceStabilityError(
-        resourceStabilityMessage(boundary, result),
-        {
-          code: resourceStabilityCode(result),
-          suggestion: CALIBRATION_RESOURCE_SUGGESTION,
-          partialReport: resourceFailurePartialReport(failure),
-        }
-      );
+      const diagnosticCandidate = adaptiveDiagnosticCandidate();
+      return buildResourceStabilityError({
+        boundary,
+        result,
+        ...(probeIndex !== undefined ? { probeIndex } : {}),
+        strategy: 'adaptive',
+        probes: publicProbes,
+        warnings,
+        ...(diagnosticCandidate ? { diagnosticCandidate } : {}),
+      });
     };
     const inheritedCeilingByCell = new Map<
       string,
@@ -2224,9 +2391,7 @@ export class LlamaServerManager extends ServerManager {
         emitProgress('done', { terminalStatus: 'failed' });
         throw resourceStabilityError('pre-launch', preLaunchBoundary);
       }
-      for (const warning of preLaunchBoundary?.warnings ?? []) {
-        if (!warnings.includes(warning)) warnings.push(warning);
-      }
+      mergeCalibrationWarnings(warnings, preLaunchBoundary?.warnings);
       // The guard consumes wall time but no launch budget. If that (or anything before it) used up
       // the remaining budget - including a suspicion that recovered only after the deadline - the
       // run ends through the ordinary budget-exhausted path rather than launching anyway.
@@ -2280,13 +2445,12 @@ export class LlamaServerManager extends ServerManager {
         const durationMs = performance.now() - probeStartedAt;
         // Teardown is confirmed (the executor resolved) and `durationMs` is already fixed, so the
         // post-cleanup guard is measured from the real teardown instant without inflating the
-        // recorded probe duration. One cooldown first: an immediate snapshot is dominated by the
-        // probe's own released model mappings on Windows, which is self-release lag, not the
-        // environment. Both the cooldown and the guard follow the caller's signal rather than the
-        // possibly expired per-probe deadline (plan decision 8).
-        await calibrationDelay(LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs, validated.signal);
-        this.systemInfo.clearCache();
-        const postCleanupBoundary = await checkResourceBoundary('post-cleanup');
+        // recorded probe duration.
+        const postCleanupBoundary = await this.settleAndCheckPostCleanupResourceBoundary(
+          resourceGuard,
+          resourceBaseline,
+          validated.signal
+        );
         const run = observation.run;
         const terminatedAtAdaptiveCap =
           run.status === 'request-timeout' && observation.aggregateScoreLowerBoundMs !== undefined;
@@ -2319,9 +2483,7 @@ export class LlamaServerManager extends ServerManager {
             'GPU available-memory telemetry was unavailable for one or both probe snapshots.'
           );
         }
-        for (const warning of diagnosticWarnings) {
-          if (!warnings.includes(warning)) warnings.push(warning);
-        }
+        mergeCalibrationWarnings(warnings, diagnosticWarnings);
         const diagnostics = {
           kvBytesEstimate:
             estimateKVBytesPerToken(model, resolvedConfig.cacheTypeK, resolvedConfig.cacheTypeV) *
@@ -2482,17 +2644,12 @@ export class LlamaServerManager extends ServerManager {
           const fatalBoundary =
             sanitizedCode === 'CALIBRATION_CLEANUP_FAILED' || validated.signal?.aborted === true
               ? undefined
-              : await (async () => {
-                  await calibrationDelay(
-                    LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
-                    validated.signal
-                  );
-                  this.systemInfo.clearCache();
-                  return checkResourceBoundary('post-cleanup');
-                })();
-          for (const warning of fatalBoundary?.warnings ?? []) {
-            if (!warnings.includes(warning)) warnings.push(warning);
-          }
+              : await this.settleAndCheckPostCleanupResourceBoundary(
+                  resourceGuard,
+                  resourceBaseline,
+                  validated.signal
+                );
+          mergeCalibrationWarnings(warnings, fatalBoundary?.warnings);
           if (fatalBoundary && fatalBoundary.conclusion !== 'admitted') {
             // Precedence: with cleanup confirmed, a resource failure supersedes the probe's own
             // operational/OOM outcome, because that outcome is no longer interpretable. The
@@ -2971,6 +3128,89 @@ export class LlamaServerManager extends ServerManager {
     };
     emitProgress('done', { terminalStatus: terminal.status });
     return report;
+  }
+
+  /**
+   * Bounded, abortable telemetry capture for the fixed-baseline resource guard.
+   *
+   * The refresh-then-read ordering inside the adapter keeps every snapshot in one measurement
+   * regime: the Windows standby-aware reading has a TTL, and a stale fallback to `os.freemem()`
+   * would read a probe's own released mmap pages as a large availability drop. A failed refresh
+   * yields an untrusted host reading rather than a comparable-looking number.
+   *
+   * Shared by both strategies: exact and adaptive calibration must guard identical boundaries with
+   * identical telemetry trust, so neither owns its own capture wiring.
+   */
+  private createCalibrationResourceGuard(): ResourceGuardDependencies {
+    return {
+      captureSnapshot: createTelemetrySnapshotCapture(this.systemInfo, {
+        telemetryTimeoutMs: LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs,
+        onDiagnostic: (message, error) => debugLog(`[LlamaCalibration] ${message}`, error),
+      }),
+      delay: abortableDelay,
+    };
+  }
+
+  /**
+   * Capture the run's ONE fixed baseline.
+   *
+   * Called after provisioning/preparation and before any launch or probe clock, so the fixed settle
+   * delay and the bounded cooldown-spaced samples are never paid out of a probe budget. A metric
+   * with too few trusted samples is disabled for the whole run with a warning; nothing here loops
+   * waiting for telemetry to become trustworthy.
+   */
+  private async collectCalibrationResourceBaseline(
+    guard: ResourceGuardDependencies,
+    signal?: AbortSignal
+  ): Promise<ResourceBaseline> {
+    return collectBaseline(guard, {
+      cooldownMs: LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
+      samples: LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples,
+      settleMs: LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSettleMs,
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  /**
+   * Evaluate one launch boundary against the run's fixed baseline.
+   *
+   * Always driven by the caller's signal, never by an internal per-probe deadline: plan decision 8
+   * makes post-check correctness outrank an expired probe deadline, and decision 6 requires a
+   * triggered confirmation to finish even past a wall budget. Confirmation is telemetry only, so it
+   * consumes no launch or probe budget by construction.
+   */
+  private async checkCalibrationResourceBoundary(
+    guard: ResourceGuardDependencies,
+    baseline: ResourceBaseline,
+    boundary: ResourceBoundaryKind,
+    signal?: AbortSignal
+  ): Promise<ResourceBoundaryResult | undefined> {
+    if (baseline.enabledMetrics.length === 0) return undefined;
+    return checkBoundary(guard, {
+      baseline,
+      thresholds: CALIBRATION_RESOURCE_THRESHOLDS,
+      cooldownMs: LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
+      confirmationReads: LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads,
+      boundary,
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  /**
+   * Settle after a confirmed teardown, then evaluate the post-cleanup boundary.
+   *
+   * One cooldown first: an immediate snapshot is dominated by the probe's own released model
+   * mappings on Windows, which is self-release lag rather than the environment. Both the cooldown
+   * and the guard follow the caller's signal rather than a possibly expired per-probe deadline.
+   */
+  private async settleAndCheckPostCleanupResourceBoundary(
+    guard: ResourceGuardDependencies,
+    baseline: ResourceBaseline,
+    signal?: AbortSignal
+  ): Promise<ResourceBoundaryResult | undefined> {
+    await calibrationDelay(LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs, signal);
+    this.systemInfo.clearCache();
+    return this.checkCalibrationResourceBoundary(guard, baseline, 'post-cleanup', signal);
   }
 
   private async assertNoCalibrationOrphan(): Promise<void> {

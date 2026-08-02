@@ -480,22 +480,22 @@ adaptive manager branch can select observe/shadow behavior.
 **Goal:** exact diagnostic sweeps receive the same comparability guarantee and documented reject
 path.
 
-1. [~] Establish the same stabilized baseline after exact candidate/binary preparation and before the
+1. [x] Establish the same stabilized baseline after exact candidate/binary preparation and before the
    first combo launch.
-2. [~] Guard every pre-launch boundary before invoking the executor.
-3. [~] Replace the current debug-only 25% post-run log with the shared post-cleanup confirmation guard.
-4. [~] Maintain a clean-runs collection distinct from the chronological probe trail. A post-drift run
+2. [x] Guard every pre-launch boundary before invoking the executor.
+3. [x] Replace the current debug-only 25% post-run log with the shared post-cleanup confirmation guard.
+4. [x] Maintain a clean-runs collection distinct from the chronological probe trail. A post-drift run
    can be displayed as invalidated but cannot influence `recommendLlamaCalibrationRun()`.
-5. [~] Build `diagnosticCandidate` only from earlier clean exact runs. Confirmed post-cleanup drift on
+5. [x] Build `diagnosticCandidate` only from earlier clean exact runs. Confirmed post-cleanup drift on
    the first run yields no candidate because that run is contaminated; pre-launch drift before the
    second run may report the already-clean first run under exact mode's single-launch evidence rule.
    Make exact ranking retain the winning clean public probe index.
-6. [~] Preserve cleanup-failure precedence and structured details through exact and outer catch paths.
+6. [x] Preserve cleanup-failure precedence and structured details through exact and outer catch paths.
    Stage verified-profile/token-count and ranking mutations until post-cleanup acceptance, matching
    adaptive behavior.
-7. [~] Update exact progress to emit exactly one `phase: 'done'`/`terminalStatus: 'failed'` payload and
+7. [x] Update exact progress to emit exactly one `phase: 'done'`/`terminalStatus: 'failed'` payload and
    never report a completed sweep after stability failure.
-8. [~] Convert exact manager observe/shadow wiring to the identical enforcing path and delete its
+8. [x] Convert exact manager observe/shadow wiring to the identical enforcing path and delete its
    shadow branch, replay-threshold control, and runtime selector.
 
 **Verification:** exact mode launches no later combos after confirmed drift and exposes no usable
@@ -507,26 +507,26 @@ enforcing path, with only the development harness and retained trace artifact ou
 
 **Goal:** make every new semantic explicit and difficult for a host to misuse.
 
-1. [ ] Update `src/types/llm-calibration.ts` with the structured diagnostics, probe validity, typed
+1. [~] Update `src/types/llm-calibration.ts` with the structured diagnostics, probe validity, typed
    diagnostic candidate, expanded partial report, and schema-v3 report literals.
-2. [ ] Add/export `LlamaCalibrationResourceStabilityError` and its discriminated details union from the
+2. [~] Add/export `LlamaCalibrationResourceStabilityError` and its discriminated details union from the
    public error surface and root index.
-3. [ ] Replace defaults atomically, assert their fixed invariants in tests, and publish
+3. [~] Replace defaults atomically, assert their fixed invariants in tests, and publish
    `llama-runtime-v3`; do not add caller override fields.
-4. [ ] Refactor duplicated exact/adaptive partial-report construction enough to guarantee the same
+4. [~] Refactor duplicated exact/adaptive partial-report construction enough to guarantee the same
    redaction, resource diagnostics, cleanup state, and candidate usability markers.
-5. [ ] Preserve specialized error identity through `redactCalibrationError()` and every adaptive/exact
+5. [~] Preserve specialized error identity through `redactCalibrationError()` and every adaptive/exact
    outer catch instead of reconstructing a base `ServerError`. Test `instanceof`, typed details, and
    prompt redaction at the final caller boundary for both strategies.
-6. [ ] Add one specialized branch before generic `ServerError` handling in `formatErrorForUI()`. Surface
+6. [~] Add one specialized branch before generic `ServerError` handling in `formatErrorForUI()`. Surface
    either calibration-specific details code and its actionable suggestion; cover both in
    `error-helpers.test.ts` and the integration guide.
-7. [ ] Update report methodology and warnings for disabled metrics. Do not manufacture a drift decision
+7. [~] Update report methodology and warnings for disabled metrics. Do not manufacture a drift decision
    when telemetry is unavailable or repeat baseline/threshold payloads in methodology.
-8. [ ] Add a durable `test:packed-api` harness/script that packs the built library and compiles a small
+8. [~] Add a durable `test:packed-api` harness/script that packs the built library and compiles a small
    external TypeScript consumer against the tarball. Exercise `instanceof`, details narrowing,
    schema-v3 types, and the removed fields without relying on source-relative imports.
-9. [ ] Ensure generated declarations make the specialized error and typed details usable from that
+9. [~] Ensure generated declarations make the specialized error and typed details usable from that
    packed consumer.
 
 **Verification:** public compile tests consume the new error/details/diagnostics, prove removed keys
