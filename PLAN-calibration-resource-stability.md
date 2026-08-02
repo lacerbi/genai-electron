@@ -95,6 +95,19 @@ traces.
    checkpoint, above the measured settling envelope) adds an explicit report warning that the result
    may be conservative and recalibration may find a better configuration. Implemented with the
    Phase 2/4 report work.
+   *Checkpoint resolution (2026-08-02):* user approved host decrease 10%, VRAM decrease 10%,
+   settle 5000 ms, cooldown 750 ms, telemetry timeout 10000 ms, samples 3, confirmation reads 1.
+   Increase band set at host 20% / VRAM 10%; warn-vs-stop semantics at that band deliberately held
+   open pending the long-run (adaptive-2p default-budget) settling datapoint, because a large
+   increase also desensitizes the fixed-baseline decrease guard (nominal 10% becomes ~(settle+10)%
+   effective against the settled level) — the user's argument for bounding it.
+   *Final resolution (2026-08-02):* the 13.3-min default-budget adaptive-2p run settled at a
+   +10.50% plateau (stable from ~minute 6), matching the earlier +10.82% peak. Increase bands are
+   therefore enforced as confirmed HARD stops, not warnings: host increase 20% (≈1.9× plateau
+   margin), VRAM increase 10% (zero measured settling). Same confirmation protocol and the same
+   `CALIBRATION_RESOURCE_DRIFT` details code as decreases; direction is recorded in diagnostics.
+   Frozen set: host 10 dec / 20 inc, VRAM 10 dec / 10 inc, settle 5000 ms, cooldown 750 ms,
+   telemetry timeout 10000 ms, baseline samples 3, confirmation reads 1.
 4. **Independent metrics.** Host RAM and VRAM have separate thresholds and trust states. A missing
    or untrusted metric cannot mask a confirmed drop in the other. There is no weighted score.
 5. **Two launch boundaries.** With complete trusted readings, checking pre and post separately is
@@ -157,8 +170,13 @@ Replace the current resource keys on `LLAMA_CALIBRATION_DEFAULTS`:
 - remove `resourceDriftThresholdPct`;
 - remove `resourceSettledTolerancePct`;
 - remove `resourceDriftRetries`;
-- add `hostMemoryDecreaseThresholdPct` (value selected at the threshold checkpoint);
-- add `vramDecreaseThresholdPct` (value selected independently at the checkpoint);
+- add `hostMemoryDecreaseThresholdPct` (value selected at the threshold checkpoint; approved
+  2026-08-02: 10);
+- add `vramDecreaseThresholdPct` (value selected independently at the checkpoint; approved
+  2026-08-02: 10);
+- add `hostMemoryIncreaseThresholdPct` (approved 2026-08-02: 20) and `vramIncreaseThresholdPct`
+  (approved 2026-08-02: 10) per the Decision 3 amendment — confirmed hard stops sharing the
+  decrease protocol and error code, direction recorded in diagnostics;
 - add `resourceBaselineSamples: 3`;
 - add `resourceBaselineSettleMs` (the fixed bounded value approved at the threshold checkpoint,
   possibly zero if the quiet trace supports it);
@@ -311,7 +329,9 @@ Exact mode therefore gains a documented rejection path that callers must catch.
 
 - Restarting calibration after drift, automatic retry, or any open-ended settling loop.
 - Weighting or combining host and VRAM measurements.
-- Treating resource increases as interference.
+- Treating resource increases as interference. *(Amended 2026-08-02: bounded increase bands are now
+  enforced per the Decision 3 amendment; what remains out of scope is treating sub-band increases —
+  e.g. ordinary settling — as interference.)*
 - Cross-platform claims based on the Windows/NVIDIA validation machine.
 - Monitoring CPU load, GPU utilization, temperature, clocks, disk pressure, or unrelated process
   activity in this change.
@@ -397,7 +417,9 @@ from production-timed quiet traces. Do not claim to identify a universal perform
    false-abort margin. Label them heuristic, provisional, and scoped to the observed platform. A
    larger threshold is false-abort-conservative; a smaller threshold is
    comparability-conservative—do not use “conservative” without naming the risk.
-8. [~] **User checkpoint:** present raw summaries, candidate replay, proposed independent defaults,
+8. [x] (resolved 2026-08-02: host 10 dec / 20 inc, VRAM 10 dec / 10 inc, all hard; settle 5000,
+   cooldown 750, timeout 10000 approved; long-run settling plateau +10.50% measured by the redo)
+   **User checkpoint:** present raw summaries, candidate replay, proposed independent defaults,
    telemetry timeout, fixed settle delay, cooldown value, and platform limits. Do not enable manager
    hard stops or claim a harmful-pressure boundary without explicit approval.
 
@@ -661,7 +683,9 @@ git diff --check
 - One calibration call establishes one bounded, fixed baseline for each enabled trusted metric and
   never re-anchors or restarts; partial/unavailable monitoring coverage is explicit.
 - Minor decreases below independently approved host/VRAM thresholds are tolerated; increases do not
-  stop calibration.
+  stop calibration. *(Amended 2026-08-02: increases beyond the approved bands — host 20%, VRAM 10% —
+  also stop calibration under the same error code; sub-band increases remain tolerated and
+  diagnostic.)*
 - A confirmed material decrease in either trusted metric rejects both adaptive and exact modes with
   `LlamaCalibrationResourceStabilityError` and
   `details.code === 'CALIBRATION_RESOURCE_DRIFT'`.
