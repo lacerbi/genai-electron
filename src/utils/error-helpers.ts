@@ -6,6 +6,7 @@
 import {
   GenaiElectronError,
   ContextConstraintError,
+  LlamaCalibrationResourceStabilityError,
   ModelNotFoundError,
   DownloadError,
   InsufficientResourcesError,
@@ -159,6 +160,21 @@ export function formatErrorForUI(error: unknown): UIErrorFormat {
       remediation:
         (error.details as { suggestion?: string })?.suggestion ||
         'Choose a different port or stop the application using this port.',
+    };
+  }
+
+  // Handle LlamaCalibrationResourceStabilityError BEFORE the generic ServerError branch it
+  // extends: the calibration-specific details code and its retry guidance are the whole point of
+  // the typed rejection, and a generic "check the server logs" message would bury them.
+  if (error instanceof LlamaCalibrationResourceStabilityError) {
+    return {
+      code: error.details.code,
+      title:
+        error.details.code === 'CALIBRATION_RESOURCE_DRIFT'
+          ? 'Machine Resources Changed During Calibration'
+          : 'Machine Resource Stability Could Not Be Verified',
+      message: `${error.message}. Calibration was stopped and produced no usable recommendation; close heavy applications and other GPU work, then run it again from the beginning.`,
+      remediation: error.details.suggestion,
     };
   }
 

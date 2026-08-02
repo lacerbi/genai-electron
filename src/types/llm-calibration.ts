@@ -331,13 +331,6 @@ export interface LlamaCalibrationCleanupRecord {
   error?: string;
 }
 
-export interface LlamaCalibrationResourceMetricDiagnostic {
-  beforeBytes?: number;
-  afterBytes?: number;
-  comparability: 'available' | 'material' | 'unavailable';
-  decreasePct?: number;
-}
-
 /** The two independently guarded resources. There is no weighting and no combined score. */
 export type LlamaCalibrationResourceMetric = 'hostMemory' | 'vram';
 
@@ -390,6 +383,50 @@ export interface LlamaCalibrationResourceBoundaryDiagnostic {
 }
 
 /**
+ * Both guarded boundaries of one launch.
+ *
+ * `postCleanup` is present only when teardown was confirmed, because an unconfirmed teardown
+ * rejects with its own cleanup error before any resource classification happens. Either side is
+ * absent when resource monitoring was unavailable for the run.
+ */
+export interface LlamaCalibrationProbeResourceBoundaries {
+  preLaunch?: LlamaCalibrationResourceBoundaryDiagnostic;
+  postCleanup?: LlamaCalibrationResourceBoundaryDiagnostic;
+}
+
+/** How much of the resource guard was actually active for a run. */
+export type LlamaCalibrationResourceMonitoringCoverage = 'complete' | 'partial' | 'unavailable';
+
+/**
+ * One metric's fixed baseline for the whole run.
+ *
+ * There is exactly one of these per metric per `calibrate()` call: calibration never re-anchors, so
+ * every boundary reading in the report is comparable against this single value.
+ */
+export interface LlamaCalibrationResourceMetricMonitoring {
+  metric: LlamaCalibrationResourceMetric;
+  /** False when too few trusted baseline samples existed; such a metric guards nothing. */
+  enabled: boolean;
+  /** Median of `trustedSamples`; finite and positive, and present only when `enabled`. */
+  baselineBytes?: number;
+  decreaseThresholdPct: number;
+  increaseThresholdPct: number;
+  /** Bounded baseline snapshot attempts inspected. Never extended by retries. */
+  attempts: number;
+  /** Trusted baseline sample values in capture order; may be shorter than `attempts`. */
+  trustedSamples: readonly number[];
+}
+
+/** Run-level resource-guard coverage and the fixed baselines every boundary was compared against. */
+export interface LlamaCalibrationResourceMonitoring {
+  coverage: LlamaCalibrationResourceMonitoringCoverage;
+  /** Metrics guarded for the whole run, in canonical order. */
+  enabledMetrics: readonly LlamaCalibrationResourceMetric[];
+  /** One entry per metric, in canonical order, including disabled ones. */
+  metrics: readonly LlamaCalibrationResourceMetricMonitoring[];
+}
+
+/**
  * The single source of truth for a resource-stability rejection.
  *
  * `probeIndex` is absent for a pre-launch failure, which by construction has no probe.
@@ -430,13 +467,17 @@ export type LlamaCalibrationProbeResourceValidity =
   | 'accepted'
   | 'invalidated-by-resource-stability';
 
+/**
+ * Passive per-probe estimates.
+ *
+ * Machine-resource readings are NOT here: they live in the probe's `resourceBoundaries`, compared
+ * against the run's single fixed baseline in report-level `resourceMonitoring`.
+ */
 export interface LlamaCalibrationPassiveDiagnostics {
   /** Full-attention upper-bound-style estimate; not SWA-correct for windowed models. */
   kvBytesEstimate?: number;
   modelBytes?: number;
   expertWeightBytes?: number;
-  hostAvailableMemory: LlamaCalibrationResourceMetricDiagnostic;
-  gpuAvailableMemory: LlamaCalibrationResourceMetricDiagnostic;
   warnings: readonly string[];
 }
 
@@ -462,9 +503,17 @@ export interface LlamaCalibrationProbe {
    *
    * `invalidated-by-resource-stability` probes stay in the chronological trail for auditing but
    * never reach adaptive classification, exact ranking, selection, fallback, or the diagnostic
-   * candidate. Absent means the observation was not resource-guarded.
+   * candidate. `accepted` means only that the resource guard did not invalidate it; a probe can
+   * still be `accepted` and carry its own operational failure.
    */
-  resourceValidity?: LlamaCalibrationProbeResourceValidity;
+  resourceValidity: LlamaCalibrationProbeResourceValidity;
+  /**
+   * The guarded boundaries around this launch, compared against the run's fixed baseline.
+   *
+   * Absent sides mean that boundary was never evaluated: resource monitoring was unavailable for
+   * the run, or the launch ended before it (an unconfirmed teardown, a caller abort).
+   */
+  resourceBoundaries?: LlamaCalibrationProbeResourceBoundaries;
   loadTimeMs?: number;
   effectiveContextSize?: number;
   effectiveParallelRequests?: number;
@@ -629,6 +678,33 @@ export interface LlamaCalibrationBudgetReport {
   };
 }
 
+/**
+ * How the fixed-baseline resource guard was operated, as protocol facts only.
+ *
+ * Numeric baselines and bands are deliberately absent: they belong to `resourceMonitoring`, which
+ * is the single source of truth for what each metric was compared against.
+ */
+export interface LlamaCalibrationResourceStabilityMethodology {
+  /** Fixed delay after preparation, before the bounded baseline snapshots. Never condition-driven. */
+  baselineSettleMs: number;
+  /** Bounded baseline snapshot attempts. Never extended by retries. */
+  baselineSamples: number;
+  /** Trusted values a metric needs before it is guarded at all. */
+  minTrustedBaselineSamples: number;
+  /** Whole-boundary confirmation snapshots taken for a suspicious trusted reading. */
+  confirmationReads: number;
+  /** Per-command wall-clock bound for each platform telemetry read. */
+  telemetryTimeoutMs: number;
+  /** Both directions are guarded, each by its own independent per-metric band. */
+  guardedDirections: readonly LlamaCalibrationResourceChangeDirection[];
+  /** Both launch sides are guarded; `post-cleanup` only once teardown is confirmed. */
+  guardedBoundaries: readonly LlamaCalibrationResourceBoundaryKind[];
+  /** A change exactly equal to a band is suspicious and must be confirmed. */
+  thresholdComparison: 'inclusive';
+  /** States the sampling blind spot instead of promising continuous observation. */
+  caveat: string;
+}
+
 export interface LlamaCalibrationMethodology {
   layerCount: number;
   layerCountSource: 'metadata' | 'fallback';
@@ -648,10 +724,11 @@ export interface LlamaCalibrationMethodology {
   kvPrecisionPreferencePct: number;
   contextPreferencePct?: number;
   scoreUnit: 'scenario-median-wall-ms';
+  resourceStability: LlamaCalibrationResourceStabilityMethodology;
 }
 
 interface LlamaCalibrationReportBase {
-  schemaVersion: 2;
+  schemaVersion: 3;
   policyVersion: string;
   createdAt: string;
   status: LlamaCalibrationTerminalStatus;
@@ -662,6 +739,8 @@ interface LlamaCalibrationReportBase {
   fixedConfig: LlamaCalibrationFixedConfig;
   workloads: readonly LlamaCalibrationWorkloadSignature[];
   methodology: LlamaCalibrationMethodology;
+  /** The run's single fixed baseline per metric, and how much of the guard was active. */
+  resourceMonitoring: LlamaCalibrationResourceMonitoring;
   probes: readonly LlamaCalibrationProbe[];
   warnings: readonly string[];
 }
@@ -713,11 +792,13 @@ export type LlamaCalibrationReport = LlamaAdaptiveCalibrationReport | LlamaExact
 
 /** Partial report attached to aborted/failed calibration errors. */
 export interface LlamaCalibrationPartialReport {
-  schemaVersion: 2;
+  schemaVersion: 3;
   policyVersion: string;
   strategy: 'adaptive' | 'exact';
   status: Extract<LlamaCalibrationTerminalStatus, 'aborted' | 'failed'>;
   createdAt: string;
+  /** Absent only when the run failed before its fixed baseline was established. */
+  resourceMonitoring?: LlamaCalibrationResourceMonitoring;
   probes: readonly LlamaCalibrationProbe[];
   warnings: readonly string[];
   cleanupConfirmed: boolean;
@@ -733,6 +814,8 @@ export interface LlamaCalibrationPartialReport {
 export interface LlamaCalibrationResourceFailurePartialReport
   extends LlamaCalibrationPartialReport {
   status: 'failed';
+  /** Always present: a resource rejection can only happen once a fixed baseline exists. */
+  resourceMonitoring: LlamaCalibrationResourceMonitoring;
   resourceFailure: LlamaCalibrationResourceFailure;
   /** Present only when clean pre-failure evidence already met the normal reproduction rule. */
   diagnosticCandidate?: LlamaCalibrationDiagnosticCandidate;

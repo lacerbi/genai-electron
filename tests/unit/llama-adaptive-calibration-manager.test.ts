@@ -792,12 +792,19 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
           expect.stringContaining('Resource metric vram is disabled for this calibration run'),
         ])
       );
+      // Schema v3 states the loss once, as coverage, instead of manufacturing a per-probe
+      // resource conclusion: both metrics are disabled and no boundary was ever evaluated.
+      expect(report.resourceMonitoring).toMatchObject({
+        coverage: 'unavailable',
+        enabledMetrics: [],
+      });
+      expect(report.resourceMonitoring.metrics.map((metric) => metric.enabled)).toEqual([
+        false,
+        false,
+      ]);
       expect(
         report.probes.every(
-          (probe) =>
-            probe.resourceValidity === 'accepted' &&
-            probe.diagnostics?.hostAvailableMemory.comparability === 'unavailable' &&
-            probe.diagnostics.gpuAvailableMemory.comparability === 'unavailable'
+          (probe) => probe.resourceValidity === 'accepted' && probe.resourceBoundaries === undefined
         )
       ).toBe(true);
     });
@@ -826,10 +833,38 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(report.warnings).not.toContain(
         expect.stringContaining('Resource metric hostMemory is disabled')
       );
+      // Partial coverage is explicit, and the surviving metric keeps a real fixed baseline that
+      // every probe boundary was compared against.
+      expect(report.resourceMonitoring.coverage).toBe('partial');
+      expect(report.resourceMonitoring.enabledMetrics).toEqual(['hostMemory']);
+      const hostMonitoring = report.resourceMonitoring.metrics.find(
+        (metric) => metric.metric === 'hostMemory'
+      );
+      expect(hostMonitoring?.enabled).toBe(true);
+      expect(hostMonitoring?.baselineBytes).toBeGreaterThan(0);
+      expect(hostMonitoring?.decreaseThresholdPct).toBe(
+        LLAMA_CALIBRATION_DEFAULTS.hostMemoryDecreaseThresholdPct
+      );
+      expect(hostMonitoring?.increaseThresholdPct).toBe(
+        LLAMA_CALIBRATION_DEFAULTS.hostMemoryIncreaseThresholdPct
+      );
       expect(
-        report.probes.every(
-          (probe) => probe.diagnostics?.hostAvailableMemory.comparability === 'available'
-        )
+        report.probes.every((probe) => {
+          const host = probe.resourceBoundaries?.postCleanup?.initial.readings.find(
+            (reading) => reading.metric === 'hostMemory'
+          );
+          const vram = probe.resourceBoundaries?.postCleanup?.initial.readings.find(
+            (reading) => reading.metric === 'vram'
+          );
+          return (
+            probe.resourceBoundaries?.preLaunch?.boundary === 'pre-launch' &&
+            host?.enabled === true &&
+            host.trusted === true &&
+            typeof host.availableBytes === 'number' &&
+            typeof host.decreasePctFromBaseline === 'number' &&
+            vram?.enabled === false
+          );
+        })
       ).toBe(true);
       // Every platform read is bounded and carries the caller's signal, so a hung command can
       // neither stall the run nor leak a child process.
@@ -1140,6 +1175,45 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         terminationReason: 'CALIBRATION_INVALID_CONFIG',
         operationalStatus: 'error',
       });
+    });
+
+    it('preserves the typed error identity, narrowing, and redaction through the adaptive outer catch', async () => {
+      // The final caller boundary is `calibrate()`, whose outer catch re-sanitizes everything it
+      // rethrows. It must not rebuild this as a base ServerError: hosts branch on the class and
+      // then switch on the typed details code.
+      scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error).toBeInstanceOf(ServerError);
+      expect(error.name).toBe('LlamaCalibrationResourceStabilityError');
+      // Both arms of the discriminated details union are reachable from one `instanceof` branch.
+      const narrowed: string =
+        error.details.code === 'CALIBRATION_RESOURCE_DRIFT'
+          ? `drift:${error.details.partialReport.resourceFailure.boundary}`
+          : `unverified:${error.details.partialReport.resourceFailure.boundary}`;
+      expect(narrowed).toBe('drift:post-cleanup');
+      const partial = error.details.partialReport;
+      expect(partial.schemaVersion).toBe(3);
+      expect(partial.policyVersion).toBe('llama-runtime-v3');
+      expect(partial.resourceMonitoring).toMatchObject({
+        coverage: 'complete',
+        enabledMetrics: ['hostMemory', 'vram'],
+      });
+      // Boundary percentages in the failure are only meaningful against the run's fixed baseline,
+      // so the partial report carries that baseline with them.
+      for (const metric of partial.resourceMonitoring.metrics) {
+        expect(metric.baselineBytes).toBeGreaterThan(0);
+        expect(metric.trustedSamples.length).toBeGreaterThanOrEqual(2);
+        expect(metric.attempts).toBe(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples);
+      }
+      expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain(
+        workload.prompt
+      );
     });
 
     it('rejects a caller abort raised during baseline collection as an abort, not drift', async () => {

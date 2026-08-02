@@ -507,26 +507,26 @@ enforcing path, with only the development harness and retained trace artifact ou
 
 **Goal:** make every new semantic explicit and difficult for a host to misuse.
 
-1. [~] Update `src/types/llm-calibration.ts` with the structured diagnostics, probe validity, typed
+1. [x] Update `src/types/llm-calibration.ts` with the structured diagnostics, probe validity, typed
    diagnostic candidate, expanded partial report, and schema-v3 report literals.
-2. [~] Add/export `LlamaCalibrationResourceStabilityError` and its discriminated details union from the
+2. [x] Add/export `LlamaCalibrationResourceStabilityError` and its discriminated details union from the
    public error surface and root index.
-3. [~] Replace defaults atomically, assert their fixed invariants in tests, and publish
+3. [x] Replace defaults atomically, assert their fixed invariants in tests, and publish
    `llama-runtime-v3`; do not add caller override fields.
-4. [~] Refactor duplicated exact/adaptive partial-report construction enough to guarantee the same
+4. [x] Refactor duplicated exact/adaptive partial-report construction enough to guarantee the same
    redaction, resource diagnostics, cleanup state, and candidate usability markers.
-5. [~] Preserve specialized error identity through `redactCalibrationError()` and every adaptive/exact
+5. [x] Preserve specialized error identity through `redactCalibrationError()` and every adaptive/exact
    outer catch instead of reconstructing a base `ServerError`. Test `instanceof`, typed details, and
    prompt redaction at the final caller boundary for both strategies.
-6. [~] Add one specialized branch before generic `ServerError` handling in `formatErrorForUI()`. Surface
+6. [x] Add one specialized branch before generic `ServerError` handling in `formatErrorForUI()`. Surface
    either calibration-specific details code and its actionable suggestion; cover both in
    `error-helpers.test.ts` and the integration guide.
-7. [~] Update report methodology and warnings for disabled metrics. Do not manufacture a drift decision
+7. [x] Update report methodology and warnings for disabled metrics. Do not manufacture a drift decision
    when telemetry is unavailable or repeat baseline/threshold payloads in methodology.
-8. [~] Add a durable `test:packed-api` harness/script that packs the built library and compiles a small
+8. [x] Add a durable `test:packed-api` harness/script that packs the built library and compiles a small
    external TypeScript consumer against the tarball. Exercise `instanceof`, details narrowing,
    schema-v3 types, and the removed fields without relying on source-relative imports.
-9. [~] Ensure generated declarations make the specialized error and typed details usable from that
+9. [x] Ensure generated declarations make the specialized error and typed details usable from that
    packed consumer.
 
 **Verification:** public compile tests consume the new error/details/diagnostics, prove removed keys
@@ -536,9 +536,9 @@ and `resourceRegime` are absent, and reject schema-v2 assumptions.
 
 **Goal:** prove the hard-stop contract at unit, manager, lifecycle, and public-package levels.
 
-1. [ ] In `tests/unit/llama-adaptive-calibration-manager.test.ts`, use an atomic scripted snapshot queue
+1. [~] In `tests/unit/llama-adaptive-calibration-manager.test.ts`, use an atomic scripted snapshot queue
    so baseline/pre/post/confirmation host and GPU values cannot become misaligned.
-2. [ ] Cover adaptive and exact cases for:
+2. [~] Cover adaptive and exact cases for:
    - bounded baseline collection and refresh-before-read ordering;
    - normal pre/post flow with no confirmation;
    - increases, zero-byte severe drops, and just-under-threshold decreases;
@@ -563,12 +563,12 @@ and `resourceRegime` are absent, and reject schema-v2 assumptions.
      redaction, UI formatting, manager unlock, and cleanup/fatal-error precedence;
    - caller abort, telemetry command timeout, and internal deadline behavior during
      baseline/confirmation.
-3. [ ] Remove regime/re-anchor/material-drift policy tests and keep existing inline golden adaptive
+3. [~] Remove regime/re-anchor/material-drift policy tests and keep existing inline golden adaptive
    traces as regression tests.
-4. [ ] Expand `SystemInfo`, defaults, error, public-types, report-shape, and process-level calibration
+4. [~] Expand `SystemInfo`, defaults, error, public-types, report-shape, and process-level calibration
    tests. Ensure older fixtures provide explicit trusted host and available-VRAM values rather than
    silently disabling the guard.
-5. [ ] Run the probe and runner lifecycle suites unchanged as regressions.
+5. [~] Run the probe and runner lifecycle suites unchanged as regressions.
 
 **Focused verification:**
 

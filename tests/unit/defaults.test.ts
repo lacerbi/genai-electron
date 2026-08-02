@@ -93,6 +93,31 @@ describe('LLM calibration defaults', () => {
     });
   });
 
+  it('pins the frozen resource-stability protocol values approved on 2026-08-02', () => {
+    // These are exported policy constants, not caller-configurable calibration fields: a report
+    // that claims policy `llama-runtime-v3` must have been produced by exactly this protocol.
+    expect(LLAMA_CALIBRATION_DEFAULTS.hostMemoryDecreaseThresholdPct).toBe(10);
+    expect(LLAMA_CALIBRATION_DEFAULTS.hostMemoryIncreaseThresholdPct).toBe(20);
+    expect(LLAMA_CALIBRATION_DEFAULTS.vramDecreaseThresholdPct).toBe(10);
+    expect(LLAMA_CALIBRATION_DEFAULTS.vramIncreaseThresholdPct).toBe(10);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSettleMs).toBe(5_000);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs).toBe(750);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs).toBe(10_000);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples).toBe(3);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads).toBe(1);
+    expect(LLAMA_CALIBRATION_DEFAULTS.policyVersion).toBe('llama-runtime-v3');
+  });
+
+  it('exposes no field that would let a caller weaken or disable the guard', () => {
+    // Confirmation cannot be switched off, and no key hints that any of this is per-call tunable.
+    // (The compile-time half - that a calibration config literal rejects these names - lives in
+    // public-types.test.ts.)
+    const tunableLookingKeys = Object.keys(LLAMA_CALIBRATION_DEFAULTS).filter((key) =>
+      /(disable|skip|override|enabled|allowUnverified)/i.test(key)
+    );
+    expect(tunableLookingKeys).toEqual([]);
+  });
+
   it('removes every re-anchoring resource key the fixed-baseline guard replaced', () => {
     // Re-anchoring is gone, so a build that still reads these keys must fail loudly rather than
     // silently fall back to `undefined` inside a threshold comparison.

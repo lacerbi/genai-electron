@@ -157,6 +157,9 @@ function summarizeReport(report) {
     createdAt: report.createdAt,
     probeCount: report.probes.length,
     warnings: report.warnings,
+    // Schema v3: the run's ONE fixed baseline per metric, which every probe boundary below is
+    // measured against. Retained verbatim - it is what makes a trace replayable.
+    resourceMonitoring: report.resourceMonitoring,
     selected: summarizeRecommendation(report.selected),
     provisional: summarizeRecommendation(report.provisional),
     fallback: summarizeRecommendation(report.fallback),
@@ -177,10 +180,11 @@ function summarizeReport(report) {
       durationMs: probe.durationMs,
       resourceValidity: probe.resourceValidity,
       cleanupConfirmed: probe.cleanup?.confirmed,
+      // Schema v3 replaced the per-probe before/after reduction with both guarded boundaries.
+      resourceBoundaries: probe.resourceBoundaries,
       diagnostics: probe.diagnostics
         ? {
-            hostAvailableMemory: probe.diagnostics.hostAvailableMemory,
-            gpuAvailableMemory: probe.diagnostics.gpuAvailableMemory,
+            kvBytesEstimate: probe.diagnostics.kvBytesEstimate,
             warnings: probe.diagnostics.warnings,
           }
         : undefined,
@@ -197,6 +201,7 @@ function summarizePartialReport(partial) {
     probeCount: Array.isArray(partial.probes) ? partial.probes.length : undefined,
     warnings: partial.warnings,
     cleanupConfirmed: partial.cleanupConfirmed,
+    resourceMonitoring: partial.resourceMonitoring,
     // Retained verbatim: the boundary diagnostics are the whole point of an enforcement smoke.
     resourceFailure: partial.resourceFailure,
     diagnosticCandidate: partial.diagnosticCandidate,

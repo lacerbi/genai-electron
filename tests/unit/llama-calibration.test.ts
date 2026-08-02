@@ -290,7 +290,7 @@ describe('LlamaServerManager.calibrate', () => {
     for (const call of mockStartRunner.mock.calls) {
       expect(call[0]).toMatchObject({ contextSize: 12_288, parallelRequests: 2 });
     }
-    expect(report).toMatchObject({ schemaVersion: 2, strategy: 'exact', status: 'complete' });
+    expect(report).toMatchObject({ schemaVersion: 3, strategy: 'exact', status: 'complete' });
     if (report.strategy !== 'exact') throw new Error('expected exact report');
     expect(report.runs.map((run) => run.scoreMs)).toEqual([100, 90]);
     expect(report.selected?.combo?.label).toBe('b');
@@ -925,12 +925,76 @@ describe('LlamaServerManager.calibrate', () => {
       // The outer catch must not rebuild this as a base ServerError: hosts branch on the class and
       // then switch on the typed details code.
       expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error).toBeInstanceOf(ServerError);
       expect(error.name).toBe('LlamaCalibrationResourceStabilityError');
       expect(error.message).toEqual(expect.stringContaining('hostMemory'));
       expect(error.details.partialReport.resourceFailure).toBeDefined();
+      // Both arms of the discriminated details union are reachable from one `instanceof` branch.
+      const narrowed: string =
+        error.details.code === 'CALIBRATION_RESOURCE_DRIFT'
+          ? `drift:${error.details.partialReport.resourceFailure.boundary}`
+          : `unverified:${error.details.partialReport.resourceFailure.boundary}`;
+      expect(narrowed).toBe('drift:pre-launch');
+      const partial = error.details.partialReport;
+      expect(partial.schemaVersion).toBe(3);
+      expect(partial.policyVersion).toBe('llama-runtime-v3');
+      expect(partial.resourceMonitoring).toMatchObject({
+        coverage: 'complete',
+        enabledMetrics: ['hostMemory', 'vram'],
+      });
       expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain(
         'PRIVATE-PROMPT'
       );
+    });
+
+    it('reports schema-v3 boundaries and the fixed baseline on a completed sweep', async () => {
+      scriptSnapshots({});
+
+      const report = await settleCalibration(manager.calibrate(config));
+
+      if (report.strategy !== 'exact') throw new Error('expected exact report');
+      expect(report.schemaVersion).toBe(3);
+      expect(report.resourceMonitoring.coverage).toBe('complete');
+      // Report-level machine memory is the stabilized baseline, independently per metric, so the
+      // numbers a reader compares probes against are the ones the guard actually used.
+      const hostBaseline = report.resourceMonitoring.metrics.find(
+        (metric) => metric.metric === 'hostMemory'
+      )?.baselineBytes;
+      const vramBaseline = report.resourceMonitoring.metrics.find(
+        (metric) => metric.metric === 'vram'
+      )?.baselineBytes;
+      expect(report.machine.availableMemoryBytes).toBe(hostBaseline);
+      expect(report.machine.gpu[0]?.availableMemoryBytes).toBe(vramBaseline);
+      // Methodology states the protocol, never a second copy of the baselines or bands.
+      expect(report.methodology.resourceStability).toMatchObject({
+        baselineSamples: LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples,
+        confirmationReads: LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads,
+        guardedDirections: ['decrease', 'increase'],
+        guardedBoundaries: ['pre-launch', 'post-cleanup'],
+        thresholdComparison: 'inclusive',
+      });
+      expect(JSON.stringify(report.methodology.resourceStability)).not.toContain(
+        String(hostBaseline)
+      );
+      expect(report.methodology.resourceStability.caveat).toEqual(
+        expect.stringContaining('not continuous observation')
+      );
+      for (const probe of report.probes) {
+        expect(probe.resourceBoundaries?.preLaunch).toMatchObject({
+          boundary: 'pre-launch',
+          confirmationPerformed: false,
+        });
+        expect(probe.resourceBoundaries?.postCleanup).toMatchObject({
+          boundary: 'post-cleanup',
+          confirmationPerformed: false,
+        });
+        const host = probe.resourceBoundaries?.postCleanup?.initial.readings.find(
+          (reading) => reading.metric === 'hostMemory'
+        );
+        expect(host).toMatchObject({ enabled: true, trusted: true, suspicious: false });
+        expect(typeof host?.availableBytes).toBe('number');
+        expect(typeof host?.decreasePctFromBaseline).toBe('number');
+      }
     });
   });
 });
