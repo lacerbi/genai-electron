@@ -5,10 +5,48 @@
 
 import os from 'node:os';
 import { exec } from 'node:child_process';
+import type { ExecOptionsWithStringEncoding } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { MemoryInfo, GPUInfo } from '../types/index.js';
+import type {
+  MemoryInfo,
+  GPUInfo,
+  MemoryTelemetryRefreshStatus,
+  TelemetryCommandOptions,
+} from '../types/index.js';
+
+export type { MemoryTelemetryRefreshStatus, TelemetryCommandOptions } from '../types/index.js';
 
 const execAsync = promisify(exec);
+
+/** Default wall-clock bound for a single platform telemetry command. */
+const DEFAULT_TELEMETRY_TIMEOUT_MS = 10000;
+
+const WINDOWS_AVAILABLE_BYTES_COMMAND =
+  'powershell -NoProfile -Command "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableBytes"';
+
+/**
+ * Reject with the caller's abort reason so upstream can map it to its own
+ * abort handling instead of seeing a generic command failure.
+ */
+function throwIfAborted(options?: TelemetryCommandOptions): void {
+  const signal = options?.signal;
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error('Telemetry command aborted');
+  }
+}
+
+/**
+ * Build `exec` options that bound the command in wall-clock time and wire the
+ * caller's abort signal. Node kills the child process for both, so neither a
+ * timeout nor an abort can leave a telemetry process running.
+ */
+function telemetryExecOptions(options?: TelemetryCommandOptions): ExecOptionsWithStringEncoding {
+  return {
+    encoding: 'utf8',
+    timeout: options?.timeoutMs ?? DEFAULT_TELEMETRY_TIMEOUT_MS,
+    signal: options?.signal,
+  };
+}
 
 /**
  * Cached Windows "Available Bytes" (free + standby + modified-ready).
@@ -20,26 +58,52 @@ let cachedWindowsAvailable: { bytes: number; timestamp: number } | null = null;
 const WINDOWS_AVAILABLE_TTL_MS = 60000;
 
 /**
- * Refresh the standby-aware available-memory reading (Windows only; no-op
- * elsewhere). Called from SystemInfo.detect() so the synchronous
- * getMemoryInfo() has a fresh value by the time sizing decisions run.
+ * Refresh the standby-aware available-memory reading (Windows only) and report
+ * what actually happened during THIS invocation.
+ *
+ * Called from SystemInfo.detect() so the synchronous getMemoryInfo() has a
+ * fresh value by the time sizing decisions run, and from
+ * SystemInfo.refreshMemoryTelemetry() by long-running samplers that must keep
+ * every reading in one measurement regime.
+ *
+ * @param options - Optional abort signal and per-command timeout (default 10 s)
+ * @returns
+ * - `'not-required'` on non-Windows platforms: nothing is spawned, the direct
+ *   `os.freemem()` reading is trusted as-is.
+ * - `'refreshed'` when this invocation's PerfOS query produced a valid finite
+ *   non-negative value that was stored. A stale cached value never counts.
+ * - `'failed'` (never throws) on command failure, timeout, or unusable output.
+ *
+ * @throws The caller's abort reason if `options.signal` is aborted.
  */
-export async function refreshAvailableMemory(): Promise<void> {
+export async function refreshAvailableMemory(
+  options?: TelemetryCommandOptions
+): Promise<MemoryTelemetryRefreshStatus> {
   if (process.platform !== 'win32') {
-    return;
+    return 'not-required';
   }
+
+  throwIfAborted(options);
+
+  let stdout: string;
   try {
-    const { stdout } = await execAsync(
-      'powershell -NoProfile -Command "(Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory).AvailableBytes"',
-      { timeout: 10000 }
-    );
-    const bytes = parseInt(stdout.trim(), 10);
-    if (Number.isFinite(bytes) && bytes > 0) {
-      cachedWindowsAvailable = { bytes, timestamp: Date.now() };
-    }
+    ({ stdout } = await execAsync(WINDOWS_AVAILABLE_BYTES_COMMAND, telemetryExecOptions(options)));
   } catch {
-    // Fall back to os.freemem() readings
+    // A caller abort must stay distinguishable from an ordinary failure
+    throwIfAborted(options);
+    // Command failure or timeout (exec already killed the child):
+    // fall back to os.freemem() readings and report the degradation
+    return 'failed';
   }
+
+  const raw = typeof stdout === 'string' ? stdout.trim() : '';
+  const bytes = raw.length > 0 ? Number(raw) : Number.NaN;
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return 'failed';
+  }
+
+  cachedWindowsAvailable = { bytes, timestamp: Date.now() };
+  return 'refreshed';
 }
 
 /**
@@ -80,6 +144,7 @@ export function getMemoryInfo(): MemoryInfo {
  * Returns null if unable to detect or no GPU available
  *
  * @param gpu - GPU information from detectGPU()
+ * @param options - Optional abort signal and per-command timeout (default 10 s)
  * @returns VRAM in bytes or null
  *
  * @example
@@ -91,7 +156,10 @@ export function getMemoryInfo(): MemoryInfo {
  * }
  * ```
  */
-export async function estimateVRAM(gpu: GPUInfo): Promise<number | null> {
+export async function estimateVRAM(
+  gpu: GPUInfo,
+  options?: TelemetryCommandOptions
+): Promise<number | null> {
   if (!gpu.available) {
     return null;
   }
@@ -110,14 +178,16 @@ export async function estimateVRAM(gpu: GPUInfo): Promise<number | null> {
   if (gpu.type === 'nvidia' && gpu.cuda) {
     try {
       const { stdout } = await execAsync(
-        'nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits'
+        'nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits',
+        telemetryExecOptions(options)
       );
       const vramMB = parseInt(stdout.trim(), 10);
       if (!isNaN(vramMB)) {
         return vramMB * 1024 * 1024; // Convert MB to bytes
       }
     } catch {
-      // nvidia-smi not available or failed
+      // nvidia-smi not available, timed out, or failed
+      throwIfAborted(options);
       return null;
     }
   }
@@ -125,7 +195,10 @@ export async function estimateVRAM(gpu: GPUInfo): Promise<number | null> {
   // AMD ROCm: Try rocm-smi (Linux only)
   if (platform === 'linux' && gpu.type === 'amd' && gpu.rocm) {
     try {
-      const { stdout } = await execAsync('rocm-smi --showmeminfo vram --csv');
+      const { stdout } = await execAsync(
+        'rocm-smi --showmeminfo vram --csv',
+        telemetryExecOptions(options)
+      );
       // Parse CSV output to extract VRAM size
       const lines = stdout.split('\n');
       if (lines.length > 1 && lines[1]) {
@@ -138,7 +211,8 @@ export async function estimateVRAM(gpu: GPUInfo): Promise<number | null> {
         }
       }
     } catch {
-      // rocm-smi not available or failed
+      // rocm-smi not available, timed out, or failed
+      throwIfAborted(options);
       return null;
     }
   }

@@ -135,6 +135,9 @@ describe('SystemInfo', () => {
   });
 
   describe('refreshMemoryTelemetry()', () => {
+    // Status semantics, bounding, and abort handling are covered in depth by
+    // tests/unit/system-telemetry.test.ts, which isolates the module-scoped
+    // Windows available-memory cache from the assertions in this file.
     it('refreshes the reading behind getMemoryInfo() without throwing', async () => {
       // Long-running callers that sample memory repeatedly (LLM calibration
       // probes) need this to keep every reading in one measurement regime; on
@@ -157,7 +160,11 @@ describe('SystemInfo', () => {
         callback(null, { stdout: `${4 * 1024 * 1024 * 1024}\n`, stderr: '' });
       });
 
-      await expect(systemInfo.refreshMemoryTelemetry()).resolves.toBeUndefined();
+      // The status describes this invocation: Windows actually ran the PerfOS
+      // command, every other platform trusts its os.freemem() reading as-is.
+      await expect(systemInfo.refreshMemoryTelemetry()).resolves.toBe(
+        process.platform === 'win32' ? 'refreshed' : 'not-required'
+      );
 
       const memInfo = systemInfo.getMemoryInfo();
       expect(memInfo.total).toBe(16 * 1024 * 1024 * 1024);

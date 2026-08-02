@@ -8,6 +8,8 @@ export type {
   GPUInfo,
   CPUInfo,
   MemoryInfo,
+  MemoryTelemetryRefreshStatus,
+  TelemetryCommandOptions,
   SystemCapabilities,
   SystemRecommendations,
 } from './system.js';

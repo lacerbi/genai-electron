@@ -268,6 +268,7 @@ export type {
   GPUInfo,
   CPUInfo,
   MemoryInfo,
+  MemoryTelemetryRefreshStatus,
   SystemCapabilities,
   SystemRecommendations,
   // Model types

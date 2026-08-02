@@ -64,6 +64,29 @@ export interface MemoryInfo {
 }
 
 /**
+ * Outcome of a platform available-memory telemetry refresh.
+ *
+ * - `refreshed`: the platform command ran and stored a valid reading.
+ * - `not-required`: the platform needs no command; its direct reading is trusted.
+ * - `failed`: the command failed, timed out, or produced an unusable value.
+ */
+export type MemoryTelemetryRefreshStatus = 'refreshed' | 'not-required' | 'failed';
+
+/**
+ * Bounding options for a platform telemetry command (memory/GPU probes).
+ *
+ * Long-running callers (LLM calibration) pass their abort signal and a bounded
+ * timeout so a hung platform command cannot stall a run or leak a child process.
+ */
+export interface TelemetryCommandOptions {
+  /** Caller abort signal. Aborting rejects with the signal's reason. */
+  signal?: AbortSignal;
+
+  /** Per-command wall-clock bound in milliseconds (default: 10 000). */
+  timeoutMs?: number;
+}
+
+/**
  * System recommendations for model configuration
  */
 export interface SystemRecommendations {

@@ -4,16 +4,47 @@
  */
 
 import { exec } from 'node:child_process';
+import type { ExecOptionsWithStringEncoding } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { GPUInfo } from '../types/index.js';
+import type { GPUInfo, TelemetryCommandOptions } from '../types/index.js';
 import { isMac, isWindows, isLinux, isAppleSilicon } from '../utils/platform-utils.js';
 
 const execAsync = promisify(exec);
+
+/** Default wall-clock bound for a single platform telemetry command. */
+const DEFAULT_TELEMETRY_TIMEOUT_MS = 10000;
+
+/**
+ * Reject with the caller's abort reason so upstream can map it to its own
+ * abort handling instead of seeing a generic detection failure.
+ */
+function throwIfAborted(options?: TelemetryCommandOptions): void {
+  const signal = options?.signal;
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error('Telemetry command aborted');
+  }
+}
+
+/**
+ * Build `exec` options that bound the command in wall-clock time and wire the
+ * caller's abort signal. Node kills the child process for both, so neither a
+ * timeout nor an abort can leave a telemetry process running.
+ */
+function telemetryExecOptions(options?: TelemetryCommandOptions): ExecOptionsWithStringEncoding {
+  return {
+    encoding: 'utf8',
+    timeout: options?.timeoutMs ?? DEFAULT_TELEMETRY_TIMEOUT_MS,
+    signal: options?.signal,
+  };
+}
 
 /**
  * Detect GPU availability and capabilities
  * Platform-specific implementation
  *
+ * @param options - Optional abort signal and per-command timeout (default 10 s).
+ * A timed-out or failed command keeps the ordinary "no GPU" result; a caller
+ * abort rejects with the signal's reason.
  * @returns GPU information
  *
  * @example
@@ -24,17 +55,17 @@ const execAsync = promisify(exec);
  * }
  * ```
  */
-export async function detectGPU(): Promise<GPUInfo> {
+export async function detectGPU(options?: TelemetryCommandOptions): Promise<GPUInfo> {
   if (isMac()) {
-    return detectMacGPU();
+    return detectMacGPU(options);
   }
 
   if (isWindows()) {
-    return detectWindowsGPU();
+    return detectWindowsGPU(options);
   }
 
   if (isLinux()) {
-    return detectLinuxGPU();
+    return detectLinuxGPU(options);
   }
 
   // Unsupported platform
@@ -45,7 +76,7 @@ export async function detectGPU(): Promise<GPUInfo> {
  * Detect GPU on macOS
  * All modern Macs have Metal support
  */
-async function detectMacGPU(): Promise<GPUInfo> {
+async function detectMacGPU(options?: TelemetryCommandOptions): Promise<GPUInfo> {
   // All modern Macs (macOS 11+) have Metal support
   const gpuInfo: GPUInfo = {
     available: true,
@@ -55,12 +86,16 @@ async function detectMacGPU(): Promise<GPUInfo> {
 
   // Try to get GPU name from system_profiler
   try {
-    const { stdout } = await execAsync('system_profiler SPDisplaysDataType | grep "Chipset Model"');
+    const { stdout } = await execAsync(
+      'system_profiler SPDisplaysDataType | grep "Chipset Model"',
+      telemetryExecOptions(options)
+    );
     const match = stdout.match(/Chipset Model:\s*(.+)/);
     if (match && match[1]) {
       gpuInfo.name = match[1].trim();
     }
   } catch {
+    throwIfAborted(options);
     // Fallback: Use generic name based on architecture
     if (isAppleSilicon()) {
       gpuInfo.name = 'Apple Silicon GPU';
@@ -76,11 +111,12 @@ async function detectMacGPU(): Promise<GPUInfo> {
  * Detect GPU on Windows
  * Primarily checks for NVIDIA GPUs via nvidia-smi
  */
-async function detectWindowsGPU(): Promise<GPUInfo> {
+async function detectWindowsGPU(options?: TelemetryCommandOptions): Promise<GPUInfo> {
   // Try NVIDIA GPU detection via nvidia-smi
   try {
     const { stdout } = await execAsync(
-      'nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader'
+      'nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader',
+      telemetryExecOptions(options)
     );
 
     const parts = stdout.trim().split(',');
@@ -99,7 +135,8 @@ async function detectWindowsGPU(): Promise<GPUInfo> {
       };
     }
   } catch {
-    // nvidia-smi not available or failed
+    // nvidia-smi not available, timed out, or failed
+    throwIfAborted(options);
   }
 
   // TODO Phase 4: Add AMD GPU detection for Windows
@@ -113,21 +150,21 @@ async function detectWindowsGPU(): Promise<GPUInfo> {
  * Detect GPU on Linux
  * Checks for NVIDIA (CUDA), AMD (ROCm), and Intel GPUs
  */
-async function detectLinuxGPU(): Promise<GPUInfo> {
+async function detectLinuxGPU(options?: TelemetryCommandOptions): Promise<GPUInfo> {
   // Try NVIDIA GPU detection via nvidia-smi
-  const nvidiaGPU = await detectLinuxNvidiaGPU();
+  const nvidiaGPU = await detectLinuxNvidiaGPU(options);
   if (nvidiaGPU.available) {
     return nvidiaGPU;
   }
 
   // Try AMD GPU detection via rocm-smi
-  const amdGPU = await detectLinuxAMDGPU();
+  const amdGPU = await detectLinuxAMDGPU(options);
   if (amdGPU.available) {
     return amdGPU;
   }
 
   // Try Intel GPU detection via /sys/class/drm
-  const intelGPU = await detectLinuxIntelGPU();
+  const intelGPU = await detectLinuxIntelGPU(options);
   if (intelGPU.available) {
     return intelGPU;
   }
@@ -139,10 +176,11 @@ async function detectLinuxGPU(): Promise<GPUInfo> {
 /**
  * Detect NVIDIA GPU on Linux via nvidia-smi
  */
-async function detectLinuxNvidiaGPU(): Promise<GPUInfo> {
+async function detectLinuxNvidiaGPU(options?: TelemetryCommandOptions): Promise<GPUInfo> {
   try {
     const { stdout } = await execAsync(
-      'nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader'
+      'nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv,noheader',
+      telemetryExecOptions(options)
     );
 
     const parts = stdout.trim().split(',');
@@ -161,7 +199,8 @@ async function detectLinuxNvidiaGPU(): Promise<GPUInfo> {
       };
     }
   } catch {
-    // nvidia-smi not available or failed
+    // nvidia-smi not available, timed out, or failed
+    throwIfAborted(options);
   }
 
   return { available: false };
@@ -170,16 +209,22 @@ async function detectLinuxNvidiaGPU(): Promise<GPUInfo> {
 /**
  * Detect AMD GPU on Linux via rocm-smi
  */
-async function detectLinuxAMDGPU(): Promise<GPUInfo> {
+async function detectLinuxAMDGPU(options?: TelemetryCommandOptions): Promise<GPUInfo> {
   try {
     // Check if ROCm is available
-    const { stdout: rocmVersion } = await execAsync('rocm-smi --version');
+    const { stdout: rocmVersion } = await execAsync(
+      'rocm-smi --version',
+      telemetryExecOptions(options)
+    );
     if (!rocmVersion) {
       return { available: false };
     }
 
     // Get GPU info
-    const { stdout } = await execAsync('rocm-smi --showproductname --csv');
+    const { stdout } = await execAsync(
+      'rocm-smi --showproductname --csv',
+      telemetryExecOptions(options)
+    );
     const lines = stdout.split('\n');
 
     if (lines.length > 1 && lines[1]) {
@@ -191,7 +236,10 @@ async function detectLinuxAMDGPU(): Promise<GPUInfo> {
 
       // Try to get VRAM info
       try {
-        const { stdout: vramOut } = await execAsync('rocm-smi --showmeminfo vram --csv');
+        const { stdout: vramOut } = await execAsync(
+          'rocm-smi --showmeminfo vram --csv',
+          telemetryExecOptions(options)
+        );
         const vramLines = vramOut.split('\n');
         if (vramLines.length > 1 && vramLines[1]) {
           const vramPart = vramLines[1].split(',')[0];
@@ -208,6 +256,7 @@ async function detectLinuxAMDGPU(): Promise<GPUInfo> {
         }
       } catch {
         // VRAM info not available, but GPU is detected
+        throwIfAborted(options);
       }
 
       return {
@@ -218,7 +267,8 @@ async function detectLinuxAMDGPU(): Promise<GPUInfo> {
       };
     }
   } catch {
-    // rocm-smi not available or failed
+    // rocm-smi not available, timed out, or failed
+    throwIfAborted(options);
   }
 
   return { available: false };
@@ -227,18 +277,22 @@ async function detectLinuxAMDGPU(): Promise<GPUInfo> {
 /**
  * Detect Intel GPU on Linux via /sys/class/drm
  */
-async function detectLinuxIntelGPU(): Promise<GPUInfo> {
+async function detectLinuxIntelGPU(options?: TelemetryCommandOptions): Promise<GPUInfo> {
   try {
     // Check for Intel GPU in /sys/class/drm
     const { stdout } = await execAsync(
-      'ls /sys/class/drm/card*/device/vendor 2>/dev/null | head -1 | xargs cat 2>/dev/null'
+      'ls /sys/class/drm/card*/device/vendor 2>/dev/null | head -1 | xargs cat 2>/dev/null',
+      telemetryExecOptions(options)
     );
 
     // Intel vendor ID: 0x8086
     if (stdout.trim() === '0x8086') {
       // Try to get GPU name from device info
       try {
-        const { stdout: deviceInfo } = await execAsync('lspci | grep -i vga | grep -i intel');
+        const { stdout: deviceInfo } = await execAsync(
+          'lspci | grep -i vga | grep -i intel',
+          telemetryExecOptions(options)
+        );
         const match = deviceInfo.match(/Intel.*?:\s*(.+)/);
         const name = match && match[1] ? match[1].trim() : 'Intel GPU';
 
@@ -249,6 +303,7 @@ async function detectLinuxIntelGPU(): Promise<GPUInfo> {
           vulkan: true, // Intel GPUs generally support Vulkan
         };
       } catch {
+        throwIfAborted(options);
         // lspci not available, use generic name
         return {
           available: true,
@@ -259,7 +314,8 @@ async function detectLinuxIntelGPU(): Promise<GPUInfo> {
       }
     }
   } catch {
-    // /sys/class/drm not available or detection failed
+    // /sys/class/drm not available, timed out, or detection failed
+    throwIfAborted(options);
   }
 
   return { available: false };
