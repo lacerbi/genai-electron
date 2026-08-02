@@ -1,6 +1,6 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: Unreleased — adaptive LLM runtime calibration
+> **Current Status**: v0.19.0 — adaptive LLM runtime calibration
 > (2026-08-02)
 
 ---
@@ -9,11 +9,11 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 881/881 passing (35 suites), including serial open-handle diagnostics
-- **Last Updated:** 2026-08-02 (unreleased adaptive calibration work)
+- **Last Updated:** 2026-08-02 (v0.19.0 release preparation)
 
 ---
 
-## Unreleased: Adaptive LLM Runtime Calibration
+## v0.19.0: Adaptive LLM Runtime Calibration (2026-08-02)
 
 - Replaced the omitted-`combos` generated ladder with a bounded cell-local adaptive strategy.
   Adaptive callers pass one or two comparable `profiles`; the policy searches each relevant
@@ -66,12 +66,22 @@
   bisection remains covered by golden traces only: on this card the boundary sits adjacent to the
   physical ceiling, so it is reached by ceiling probe rather than by halving an interval.
 
-**Pickup point:** Phase 6 validation is complete; only plan archival remains (resolution links into
-`docs/dev/issues/ISSUE-adaptive-calibration-search.md` and moving the plan under `docs/dev/plans/`).
-No calibration from this branch is in flight and no server is running. The temporary Electron
-harness, Gemma GGUF, GUI-provisioned llama binary, and host GPU state are local-only; recreate the
-harness through the documented public `calibrate()` and `start()` APIs rather than expecting them in
-a fresh checkout.
+**Breaking change:** `LlamaServerManager.calibrate()` only. The config is a discriminated union —
+adaptive mode takes one or two `profiles` and no `combos`; exact diagnostic mode keeps the singular
+`profile` plus non-empty caller-ordered `combos`. Callers on the v0.18 default wrap their `profile`
+in `profiles: [ ... ]`; `combos` callers are unchanged. Reports are schema v2 and persisted v0.18
+reports should be discarded rather than migrated. See `genai-electron-docs/migration-0-18-to-0-19.md`.
+
+**Release validation:** `prepublishOnly` passes with a clean build and 881/881 tests across 35
+suites; the unconditional open-handle diagnostic run also passes. Jest still reports its worker
+force-exit warning after the successful plain run, as in prior releases. ESLint passes with 0 errors
+and 109 warnings, repository formatting and `git diff --check` pass, the generated declarations
+contain `refreshMemoryTelemetry` and `resourceRegime`, and the production dependency audit reports 0
+vulnerabilities. The v0.19.0 package dry-run contains 203 files (1.2 MB unpacked).
+
+**Release status:** Release preparation on `feat/adaptive-llm-calibration`. Version metadata, the
+v0.18.x-to-v0.19.0 migration guide, and the archived plan are included; PR merge, tag, GitHub
+release, and maintainer-side `npm publish` follow.
 
 ---
 
@@ -107,9 +117,7 @@ suites; the earlier full open-handle diagnostic run also passes. ESLint passes w
 audit reports 0 vulnerabilities. The v0.18.0 package dry-run contains 195 files (165,757 bytes
 packed; 849,425 bytes unpacked).
 
-**Release status:** Release candidate on `release/v0.18.0`. Version metadata, the resolved issue
-archive, and the v0.17.x-to-v0.18.0 migration guide are included and all local release gates pass;
-PR merge, tag, GitHub release, and maintainer-side `npm publish` remain pending.
+**Release status:** Published as v0.18.0 (tagged `v0.18.0`; live on npm).
 
 ---
 
@@ -130,9 +138,7 @@ the generated declarations contain the new public config/signature, and the prod
 audit reports 0 vulnerabilities. The v0.17.0 package dry-run contains 171 files (135,963 bytes
 packed; 694,703 bytes unpacked).
 
-**Release status:** Release candidate on `release/v0.17.0`. Version metadata, the resolved issue
-archive, and the v0.16.x-to-v0.17.0 migration guide are included in the release PR; merge, tag,
-GitHub release, and maintainer-side `npm publish` remain pending.
+**Release status:** Published as v0.17.0 (tagged `v0.17.0`).
 
 ---
 
@@ -159,9 +165,7 @@ suites; the open-handle verification run also passes. ESLint passes with 0 error
 the 5 affected suites. The v0.16.0 package dry-run contains 171 files, and the production
 dependency audit reports 0 vulnerabilities.
 
-**Release status:** Release candidate on `release/v0.16.0`. Version metadata and the v0.15.x-to-v0.16.0
-migration guide are included in the release PR; merge, tag, GitHub release, and maintainer-side
-`npm publish` remain pending.
+**Release status:** Published as v0.16.0 (tagged `v0.16.0`).
 
 ---
 
@@ -230,9 +234,7 @@ The final follow-up double-check identified the install-before-manifest recovery
 window; the corrected manifest-aware cleanup policy and its regressions passed
 re-review with no remaining blocker.
 
-**Release status:** Release candidate on `release/v0.14.0`. Version metadata and migration guide
-are included in the release PR; merge, tag, GitHub release, and maintainer-side `npm publish`
-remain pending.
+**Release status:** Published as v0.14.0 (tagged `v0.14.0`).
 
 ---
 
