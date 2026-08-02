@@ -917,6 +917,8 @@ interface LlamaCalibrationProbe {
   operationalStatus: LlamaCalibrationOperationalStatus;
   memoryEvidence: LlamaCalibrationMemoryEvidence;
   boundaryDecision: LlamaCalibrationBoundaryDecision;
+  /** Settled resource level this adaptive launch was measured under. Absent in exact mode. */
+  resourceRegime?: number;
   loadTimeMs?: number;
   effectiveContextSize?: number;
   effectiveParallelRequests?: number;

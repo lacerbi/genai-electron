@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.18.0 (automated LLM runtime calibration)
+> **Version**: 0.19.1 (adaptive LLM runtime calibration)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.19.0 to v0.19.1](migration-0-19-0-to-0-19-1.md)** - Adaptive calibration correctness patch: regime-consistent reproduction, stricter settle test, telemetry trust
 - **[Migrating from v0.18.x to v0.19.0](migration-0-18-to-0-19.md)** - Adaptive cell-local `gpuLayers` boundary search, one-or-two comparable context profiles, and schema-v2 calibration reports
 - **[Migrating from v0.17.x to v0.18.0](migration-0-17-to-0-18.md)** - Fixed-profile, caller-shaped llama-server runtime calibration and report-only recommendations
 - **[Migrating from v0.16.x to v0.17.0](migration-0-16-to-0-17.md)** - Opt-in full-size SWA cache control, conservative KV sizing, and direct llama-config typing

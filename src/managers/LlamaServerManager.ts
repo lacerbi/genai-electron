@@ -1885,10 +1885,13 @@ export class LlamaServerManager extends ServerManager {
     ): Promise<{
       hostAvailableBytes?: number;
       gpuAvailableBytes?: number;
+      /** False when the platform telemetry refresh failed, so the reading may be from a degraded regime. */
+      telemetryRefreshed?: boolean;
     }> => {
       const capture = async () => {
         let hostAvailableBytes: number | undefined;
         let gpuAvailableBytes: number | undefined;
+        let telemetryRefreshed = true;
         try {
           // Keep every snapshot in one measurement regime. The Windows
           // standby-aware reading has a 60 s TTL refreshed only by detect(),
@@ -1899,6 +1902,12 @@ export class LlamaServerManager extends ServerManager {
           // guard rejects the heaviest cells for a purely instrumental reason.
           await this.systemInfo.refreshMemoryTelemetry();
         } catch (error) {
+          // A failed refresh may silently degrade the reading to a different
+          // measurement regime. Report it rather than letting the degraded value
+          // look like an ordinary observation — two consecutive degraded readings
+          // agree with each other and would otherwise re-anchor the drift
+          // reference onto an instrument artifact.
+          telemetryRefreshed = false;
           debugLog('[LlamaCalibration] memory telemetry refresh failed:', error);
         }
         try {
@@ -1911,7 +1920,7 @@ export class LlamaServerManager extends ServerManager {
         } catch (error) {
           debugLog('[LlamaCalibration] GPU-memory snapshot unavailable:', error);
         }
-        return { hostAvailableBytes, gpuAvailableBytes };
+        return { hostAvailableBytes, gpuAvailableBytes, telemetryRefreshed };
       };
       if (!signal) return capture();
       return new Promise((resolve) => {
@@ -1919,6 +1928,7 @@ export class LlamaServerManager extends ServerManager {
         const finish = (snapshot: {
           hostAvailableBytes?: number;
           gpuAvailableBytes?: number;
+          telemetryRefreshed?: boolean;
         }): void => {
           if (settled) return;
           settled = true;
@@ -1965,6 +1975,10 @@ export class LlamaServerManager extends ServerManager {
      * environment that is still moving (not tolerable: the launches are not
      * comparable). Metrics missing from either reading are skipped; if nothing is
      * comparable the levels cannot be called settled.
+     *
+     * The tolerance is `resourceSettledTolerancePct`, deliberately far tighter
+     * than the drift threshold: at the drift threshold a monotonically declining
+     * machine would re-anchor on every probe and never be reported as unstable.
      */
     const comparableResourceLevels = (
       previous: { hostAvailableBytes?: number; gpuAvailableBytes?: number },
@@ -1980,7 +1994,7 @@ export class LlamaServerManager extends ServerManager {
         if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0) continue;
         compared += 1;
         const changePct = (Math.abs(right - left) / left) * 100;
-        if (changePct > LLAMA_CALIBRATION_DEFAULTS.resourceDriftThresholdPct) return false;
+        if (changePct > LLAMA_CALIBRATION_DEFAULTS.resourceSettledTolerancePct) return false;
       }
       return compared > 0;
     };
@@ -2220,12 +2234,23 @@ export class LlamaServerManager extends ServerManager {
         const isMaterial = () =>
           measured.host.comparability === 'material' || measured.gpu.comparability === 'material';
         const regimeChangeWarnings: string[] = [];
+        const telemetryTrustworthy =
+          resourcesBefore.telemetryRefreshed !== false &&
+          resourcesAfter.telemetryRefreshed !== false;
+        if (!telemetryTrustworthy) {
+          regimeChangeWarnings.push(
+            'Platform memory-telemetry refresh failed for this probe; the availability reading may come from a degraded measurement regime and cannot re-anchor the drift reference.'
+          );
+        }
         // A repeat that reproduces the same new level is a settled environment,
         // not an unstable one: re-anchor to it, start a new regime, and keep
         // searching. Readings that are still moving stay material and terminate
-        // the run as before.
+        // the run as before. A degraded reading is never allowed to re-anchor:
+        // two consecutive instrument artifacts agree with each other and would
+        // otherwise move the baseline onto the artifact.
         if (
           isMaterial() &&
+          telemetryTrustworthy &&
           observation.memoryEvidence.classification !== 'confirmed' &&
           priorDriftAttempts >= LLAMA_CALIBRATION_DEFAULTS.resourceDriftRetries
         ) {
@@ -2467,6 +2492,7 @@ export class LlamaServerManager extends ServerManager {
               classification: 'ambiguous',
               reason: 'cleanup-unconfirmed',
             },
+            resourceRegime,
             workloadResults: validated.workloads.map((workload) => ({
               workloadId: workload.id,
               kind: workload.kind,
@@ -2531,6 +2557,7 @@ export class LlamaServerManager extends ServerManager {
               classification: 'ambiguous',
               reason: interruptedByDeadline ? 'internal-deadline' : 'caller-abort',
             },
+            resourceRegime,
             workloadResults: validated.workloads.map((workload) => ({
               workloadId: workload.id,
               kind: workload.kind,

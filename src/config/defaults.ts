@@ -23,6 +23,15 @@ export const LLAMA_CALIBRATION_DEFAULTS = {
   guardDistanceFraction: 0.1,
   stabilityTolerancePct: 25,
   resourceDriftThresholdPct: 25,
+  /**
+   * How close two consecutive readings at one point must be before a material
+   * drop counts as a settled new level rather than an environment still in
+   * motion. Deliberately much tighter than `resourceDriftThresholdPct`: reusing
+   * the drift threshold here would let a steady decline (each step just under
+   * the drift band) re-anchor repeatedly and never register as persistent
+   * drift, which is the condition the guard exists to catch.
+   */
+  resourceSettledTolerancePct: 5,
   resourceDriftRetries: 1,
   unobservedProbeDurationPolicy: 'configured-conservative-estimate',
   policyVersion: 'llama-runtime-v2',
