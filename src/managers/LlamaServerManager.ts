@@ -83,6 +83,9 @@ import {
   type AdaptiveProbeAction,
   type AdaptiveTerminalAction,
 } from '../utils/llama-adaptive-calibration-policy.js';
+// TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+// Phase 2.10 / 3.8. Not re-exported from src/index.ts and inert unless a development harness arms it.
+import { getCalibrationResourceShadow } from '../utils/llama-resource-guard-shadow.js';
 import { getLayerCountWithFallback, getSlidingWindow } from '../utils/model-metadata-helpers.js';
 import { estimateKVBytesPerToken } from '../utils/kv-cache-math.js';
 import {
@@ -1000,8 +1003,26 @@ export class LlamaServerManager extends ServerManager {
         | undefined;
       const observedPromptTokenCounts = new Map<string, readonly number[]>();
 
+      // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+      // Phase 2.10 / 3.8. Preparation is complete and no combo has launched yet, so this is the
+      // exact-mode equivalent of the adaptive pre-`policyReadyAt` baseline placement.
+      await getCalibrationResourceShadow()?.observeBaseline({
+        source: this.systemInfo,
+        strategy: 'exact',
+        ...(validated.signal ? { signal: validated.signal } : {}),
+      });
+
       for (let comboIndex = 0; comboIndex < candidates.length; comboIndex++) {
         const { combo, resolvedConfig, argvKey } = candidates[comboIndex]!;
+        // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+        // Phase 2.10 / 3.8. Before `probeStartedAt` so the recorded probe duration keeps meaning
+        // the launch/workload duration; the conclusion is recorded and never acted on.
+        await getCalibrationResourceShadow()?.observePreLaunch({
+          source: this.systemInfo,
+          strategy: 'exact',
+          probeOrdinal: probes.length,
+          ...(validated.signal ? { signal: validated.signal } : {}),
+        });
         const probeStartedAt = performance.now();
         try {
           const observation = await this.calibrationProbeExecutor({
@@ -1113,6 +1134,21 @@ export class LlamaServerManager extends ServerManager {
               stderrTail: run.stderrTail,
               cleanup: fatalObservation.cleanup,
             });
+            // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by
+            // plan Phase 2.10 / 3.8. A fatally-failed probe whose teardown was still confirmed is
+            // exactly the case where Phase 3.6 must know whether resources were stable. Skipped
+            // after a caller abort so the abort rejection is not delayed.
+            if (!validated.signal?.aborted) {
+              await getCalibrationResourceShadow()?.observePostCleanup({
+                source: this.systemInfo,
+                strategy: 'exact',
+                probeOrdinal: probes.length - 1,
+                beforeInitialRead: () => {
+                  this.systemInfo.clearCache();
+                },
+                ...(validated.signal ? { signal: validated.signal } : {}),
+              });
+            }
           }
           if (calibrationErrorCode(sanitized) === 'CALIBRATION_CLEANUP_FAILED') {
             const orphanPid = calibrationErrorDetail(sanitized, 'pid');
@@ -1170,20 +1206,57 @@ export class LlamaServerManager extends ServerManager {
           }
           throw sanitized;
         }
+        // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+        // Phase 2.10 / 3.8. Teardown is confirmed here (the executor resolved), so the shadow owns
+        // its own cooldown/clearCache/read/confirmation sequence measured from this instant. The
+        // v0.19 debug-only post-run check below still runs unchanged, afterwards.
+        await getCalibrationResourceShadow()?.observePostCleanup({
+          source: this.systemInfo,
+          strategy: 'exact',
+          probeOrdinal: probes.length - 1,
+          beforeInitialRead: () => {
+            this.systemInfo.clearCache();
+          },
+          ...(validated.signal ? { signal: validated.signal } : {}),
+        });
         this.systemInfo.clearCache();
         try {
           const currentMemory = this.systemInfo.getMemoryInfo();
           const currentGpu = await this.systemInfo.getGPUInfo();
-          if (
+          const legacyDrifted =
             currentMemory.available < capabilities.memory.available * 0.75 ||
             (capabilities.gpu.vramAvailable !== undefined &&
               currentGpu.vramAvailable !== undefined &&
-              currentGpu.vramAvailable < capabilities.gpu.vramAvailable * 0.75)
-          ) {
+              currentGpu.vramAvailable < capabilities.gpu.vramAvailable * 0.75);
+          if (legacyDrifted) {
             debugLog(
               '[LlamaCalibration] available resources drifted by more than 25% during the sweep'
             );
           }
+          // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+          // Phase 2.10 / 3.8. Records the v0.19 view of the same probe so traces can compare it
+          // against the fixed-baseline view without another live run.
+          getCalibrationResourceShadow()?.recordLegacyOutcome({
+            strategy: 'exact',
+            probeOrdinal: probes.length - 1,
+            outcome: {
+              hostDecreasePct:
+                capabilities.memory.available > 0
+                  ? ((capabilities.memory.available - currentMemory.available) /
+                      capabilities.memory.available) *
+                    100
+                  : undefined,
+              gpuDecreasePct:
+                capabilities.gpu.vramAvailable !== undefined &&
+                capabilities.gpu.vramAvailable > 0 &&
+                currentGpu.vramAvailable !== undefined
+                  ? ((capabilities.gpu.vramAvailable - currentGpu.vramAvailable) /
+                      capabilities.gpu.vramAvailable) *
+                    100
+                  : undefined,
+              resourceDriftStatus: legacyDrifted ? 'debug-25pct-drift' : 'debug-within-25pct',
+            },
+          });
         } catch (error) {
           debugLog('[LlamaCalibration] resource drift snapshot failed:', error);
         }
@@ -1827,6 +1900,14 @@ export class LlamaServerManager extends ServerManager {
         finalistTimeReserveMs: state.budgets.finalistTimeReserveMs,
       });
     }
+    // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+    // Phase 2.10 / 3.8. Provisioning, profile/cell preparation, and binary readiness are complete,
+    // and the adaptive probe wall clock has not started yet: plan decision 2's baseline placement.
+    await getCalibrationResourceShadow()?.observeBaseline({
+      source: this.systemInfo,
+      strategy: 'adaptive',
+      ...(validated.signal ? { signal: validated.signal } : {}),
+    });
     const policyReadyAt = performance.now();
     policyTiming.readyAt = policyReadyAt;
     progressBudget = resolvedProgressBudget();
@@ -2152,6 +2233,17 @@ export class LlamaServerManager extends ServerManager {
       const resourcesBefore = await captureAvailableResources(probeSignal);
       resourceBaseline.hostAvailableBytes ??= resourcesBefore.hostAvailableBytes;
       resourceBaseline.gpuAvailableBytes ??= resourcesBefore.gpuAvailableBytes;
+      // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+      // Phase 2.10 / 3.8. Placed after the v0.19 pre-launch capture so that capture keeps its
+      // original position relative to preparation, and immediately before the executor invocation.
+      // Uses the probe signal the surrounding code uses; the conclusion is recorded, never acted on.
+      const shadowProbeOrdinal = publicProbes.length;
+      await getCalibrationResourceShadow()?.observePreLaunch({
+        source: this.systemInfo,
+        strategy: 'adaptive',
+        probeOrdinal: shadowProbeOrdinal,
+        signal: probeSignal,
+      });
       try {
         const observation = await this.calibrationProbeExecutor({
           binaryPath: calibrationBinaryPath,
@@ -2178,6 +2270,22 @@ export class LlamaServerManager extends ServerManager {
           },
         });
         const durationMs = performance.now() - probeStartedAt;
+        // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+        // Phase 2.10 / 3.8. Teardown is confirmed here (the executor resolved) and `durationMs` is
+        // already fixed, so the shadow's cooldown/clearCache/read/confirmation sequence is measured
+        // from the real teardown instant without inflating the recorded probe duration. The v0.19
+        // cooldown/capture/re-anchor block below runs unchanged, afterwards; its own reading is
+        // therefore taken later in wall-clock terms than in a disarmed run, which is recorded
+        // rather than hidden.
+        await getCalibrationResourceShadow()?.observePostCleanup({
+          source: this.systemInfo,
+          strategy: 'adaptive',
+          probeOrdinal: shadowProbeOrdinal,
+          beforeInitialRead: () => {
+            this.systemInfo.clearCache();
+          },
+          signal: probeSignal,
+        });
         // Let process teardown and OS/GPU accounting settle before treating an
         // availability delta as environmental drift. An immediate snapshot is
         // dominated by the probe's own model mappings on Windows.
@@ -2335,6 +2443,23 @@ export class LlamaServerManager extends ServerManager {
               gpuAvailableMemory.comparability === 'unavailable'
             ? ('unavailable' as const)
             : ('available' as const);
+        // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+        // Phase 2.10 / 3.8. Records the v0.19 view of this probe (its measured decrease pcts, its
+        // regime, and any re-anchor warning) beside the shadow boundaries, so one trace can compare
+        // the old min(pre, post)/re-anchoring view with the fixed-baseline view.
+        getCalibrationResourceShadow()?.recordLegacyOutcome({
+          strategy: 'adaptive',
+          probeOrdinal: shadowProbeOrdinal,
+          outcome: {
+            hostDecreasePct: hostAvailableMemory.decreasePct,
+            gpuDecreasePct: gpuAvailableMemory.decreasePct,
+            hostComparability: hostAvailableMemory.comparability,
+            gpuComparability: gpuAvailableMemory.comparability,
+            resourceRegime,
+            resourceDriftStatus,
+            warnings: diagnosticWarnings,
+          },
+        });
         const policyObservation = {
           cellId: cell.id,
           gpuLayers: action.gpuLayers,
@@ -2458,6 +2583,21 @@ export class LlamaServerManager extends ServerManager {
             stderrTail: run.stderrTail,
             cleanup: fatalObservation.cleanup,
           });
+          // TEMPORARY Phase-0.8 shadow observation — converted to enforcement and deleted by plan
+          // Phase 2.10 / 3.8. Teardown was confirmed even though the probe failed fatally, which is
+          // precisely the precedence case Phase 2.5 has to decide. Skipped once the probe signal
+          // has aborted so neither a caller abort nor the internal deadline is delayed.
+          if (!probeSignal.aborted) {
+            await getCalibrationResourceShadow()?.observePostCleanup({
+              source: this.systemInfo,
+              strategy: 'adaptive',
+              probeOrdinal: shadowProbeOrdinal,
+              beforeInitialRead: () => {
+                this.systemInfo.clearCache();
+              },
+              signal: probeSignal,
+            });
+          }
         }
         if (sanitizedCode === 'CALIBRATION_CLEANUP_FAILED') {
           const orphanPid = calibrationErrorDetail(sanitized, 'pid');

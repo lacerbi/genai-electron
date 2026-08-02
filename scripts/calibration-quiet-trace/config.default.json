@@ -1,0 +1,85 @@
+{
+  "formatVersion": 1,
+  "comment": "Phase 1 quiet-trace matrix for PLAN-calibration-resource-stability. Prompt text here is generic harness text; artifacts store only its hash.",
+  "userDataDir": "%APPDATA%\\@palimpsest\\gui",
+  "modelId": "gemma-4-12b-iq4xs",
+  "shadow": {
+    "thresholds": {
+      "hostMemoryDecreaseThresholdPct": 10,
+      "vramDecreaseThresholdPct": 10
+    },
+    "cooldownMs": 750,
+    "settleMs": 5000,
+    "baselineSamples": 3,
+    "confirmationReads": 1,
+    "telemetryTimeoutMs": 10000,
+    "postCleanupExtraSampleOffsetsMs": [2250, 3000]
+  },
+  "common": {
+    "samples": 3,
+    "seed": 42,
+    "startupTimeoutMs": 180000,
+    "requestTimeoutMs": 120000,
+    "fixedConfig": {
+      "flashAttention": "on"
+    },
+    "workloads": [
+      {
+        "id": "cold",
+        "kind": "cold-prefill",
+        "weight": 2,
+        "nPredict": 96,
+        "prompt": "Summarize, in three sentences, how a fixed measurement baseline differs from a re-anchored one when comparing repeated benchmark launches on a shared workstation."
+      },
+      {
+        "id": "burst",
+        "kind": "shared-prefix",
+        "weight": 1,
+        "nPredict": 64,
+        "sharedPrefix": "You are a careful technical editor. The following notes describe a benchmarking protocol that compares repeated server launches against one stabilized resource baseline, with a bounded confirmation read whenever a reading looks suspicious.",
+        "suffixes": [
+          "Rewrite the first note as a single sentence.",
+          "List the two independently guarded resources.",
+          "State the risk of re-anchoring in one sentence."
+        ]
+      }
+    ]
+  },
+  "cells": {
+    "adaptive-1p": {
+      "description": "Adaptive, one profile at the calibrated production context.",
+      "strategy": "adaptive",
+      "profiles": [{ "contextSize": 16384, "parallelRequests": 1 }],
+      "maxProbes": 8,
+      "maxWallTimeMs": 1800000
+    },
+    "adaptive-2p": {
+      "description": "Adaptive, two comparable profiles so cross-cell scheduling is exercised.",
+      "strategy": "adaptive",
+      "profiles": [
+        { "contextSize": 16384, "parallelRequests": 1 },
+        { "contextSize": 24576, "parallelRequests": 1 }
+      ],
+      "maxProbes": 12,
+      "maxWallTimeMs": 2400000
+    },
+    "exact-near-capacity": {
+      "description": "Exact, near-capacity/full-offload combos: the highest VRAM pressure this machine can hold.",
+      "strategy": "exact",
+      "profile": { "contextSize": 16384, "parallelRequests": 1 },
+      "combos": [
+        { "label": "full-offload", "overrides": { "gpuLayers": 48 } },
+        { "label": "near-full-offload", "overrides": { "gpuLayers": 46 } }
+      ]
+    },
+    "exact-lower-pressure": {
+      "description": "Exact, deliberately lower pressure so post-cleanup recovery is observable away from the capacity edge.",
+      "strategy": "exact",
+      "profile": { "contextSize": 8192, "parallelRequests": 1 },
+      "combos": [
+        { "label": "half-offload", "overrides": { "gpuLayers": 24 } },
+        { "label": "two-thirds-offload", "overrides": { "gpuLayers": 32 } }
+      ]
+    }
+  }
+}

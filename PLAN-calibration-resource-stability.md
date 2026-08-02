@@ -345,7 +345,7 @@ manager decisions or freeze threshold values yet.
 7. [x] Add focused utility tests for median handling, unavailable metrics, independent trust,
    zero-byte boundary readings, just-below/equal/above thresholds, increases, transient recovery,
    confirmed decreases, cross-metric changes, and stability-unverified outcomes.
-8. [ ] Create one versioned development-only quiet-trace harness and artifact format. Integrate the
+8. [x] Create one versioned development-only quiet-trace harness and artifact format. Integrate the
    guard temporarily in an observe/shadow path that executes the real manager baseline, pre-launch,
    post-cleanup, cooldown, and confirmation schedule but does not alter the v0.19 decision. Do not
    expose a caller-facing shadow option or ship mixed shadow/enforcement behavior. Shadow
