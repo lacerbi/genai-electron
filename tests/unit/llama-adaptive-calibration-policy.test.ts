@@ -193,6 +193,40 @@ describe('pure adaptive LLM calibration policy', () => {
         effectiveFinalistTimeReserveMs: 300_000,
       })
     ).toEqual({ allowed: false, reason: 'wall-time' });
+    // Probe zero bypasses the reserve checks: reserves protect later validation
+    // launches, and the configured conservative estimate can exceed an ordinary
+    // budget on its own, which would otherwise return a zero-probe report.
+    expect(
+      evaluateProbeAdmission({
+        probesUsed: 0,
+        elapsedMs: 0,
+        budgets,
+        finalistPurpose: false,
+        estimatedNextProbeDurationMs: 2_194_500,
+        effectiveFinalistTimeReserveMs: 300_000,
+      })
+    ).toEqual({ allowed: true, reason: 'allowed' });
+    expect(
+      evaluateProbeAdmission({
+        probesUsed: 1,
+        elapsedMs: 0,
+        budgets,
+        finalistPurpose: false,
+        estimatedNextProbeDurationMs: 2_194_500,
+        effectiveFinalistTimeReserveMs: 300_000,
+      })
+    ).toEqual({ allowed: false, reason: 'time-reserve' });
+    // An already-expired deadline still refuses probe zero.
+    expect(
+      evaluateProbeAdmission({
+        probesUsed: 0,
+        elapsedMs: budgets.maxWallTimeMs,
+        budgets,
+        finalistPurpose: false,
+        estimatedNextProbeDurationMs: 1_000,
+        effectiveFinalistTimeReserveMs: 300_000,
+      })
+    ).toEqual({ allowed: false, reason: 'wall-time' });
 
     const emptyState = createAdaptivePolicyState(basePolicyConfig);
     expect(summarizeAdaptiveTimingAdmission(emptyState)).toMatchObject({
@@ -1034,6 +1068,103 @@ describe('pure adaptive LLM calibration policy', () => {
       'probe',
       'terminal',
     ]);
+  });
+
+  it('never reproduces a point across a resource-regime change', () => {
+    const cellId = 'cell';
+    const before = [
+      evidence(0, { cellId, gpuLayers: 40, fidelity: 'full', scoreMs: 100, resourceRegime: 0 }),
+      evidence(1, { cellId, gpuLayers: 40, fidelity: 'full', scoreMs: 104, resourceRegime: 0 }),
+    ];
+    // Two agreeing full-fidelity launches in one regime reproduce the point.
+    expect(assessMixedFidelityStability(before)).toMatchObject({ status: 'stable' });
+
+    // A confirmed step change re-anchors the reference. The newest regime now has
+    // a single launch, so the point is no longer reproduced and needs another
+    // launch under the current conditions - the earlier pair cannot stand in.
+    const afterStep = [
+      ...before,
+      evidence(2, { cellId, gpuLayers: 40, fidelity: 'full', scoreMs: 103, resourceRegime: 1 }),
+    ];
+    expect(assessMixedFidelityStability(afterStep)).toMatchObject({ status: 'insufficient' });
+
+    // Once the new regime has its own agreeing pair, it reproduces again, and the
+    // recommendation score comes only from that regime.
+    const settled = [
+      ...afterStep,
+      evidence(3, { cellId, gpuLayers: 40, fidelity: 'full', scoreMs: 107, resourceRegime: 1 }),
+    ];
+    const resolved = assessMixedFidelityStability(settled);
+    expect(resolved).toMatchObject({ status: 'stable' });
+    expect(resolved.recommendationScoreMs).toBe(105);
+    expect(resolved.evidenceIndices).toEqual([2, 3]);
+  });
+
+  it('explores a second cell rather than pruning it on a slow low-layer reference', () => {
+    // Regression for the 2026-08-02 live run: the swa-full cell was abandoned in
+    // `establishing-ceiling` after one ngl=19 reference, because the interim low
+    // was treated as a converged boundary. At ngl=19 almost the whole model is on
+    // CPU, so that score measures offload level rather than the cell's own axis:
+    // the windowed cell improved 10102 -> 3205 ms across exactly that span.
+    const windowCell = traceCell(12_288, 'window', 'q8_0');
+    const fullCell = traceCell(12_288, 'full', 'q8_0');
+    const config: AdaptivePolicyConfig = {
+      ...basePolicyConfig,
+      profiles: [{ ...basePolicyConfig.profiles[0]!, autoGpuLayers: 19 }],
+    };
+    const rows: readonly AdaptiveTraceRow[] = [
+      [windowCell, 19, 'reference', 'search', 'ok', 10_102, 'admissible'],
+      [windowCell, 48, 'ceiling', 'search', 'ok', 3_205, 'admissible'],
+      [windowCell, 48, 'finalist', 'full', 'ok', 3_834, 'admissible'],
+      [fullCell, 19, 'reference', 'search', 'ok', 17_612, 'admissible'],
+      [fullCell, 48, 'ceiling', 'search', 'ok', 5_200, 'admissible'],
+      [fullCell, 48, 'finalist', 'full', 'ok', 5_300, 'admissible'],
+    ];
+    const result = executeAdaptiveTrace(
+      defineAdaptiveTrace('slow low-layer reference', config, rows)
+    );
+
+    expect(result.terminal).toMatchObject({
+      status: 'complete',
+      selected: { gpuLayers: 48, swaFull: false },
+    });
+    expect(
+      result.state.evidence
+        .filter((item) => item.cellId.includes('swa-full'))
+        .map((item) => item.gpuLayers)
+    ).toEqual([19, 48, 48]);
+  });
+
+  it('still prunes a cell once its own converged boundary is uncompetitive', () => {
+    // The cut-off is preserved: it just compares the cell's converged boundary
+    // instead of its reference, so no finalist launch is spent on the loser.
+    const windowCell = traceCell(12_288, 'window', 'q8_0');
+    const fullCell = traceCell(12_288, 'full', 'q8_0');
+    const config: AdaptivePolicyConfig = {
+      ...basePolicyConfig,
+      profiles: [{ ...basePolicyConfig.profiles[0]!, autoGpuLayers: 19 }],
+    };
+    const rows: readonly AdaptiveTraceRow[] = [
+      [windowCell, 19, 'reference', 'search', 'ok', 10_102, 'admissible'],
+      [windowCell, 48, 'ceiling', 'search', 'ok', 3_205, 'admissible'],
+      [windowCell, 48, 'finalist', 'full', 'ok', 3_834, 'admissible'],
+      [fullCell, 19, 'reference', 'search', 'ok', 17_612, 'admissible'],
+      [fullCell, 48, 'ceiling', 'search', 'ok', 12_000, 'admissible'],
+    ];
+    const result = executeAdaptiveTrace(
+      defineAdaptiveTrace('uncompetitive converged boundary', config, rows)
+    );
+
+    expect(result.terminal).toMatchObject({
+      status: 'complete',
+      selected: { gpuLayers: 48, swaFull: false },
+    });
+    // 12000 exceeds 3834 * 1.575, so the cell is dropped without a finalist launch.
+    expect(
+      result.state.evidence.filter(
+        (item) => item.cellId.includes('swa-full') && item.fidelity === 'full'
+      )
+    ).toHaveLength(0);
   });
 
   it('replays a supplemented q8 trace and selects reproduced full-SWA g=45', () => {

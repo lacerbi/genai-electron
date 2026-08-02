@@ -42,7 +42,11 @@ export class LlamaCalibrationClient {
     requestTimeoutMs = this.requestTimeoutMs
   ): Promise<unknown> {
     this.signal?.throwIfAborted();
-    const timeout = AbortSignal.timeout(requestTimeoutMs);
+    // AbortSignal.timeout() rejects a non-integer delay. Adaptive completion caps
+    // are derived from performance.now() deltas and are therefore fractional, so
+    // normalize here as well as at the source: a caller passing a float must not
+    // turn a healthy probe into a spurious operational failure.
+    const timeout = AbortSignal.timeout(Math.max(1, Math.floor(requestTimeoutMs)));
     const signal = this.signal ? AbortSignal.any([timeout, this.signal]) : timeout;
     try {
       const response = await this.runner.raceWithExit(

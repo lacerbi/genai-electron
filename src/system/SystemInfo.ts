@@ -951,6 +951,26 @@ export class SystemInfo {
   }
 
   /**
+   * Refresh the platform available-memory telemetry behind {@link getMemoryInfo}.
+   *
+   * `detect()` already does this, but long-running callers that sample memory
+   * repeatedly without re-detecting (LLM calibration probes) would otherwise let
+   * the Windows standby-aware reading go stale after its TTL and silently fall
+   * back to `os.freemem()`, which excludes the standby list. Mixing the two
+   * regimes within one measurement series makes released file-backed pages look
+   * like a large availability drop.
+   *
+   * @example
+   * ```typescript
+   * await systemInfo.refreshMemoryTelemetry();
+   * const memory = systemInfo.getMemoryInfo();
+   * ```
+   */
+  public async refreshMemoryTelemetry(): Promise<void> {
+    await refreshAvailableMemory();
+  }
+
+  /**
    * Clear the capabilities cache
    * Useful for testing or when hardware changes
    */

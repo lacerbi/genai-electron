@@ -365,6 +365,14 @@ export interface LlamaCalibrationProbe {
   operationalStatus: LlamaCalibrationOperationalStatus;
   memoryEvidence: LlamaCalibrationMemoryEvidence;
   boundaryDecision: LlamaCalibrationBoundaryDecision;
+  /**
+   * Settled resource level this adaptive launch was measured under. Starts at 0
+   * and increments when a confirmed step change in available memory re-anchors
+   * the reference. A selected configuration's independent launches always share
+   * one regime, so probes from different regimes never reproduce each other.
+   * Absent in exact mode, which does not search or re-anchor.
+   */
+  resourceRegime?: number;
   loadTimeMs?: number;
   effectiveContextSize?: number;
   effectiveParallelRequests?: number;

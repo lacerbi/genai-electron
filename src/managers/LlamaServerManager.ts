@@ -1890,6 +1890,18 @@ export class LlamaServerManager extends ServerManager {
         let hostAvailableBytes: number | undefined;
         let gpuAvailableBytes: number | undefined;
         try {
+          // Keep every snapshot in one measurement regime. The Windows
+          // standby-aware reading has a 60 s TTL refreshed only by detect(),
+          // which calibration calls once at preparation; after it expires
+          // getMemoryInfo() falls back to os.freemem(), which excludes the
+          // standby list. A probe's own released mmap pages then read as a large
+          // availability drop against a standby-aware baseline, and the drift
+          // guard rejects the heaviest cells for a purely instrumental reason.
+          await this.systemInfo.refreshMemoryTelemetry();
+        } catch (error) {
+          debugLog('[LlamaCalibration] memory telemetry refresh failed:', error);
+        }
+        try {
           hostAvailableBytes = this.systemInfo.getMemoryInfo().available;
         } catch (error) {
           debugLog('[LlamaCalibration] host-memory snapshot unavailable:', error);
@@ -1947,6 +1959,31 @@ export class LlamaServerManager extends ServerManager {
         decreasePct,
       };
     };
+    /**
+     * Whether two availability readings describe the same settled level. Used to
+     * tell a one-off step change (tolerable: re-anchor and continue) from an
+     * environment that is still moving (not tolerable: the launches are not
+     * comparable). Metrics missing from either reading are skipped; if nothing is
+     * comparable the levels cannot be called settled.
+     */
+    const comparableResourceLevels = (
+      previous: { hostAvailableBytes?: number; gpuAvailableBytes?: number },
+      current: { hostAvailableBytes?: number; gpuAvailableBytes?: number }
+    ): boolean => {
+      const pairs: [number | undefined, number | undefined][] = [
+        [previous.hostAvailableBytes, current.hostAvailableBytes],
+        [previous.gpuAvailableBytes, current.gpuAvailableBytes],
+      ];
+      let compared = 0;
+      for (const [left, right] of pairs) {
+        if (left === undefined || right === undefined) continue;
+        if (!Number.isFinite(left) || !Number.isFinite(right) || left <= 0) continue;
+        compared += 1;
+        const changePct = (Math.abs(right - left) / left) * 100;
+        if (changePct > LLAMA_CALIBRATION_DEFAULTS.resourceDriftThresholdPct) return false;
+      }
+      return compared > 0;
+    };
     const adaptiveCapFor = (action: AdaptiveProbeAction): number => {
       if (action.timeoutMode === 'full') return validated.requestTimeoutMs;
       const priorRequests = publicProbes
@@ -1959,16 +1996,31 @@ export class LlamaServerManager extends ServerManager {
         .flatMap((sample) => sample.requests)
         .map((request) => request.wallTimeMs);
       if (priorRequests.length === 0) return validated.requestTimeoutMs;
-      return Math.min(
-        validated.requestTimeoutMs,
-        Math.max(
-          LLAMA_CALIBRATION_DEFAULTS.minimumAdaptiveRequestTimeoutMs,
-          LLAMA_CALIBRATION_DEFAULTS.earlyStopMultiplier * Math.max(...priorRequests)
+      // Observed request times are fractional, so floor the derived cap: timer
+      // APIs downstream require an integer delay, and an unclamped float made
+      // healthy probes fail with a spurious `error` status that then consumed the
+      // point's ambiguity repeat and shifted its boundary.
+      return Math.floor(
+        Math.min(
+          validated.requestTimeoutMs,
+          Math.max(
+            LLAMA_CALIBRATION_DEFAULTS.minimumAdaptiveRequestTimeoutMs,
+            LLAMA_CALIBRATION_DEFAULTS.earlyStopMultiplier * Math.max(...priorRequests)
+          )
         )
       );
     };
 
     const materialDriftAttempts = new Map<string, number>();
+    const materialDriftReadings = new Map<
+      string,
+      { hostAvailableBytes?: number; gpuAvailableBytes?: number }
+    >();
+    // Re-anchorable reference level. A confirmed one-off step change (the user
+    // opens a browser mid-run) shifts every later reading against a t=0 anchor
+    // even though those readings remain comparable with each other. Probes carry
+    // the regime they were measured in so reproduction never spans a step.
+    let resourceRegime = 0;
     const resourceBaseline: {
       hostAvailableBytes?: number;
       gpuAvailableBytes?: number;
@@ -2145,15 +2197,58 @@ export class LlamaServerManager extends ServerManager {
           : undefined;
         const currentMinimum = (before?: number, after?: number): number | undefined =>
           before === undefined || after === undefined ? undefined : Math.min(before, after);
-        const hostAvailableMemory = resourceMetric(
-          resourceBaseline.hostAvailableBytes,
-          currentMinimum(resourcesBefore.hostAvailableBytes, resourcesAfter.hostAvailableBytes)
-        );
-        const gpuAvailableMemory = resourceMetric(
-          resourceBaseline.gpuAvailableBytes,
-          currentMinimum(resourcesBefore.gpuAvailableBytes, resourcesAfter.gpuAvailableBytes)
-        );
-        const diagnosticWarnings: string[] = [];
+        const currentReading = {
+          hostAvailableBytes: currentMinimum(
+            resourcesBefore.hostAvailableBytes,
+            resourcesAfter.hostAvailableBytes
+          ),
+          gpuAvailableBytes: currentMinimum(
+            resourcesBefore.gpuAvailableBytes,
+            resourcesAfter.gpuAvailableBytes
+          ),
+        };
+        const measureAgainstBaseline = () => ({
+          host: resourceMetric(
+            resourceBaseline.hostAvailableBytes,
+            currentReading.hostAvailableBytes
+          ),
+          gpu: resourceMetric(resourceBaseline.gpuAvailableBytes, currentReading.gpuAvailableBytes),
+        });
+        let measured = measureAgainstBaseline();
+        const driftKey = `${cell.id}:${action.gpuLayers}`;
+        const priorDriftAttempts = materialDriftAttempts.get(driftKey) ?? 0;
+        const isMaterial = () =>
+          measured.host.comparability === 'material' || measured.gpu.comparability === 'material';
+        const regimeChangeWarnings: string[] = [];
+        // A repeat that reproduces the same new level is a settled environment,
+        // not an unstable one: re-anchor to it, start a new regime, and keep
+        // searching. Readings that are still moving stay material and terminate
+        // the run as before.
+        if (
+          isMaterial() &&
+          observation.memoryEvidence.classification !== 'confirmed' &&
+          priorDriftAttempts >= LLAMA_CALIBRATION_DEFAULTS.resourceDriftRetries
+        ) {
+          const previous = materialDriftReadings.get(driftKey);
+          if (previous && comparableResourceLevels(previous, currentReading)) {
+            if (currentReading.hostAvailableBytes !== undefined) {
+              resourceBaseline.hostAvailableBytes = currentReading.hostAvailableBytes;
+            }
+            if (currentReading.gpuAvailableBytes !== undefined) {
+              resourceBaseline.gpuAvailableBytes = currentReading.gpuAvailableBytes;
+            }
+            resourceRegime += 1;
+            measured = measureAgainstBaseline();
+            materialDriftAttempts.delete(driftKey);
+            materialDriftReadings.delete(driftKey);
+            regimeChangeWarnings.push(
+              `Available resources settled at a new level; calibration re-anchored and continued in resource regime ${resourceRegime}. Launches are only reproduced within one regime.`
+            );
+          }
+        }
+        const hostAvailableMemory = measured.host;
+        const gpuAvailableMemory = measured.gpu;
+        const diagnosticWarnings: string[] = [...regimeChangeWarnings];
         if (hostAvailableMemory.comparability === 'unavailable') {
           diagnosticWarnings.push(
             'Host available-memory telemetry was unavailable for one or both probe snapshots.'
@@ -2200,12 +2295,11 @@ export class LlamaServerManager extends ServerManager {
           },
           warnings: diagnosticWarnings,
         };
-        const driftKey = `${cell.id}:${action.gpuLayers}`;
-        const priorDriftAttempts = materialDriftAttempts.get(driftKey) ?? 0;
         const driftCanInvalidateDecision =
           materialResourceDrift && observation.memoryEvidence.classification !== 'confirmed';
         if (driftCanInvalidateDecision) {
           materialDriftAttempts.set(driftKey, priorDriftAttempts + 1);
+          materialDriftReadings.set(driftKey, currentReading);
         }
         const persistentResourceDrift =
           driftCanInvalidateDecision &&
@@ -2227,6 +2321,7 @@ export class LlamaServerManager extends ServerManager {
           terminatedAtAdaptiveCap,
           aggregateLowerBoundMs,
           resourceDriftStatus,
+          resourceRegime,
           durationMs,
           diagnostics,
         } as const;
@@ -2278,6 +2373,7 @@ export class LlamaServerManager extends ServerManager {
             classification: evidence.boundaryDecision,
             reason: evidence.decisionReason,
           },
+          resourceRegime,
           loadTimeMs: run.loadTimeMs,
           effectiveContextSize: run.effectiveContextSize,
           effectiveParallelRequests: run.effectiveParallelRequests,
@@ -2325,6 +2421,7 @@ export class LlamaServerManager extends ServerManager {
               classification: 'ambiguous',
               reason: sanitizedCode ?? 'fatal-probe-validation',
             },
+            resourceRegime,
             loadTimeMs: run.loadTimeMs,
             effectiveContextSize: run.effectiveContextSize,
             effectiveParallelRequests: run.effectiveParallelRequests,

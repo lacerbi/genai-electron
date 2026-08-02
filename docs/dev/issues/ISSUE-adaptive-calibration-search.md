@@ -1,5 +1,20 @@
 # ISSUE — Adaptive boundary search for LLM runtime calibration
 
+**Status: RESOLVED (unreleased, 2026-08-02).** Implemented as the default adaptive strategy for
+`calibrate()`; see `docs/dev/plans/PLAN-adaptive-llm-calibration.md` for the delivered contract and
+the hardware-validation record, and `genai-electron-docs/llm-server.md` for public usage. The
+cell-local requirements below were adopted essentially as filed: per-cell references, a cell-local
+cliff predicate, cell-local early cancellation, one-sample search probes, and full-sample finalists.
+Three deliberate divergences: KV precision is a fully searched own-boundary cell pair rather than a
+counter-probe at the winner (opt-in via `includeKvCacheComparison`); the API is the existing
+`calibrate()` entry point discriminated by `profiles` versus `profile` + `combos`, not a `search`
+option or a sibling method; and adaptive mode pins MoE placement, leaving that comparison to exact
+combos. The stability criterion this issue asked for became a hard requirement — a selection needs
+two independent fresh launches at the exact argv, at least one full fidelity. Probe amortization was
+not adopted: every probe still pays a full cold start, which is what keeps launches independent.
+The deferred global-footprint research program remains open in
+`ISSUE-adaptive-llm-calibration-gqbr.md`.
+
 **Filed from:** palimpsest-engine (consumer), 2026-08-01, after adopting v0.18.0's
 `llamaServer.calibrate()` and prototyping the search downstream (validated; trace below).
 

@@ -8,7 +8,7 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 877/877 passing (35 suites), including serial open-handle diagnostics
+- **Tests:** ✅ 881/881 passing (35 suites), including serial open-handle diagnostics
 - **Last Updated:** 2026-08-02 (unreleased adaptive calibration work)
 
 ---
@@ -37,18 +37,41 @@
   documentation remain historical snapshots.
 - Completed a three-reviewer final audit covering policy/statistics, lifecycle cleanup, and public
   contract/documentation consistency; all reported implementation defects have regression fixes.
-  Additional post-fix hardware and normal-start validation remains intentionally pending after the
-  host Electron GPU helper crashed before that follow-up could start a probe.
+- Completed Phase 6 hardware validation on the Windows CUDA / Gemma 4 12B IQ4_XS reference machine
+  and fixed four defects that only live running exposed:
+  - a cell was pruned on its interim low-layer reference because an unconverged bracket counted as a
+    directly observed boundary, which contradicts the policy's explicit rule and abandoned a cell
+    after one probe while reporting `complete`;
+  - the first probe could be refused outright, because the frozen conservative estimate prices every
+    planned request at the full request timeout and exceeded the default two-cell wall budget,
+    returning a zero-probe report;
+  - resource-drift snapshots mixed measurement regimes, since the Windows standby-aware reading is
+    refreshed only by `detect()` and later snapshots silently fell back to `os.freemem()`, making a
+    probe's own released mappings look like a 32-35% availability drop that scaled with host
+    footprint and rejected the heaviest cells;
+  - the drift reference never re-anchored, so one settled step change (a user opening a browser)
+    invalidated every later probe for the rest of a run.
+- Added `SystemInfo.refreshMemoryTelemetry()`, confirmed-step drift re-anchoring with per-probe
+  `resourceRegime` tagging and same-regime reproduction, and documented the machine conditions a host
+  application should ask users to maintain during a calibration.
+  - the adaptive early-stop cap reached `AbortSignal.timeout()` as a fractional value derived from
+    `performance.now()` deltas, so healthy probes failed with a spurious `error` that consumed the
+    point's ambiguity repeat, forced a one-layer step-down, and inverted a two-context product
+    decision; integer-only unit fixtures could not surface it.
+- Live results (post-fix): a one-profile 12,288-token run completes in 4.9 minutes over 5 probes and
+  a two-context 12,288 + 16,384 run completes in 4.4 minutes over 6 probes, both on default budgets
+  and with no failed launch. Each reproduces its selection across independent fresh launches, and the
+  two-context run resolves `largest-in-band`, selecting 16,384 at 2,830 ms. Both apply the selected
+  exact `startConfig` to a normal manager start that verifies capacity and stops cleanly. Midpoint
+  bisection remains covered by golden traces only: on this card the boundary sits adjacent to the
+  physical ceiling, so it is reached by ceiling probe rather than by halving an interval.
 
-**Pickup point:** Resume Phase 6 in `PLAN-adaptive-llm-calibration.md` on a stable Electron host.
-Re-run the post-fix adaptive calibration first with the recorded one-profile shape and then with one
-call containing two comparable contexts; verify two independent selected-configuration launches,
-apply the selected exact `startConfig` to a normal manager start, and stop it cleanly. If those checks
-pass, complete the remaining Phase 6 acceptance items, add the downstream resolution links, and
-archive the plan under `docs/dev/plans/`. No calibration from this branch is in flight. The temporary
-Electron harness, Gemma GGUF, GUI-provisioned llama binary, and host GPU state are local-only; recreate
-the harness through the documented public `calibrate()` and `start()` APIs rather than expecting them
-in a fresh checkout.
+**Pickup point:** Phase 6 validation is complete; only plan archival remains (resolution links into
+`docs/dev/issues/ISSUE-adaptive-calibration-search.md` and moving the plan under `docs/dev/plans/`).
+No calibration from this branch is in flight and no server is running. The temporary Electron
+harness, Gemma GGUF, GUI-provisioned llama binary, and host GPU state are local-only; recreate the
+harness through the documented public `calibrate()` and `start()` APIs rather than expecting them in
+a fresh checkout.
 
 ---
 

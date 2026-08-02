@@ -1,7 +1,7 @@
 # Plan: Adaptive LLM Calibration
 
 - Created: 2026-08-01
-- Status: IMPLEMENTATION IN PROGRESS
+- Status: COMPLETE (2026-08-02) — implemented, hardware-validated, and archived
 - Target: unreleased work after v0.18.0
 
 Sources:
@@ -945,6 +945,42 @@ Implementation errata resolved from the approval review:
       final one-layer bracket it blocks only while the directly measured lower candidate remains
       competitive; an explicitly uncompetitive unresolved cell does not prevent a reproduced winner
       elsewhere from completing.
+- [x] Live-validation erratum (2026-08-02, post-fix run): a cell has a directly observed boundary
+      only once its bracket search has converged. While it is finding a reference, establishing a
+      ceiling, or bisecting, `boundaryGpuLayers` is the interim largest admissible point, and
+      treating that as a converged boundary let Section 8's competitiveness rule prune a cell on its
+      low-layer reference — the exact behaviour Section 8 forbids. Observed live: the swa-full cell
+      was abandoned after one `ngl=19` probe whose score reflects offload level, not the cell's axis
+      (the windowed cell improved 10,102 → 3,205 ms across the same span), and the run reported
+      `complete` with 11 probe slots unused. Pruning on a converged boundary is retained.
+- [x] Live-validation erratum: the first probe of a calibration is admitted whenever wall time
+      remains. The frozen configured-conservative-estimate prices every planned request at the full
+      request timeout, so an ordinary two-workload mix at default timeouts (16 requests →
+      2,194,500 ms) exceeds the two-cell default `maxWallTimeMs` and returned a zero-probe
+      `budget-exhausted`. Reserves protect later validation launches; before any evidence exists
+      there is nothing to protect. Probe-limit and an expired deadline still refuse, and admission is
+      unchanged from probe one onward.
+- [x] Live-validation erratum: every calibration resource snapshot refreshes platform memory
+      telemetry first, via the new `SystemInfo.refreshMemoryTelemetry()`. The Windows standby-aware
+      reading has a 60 s TTL refreshed only by `detect()`, which calibration calls once at
+      preparation; after it expired, snapshots silently fell back to `os.freemem()`, which excludes
+      the standby list. A probe's released mmap'd pages then read as a 32–35% availability drop
+      against a standby-aware baseline, scaling with host footprint, so the heaviest cells were
+      rejected for a purely instrumental reason. `clearCache()` does not refresh this value.
+- [x] Live-validation erratum: the adaptive early-stop cap is floored to an integer before it reaches
+      a timer API. `adaptiveCapFor()` derives it from `performance.now()` request deltas, and
+      `AbortSignal.timeout()` rejects a non-integer delay, so a healthy probe failed with a spurious
+      `error` status that consumed the point's ambiguity repeat and shifted its boundary. The client
+      also floors any timeout it is handed. Integer-only unit fixtures could not surface this.
+- [x] Live-validation erratum: the drift reference is re-anchorable. A confirmed step change — a
+      material drop whose independent repeat lands on the same level within the drift threshold —
+      re-anchors the reference and continues in an incremented resource regime rather than ending
+      the run, because a machine that settled at a new level still yields mutually comparable
+      launches. Readings still moving on the repeat remain persistent drift. Probes record
+      `resourceRegime`, and reproduction is assessed only within the newest regime present, so a
+      selection is never reproduced by launches straddling a step. Residual scope: cross-point score
+      comparison is not regime-filtered, and the fixed preparation baseline is retained for the
+      whole-run warning.
 
 ## Implementation phases
 
@@ -1102,7 +1138,7 @@ pure controller are already tested.
 
 - [x] Every probe process is confirmed dead before the next begins.
 - [x] Cleanup failure rejects as `failed`, retains an unconfirmed cleanup record, and blocks later use.
-- [ ] A later normal `start()` accepts and applies the exact adaptive selected profile/start config.
+- [x] A later normal `start()` accepts and applies the exact adaptive selected profile/start config.
 - [x] Exact progress retains combo counts; adaptive progress uses probe budget and stays monotonic.
 - [x] Callback/event progress remains payload-identical and exception-isolated.
 
@@ -1212,15 +1248,15 @@ pure controller are already tested.
 
 **Work:**
 
-- [ ] Re-run the archived Windows CUDA/Gemma 4 12B profile/workloads with the adaptive default and
+- [x] Re-run the archived Windows CUDA/Gemma 4 12B profile/workloads with the adaptive default and
   compare the newly complete probe trail with the historical narration-only trace; do not require
   identical stochastic outcomes.
-- [ ] Run a one-call two-context validation with the same workloads and slot count, verifying inherited
+- [x] Run a one-call two-context validation with the same workloads and slot count, verifying inherited
   scheduling ceilings, own-context finalists, global-fastest-anchored preference resolution, and
   bounded total cost.
-- [ ] Verify fresh-launch instability handling, full-fidelity selection, fallback evidence, total starts,
+- [x] Verify fresh-launch instability handling, full-fidelity selection, fallback evidence, total starts,
   calibration wall time, cleanup, and a subsequent normal start.
-- [ ] Compare the selected score and calibration cost with the archived v0.18 generated sweep. Timing is
+- [x] Compare the selected score and calibration cost with the archived v0.18 generated sweep. Timing is
   diagnostic; do not create a brittle universal performance assertion.
 - [x] Record whether the two-cell `maxProbes = 7 + 4 * cellCount` intercept repeatedly causes honest
   exhaustion specifically because of the new guard, denominator reproduction, or mixed-fidelity
@@ -1229,11 +1265,68 @@ pure controller are already tested.
 - [x] Update current public documentation and unreleased progress records listed below.
 - [x] Once this plan is approved, add a short status cross-link from the GQBR issue stating that
   pragmatic cell-local work proceeds first while GQBR remains deferred research.
-- [ ] After implementation passes acceptance, add resolution links to the archived downstream issue,
+- [x] After implementation passes acceptance, add resolution links to the archived downstream issue,
   mark this plan complete, and archive it under `docs/dev/plans/`.
 - [x] Run all repository quality gates.
 
-**2026-08-02 live-validation record:**
+**2026-08-02 post-fix live-validation record (supersedes the pre-fix record below):**
+
+Reference machine: Windows 11, RTX 4060 Laptop 8 GB, Gemma 4 12B IQ4_XS, GUI-provisioned llama.cpp
+b9860 CUDA binary. The harness was recreated through the public `calibrate()` / `start()` APIs in a
+headless Electron main process (`app.disableHardwareAcceleration()` plus `--disable-gpu`, no
+`BrowserWindow`), which avoids the Chromium GPU-helper crash that blocked the pre-fix attempt.
+Workloads are structurally representative, not the archived downstream prompts: an 861-token
+cold-prefill at weight 8 and a 1,524-token shared-prefix burst of three requests at weight 2. Both
+are short relative to the context, so these runs validate the mechanism rather than any particular
+application's profile; workload choice belongs to the consuming app.
+
+- **One profile, 12,288 x 1 slot, default budgets:** `complete` in 294.2 s over 5 probes with no
+  failed launch. Selected `gpuLayers 48 / swaFull false / q8_0 KV / flash attention on` at 2,868 ms,
+  reproduced across two independent launches (2,804 search and 2,868 full fidelity, a 2.3% spread).
+  The swa-full cell was searched to its own boundary (reference 11,474 ms, ceiling 13,772 ms) and
+  then correctly pruned once that converged boundary failed the competitiveness ratio against
+  2,868 x 1.575 — demonstrating both halves of the boundary-convergence fix in one run. A subsequent
+  normal `start()` applied every selected flag, `/props` verified 12,288 tokens and one slot, and the
+  server stopped cleanly. Cleanup confirmed on all five probes.
+- **Two comparable contexts in one call, 12,288 + 16,384 x 1 slot, SWA pinned:** `complete` in
+  263.0 s over 6 probes with no failed launch. Per-profile auto-configured baselines differed (19 and
+  9 layers) and both cells resolved at their own boundary of 48. `globalFastestScoreMs` was 2,830 —
+  the larger context — so with a 3,113 ms band `contextPreferenceResolution` resolved to
+  `largest-in-band` and the 16,384 profile was selected at 2,830 ms with two independent launches.
+  Caller order remained the stable `profileIndex` while scheduling ran smaller-context-first. The
+  selected configuration then started normally with every flag and the exact profile, `/props`
+  verified 16,384 tokens and one slot, and it stopped cleanly.
+- **Two comparable contexts, 16,384 + 32,768 x 1 slot (pre-timer-fix, superseded):** returned an
+  honest `budget-exhausted` after 9 probes with `selected` absent and a diagnostic `provisional`. The
+  conflict/step-down/unresolved chain behaved exactly as specified, but its trigger was the spurious
+  fractional-timeout `error` described below rather than real near-cliff instability, so this run is
+  retained only as evidence that the conservative path works — not as a measurement of 32,768
+  behaviour on this card.
+- **Cost comparison with the archived v0.18 generated sweep:** the archived ladder used 9 candidates
+  and 51.6 minutes on this machine. These post-fix adaptive runs used 5-6 fresh launches and 4.4-4.9
+  minutes, well inside the 15-launch/30-minute two-cell defaults, and both reached `complete` with an
+  independently reproduced selection. Probe count is lower and wall time is roughly an order of
+  magnitude lower, but the workloads here are far lighter than the archived narration set, so the
+  wall-time ratio reflects workload weight as much as policy efficiency and the selected-score
+  comparison is deliberately not carried over as a performance claim.
+- **Not validated on hardware:** midpoint bisection. On this card the boundary sits adjacent to the
+  physical ceiling (47-48), so the controller reaches it by ceiling probe and one-layer step-down
+  rather than by halving an interval. Interval bisection remains covered by golden traces only.
+- **Fractional adaptive-cap defect (found and fixed during this validation):** in three consecutive
+  runs the first `gpuLayers 48` probe of a freshly scheduled cell returned `error` after roughly 13 s
+  and then succeeded on its repeat. This was not a hardware transient. `adaptiveCapFor()` derives the
+  early-stop cap from `performance.now()` request deltas, so it is fractional, and
+  `AbortSignal.timeout()` rejects a non-integer delay ("Received 30709.872999999963" =
+  `earlyStopMultiplier * 15354.9365`). It only surfaced when the fractional middle term won the
+  min/max clamp; pinned to 120,000 or 15,000 the value is an integer and passes, which made it look
+  intermittent. Every unit test supplied integer timeouts, so 881 passing tests could not see it.
+  The cap is now floored at the source and the client defensively floors any timeout it receives.
+  Impact on earlier runs: the spurious `error` made an otherwise healthy point conflicted, consumed
+  its ambiguity repeat, and forced a one-layer step-down — which inverted the two-context result
+  (12,288 selected via `fastest-only` before the fix, 16,384 via `largest-in-band` after it). Any
+  measurement taken before the fix must be read with that in mind.
+
+**2026-08-02 pre-fix live-validation record:**
 
 - Ran the adaptive default on the Windows CUDA / Gemma 4 12B IQ4_XS reference machine with one
   12,288-token, one-slot profile and representative cold-prefill plus shared-prefix workloads. The
@@ -1261,10 +1354,10 @@ pure controller are already tested.
 
 - [x] The reference trace completes within `maxProbes` and the configured search deadline or returns
       an honest unresolved result.
-- [ ] The adaptive selected configuration completes two independent fresh launches, including one
+- [x] The adaptive selected configuration completes two independent fresh launches, including one
       full-fidelity launch.
 - [x] No calibration process, healthy endpoint, temporary slot state, or orphan remains.
-- [ ] A normal manager start uses every selected flag and the selected exact context/slot profile,
+- [x] A normal manager start uses every selected flag and the selected exact context/slot profile,
       then stops cleanly.
 - [x] `npm run build`, `npm run lint`, `npm run format`, and `npm test` pass; run the open-handle
       diagnostic unconditionally because the implementation changes repeated process/deadline cleanup.
@@ -1417,7 +1510,7 @@ migration guide only as part of a later explicitly requested release.
 - [x] ESLint passes with zero errors.
 - [x] Prettier formatting and `git diff --check` pass.
 - [x] Full Jest suite and an unconditional open-handle diagnostic pass without leaked processes.
-- [ ] Live reference validation and subsequent normal start/stop pass.
+- [x] Live reference validation and subsequent normal start/stop pass.
 - [x] Documentation matches the actual exported contract and effective defaults.
 
 ## Approved design decisions
@@ -1448,4 +1541,7 @@ The user approved these decisions for the updated plan:
 
 ---
 
-**Please review the amended plan, then confirm to begin implementation.**
+**Completed 2026-08-02.** Implementation, automated coverage, and hardware validation are done; the
+resolution record lives in `docs/dev/issues/ISSUE-adaptive-calibration-search.md` and the unreleased
+summary in `PROGRESS.md`. Release steps (version bump, migration guide, tag, publish) are deliberately
+out of scope until separately requested.

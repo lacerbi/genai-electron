@@ -495,6 +495,29 @@ stopped and never applies or persists a result. Stop diffusion generation, other
 processes, and unrelated GPU-heavy work first so the observations describe the intended production
 environment.
 
+#### Machine conditions during a run
+
+Calibration compares wall-clock timings across launches that are minutes apart, so it is only as
+reliable as the machine's stability during the run. A calibration can take tens of minutes; the
+machine should be otherwise idle for its duration.
+
+Because the library cannot control what else the user does, **a host application should tell the
+user that calibration is running and ask them not to start heavy work until it finishes** — other
+model servers, image generation, games, large builds, video encoding, or anything else competing for
+RAM, VRAM, or CPU. Surfacing this alongside the progress UI is usually enough.
+
+Ordinary light desktop use is expected and does not invalidate a run. What the guard reacts to is a
+large drop in available memory, and it distinguishes two cases:
+
+- **A settled step change** — something took memory once and kept it. The affected point is repeated;
+  when the repeat confirms the same new level, calibration re-anchors its reference, records a
+  warning, and continues in a new *resource regime*. Probes carry the regime they were measured in,
+  and a selected configuration's independent launches always share one regime, so a point is never
+  considered reproduced by launches taken under materially different conditions.
+- **An unsettled environment** — availability is still moving on the repeat. Those launches are not
+  comparable, so calibration ends `budget-exhausted` instead of reporting a number it cannot stand
+  behind. That is a deliberate refusal, not a crash — rerun it on a quiet machine.
+
 ### Adaptive calibration (default)
 
 Use `profiles` and omit `combos`:

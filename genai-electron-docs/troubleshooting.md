@@ -574,11 +574,19 @@ PID, then retry. Do not discard the partial report when escalating a cleanup pro
 
 Calibration compares available host RAM and GPU-memory snapshots when those metrics exist. A drop
 greater than the versioned threshold (25% by default) triggers cooldown and at most one reference
-repeat. Persistent decision-relevant drift can end as `budget-exhausted`. Missing telemetry is
-reported as unavailable rather than treated as stable.
+repeat. If the repeat confirms the same new level, the run re-anchors to it and continues in a new
+resource regime — `probe.resourceRegime` records which level each launch was measured under, and
+reproduction never spans regimes. Only drift that is still moving on the repeat ends as
+`budget-exhausted`. Missing telemetry is reported as unavailable rather than treated as stable.
 
 Close competing workloads and retry. Resource snapshots are diagnostics only: they do not estimate
 a hidden memory threshold or determine the winner.
+
+To prevent it, run calibration on an otherwise idle machine and have the host application ask the
+user not to start heavy work while it runs — see
+[Machine conditions during a run](llm-server.md#machine-conditions-during-a-run). Light desktop use
+is fine; starting another model server, an image generation, or a large build partway through a run
+is what makes launches incomparable.
 
 ### When is a saved recommendation stale?
 

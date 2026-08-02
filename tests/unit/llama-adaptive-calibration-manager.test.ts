@@ -218,6 +218,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
   let executor: jest.MockedFunction<ProbeExecutor>;
   let getMemoryInfo: jest.Mock;
   let getGPUInfo: jest.Mock;
+  let refreshMemoryTelemetry: jest.Mock;
 
   beforeEach(() => {
     jest.useFakeTimers();
@@ -230,12 +231,14 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
     executor = jest.fn<ProbeExecutor>();
     getMemoryInfo = jest.fn(() => capabilities.memory);
     getGPUInfo = jest.fn(async () => capabilities.gpu);
+    refreshMemoryTelemetry = jest.fn(async () => undefined);
     const modelManager = { getModelInfo: jest.fn(async () => model) };
     const systemInfo = {
       detect: jest.fn(async () => capabilities),
       clearCache: jest.fn(),
       getMemoryInfo,
       getGPUInfo,
+      refreshMemoryTelemetry,
     };
     manager = new LlamaServerManager(modelManager as never, systemInfo as never, executor);
     (manager as unknown as { initializeLogManager: () => Promise<void> }).initializeLogManager =
@@ -624,7 +627,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(ensureBinary).not.toHaveBeenCalled();
     });
 
-    it('reports configured time-admission exhaustion without launching a probe', async () => {
+    it('still attempts the first probe when the configured estimate exceeds the budget', async () => {
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
       const report = await settleCalibration(
@@ -635,24 +638,29 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       );
 
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      expect(report.status).toBe('budget-exhausted');
-      expect(executor).not.toHaveBeenCalled();
-      expect(report.probes).toHaveLength(0);
+      // The configured conservative estimate prices every planned request at the
+      // full request timeout, so it exceeds this budget. Reserves protect later
+      // validation launches only: with no evidence yet there is nothing to
+      // protect, and refusing here would return a zero-probe report. The warning
+      // is retained, the first probe runs, and admission then uses observed
+      // launch durations.
       expect(report.warnings).toEqual([
         expect.stringContaining('configured conservative first-probe estimate'),
       ]);
+      expect(executor).toHaveBeenCalled();
+      expect(report.probes.length).toBeGreaterThan(0);
+      expect(report.probes[0]).toMatchObject({ purpose: 'reference', probeIndex: 0 });
+      // The budget really is too small for this workload, so it still exhausts
+      // honestly - but now after one probe of real evidence instead of zero.
+      expect(report.status).toBe('budget-exhausted');
       expect(report.budget).toMatchObject({
-        completedProbes: 0,
+        completedProbes: report.probes.length,
         maxWallTimeMs: 400_000,
-        timeAdmission: {
-          policy: 'configured-conservative-estimate',
-          estimatedNextProbeDurationMs: expect.any(Number),
-        },
       });
-      expect(report.budget.timeAdmission.estimatedNextProbeDurationMs).toBeGreaterThan(400_000);
     });
 
     it('warns against the maximum possible default cell budget before provisioning', async () => {
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
       const { maxWallTimeMs: _omitted, ...withoutWallOverride } = baseConfig;
       const report = await settleCalibration(
         manager.calibrate({
@@ -672,8 +680,8 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       );
 
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      expect(report.status).toBe('budget-exhausted');
-      expect(executor).not.toHaveBeenCalled();
+      // The warning resolves against the maximum possible cell-count default
+      // (1,800,000 ms) even though this run enumerates one cell (1,350,000 ms).
       expect(report.budget.maxWallTimeMs).toBe(1_350_000);
       expect(report.warnings).toEqual([
         expect.stringContaining('pre-provisioning wall-time allowance (1800000 ms)'),
@@ -729,17 +737,19 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       }
     );
 
-    it('repeats one materially drifting point and ends unresolved without unsuitable evidence', async () => {
+    it('repeats a drifting point and ends unresolved when the level never settles', async () => {
       const memory = (available: number) => ({
         ...capabilities.memory,
         available,
         used: capabilities.memory.total - available,
       });
+      // The repeat lands on a different level again (10_000 then 5_000), so the
+      // environment is still moving and the launches are not comparable.
       getMemoryInfo
         .mockReturnValueOnce(memory(20_000))
         .mockReturnValueOnce(memory(10_000))
         .mockReturnValueOnce(memory(20_000))
-        .mockReturnValueOnce(memory(10_000));
+        .mockReturnValueOnce(memory(5_000));
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
       const report = await settleCalibration(manager.calibrate(baseConfig));
@@ -766,6 +776,13 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
           expect.stringContaining('Available resources fell by more than'),
           'persistent decision-relevant resource drift prevented comparable evidence',
         ])
+      );
+      // Every host snapshot must be preceded by a telemetry refresh so the
+      // baseline and each probe reading share one measurement regime. Without
+      // it the Windows standby-aware TTL expires mid-run and later snapshots
+      // silently drop to os.freemem(), which excludes reclaimable standby pages.
+      expect(refreshMemoryTelemetry.mock.calls.length).toBeGreaterThanOrEqual(
+        getMemoryInfo.mock.calls.length
       );
     });
 
@@ -800,12 +817,14 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(report.probes.slice(1).every((probe) => probe.operationalStatus === 'ok')).toBe(true);
     });
 
-    it('compares later launch resources with the stable first-launch baseline', async () => {
+    it('re-anchors and continues when a step change settles at a new level', async () => {
       const memory = (available: number) => ({
         ...capabilities.memory,
         available,
         used: capabilities.memory.total - available,
       });
+      // Baseline 20_000, then a one-off step to a level that holds across the
+      // repeat - a user opening a browser, not an unstable machine.
       getMemoryInfo
         .mockReturnValueOnce(memory(20_000))
         .mockReturnValueOnce(memory(20_000))
@@ -820,12 +839,22 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       );
 
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      expect(report.status).toBe('budget-exhausted');
+      // The first drop is still treated as drift and repeated; the repeat proves
+      // the level settled, so the reference re-anchors instead of ending the run.
       expect(report.probes[0]?.diagnostics?.hostAvailableMemory.comparability).toBe('available');
-      expect(report.probes.slice(1).map((probe) => probe.boundaryDecision.reason)).toEqual([
-        'resource-drift',
-        'persistent-resource-drift',
-      ]);
+      expect(report.probes[1]?.boundaryDecision.reason).toBe('resource-drift');
+      // The pre-step launches cannot reproduce the point for the post-step one,
+      // so regime 1 has to earn its own second launch before selection.
+      expect(report.probes.map((probe) => probe.resourceRegime)).toEqual([0, 0, 1, 1]);
+      expect(
+        report.probes.some((probe) => probe.boundaryDecision.reason === 'persistent-resource-drift')
+      ).toBe(false);
+      expect(report.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('re-anchored and continued in resource regime 1'),
+        ])
+      );
+      expect(report.status).toBe('complete');
     });
 
     it('returns a redacted aborted partial report when already aborted during preparation', async () => {

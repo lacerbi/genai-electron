@@ -110,6 +110,13 @@ export interface AdaptiveProbeObservation {
    * after a clean repeat resolves the point.
    */
   resourceDriftStatus?: AdaptiveResourceDriftStatus;
+  /**
+   * Which settled resource level this launch was measured under. Incremented
+   * when a confirmed step change re-anchors the reference, so a point is never
+   * considered reproduced by launches taken under materially different
+   * conditions. Absent is treated as regime 0.
+   */
+  resourceRegime?: number;
   durationMs: number;
   diagnostics?: AdaptivePassiveDiagnostics;
 }
@@ -558,6 +565,16 @@ export function evaluateProbeAdmission(input: AdaptiveProbeAdmissionInput): Adap
   if (input.probesUsed >= input.budgets.maxProbes) {
     return { allowed: false, reason: 'probe-limit' };
   }
+  // The first probe of a calibration is always attempted while wall time remains.
+  // Launch and time reserves protect later validation launches; before any
+  // evidence exists there is nothing to protect, and the frozen
+  // configured-conservative-estimate prices every planned request at the full
+  // request timeout, so it can exceed an ordinary budget and return a
+  // zero-probe report. The internal deadline still stops an overrunning probe
+  // and performs confirmed cleanup.
+  if (input.probesUsed === 0 && input.budgets.maxWallTimeMs - input.elapsedMs > 0) {
+    return { allowed: true, reason: 'allowed' };
+  }
   const remainingProbeSlots = input.budgets.maxProbes - input.probesUsed;
   if (!input.finalistPurpose && remainingProbeSlots <= input.budgets.finalistReserve) {
     return { allowed: false, reason: 'launch-reserve' };
@@ -613,6 +630,23 @@ export function isAdaptiveCellCompetitive(input: AdaptiveCompetitivenessInput): 
   }
   return (
     input.cellBestDirectScoreMs <= input.globalBestDirectScoreMs * competitiveObservedRatio(input)
+  );
+}
+
+/**
+ * A cell has a directly observed boundary only once its bracket search has
+ * converged. While it is still finding a reference, establishing a ceiling, or
+ * bisecting, `boundaryGpuLayers` is merely the interim largest admissible point
+ * — typically the low-layer reference. Pruning a cell on that score would
+ * discard it without ever measuring the higher layers that may improve it
+ * materially, which the policy explicitly forbids.
+ */
+function hasConvergedBoundary(phase: AdaptiveCellPhase): boolean {
+  return (
+    phase !== 'pending' &&
+    phase !== 'finding-reference' &&
+    phase !== 'establishing-ceiling' &&
+    phase !== 'bisecting'
   );
 }
 
@@ -876,7 +910,18 @@ export function assessMixedFidelityStability(
   // terminated by the manager before recommendation. Excluding only explicitly material launches
   // avoids making a single resolved telemetry disturbance permanently poison an otherwise stable
   // point while preserving every ordinary operational conflict.
-  const comparableEvidence = evidence.filter((item) => item.resourceDriftStatus !== 'material');
+  const driftFree = evidence.filter((item) => item.resourceDriftStatus !== 'material');
+  // Reproduction may never span a confirmed resource-regime change. Assess the
+  // newest regime present: it describes the environment the run is now in, and
+  // requiring fresh launches there is the conservative reading - older evidence
+  // stays in the trail but cannot reproduce a point on its own.
+  const activeRegime = driftFree.reduce(
+    (latest, item) => Math.max(latest, item.resourceRegime ?? 0),
+    0
+  );
+  const comparableEvidence = driftFree.filter(
+    (item) => (item.resourceRegime ?? 0) === activeRegime
+  );
   const nonOk = comparableEvidence.filter((item) => item.operationalStatus !== 'ok');
   if (nonOk.length > 0) {
     return {
@@ -1893,7 +1938,7 @@ export function nextAdaptivePolicyAction(state: AdaptivePolicyState): AdaptivePo
               state.policy.nonMonotoneTriggerPct
         ));
     return isAdaptiveCellCompetitive({
-      hasDirectBoundary: true,
+      hasDirectBoundary: hasConvergedBoundary(plan.phase),
       cellBestDirectScoreMs,
       globalBestDirectScoreMs: preference.globalFastestScore,
       triggeredNonMonotoneCandidate,
