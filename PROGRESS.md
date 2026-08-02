@@ -9,7 +9,7 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 877/877 passing (35 suites), including serial open-handle diagnostics
-- **Branch:** `main`
+- **Branch:** `feat/adaptive-llm-calibration`
 - **Last Updated:** 2026-08-02 (unreleased adaptive calibration work)
 
 ---
@@ -40,6 +40,16 @@
   contract/documentation consistency; all reported implementation defects have regression fixes.
   Additional post-fix hardware and normal-start validation remains intentionally pending after the
   host Electron GPU helper crashed before that follow-up could start a probe.
+
+**Pickup point:** Resume Phase 6 in `PLAN-adaptive-llm-calibration.md` on a stable Electron host.
+Re-run the post-fix adaptive calibration first with the recorded one-profile shape and then with one
+call containing two comparable contexts; verify two independent selected-configuration launches,
+apply the selected exact `startConfig` to a normal manager start, and stop it cleanly. If those checks
+pass, complete the remaining Phase 6 acceptance items, add the downstream resolution links, and
+archive the plan under `docs/dev/plans/`. No calibration from this branch is in flight. The temporary
+Electron harness, Gemma GGUF, GUI-provisioned llama binary, and host GPU state are local-only; recreate
+the harness through the documented public `calibrate()` and `start()` APIs rather than expecting them
+in a fresh checkout.
 
 ---
 
