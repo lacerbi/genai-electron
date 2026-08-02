@@ -88,6 +88,13 @@ traces.
 3. **Asymmetric comparison.** For reading `R` and baseline `B`, use
    `decreasePct = max(0, (B - R) / B * 100)` for decisions. Signed raw change remains available for
    diagnostics. An increase never contributes to failure.
+   *Amendment (2026-08-02, user checkpoint discussion):* a large increase also degrades strict
+   comparability (earlier probes ran under tighter conditions; the result may be conservative), but
+   quiet machines measurably settle upward (+10.8% host over one quiet run), so increases stay
+   non-fatal. Instead, a trusted increase beyond a warning-only band (value chosen at the threshold
+   checkpoint, above the measured settling envelope) adds an explicit report warning that the result
+   may be conservative and recalibration may find a better configuration. Implemented with the
+   Phase 2/4 report work.
 4. **Independent metrics.** Host RAM and VRAM have separate thresholds and trust states. A missing
    or untrusted metric cannot mask a confirmed drop in the other. There is no weighted score.
 5. **Two launch boundaries.** With complete trusted readings, checking pre and post separately is
@@ -362,35 +369,35 @@ cooldown or hardware.
 **Goal:** choose provisional independent host/VRAM thresholds and a bounded baseline-settle schedule
 from production-timed quiet traces. Do not claim to identify a universal performance-harm boundary.
 
-1. [ ] Reuse the pinned Windows CUDA / Gemma 4 12B reference environment and invoke the repository's
+1. [x] Reuse the pinned Windows CUDA / Gemma 4 12B reference environment and invoke the repository's
    `llama-server` skill before real-model runs. Use headless Electron with hardware acceleration and
    BrowserWindow creation disabled so the harness does not create its own GPU interference.
-2. [ ] Store a reproducible sanitized record beside the versioned harness: binary/model identities,
+2. [x] Store a reproducible sanitized record beside the versioned harness: binary/model identities,
    exact profiles/combos, workload hashes/token counts, harness revision, timestamps, baseline
    samples, initial/confirmation readings and trust, cleanup-confirmation timing, signed changes,
    scores, and outcomes.
-3. [ ] Run a capped quiet matrix through the shadow guard: adaptive one-profile, adaptive two-profile,
+3. [x] (5 calls used of 8, ~50 min of 90: 4 cells complete; reserve call 1 — the 2p rerun without the caller probe cap — was externally stopped with clean teardown and no artifact) Run a capped quiet matrix through the shadow guard: adaptive one-profile, adaptive two-profile,
    exact near-capacity/full-offload, and exact lower-pressure. Reserve four additional calls to rerun
    those same cells with the final settle/cooldown schedule; use them as ordinary repetitions only
    when no schedule changes. Stop at eight calibration calls or 90 minutes, whichever comes first.
-4. [ ] Compare fixed preparation-delay candidates and the three-sample median. If cooldown-spaced
+4. [x] Compare fixed preparation-delay candidates and the three-sample median. If cooldown-spaced
    baseline samples remain on the initial settling slope, choose one fixed bounded delay; never add
    a condition-driven settling loop. Once selected, rerun affected traces with that exact schedule;
    pre-delay traces cannot validate the final default.
-5. [ ] Measure post-cleanup recovery at the production decision points—currently one cooldown at 750 ms
+5. [x] Measure post-cleanup recovery at the production decision points—currently one cooldown at 750 ms
    and confirmation at 1,500 ms—under both near-capacity and lower-pressure configurations. A
    dedicated diagnostic pass samples farther out (for example 2,250 and 3,000 ms) to distinguish
    self-release lag from environmental decrease. If 750/1,500 ms is too early, approve a longer
    fixed `resourceCooldownMs` and rerun the affected cells; do not hide release lag by widening the
    decrease threshold. If no bounded cooldown settles, stop for plan revision.
-6. [ ] Replay candidate host/VRAM thresholds (for example 10%, 15%, 20%, and the existing 25%) over the
+6. [x] Replay candidate host/VRAM thresholds (for example 10%, 15%, 20%, and the existing 25%) over the
    retained raw traces. Report the initial suspicions and confirmed would-abort sequences for every
    threshold and settle-delay candidate.
-7. [ ] Propose defaults above the largest confirmed quiet downward envelope plus an explicit
+7. [x] Propose defaults above the largest confirmed quiet downward envelope plus an explicit
    false-abort margin. Label them heuristic, provisional, and scoped to the observed platform. A
    larger threshold is false-abort-conservative; a smaller threshold is
    comparability-conservative—do not use “conservative” without naming the risk.
-8. [ ] **User checkpoint:** present raw summaries, candidate replay, proposed independent defaults,
+8. [~] **User checkpoint:** present raw summaries, candidate replay, proposed independent defaults,
    telemetry timeout, fixed settle delay, cooldown value, and platform limits. Do not enable manager
    hard stops or claim a harmful-pressure boundary without explicit approval.
 

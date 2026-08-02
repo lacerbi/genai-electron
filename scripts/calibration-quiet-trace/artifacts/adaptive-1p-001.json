@@ -1,0 +1,1319 @@
+{
+  "formatVersion": 1,
+  "kind": "calibration-quiet-trace",
+  "cell": "adaptive-1p",
+  "cellDescription": "Adaptive, one profile at the calibrated production context.",
+  "harness": {
+    "script": "run-quiet-trace.mjs",
+    "repositoryRevision": "32faf3ce655c05c801c0b6c647f724aa7a806503",
+    "repositoryDirty": false,
+    "configFile": "config.default.json"
+  },
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "electron": "43.2.0",
+    "chrome": "150.0.7871.129",
+    "node": "24.18.0",
+    "hardwareAccelerationDisabled": true,
+    "browserWindowsCreated": 0
+  },
+  "timestamps": {
+    "startedAt": "2026-08-02T18:17:45.480Z",
+    "finishedAt": "2026-08-02T18:25:09.051Z",
+    "durationMs": 443474.10599999997
+  },
+  "identities": {
+    "binary": {
+      "name": "llama-server.exe",
+      "sizeBytes": 9216
+    },
+    "model": {
+      "id": "gemma-4-12b-iq4xs",
+      "name": "Gemma 4 12B IQ4_XS",
+      "architecture": "gemma4",
+      "sizeBytes": 6375732640,
+      "files": [
+        {
+          "name": "gemma-4-12b-it-IQ4_XS.gguf",
+          "sizeBytes": 6375732640
+        }
+      ]
+    }
+  },
+  "calibrateConfig": {
+    "samples": 3,
+    "seed": 42,
+    "startupTimeoutMs": 180000,
+    "requestTimeoutMs": 120000,
+    "fixedConfig": {
+      "flashAttention": "on"
+    },
+    "workloads": [
+      {
+        "workloadId": "cold",
+        "kind": "cold-prefill",
+        "weight": 2,
+        "nPredict": 96,
+        "tokenCounts": [
+          31
+        ],
+        "prompt": {
+          "sha256": "ac02bfa41eb7a7ca51030d514cc38682db541bb3bea373d9819f638ebf23626c",
+          "chars": 162
+        }
+      },
+      {
+        "workloadId": "burst",
+        "kind": "shared-prefix",
+        "weight": 1,
+        "nPredict": 64,
+        "tokenCounts": [
+          46,
+          44,
+          49
+        ],
+        "sharedPrefix": {
+          "sha256": "b55d227a0ecfc563eb3b32d19009b3bf3e6b12edf2fafffcd67169cb3597b686",
+          "chars": 239
+        },
+        "suffixes": [
+          {
+            "sha256": "4438acac4ce2f46177e6ec32f717db281e07a174f45f0937c9e98525d7f1c2a5",
+            "chars": 44
+          },
+          {
+            "sha256": "4dadbdd4bfce5d85493cd013d46c8f55f939ae193b8130a98e25c2e1b4ab2939",
+            "chars": 45
+          },
+          {
+            "sha256": "701af8d340db1afceffb2992814c4f0b1727c6b8c23858892718ca1fd2c95794",
+            "chars": 47
+          }
+        ]
+      }
+    ],
+    "modelId": "gemma-4-12b-iq4xs",
+    "profiles": [
+      {
+        "contextSize": 16384,
+        "parallelRequests": 1
+      }
+    ],
+    "maxProbes": 8,
+    "maxWallTimeMs": 1800000
+  },
+  "shadowSchedule": {
+    "thresholds": {
+      "hostMemoryDecreaseThresholdPct": 10,
+      "vramDecreaseThresholdPct": 10
+    },
+    "cooldownMs": 750,
+    "settleMs": 5000,
+    "baselineSamples": 3,
+    "confirmationReads": 1,
+    "telemetryTimeoutMs": 10000,
+    "postCleanupExtraSampleOffsetsMs": [
+      2250,
+      3000
+    ]
+  },
+  "shadowTrace": {
+    "label": "adaptive-1p",
+    "armedAt": "2026-08-02T18:17:45.482Z",
+    "schedule": {
+      "thresholds": {
+        "hostMemoryDecreaseThresholdPct": 10,
+        "vramDecreaseThresholdPct": 10
+      },
+      "cooldownMs": 750,
+      "settleMs": 5000,
+      "baselineSamples": 3,
+      "confirmationReads": 1,
+      "telemetryTimeoutMs": 10000,
+      "postCleanupExtraSampleOffsetsMs": [
+        2250,
+        3000
+      ]
+    },
+    "events": [
+      {
+        "type": "baseline",
+        "strategy": "adaptive",
+        "settleMs": 5000,
+        "cooldownMs": 750,
+        "requestedSamples": 3,
+        "snapshots": [
+          {
+            "hostMemory": {
+              "trusted": true,
+              "availableBytes": 11282374656
+            },
+            "vram": {
+              "trusted": true,
+              "availableBytes": 8343519232
+            }
+          },
+          {
+            "hostMemory": {
+              "trusted": true,
+              "availableBytes": 11271995392
+            },
+            "vram": {
+              "trusted": true,
+              "availableBytes": 8343519232
+            }
+          },
+          {
+            "hostMemory": {
+              "trusted": true,
+              "availableBytes": 11286204416
+            },
+            "vram": {
+              "trusted": true,
+              "availableBytes": 8343519232
+            }
+          }
+        ],
+        "baseline": {
+          "metrics": {
+            "hostMemory": {
+              "metric": "hostMemory",
+              "enabled": true,
+              "baselineBytes": 11282374656,
+              "attempts": 3,
+              "trustedSamples": [
+                11282374656,
+                11271995392,
+                11286204416
+              ]
+            },
+            "vram": {
+              "metric": "vram",
+              "enabled": true,
+              "baselineBytes": 8343519232,
+              "attempts": 3,
+              "trustedSamples": [
+                8343519232,
+                8343519232,
+                8343519232
+              ]
+            }
+          },
+          "enabledMetrics": [
+            "hostMemory",
+            "vram"
+          ],
+          "coverage": "complete",
+          "attempts": 3,
+          "warnings": []
+        },
+        "sequence": 0,
+        "atMs": 13527.593,
+        "sinceArmMs": 13023.102,
+        "wallMs": 8336.6332
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "pre-launch",
+        "probeOrdinal": 0,
+        "preReadCooldownMs": 0,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11273297920
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "pre-launch",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 11273297920,
+                "decreasePctFromBaseline": 0.08045058134258079,
+                "decisionDecreasePct": 0.08045058134258079,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 1,
+        "atMs": 14694.7937,
+        "sinceArmMs": 14190.3027,
+        "wallMs": 578.4541000000008
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "post-cleanup",
+        "probeOrdinal": 0,
+        "preReadCooldownMs": 750,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11670781952
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "post-cleanup",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 11670781952,
+                "decreasePctFromBaseline": -3.4426023584799488,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 2,
+        "atMs": 124225.0152,
+        "sinceArmMs": 123720.5242,
+        "wallMs": 1926.1023999999888
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 0,
+        "offsetMs": 2250,
+        "actualOffsetMs": 2873.3676000000123,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11688337408
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 3,
+        "atMs": 125172.2843,
+        "sinceArmMs": 124667.7933,
+        "wallMs": 947.2590000000055
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 0,
+        "offsetMs": 3000,
+        "actualOffsetMs": 3624.8349000000017,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11684499456
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 4,
+        "atMs": 125923.7464,
+        "sinceArmMs": 125419.25540000001,
+        "wallMs": 751.4453000000067
+      },
+      {
+        "type": "legacy-outcome",
+        "strategy": "adaptive",
+        "probeOrdinal": 0,
+        "outcome": {
+          "hostDecreasePct": 0,
+          "gpuDecreasePct": 0,
+          "hostComparability": "available",
+          "gpuComparability": "available",
+          "resourceRegime": 0,
+          "resourceDriftStatus": "available",
+          "warnings": []
+        },
+        "sequence": 5,
+        "atMs": 127311.2363,
+        "sinceArmMs": 126806.74530000001,
+        "wallMs": 0
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "pre-launch",
+        "probeOrdinal": 1,
+        "preReadCooldownMs": 0,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11683889152
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "pre-launch",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 11683889152,
+                "decreasePctFromBaseline": -3.558776483162376,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 6,
+        "atMs": 128544.495,
+        "sinceArmMs": 128040.004,
+        "wallMs": 623.7054999999964
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "post-cleanup",
+        "probeOrdinal": 1,
+        "preReadCooldownMs": 750,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11700064256
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "post-cleanup",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 11700064256,
+                "decreasePctFromBaseline": -3.7021426139032836,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 7,
+        "atMs": 159604.5335,
+        "sinceArmMs": 159100.04249999998,
+        "wallMs": 1470.469299999997
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 1,
+        "offsetMs": 2250,
+        "actualOffsetMs": 2949.9250000000175,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11726487552
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 8,
+        "atMs": 161083.9942,
+        "sinceArmMs": 160579.50319999998,
+        "wallMs": 1479.4429999999993
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 1,
+        "offsetMs": 3000,
+        "actualOffsetMs": 3698.397900000011,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11730382848
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 9,
+        "atMs": 161832.4682,
+        "sinceArmMs": 161327.9772,
+        "wallMs": 748.4561000000103
+      },
+      {
+        "type": "legacy-outcome",
+        "strategy": "adaptive",
+        "probeOrdinal": 1,
+        "outcome": {
+          "hostDecreasePct": -3.58713863355607,
+          "gpuDecreasePct": 0,
+          "hostComparability": "available",
+          "gpuComparability": "available",
+          "resourceRegime": 0,
+          "resourceDriftStatus": "available",
+          "warnings": []
+        },
+        "sequence": 10,
+        "atMs": 163272.3468,
+        "sinceArmMs": 162767.8558,
+        "wallMs": 0
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "pre-launch",
+        "probeOrdinal": 2,
+        "preReadCooldownMs": 0,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11723567104
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "pre-launch",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 11723567104,
+                "decreasePctFromBaseline": -3.910457341224461,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 11,
+        "atMs": 164614.3765,
+        "sinceArmMs": 164109.8855,
+        "wallMs": 672.5578999999852
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "post-cleanup",
+        "probeOrdinal": 2,
+        "preReadCooldownMs": 750,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11730640896
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "post-cleanup",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 11730640896,
+                "decreasePctFromBaseline": -3.9731550641390085,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 12,
+        "atMs": 214480.2431,
+        "sinceArmMs": 213975.75209999998,
+        "wallMs": 1534.5032000000065
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 2,
+        "offsetMs": 2250,
+        "actualOffsetMs": 2901.3650999999954,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11724775424
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 13,
+        "atMs": 215847.096,
+        "sinceArmMs": 215342.60499999998,
+        "wallMs": 1366.8488999999827
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 2,
+        "offsetMs": 3000,
+        "actualOffsetMs": 3648.6977999999945,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11726909440
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 14,
+        "atMs": 216594.4281,
+        "sinceArmMs": 216089.93709999998,
+        "wallMs": 747.3277999999991
+      },
+      {
+        "type": "legacy-outcome",
+        "strategy": "adaptive",
+        "probeOrdinal": 2,
+        "outcome": {
+          "hostDecreasePct": -3.884351118150768,
+          "gpuDecreasePct": 0,
+          "hostComparability": "available",
+          "gpuComparability": "available",
+          "resourceRegime": 0,
+          "resourceDriftStatus": "available",
+          "warnings": []
+        },
+        "sequence": 15,
+        "atMs": 218062.8535,
+        "sinceArmMs": 217558.3625,
+        "wallMs": 0
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "pre-launch",
+        "probeOrdinal": 3,
+        "preReadCooldownMs": 0,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 11745501184
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "pre-launch",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 11745501184,
+                "decreasePctFromBaseline": -4.1048674779977095,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 16,
+        "atMs": 219351.8576,
+        "sinceArmMs": 218847.36659999998,
+        "wallMs": 635.9849000000104
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "post-cleanup",
+        "probeOrdinal": 3,
+        "preReadCooldownMs": 750,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 12379226112
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "post-cleanup",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 12379226112,
+                "decreasePctFromBaseline": -9.721813797565137,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 17,
+        "atMs": 381175.6544,
+        "sinceArmMs": 380671.1634,
+        "wallMs": 2929.1396999999997
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 3,
+        "offsetMs": 2250,
+        "actualOffsetMs": 3538.3588000000454,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 12383711232
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 18,
+        "atMs": 381784.8704,
+        "sinceArmMs": 381280.37940000003,
+        "wallMs": 609.211100000015
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 3,
+        "offsetMs": 3000,
+        "actualOffsetMs": 4148.6802000000025,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 12381253632
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 19,
+        "atMs": 382395.1915,
+        "sinceArmMs": 381890.70050000004,
+        "wallMs": 610.3170999999857
+      },
+      {
+        "type": "legacy-outcome",
+        "strategy": "adaptive",
+        "probeOrdinal": 3,
+        "outcome": {
+          "hostDecreasePct": -4.12753157133717,
+          "gpuDecreasePct": 0,
+          "hostComparability": "available",
+          "gpuComparability": "available",
+          "resourceRegime": 0,
+          "resourceDriftStatus": "available",
+          "warnings": []
+        },
+        "sequence": 20,
+        "atMs": 383780.1333,
+        "sinceArmMs": 383275.6423,
+        "wallMs": 0
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "pre-launch",
+        "probeOrdinal": 4,
+        "preReadCooldownMs": 0,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 12380946432
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "pre-launch",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 12380946432,
+                "decreasePctFromBaseline": -9.737061651429704,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 21,
+        "atMs": 384997.0066,
+        "sinceArmMs": 384492.51560000004,
+        "wallMs": 609.9452000000165
+      },
+      {
+        "type": "boundary",
+        "strategy": "adaptive",
+        "boundary": "post-cleanup",
+        "probeOrdinal": 4,
+        "preReadCooldownMs": 750,
+        "initialSnapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 12503687168
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "confirmationPerformed": false,
+        "confirmationSnapshots": [],
+        "result": {
+          "boundary": "post-cleanup",
+          "conclusion": "admitted",
+          "confirmationPerformed": false,
+          "initial": {
+            "metrics": {
+              "hostMemory": {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 12503687168,
+                "decreasePctFromBaseline": -10.824959720252709,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              },
+              "vram": {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decisionDecreasePct": 0,
+                "thresholdPct": 10,
+                "suspicious": false
+              }
+            },
+            "suspiciousMetrics": [],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [],
+          "affectedMetrics": [],
+          "warnings": []
+        },
+        "sequence": 22,
+        "atMs": 440482.3987,
+        "sinceArmMs": 439977.90770000004,
+        "wallMs": 1518.2835000000196
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 4,
+        "offsetMs": 2250,
+        "actualOffsetMs": 2865.3710999999894,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 12497727488
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 23,
+        "atMs": 441829.4847,
+        "sinceArmMs": 441324.9937,
+        "wallMs": 1347.0814999999711
+      },
+      {
+        "type": "extra-sample",
+        "strategy": "adaptive",
+        "probeOrdinal": 4,
+        "offsetMs": 3000,
+        "actualOffsetMs": 3639.908699999971,
+        "snapshot": {
+          "hostMemory": {
+            "trusted": true,
+            "availableBytes": 12490854400
+          },
+          "vram": {
+            "trusted": true,
+            "availableBytes": 8343519232
+          }
+        },
+        "sequence": 24,
+        "atMs": 442604.0216,
+        "sinceArmMs": 442099.5306,
+        "wallMs": 774.5305999999982
+      },
+      {
+        "type": "legacy-outcome",
+        "strategy": "adaptive",
+        "probeOrdinal": 4,
+        "outcome": {
+          "hostDecreasePct": -9.824788065892934,
+          "gpuDecreasePct": 0,
+          "hostComparability": "available",
+          "gpuComparability": "available",
+          "resourceRegime": 0,
+          "resourceDriftStatus": "available",
+          "warnings": []
+        },
+        "sequence": 25,
+        "atMs": 443975.3395,
+        "sinceArmMs": 443470.8485,
+        "wallMs": 0
+      }
+    ],
+    "guardAddedMs": 30217.699299999993
+  },
+  "guardAddedTotalMs": 30217.699299999993,
+  "report": {
+    "schemaVersion": 2,
+    "policyVersion": "llama-runtime-v2",
+    "strategy": "adaptive",
+    "status": "complete",
+    "terminalReason": "all active preferences and empirical reproduction requirements are resolved",
+    "createdAt": "2026-08-02T18:25:08.954Z",
+    "probeCount": 5,
+    "warnings": [
+      "The configured conservative first-probe estimate (2314500 ms) exceeds the pre-provisioning wall-time allowance (1800000 ms); calibration may end budget-exhausted before search evidence is available."
+    ],
+    "selected": {
+      "profileIndex": 0,
+      "cellId": "p0:c16384:swa-window:kv-q8_0",
+      "scoreMs": 4014.152700000006,
+      "gpuLayers": 48,
+      "contextSize": 16384
+    },
+    "selectionEvidence": "independent-reproduction",
+    "confidence": "empirical-reproducibility",
+    "probes": [
+      {
+        "probeIndex": 0,
+        "purpose": "reference",
+        "fidelity": "search",
+        "cellId": "p0:c16384:swa-window:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 9,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 24678.0967,
+        "durationMs": 108770.1892,
+        "resourceRegime": 0,
+        "cleanupConfirmed": true,
+        "diagnostics": {
+          "hostAvailableMemory": {
+            "beforeBytes": 11280064512,
+            "afterBytes": 11280064512,
+            "comparability": "available",
+            "decreasePct": 0
+          },
+          "gpuAvailableMemory": {
+            "beforeBytes": 8343519232,
+            "afterBytes": 8343519232,
+            "comparability": "available",
+            "decreasePct": 0
+          },
+          "warnings": []
+        }
+      },
+      {
+        "probeIndex": 1,
+        "purpose": "ceiling",
+        "fidelity": "search",
+        "cellId": "p0:c16384:swa-window:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 48,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 4155.356266666669,
+        "durationMs": 30822.094999999987,
+        "resourceRegime": 0,
+        "cleanupConfirmed": true,
+        "diagnostics": {
+          "hostAvailableMemory": {
+            "beforeBytes": 11280064512,
+            "afterBytes": 11684696064,
+            "comparability": "available",
+            "decreasePct": -3.58713863355607
+          },
+          "gpuAvailableMemory": {
+            "beforeBytes": 8343519232,
+            "afterBytes": 8343519232,
+            "comparability": "available",
+            "decreasePct": 0
+          },
+          "warnings": []
+        }
+      },
+      {
+        "probeIndex": 2,
+        "purpose": "finalist",
+        "fidelity": "full",
+        "cellId": "p0:c16384:swa-window:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 48,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 4014.152700000006,
+        "durationMs": 49672.889999999985,
+        "resourceRegime": 0,
+        "cleanupConfirmed": true,
+        "diagnostics": {
+          "hostAvailableMemory": {
+            "beforeBytes": 11280064512,
+            "afterBytes": 11718221824,
+            "comparability": "available",
+            "decreasePct": -3.884351118150768
+          },
+          "gpuAvailableMemory": {
+            "beforeBytes": 8343519232,
+            "afterBytes": 8343519232,
+            "comparability": "available",
+            "decreasePct": 0
+          },
+          "warnings": []
+        }
+      },
+      {
+        "probeIndex": 3,
+        "purpose": "reference",
+        "fidelity": "search",
+        "cellId": "p0:c16384:swa-full:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 9,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 28479.76826666664,
+        "durationMs": 160182.8492,
+        "resourceRegime": 0,
+        "cleanupConfirmed": true,
+        "diagnostics": {
+          "hostAvailableMemory": {
+            "beforeBytes": 11280064512,
+            "afterBytes": 11745652736,
+            "comparability": "available",
+            "decreasePct": -4.12753157133717
+          },
+          "gpuAvailableMemory": {
+            "beforeBytes": 8343519232,
+            "afterBytes": 8343519232,
+            "comparability": "available",
+            "decreasePct": 0
+          },
+          "warnings": []
+        }
+      },
+      {
+        "probeIndex": 4,
+        "purpose": "ceiling",
+        "fidelity": "search",
+        "cellId": "p0:c16384:swa-full:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 48,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 8707.83600000001,
+        "durationMs": 55183.3089,
+        "resourceRegime": 0,
+        "cleanupConfirmed": true,
+        "diagnostics": {
+          "hostAvailableMemory": {
+            "beforeBytes": 11280064512,
+            "afterBytes": 12388306944,
+            "comparability": "available",
+            "decreasePct": -9.824788065892934
+          },
+          "gpuAvailableMemory": {
+            "beforeBytes": 8343519232,
+            "afterBytes": 8343519232,
+            "comparability": "available",
+            "decreasePct": 0
+          },
+          "warnings": []
+        }
+      }
+    ]
+  },
+  "progress": [
+    {
+      "phase": "policy-ready",
+      "elapsedMs": 13022.0357
+    },
+    {
+      "phase": "done",
+      "terminalStatus": "complete",
+      "elapsedMs": 443470.9004
+    }
+  ],
+  "cleanup": {
+    "calibrating": false,
+    "serverStatus": "stopped",
+    "everyProbeCleanupConfirmed": true
+  }
+}

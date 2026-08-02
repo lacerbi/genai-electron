@@ -60,7 +60,6 @@
         { "contextSize": 16384, "parallelRequests": 1 },
         { "contextSize": 24576, "parallelRequests": 1 }
       ],
-      "maxProbes": 12,
       "maxWallTimeMs": 2400000
     },
     "exact-near-capacity": {
