@@ -1,20 +1,8 @@
 {
-  "formatVersion": 1,
-  "comment": "Phase 1 quiet-trace matrix for PLAN-calibration-resource-stability. Prompt text here is generic harness text; artifacts store only its hash.",
+  "formatVersion": 2,
+  "comment": "Quiet-trace/enforcement-smoke matrix for PLAN-calibration-resource-stability. Prompt text here is generic harness text; artifacts store only its hash. The resource bands and schedule are shipped policy constants and are no longer configurable here.",
   "userDataDir": "%APPDATA%\\@palimpsest\\gui",
   "modelId": "gemma-4-12b-iq4xs",
-  "shadow": {
-    "thresholds": {
-      "hostMemoryDecreaseThresholdPct": 10,
-      "vramDecreaseThresholdPct": 10
-    },
-    "cooldownMs": 750,
-    "settleMs": 5000,
-    "baselineSamples": 3,
-    "confirmationReads": 1,
-    "telemetryTimeoutMs": 10000,
-    "postCleanupExtraSampleOffsetsMs": [2250, 3000]
-  },
   "common": {
     "samples": 3,
     "seed": 42,

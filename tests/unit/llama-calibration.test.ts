@@ -118,10 +118,10 @@ describe('LlamaServerManager.calibrate', () => {
       clearCache: jest.fn(),
       getMemoryInfo: jest.fn(() => capabilities.memory),
       getGPUInfo: jest.fn(async () => capabilities.gpu),
-      // Required by calibration snapshots. Omitting it does not fail loudly -
-      // the manager guards the call - so the suite would silently exercise the
-      // degraded-telemetry path instead of the normal one.
-      refreshMemoryTelemetry: jest.fn(async () => undefined),
+      // Required by the resource guard's snapshots. A `'failed'` status makes host memory
+      // untrusted, so returning the real success status here keeps the suite on the normal
+      // fully-guarded path instead of the degraded-telemetry one.
+      refreshMemoryTelemetry: jest.fn(async () => 'refreshed'),
     };
     manager = new LlamaServerManager(modelManager as never, systemInfo as never);
     (manager as unknown as { initializeLogManager: () => Promise<void> }).initializeLogManager =
@@ -340,7 +340,12 @@ describe('LlamaServerManager.calibrate', () => {
     ).toBe(true);
     expect(eventProgress).toEqual(callbackProgress);
     expect(JSON.stringify(report)).not.toContain('PRIVATE-PROMPT');
-  });
+    expect(report.probes.every((probe) => probe.resourceValidity === 'accepted')).toBe(true);
+    // This suite runs on real timers, and the resource guard's schedule is real wall time: a fixed
+    // settle delay plus cooldown-spaced baseline samples before the probe clock starts, then one
+    // cooldown after each probe's teardown. That is the cost the plan accepted, so the timeout is
+    // raised here rather than the schedule being mocked away.
+  }, 60_000);
 
   it('erases, primes, and times a complete shared-prefix burst on one slot', async () => {
     mockComplete.mockReset().mockResolvedValue(timing(10));

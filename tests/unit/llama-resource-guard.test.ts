@@ -16,10 +16,10 @@ import {
   mergeResourceSnapshotEvaluations,
   trustedReading,
   untrustedReading,
-  validateResourceDecreaseThresholds,
+  validateResourceStabilityThresholds,
 } from '../../src/utils/llama-resource-guard.js';
 import type {
-  ResourceDecreaseThresholds,
+  ResourceStabilityThresholds,
   ResourceMetricReading,
   ResourceReadingUntrustedReason,
   ResourceSnapshot,
@@ -47,10 +47,22 @@ import type {
  */
 const BASE = 1000;
 
-/** Independent per-metric thresholds; different values catch metric mix-ups. */
-const THRESHOLDS: ResourceDecreaseThresholds = {
+/**
+ * Independent per-metric decrease bands; different values catch metric mix-ups.
+ *
+ * No increase bands, which is the Phase-1 replay shape: that direction is then simply not guarded.
+ */
+const THRESHOLDS: ResourceStabilityThresholds = {
   hostMemoryDecreaseThresholdPct: 25,
   vramDecreaseThresholdPct: 50,
+};
+
+/** The shipped shape: both directions guarded, all four values distinct. */
+const BANDED: ResourceStabilityThresholds = {
+  hostMemoryDecreaseThresholdPct: 25,
+  vramDecreaseThresholdPct: 50,
+  hostMemoryIncreaseThresholdPct: 20,
+  vramIncreaseThresholdPct: 40,
 };
 
 const ok = (availableBytes: number): ResourceMetricReading => trustedReading(availableBytes);
@@ -262,16 +274,29 @@ describe('resource guard - bounded baseline collection', () => {
 describe('resource guard - threshold semantics', () => {
   it('rejects thresholds outside (0, 100]', () => {
     expect(() =>
-      validateResourceDecreaseThresholds({ ...THRESHOLDS, hostMemoryDecreaseThresholdPct: 0 })
+      validateResourceStabilityThresholds({ ...THRESHOLDS, hostMemoryDecreaseThresholdPct: 0 })
     ).toThrow(RangeError);
     expect(() =>
-      validateResourceDecreaseThresholds({ ...THRESHOLDS, vramDecreaseThresholdPct: 100.5 })
+      validateResourceStabilityThresholds({ ...THRESHOLDS, vramDecreaseThresholdPct: 100.5 })
     ).toThrow(RangeError);
     expect(() =>
-      validateResourceDecreaseThresholds({ ...THRESHOLDS, vramDecreaseThresholdPct: Number.NaN })
+      validateResourceStabilityThresholds({ ...THRESHOLDS, vramDecreaseThresholdPct: Number.NaN })
     ).toThrow(RangeError);
     expect(() =>
-      validateResourceDecreaseThresholds({ ...THRESHOLDS, hostMemoryDecreaseThresholdPct: 100 })
+      validateResourceStabilityThresholds({ ...THRESHOLDS, hostMemoryDecreaseThresholdPct: 100 })
+    ).not.toThrow();
+    expect(() =>
+      validateResourceStabilityThresholds({ ...BANDED, vramIncreaseThresholdPct: 0 })
+    ).toThrow(RangeError);
+    expect(() =>
+      validateResourceStabilityThresholds({ ...BANDED, hostMemoryIncreaseThresholdPct: 101 })
+    ).toThrow(RangeError);
+    // An omitted increase band is legal: that metric is simply not guarded upward.
+    expect(() =>
+      validateResourceStabilityThresholds({
+        ...BANDED,
+        hostMemoryIncreaseThresholdPct: undefined,
+      })
     ).not.toThrow();
   });
 
@@ -321,7 +346,7 @@ describe('resource guard - threshold semantics', () => {
     expect(result.affectedMetrics).toEqual(['hostMemory']);
   });
 
-  it('never treats an increase as suspicious and keeps the signed diagnostic negative', async () => {
+  it('leaves an increase unguarded when no increase band is configured', async () => {
     const harness = createHarness([snap(ok(1400), ok(2000))]);
 
     const result = await checkBoundary(harness.deps, {
@@ -333,9 +358,72 @@ describe('resource guard - threshold semantics', () => {
     expect(result.conclusion).toBe('admitted');
     expect(result.initial.metrics.hostMemory.decreasePctFromBaseline).toBe(-40);
     expect(result.initial.metrics.hostMemory.decisionDecreasePct).toBe(0);
+    expect(result.initial.metrics.hostMemory.decisionIncreasePct).toBe(40);
     expect(result.initial.metrics.vram.decreasePctFromBaseline).toBe(-100);
     expect(result.initial.suspiciousMetrics).toEqual([]);
     expect(harness.captures).toBe(1);
+  });
+
+  it('admits an increase strictly inside its band and records the direction of one at it', async () => {
+    // 1199/1000 is +19.9 % - inside the 20 % host band, so no confirmation is taken at all.
+    const inside = createHarness([snap(ok(1199), ok(BASE))]);
+    const admitted = await checkBoundary(inside.deps, {
+      baseline: enabledBaseline(),
+      thresholds: BANDED,
+      cooldownMs: 750,
+    });
+    expect(admitted.conclusion).toBe('admitted');
+    expect(admitted.confirmationPerformed).toBe(false);
+    expect(inside.captures).toBe(1);
+
+    // Exactly at the band is suspicious, the same inclusive rule the decrease side uses.
+    const atBand = createHarness([snap(ok(1200), ok(BASE)), snap(ok(1200), ok(BASE))]);
+    const confirmed = await checkBoundary(atBand.deps, {
+      baseline: enabledBaseline(),
+      thresholds: BANDED,
+      cooldownMs: 750,
+      boundary: 'pre-launch',
+    });
+    expect(confirmed.initial.metrics.hostMemory.decreasePctFromBaseline).toBe(-20);
+    expect(confirmed.initial.metrics.hostMemory.suspiciousDirection).toBe('increase');
+    expect(confirmed.conclusion).toBe('confirmed-drift');
+    expect(confirmed.affectedMetrics).toEqual(['hostMemory']);
+    expect(confirmed.affectedMetricDirections).toEqual({ hostMemory: 'increase' });
+  });
+
+  it('admits an increase that recovers into the band on confirmation', async () => {
+    const harness = createHarness([snap(ok(BASE), ok(1500)), snap(ok(BASE), ok(1100))]);
+
+    const result = await checkBoundary(harness.deps, {
+      baseline: enabledBaseline(),
+      thresholds: BANDED,
+      cooldownMs: 750,
+    });
+
+    expect(result.initial.suspiciousMetrics).toEqual(['vram']);
+    expect(result.confirmationPerformed).toBe(true);
+    expect(result.conclusion).toBe('admitted');
+    expect(result.affectedMetrics).toEqual([]);
+    expect(result.affectedMetricDirections).toEqual({});
+  });
+
+  it('reports both directions through one conclusion path with per-metric directions', async () => {
+    // Host fell 30 % while VRAM rose 60 %: two crossings, opposite directions, one conclusion.
+    const harness = createHarness([snap(ok(700), ok(1600)), snap(ok(700), ok(1600))]);
+
+    const result = await checkBoundary(harness.deps, {
+      baseline: enabledBaseline(),
+      thresholds: BANDED,
+      cooldownMs: 750,
+      boundary: 'post-cleanup',
+    });
+
+    expect(result.conclusion).toBe('confirmed-drift');
+    expect(result.affectedMetrics).toEqual(['hostMemory', 'vram']);
+    expect(result.affectedMetricDirections).toEqual({
+      hostMemory: 'decrease',
+      vram: 'increase',
+    });
   });
 
   it('treats a zero-byte trusted reading as the most severe valid decrease, not missing telemetry', async () => {

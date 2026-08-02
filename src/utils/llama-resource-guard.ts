@@ -2,9 +2,15 @@
  * Pure resource-stability calculations for LLM runtime calibration.
  *
  * Calibration compares every launch boundary against ONE fixed baseline per enabled metric. There is
- * no re-anchoring and no settled-level state: a decrease is measured cumulatively from the single
+ * no re-anchoring and no settled-level state: a change is measured cumulatively from the single
  * baseline captured during preparation, so several individually minor steps can together cross the
  * threshold.
+ *
+ * Each metric carries an independent decrease band AND increase band (plan decision 3, final
+ * resolution). Both directions use the same confirmation protocol, produce the same conclusions, and
+ * are reported under one details code; only the recorded direction differs. Increases matter because
+ * a large upward move desensitizes the fixed-baseline decrease guard and means earlier probes ran
+ * under measurably tighter conditions.
  *
  * This module is deliberately free of async work, timers, cooldowns, hardware access, and public
  * schema types. `llama-resource-guard-capture.ts` owns the bounded async orchestration and injects
@@ -68,10 +74,21 @@ export type ResourceBoundaryKind = 'pre-launch' | 'post-cleanup';
 /** How much of the resource guard is actually active for a run. */
 export type ResourceMonitoringCoverage = 'complete' | 'partial' | 'unavailable';
 
-/** Independent per-metric decrease thresholds, in percent of the baseline. */
-export interface ResourceDecreaseThresholds {
+/** Which side of the baseline a suspicious reading fell on. Diagnostic only; both are fatal. */
+export type ResourceChangeDirection = 'decrease' | 'increase';
+
+/**
+ * Independent per-metric bands, in percent of the baseline.
+ *
+ * The increase bands are optional so the Phase 1 replay tooling, which predates them and only ever
+ * evaluated decreases, keeps working against retained artifacts. An omitted increase band means that
+ * metric is simply not guarded upward; the shipped defaults always supply both.
+ */
+export interface ResourceStabilityThresholds {
   hostMemoryDecreaseThresholdPct: number;
   vramDecreaseThresholdPct: number;
+  hostMemoryIncreaseThresholdPct?: number;
+  vramIncreaseThresholdPct?: number;
 }
 
 export interface ResourceMetricBaseline {
@@ -104,11 +121,18 @@ export interface ResourceMetricEvaluation {
   availableBytes?: number;
   /** Signed: positive means less availability than the baseline, negative means more. */
   decreasePctFromBaseline?: number;
-  /** `max(0, decreasePctFromBaseline)` - the value actually compared with the threshold. */
+  /** `max(0, decreasePctFromBaseline)` - the value compared with the decrease band. */
   decisionDecreasePct?: number;
+  /** `max(0, -decreasePctFromBaseline)` - the value compared with the increase band. */
+  decisionIncreasePct?: number;
+  /** Decrease band for this metric. */
   thresholdPct?: number;
-  /** Enabled, trusted, and at or above its threshold (comparison is inclusive). */
+  /** Increase band for this metric; absent when the caller configured none. */
+  increaseThresholdPct?: number;
+  /** Enabled, trusted, and at or above either band (comparison is inclusive). */
   suspicious: boolean;
+  /** Which band was crossed. Present only when `suspicious`. */
+  suspiciousDirection?: ResourceChangeDirection;
 }
 
 export interface ResourceSnapshotEvaluation {
@@ -131,6 +155,12 @@ export interface ResourceBoundaryResult {
   initiallySuspiciousMetrics: readonly ResourceMetric[];
   /** Metrics responsible for a non-admitted conclusion; empty when admitted. */
   affectedMetrics: readonly ResourceMetric[];
+  /**
+   * Which band each affected metric crossed, keyed only by metrics in `affectedMetrics`.
+   *
+   * A metric affected solely because its confirmation reading became untrusted has no direction.
+   */
+  affectedMetricDirections: Readonly<Partial<Record<ResourceMetric, ResourceChangeDirection>>>;
   warnings: readonly string[];
 }
 
@@ -184,7 +214,7 @@ export function readingFromBytes(
 // ---------------------------------------------------------------------------
 
 export function thresholdForMetric(
-  thresholds: ResourceDecreaseThresholds,
+  thresholds: ResourceStabilityThresholds,
   metric: ResourceMetric
 ): number {
   return metric === 'hostMemory'
@@ -192,20 +222,37 @@ export function thresholdForMetric(
     : thresholds.vramDecreaseThresholdPct;
 }
 
+/** The metric's increase band, or `undefined` when the caller configured none. */
+export function increaseThresholdForMetric(
+  thresholds: ResourceStabilityThresholds,
+  metric: ResourceMetric
+): number | undefined {
+  return metric === 'hostMemory'
+    ? thresholds.hostMemoryIncreaseThresholdPct
+    : thresholds.vramIncreaseThresholdPct;
+}
+
 /**
- * Reject thresholds that cannot express a decrease band.
+ * Reject thresholds that cannot express a band.
  *
  * Thresholds are passed in rather than read from the shipped defaults so the Phase 1 quiet-trace
- * experiment can replay candidate values through exactly this code path.
+ * experiment can replay candidate values through exactly this code path. An omitted increase band is
+ * accepted (that direction is then unguarded); a present one must satisfy the same range.
  *
  * @throws {RangeError} When a threshold is not finite within `(0, 100]`
  */
-export function validateResourceDecreaseThresholds(thresholds: ResourceDecreaseThresholds): void {
+export function validateResourceStabilityThresholds(thresholds: ResourceStabilityThresholds): void {
   for (const metric of RESOURCE_METRICS) {
-    const value = thresholdForMetric(thresholds, metric);
-    if (!Number.isFinite(value) || value <= 0 || value > 100) {
+    const decrease = thresholdForMetric(thresholds, metric);
+    if (!Number.isFinite(decrease) || decrease <= 0 || decrease > 100) {
       throw new RangeError(
-        `Resource decrease threshold for ${metric} must be finite within (0, 100], received ${String(value)}`
+        `Resource decrease threshold for ${metric} must be finite within (0, 100], received ${String(decrease)}`
+      );
+    }
+    const increase = increaseThresholdForMetric(thresholds, metric);
+    if (increase !== undefined && (!Number.isFinite(increase) || increase <= 0 || increase > 100)) {
+      throw new RangeError(
+        `Resource increase threshold for ${metric} must be finite within (0, 100], received ${String(increase)}`
       );
     }
   }
@@ -225,14 +272,44 @@ export function decreasePctFromBaseline(baselineBytes: number, availableBytes: n
   return ((baselineBytes - availableBytes) / baselineBytes) * 100;
 }
 
-/** Increases never contribute to failure, so decisions clamp the signed change at zero. */
+/** The downward component of the signed change; an increase contributes zero. */
 export function decisionDecreasePct(signedDecreasePct: number): number {
   return Math.max(0, signedDecreasePct);
+}
+
+/** The upward component of the signed change; a decrease contributes zero. */
+export function decisionIncreasePct(signedDecreasePct: number): number {
+  return Math.max(0, -signedDecreasePct);
 }
 
 /** Inclusive: a decrease exactly equal to the threshold is suspicious. */
 export function isSuspiciousDecrease(signedDecreasePct: number, thresholdPct: number): boolean {
   return decisionDecreasePct(signedDecreasePct) >= thresholdPct;
+}
+
+/** Inclusive: an increase exactly equal to the threshold is suspicious. */
+export function isSuspiciousIncrease(
+  signedDecreasePct: number,
+  increaseThresholdPct: number | undefined
+): boolean {
+  if (increaseThresholdPct === undefined) return false;
+  return decisionIncreasePct(signedDecreasePct) >= increaseThresholdPct;
+}
+
+/**
+ * Decide suspicion in both directions at once.
+ *
+ * A reading strictly inside both bands is clean - that is also exactly the recovery test the
+ * confirmation protocol applies. Decrease wins the direction label when (impossibly) both matched.
+ */
+export function suspicionDirection(
+  signedDecreasePct: number,
+  thresholdPct: number,
+  increaseThresholdPct: number | undefined
+): ResourceChangeDirection | undefined {
+  if (isSuspiciousDecrease(signedDecreasePct, thresholdPct)) return 'decrease';
+  if (isSuspiciousIncrease(signedDecreasePct, increaseThresholdPct)) return 'increase';
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -322,9 +399,9 @@ export function buildResourceBaseline(
 export function evaluateResourceSnapshot(
   baseline: ResourceBaseline,
   snapshot: ResourceSnapshot,
-  thresholds: ResourceDecreaseThresholds
+  thresholds: ResourceStabilityThresholds
 ): ResourceSnapshotEvaluation {
-  validateResourceDecreaseThresholds(thresholds);
+  validateResourceStabilityThresholds(thresholds);
 
   const evaluateMetric = (metric: ResourceMetric): ResourceMetricEvaluation => {
     const metricBaseline = baseline.metrics[metric];
@@ -341,6 +418,7 @@ export function evaluateResourceSnapshot(
       };
     }
     const thresholdPct = thresholdForMetric(thresholds, metric);
+    const increaseThresholdPct = increaseThresholdForMetric(thresholds, metric);
     if (!reading.trusted) {
       return {
         metric,
@@ -348,10 +426,12 @@ export function evaluateResourceSnapshot(
         trusted: false,
         untrustedReason: reading.untrustedReason,
         thresholdPct,
+        ...(increaseThresholdPct !== undefined ? { increaseThresholdPct } : {}),
         suspicious: false,
       };
     }
     const signed = decreasePctFromBaseline(metricBaseline.baselineBytes, reading.availableBytes);
+    const direction = suspicionDirection(signed, thresholdPct, increaseThresholdPct);
     return {
       metric,
       enabled: true,
@@ -359,8 +439,11 @@ export function evaluateResourceSnapshot(
       availableBytes: reading.availableBytes,
       decreasePctFromBaseline: signed,
       decisionDecreasePct: decisionDecreasePct(signed),
+      decisionIncreasePct: decisionIncreasePct(signed),
       thresholdPct,
-      suspicious: isSuspiciousDecrease(signed, thresholdPct),
+      ...(increaseThresholdPct !== undefined ? { increaseThresholdPct } : {}),
+      suspicious: direction !== undefined,
+      ...(direction !== undefined ? { suspiciousDirection: direction } : {}),
     };
   };
 
@@ -388,7 +471,7 @@ export function requiresConfirmation(initial: ResourceSnapshotEvaluation): boole
  * The production confirmation count is one, where this is the identity. For any larger fixed count
  * the merge stays conservative so a later read can never erase an earlier observation: a metric is
  * trusted only if trusted in every read, suspicious if suspicious in any read, and its reported
- * value is the worst (largest decrease) trusted read.
+ * value is the read that deviated furthest from the baseline in either direction.
  *
  * @throws {RangeError} When called with no evaluations
  */
@@ -415,16 +498,26 @@ export function mergeResourceSnapshotEvaluations(
         trusted: false,
         untrustedReason: untrusted.untrustedReason,
         thresholdPct: base.thresholdPct,
+        ...(base.increaseThresholdPct !== undefined
+          ? { increaseThresholdPct: base.increaseThresholdPct }
+          : {}),
         suspicious: false,
       };
     }
+    const deviation = (evaluation: ResourceMetricEvaluation): number =>
+      Math.abs(evaluation.decreasePctFromBaseline ?? 0);
     let worst = base;
     for (const evaluation of perRead) {
-      if ((evaluation.decisionDecreasePct ?? 0) > (worst.decisionDecreasePct ?? 0)) {
-        worst = evaluation;
-      }
+      if (deviation(evaluation) > deviation(worst)) worst = evaluation;
     }
-    return { ...worst, suspicious: perRead.some((evaluation) => evaluation.suspicious) };
+    const suspiciousRead = perRead.find((evaluation) => evaluation.suspicious);
+    return {
+      ...worst,
+      suspicious: suspiciousRead !== undefined,
+      ...(suspiciousRead?.suspiciousDirection !== undefined
+        ? { suspiciousDirection: suspiciousRead.suspiciousDirection }
+        : {}),
+    };
   };
 
   const metrics: Record<ResourceMetric, ResourceMetricEvaluation> = {
@@ -451,8 +544,8 @@ export function mergeResourceSnapshotEvaluations(
  *
  * - No suspicious trusted metric in the initial snapshot: admitted, no confirmation.
  * - Otherwise exactly one whole-boundary confirmation decides. Admit only when every initially
- *   suspicious metric recovered (trusted and below threshold) AND no trusted enabled metric in the
- *   confirmation is at or above threshold.
+ *   suspicious metric recovered (trusted and strictly inside both bands) AND no trusted enabled
+ *   metric in the confirmation is at or above either band.
  * - A metric trusted-suspicious in both snapshots is independently confirmed: `confirmed-drift`.
  * - An initially suspicious metric that became untrusted, or a different metric that became newly
  *   suspicious, yields `stability-unverified`.
@@ -468,6 +561,20 @@ export function concludeResourceBoundary(
   const boundaryLabel = boundary ?? 'launch';
   const initiallySuspiciousMetrics = initial.suspiciousMetrics;
 
+  /** Direction of record: what the deciding snapshot saw, falling back to the initial one. */
+  const directionsFor = (
+    metrics: readonly ResourceMetric[]
+  ): Readonly<Partial<Record<ResourceMetric, ResourceChangeDirection>>> => {
+    const directions: Partial<Record<ResourceMetric, ResourceChangeDirection>> = {};
+    for (const metric of metrics) {
+      const direction =
+        confirmation?.metrics[metric].suspiciousDirection ??
+        initial.metrics[metric].suspiciousDirection;
+      if (direction) directions[metric] = direction;
+    }
+    return directions;
+  };
+
   for (const metric of initial.untrustedMetrics) {
     warnings.push(
       `Resource metric ${metric} was untrusted at the ${boundaryLabel} boundary (${initial.metrics[metric].untrustedReason ?? 'unknown'}); it is recorded but cannot indicate resource drift on its own.`
@@ -482,6 +589,7 @@ export function concludeResourceBoundary(
       initial,
       initiallySuspiciousMetrics,
       affectedMetrics: [],
+      affectedMetricDirections: {},
       warnings,
     };
   }
@@ -499,6 +607,7 @@ export function concludeResourceBoundary(
       initial,
       initiallySuspiciousMetrics,
       affectedMetrics: initiallySuspiciousMetrics,
+      affectedMetricDirections: directionsFor(initiallySuspiciousMetrics),
       warnings,
     };
   }
@@ -525,8 +634,11 @@ export function concludeResourceBoundary(
   }
 
   if (confirmedMetrics.length > 0) {
+    const directions = directionsFor(confirmedMetrics);
     warnings.push(
-      `Resource decrease confirmed at the ${boundaryLabel} boundary for ${confirmedMetrics.join(', ')}.`
+      `Resource change confirmed at the ${boundaryLabel} boundary for ${confirmedMetrics
+        .map((metric) => `${metric} (${directions[metric] ?? 'unknown'})`)
+        .join(', ')}.`
     );
     return {
       boundary,
@@ -536,6 +648,7 @@ export function concludeResourceBoundary(
       confirmation,
       initiallySuspiciousMetrics,
       affectedMetrics: confirmedMetrics,
+      affectedMetricDirections: directions,
       warnings,
     };
   }
@@ -552,6 +665,7 @@ export function concludeResourceBoundary(
       confirmation,
       initiallySuspiciousMetrics,
       affectedMetrics,
+      affectedMetricDirections: directionsFor(affectedMetrics),
       warnings,
     };
   }
@@ -564,6 +678,7 @@ export function concludeResourceBoundary(
     confirmation,
     initiallySuspiciousMetrics,
     affectedMetrics: [],
+    affectedMetricDirections: {},
     warnings,
   };
 }

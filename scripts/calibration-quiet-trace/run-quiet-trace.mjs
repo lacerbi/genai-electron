@@ -1,10 +1,14 @@
 /**
- * Versioned quiet-trace harness for PLAN-calibration-resource-stability Phase 1.
+ * Versioned quiet-trace harness for PLAN-calibration-resource-stability.
  *
  * Runs ONE `llamaServer.calibrate()` call for one matrix cell inside a headless Electron main
- * process, with the temporary Phase-0.8 resource-guard shadow armed, and writes one sanitized
- * artifact JSON. It never creates a BrowserWindow and disables hardware acceleration before the
- * app is ready, so the harness itself adds no GPU interference.
+ * process and writes one sanitized artifact JSON. It never creates a BrowserWindow and disables
+ * hardware acceleration before the app is ready, so the harness itself adds no GPU interference.
+ *
+ * The Phase-0.8 observe/shadow path is gone: the resource guard is now the ordinary enforcing
+ * behaviour of `calibrate()`, so this harness records whatever the public API returned - a report,
+ * or a typed rejection with its partial report and resource-failure diagnostics. That also makes it
+ * the Phase 6 enforcement-smoke harness without a second instrumentation path.
  *
  * This file lives outside the npm package (`files` is ["dist","README.md","LICENSE"]) and
  * deep-imports the BUILT library, so `npm run build` must run first.
@@ -13,8 +17,7 @@
  *   npx electron scripts/calibration-quiet-trace/run-quiet-trace.mjs \
  *     --cell adaptive-1p --out scripts/calibration-quiet-trace/artifacts/<name>.json
  *
- * See README.md in this directory for the four-cell matrix, the 8-call/90-minute cap, and the
- * artifact schema.
+ * See README.md in this directory for the four-cell matrix and the artifact schema.
  */
 
 import { app } from 'electron';
@@ -26,8 +29,14 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 
-/** Bump together with the artifact shape; replay tooling switches on this. */
-const ARTIFACT_FORMAT_VERSION = 1;
+/**
+ * Bump together with the artifact shape; replay tooling switches on this.
+ *
+ * `1` was the shadow era: those artifacts carry `shadowSchedule`/`shadowTrace` and are what
+ * `replay-thresholds.mjs` reads. `2` is the enforcing era: the guard's decisions are the run's own
+ * decisions, so there is no separate trace to replay and threshold replay does not apply.
+ */
+const ARTIFACT_FORMAT_VERSION = 2;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -166,7 +175,7 @@ function summarizeReport(report) {
       memoryEvidence: probe.memoryEvidence,
       scoreMs: probe.scoreMs,
       durationMs: probe.durationMs,
-      resourceRegime: probe.resourceRegime,
+      resourceValidity: probe.resourceValidity,
       cleanupConfirmed: probe.cleanup?.confirmed,
       diagnostics: probe.diagnostics
         ? {
@@ -188,6 +197,19 @@ function summarizePartialReport(partial) {
     probeCount: Array.isArray(partial.probes) ? partial.probes.length : undefined,
     warnings: partial.warnings,
     cleanupConfirmed: partial.cleanupConfirmed,
+    // Retained verbatim: the boundary diagnostics are the whole point of an enforcement smoke.
+    resourceFailure: partial.resourceFailure,
+    diagnosticCandidate: partial.diagnosticCandidate,
+    probes: (partial.probes ?? []).map((probe) => ({
+      probeIndex: probe.probeIndex,
+      purpose: probe.purpose,
+      gpuLayers: probe.resolvedConfig?.gpuLayers,
+      operationalStatus: probe.operationalStatus,
+      boundaryDecision: probe.boundaryDecision,
+      resourceValidity: probe.resourceValidity,
+      terminationReason: probe.terminationReason,
+      cleanupConfirmed: probe.cleanup?.confirmed,
+    })),
   };
 }
 
@@ -239,11 +261,7 @@ async function main() {
   await app.whenReady();
 
   const distIndex = pathToFileURL(path.join(REPO_ROOT, 'dist', 'index.js')).href;
-  const distShadow = pathToFileURL(
-    path.join(REPO_ROOT, 'dist', 'utils', 'llama-resource-guard-shadow.js')
-  ).href;
   const library = await import(distIndex);
-  const shadowModule = await import(distShadow);
   const { llamaServer, modelManager } = library;
 
   const model = await modelManager.getModelInfo(config.modelId);
@@ -270,7 +288,21 @@ async function main() {
           combos: cell.combos,
         };
 
-  const shadowSchedule = config.shadow;
+  // The bands and schedule are now shipped policy constants, echoed into the artifact so a trace
+  // stays self-describing without a separate armed-schedule block.
+  const { LLAMA_CALIBRATION_DEFAULTS } = library;
+  const resourcePolicy = {
+    hostMemoryDecreaseThresholdPct: LLAMA_CALIBRATION_DEFAULTS.hostMemoryDecreaseThresholdPct,
+    vramDecreaseThresholdPct: LLAMA_CALIBRATION_DEFAULTS.vramDecreaseThresholdPct,
+    hostMemoryIncreaseThresholdPct: LLAMA_CALIBRATION_DEFAULTS.hostMemoryIncreaseThresholdPct,
+    vramIncreaseThresholdPct: LLAMA_CALIBRATION_DEFAULTS.vramIncreaseThresholdPct,
+    resourceBaselineSamples: LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples,
+    resourceBaselineSettleMs: LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSettleMs,
+    resourceDriftConfirmationReads: LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads,
+    resourceCooldownMs: LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
+    resourceTelemetryTimeoutMs: LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs,
+    policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+  };
   const progressLog = [];
   const startedAtWallClock = new Date().toISOString();
   const startedAt = performance.now();
@@ -279,15 +311,12 @@ async function main() {
     log(
       `dry run: cell ${cellName} resolved, model ${model.id}, userData ${path.basename(userDataDir)}`
     );
+    log(`dry run: enforcing resource policy ${JSON.stringify(resourcePolicy)}`);
     log('dry run does not launch a server; re-run without --dry-run to record a trace.');
     return { skipped: true };
   }
 
-  log(`cell ${cellName}: arming shadow (thresholds ${JSON.stringify(shadowSchedule.thresholds)})`);
-  const shadow = shadowModule.armCalibrationResourceShadow({
-    ...shadowSchedule,
-    label: cellName,
-  });
+  log(`cell ${cellName}: enforcing calibration (policy ${resourcePolicy.policyVersion})`);
 
   let report;
   let failure;
@@ -307,14 +336,14 @@ async function main() {
   } catch (error) {
     failure = {
       message: error?.message ?? String(error),
+      name: error?.name,
       code: error?.details?.code,
+      suggestion: error?.details?.suggestion,
       partialReport: summarizePartialReport(error?.details?.partialReport),
     };
     log(`calibration rejected: ${failure.code ?? 'unknown'} ${failure.message}`);
   }
 
-  const trace = shadow.takeTrace();
-  shadowModule.disarmCalibrationResourceShadow();
   const finishedAt = performance.now();
 
   const tokenCountsById = new Map(
@@ -364,9 +393,7 @@ async function main() {
       ...calibrateConfig,
       workloads: sanitizeWorkloads(calibrateConfig.workloads, tokenCountsById),
     },
-    shadowSchedule: trace.schedule,
-    shadowTrace: trace,
-    guardAddedTotalMs: trace.guardAddedMs,
+    resourcePolicy,
     report: summarizeReport(report),
     failure,
     progress: progressLog,
@@ -396,8 +423,8 @@ async function main() {
   log(`wrote ${path.relative(REPO_ROOT, outPath)}`);
   log(
     `status=${sanitized.report?.status ?? sanitized.failure?.code ?? 'unknown'} ` +
-      `probes=${sanitized.report?.probeCount ?? 0} guardAddedMs=${Math.round(trace.guardAddedMs)} ` +
-      `events=${trace.events.length}`
+      `probes=${sanitized.report?.probeCount ?? sanitized.failure?.partialReport?.probeCount ?? 0} ` +
+      `durationMs=${Math.round(finishedAt - startedAt)}`
   );
   if (sanitized.cleanup.calibrating || sanitized.cleanup.serverStatus !== 'stopped') {
     log(

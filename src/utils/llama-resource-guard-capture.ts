@@ -29,17 +29,18 @@ import {
   requiresConfirmation,
   trustedReading,
   untrustedReading,
-  validateResourceDecreaseThresholds,
+  validateResourceStabilityThresholds,
 } from './llama-resource-guard.js';
 import type {
   ResourceBaseline,
   ResourceBoundaryKind,
   ResourceBoundaryResult,
-  ResourceDecreaseThresholds,
   ResourceMetricReading,
   ResourceSnapshot,
   ResourceSnapshotEvaluation,
+  ResourceStabilityThresholds,
 } from './llama-resource-guard.js';
+import type { MemoryTelemetryRefreshStatus, TelemetryCommandOptions } from '../types/system.js';
 
 /**
  * Baseline attempts made when the caller passes no count.
@@ -78,7 +79,7 @@ export interface CollectBaselineOptions {
 export interface CheckBoundaryOptions {
   baseline: ResourceBaseline;
   /** Passed in (not read from defaults) so candidate values can be replayed through this path. */
-  thresholds: ResourceDecreaseThresholds;
+  thresholds: ResourceStabilityThresholds;
   /** Cooldown before each confirmation snapshot. */
   cooldownMs: number;
   /** Fixed confirmation snapshots for a suspicious boundary. At least 1; production value is 1. */
@@ -88,13 +89,14 @@ export interface CheckBoundaryOptions {
   signal?: AbortSignal;
 }
 
-/** Typed status of a platform memory-telemetry refresh. */
-export type MemoryTelemetryRefreshStatus = 'refreshed' | 'not-required' | 'failed';
-
-export interface ResourceTelemetryReadOptions {
-  signal?: AbortSignal;
-  timeoutMs?: number;
-}
+/**
+ * Canonical public telemetry types, re-exported so guard consumers need one import.
+ *
+ * These are the same declarations `SystemInfo` uses; the guard deliberately does not maintain a
+ * parallel structural copy that could drift from the shipped contract.
+ */
+export type { MemoryTelemetryRefreshStatus };
+export type ResourceTelemetryReadOptions = TelemetryCommandOptions;
 
 /**
  * The minimum structural surface the guard needs from a telemetry provider.
@@ -219,7 +221,7 @@ export async function checkBoundary(
 ): Promise<ResourceBoundaryResult> {
   const { baseline, thresholds, cooldownMs, boundary, signal } = options;
   const confirmationReads = options.confirmationReads ?? DEFAULT_CONFIRMATION_READS;
-  validateResourceDecreaseThresholds(thresholds);
+  validateResourceStabilityThresholds(thresholds);
   assertSampleCount(confirmationReads, 'resource confirmation reads', 1);
   assertDuration(cooldownMs, 'resource cooldown');
 

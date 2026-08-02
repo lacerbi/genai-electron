@@ -1,14 +1,16 @@
 # Calibration quiet-trace harness (development only)
 
-Versioned instrumentation for **PLAN-calibration-resource-stability**, Phase 0 item 8 and Phase 1.
+Versioned instrumentation for **PLAN-calibration-resource-stability**.
 
-It runs one real `llamaServer.calibrate()` call per invocation with the temporary Phase-0.8
-resource-guard shadow armed, and writes one sanitized artifact JSON. The shadow executes the real
-baseline / pre-launch / post-cleanup / cooldown / confirmation schedule but **never** changes the
-v0.19 decision: the manager records the shadow's conclusion and drops it.
+It runs one real `llamaServer.calibrate()` call per invocation and writes one sanitized artifact
+JSON. There is no shadow to arm any more: plan Phase 2.10 converted the observe path into the
+ordinary enforcing behaviour of `calibrate()`, so the harness simply drives the public API and
+records what it returned — a report, or the typed
+`LlamaCalibrationResourceStabilityError` with its partial report, resource-failure diagnostics, and
+optional diagnostic-only candidate.
 
 This directory is outside the npm package (`package.json` `files` is `["dist","README.md","LICENSE"]`),
-so nothing here ships. Phase 6 reuses the same harness and artifact format for enforcement smokes;
+so nothing here ships. Phase 6 reuses this same harness and artifact format for enforcement smokes;
 do not create a second instrumentation path.
 
 ## Prerequisites
@@ -73,7 +75,7 @@ Flags:
 The process creates no `BrowserWindow` and calls `app.disableHardwareAcceleration()` before ready,
 so the harness contributes no GPU load of its own.
 
-## The Phase 1 matrix and its cap
+## The matrix
 
 | Cell                   | Strategy | Shape                                                   |
 | ---------------------- | -------- | ------------------------------------------------------- |
@@ -82,52 +84,43 @@ so the harness contributes no GPU load of its own.
 | `exact-near-capacity`  | exact    | near-capacity / full-offload combos                     |
 | `exact-lower-pressure` | exact    | deliberately lower pressure                             |
 
-Four further calls are reserved to rerun those same cells with the **final** settle/cooldown
-schedule; if the schedule does not change they count as ordinary repetitions. **Stop at eight
-calibration calls or 90 minutes, whichever comes first** (plan Phase 1.3). Pre-delay traces cannot
-validate a final default: once the settle schedule changes, the affected cells must be rerun.
+Each call runs with an ample explicit wall budget (`maxWallTimeMs` per cell in the config), because
+the guard's settle, cooldown, and confirmation waits are real wall time that the adaptive budget
+sees. The baseline schedule is paid before the probe wall clock starts; the per-boundary cooldowns
+are not.
 
-Each call runs with an ample explicit wall budget (`maxWallTimeMs` per cell in the config) because
-shadow waits are real. The harness records `guardAddedTotalMs`; do not treat it as free.
+## Threshold replay applies to Phase 1 artifacts only
 
-## Replay principle
-
-Arm the shadow at the **lowest** candidate threshold you intend to replay (the config ships
-10 % / 10 %). A confirmation snapshot is only captured when the live initial read was suspicious, so:
-
-- every candidate **at or above** the capture threshold can be replayed offline from the retained
-  snapshots, with no further live runs;
-- a candidate **below** it may find suspicion where no confirmation exists. Those boundaries are
-  reported as `unreplayable` rather than concluded from missing data.
+`replay-thresholds.mjs` re-decides shadow-era boundaries offline through the pure functions in
+`dist/utils/llama-resource-guard.js`. It reads `formatVersion: 1` artifacts, which carry a
+`shadowTrace` of captured snapshots:
 
 ```powershell
 node scripts\calibration-quiet-trace\replay-thresholds.mjs `
   scripts\calibration-quiet-trace\artifacts\*.json --thresholds 10,15,20,25
-node scripts\calibration-quiet-trace\replay-thresholds.mjs artifacts\a.json --host 10,15 --vram 10,25 --json
 ```
 
-`replay-thresholds.mjs` is plain Node and re-decides every boundary through the pure functions in
-`dist/utils/llama-resource-guard.js`. It re-implements nothing; a replay result is exactly what
-enforcement would have concluded at that threshold.
+Enforcement-era artifacts (`formatVersion: 2`) have nothing to replay: the guard's conclusions are
+the run's own conclusions, and thresholds are shipped policy constants rather than a swept
+parameter. Both the script and the Phase 1 artifacts are retained unchanged so the threshold
+decision stays auditable.
 
-## Artifact schema (`formatVersion: 1`)
+## Artifact schema (`formatVersion: 2`)
 
 One file per calibration call, committed under `artifacts/`.
 
 | Field                 | Contents                                                                                                                                   |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `formatVersion`       | `1`. Replay tooling switches on it.                                                                                                         |
+| `formatVersion`       | `2` for enforcing runs; `1` marks the retained Phase 1 shadow traces that `replay-thresholds.mjs` reads. |
 | `cell`                | Matrix cell name, plus `cellDescription`.                                                                                                    |
 | `harness`             | Script name, repository git SHA, dirty flag, config file basename.                                                                           |
 | `environment`         | Platform/arch, Electron/Chrome/Node versions, hardware-acceleration and window-count facts.                                                   |
 | `timestamps`          | ISO start/finish and monotonic `durationMs`.                                                                                                 |
 | `identities`          | Binary and model **basenames + byte sizes only**, model id/name/architecture. No directories.                                                 |
 | `calibrateConfig`     | The exact config passed to `calibrate()`, with every prompt replaced by `{workloadId, sha256, chars, tokenCounts}`.                            |
-| `shadowSchedule`      | Thresholds, settle, cooldown, baseline samples, confirmation reads, telemetry timeout, extra offsets.                                         |
-| `shadowTrace`         | The full trace: `baseline`, `boundary`, `extra-sample`, `legacy-outcome`, `note` events, each with `sequence`, `atMs`, `sinceArmMs`, `wallMs`. |
-| `guardAddedTotalMs`   | Total wall time the shadow itself consumed.                                                                                                   |
-| `report`              | v0.19 report summary: status, terminal reason, probe count, warnings, selected/provisional/fallback, and per probe scoreMs, operationalStatus, boundaryDecision, memoryEvidence, cleanup confirmation, v0.19 resource diagnostics. |
-| `failure`             | Present only when `calibrate()` rejected: message, details code, partial-report summary.                                                      |
+| `resourcePolicy`      | The enforced bands and schedule read from `LLAMA_CALIBRATION_DEFAULTS`, plus `policyVersion`.                                                  |
+| `report`              | Report summary: status, terminal reason, probe count, warnings, selected/provisional/fallback, and per probe scoreMs, operationalStatus, boundaryDecision, memoryEvidence, `resourceValidity`, cleanup confirmation, resource diagnostics. |
+| `failure`             | Present only when `calibrate()` rejected: message, error name, details code, suggestion, and the partial report including `resourceFailure` boundary diagnostics and any `diagnosticCandidate`. |
 | `progress`            | `policy-ready` and terminal `done` progress payloads.                                                                                         |
 | `cleanup`             | `isCalibrating()`, manager status, and whether every probe reported confirmed cleanup.                                                         |
 
@@ -137,19 +130,15 @@ directory, user name, and any remaining absolute-looking path into placeholders.
 user name, or absolute path may appear in a committed artifact — check a new artifact before
 committing it.
 
-## Known perturbation (recorded, not hidden)
+## Known cost and blind spot (recorded, not hidden)
 
-Arming the shadow adds real wall time: the baseline settle plus sampling before the adaptive wall
-clock starts, and per probe one cooldown, an optional confirmation cooldown, and any extra
-diagnostic offsets. Consequences that are accepted and must be read off the artifact rather than
-assumed away:
+The guard costs real wall time in every run, harness or not: the fixed settle delay plus
+cooldown-spaced baseline samples before the adaptive wall clock starts, then per launch a
+pre-launch read, a post-cleanup cooldown and read, and one further cooldown plus read whenever a
+reading is suspicious. Near an exhausted wall budget that time can change which branch the search
+takes; keep `maxWallTimeMs` ample, and read the budget and terminal reason off the artifact rather
+than assuming.
 
-- the v0.19 post-probe reading is taken later relative to teardown than in a disarmed run, because
-  the shadow sequence runs first (that is deliberate: Phase 1.5 needs the 750/1500 ms decision
-  points measured from the real teardown instant);
-- near an exhausted adaptive wall budget the added time can change which branch v0.19 takes. Keep
-  `maxWallTimeMs` ample; the artifact records the budget, the guard-added total, and the terminal
-  reason so this is visible.
-
-Everything else about the v0.19 path — decisions, report contents, probe records, warnings, and
-event payloads — is unchanged when the shadow is armed.
+Boundary sampling is pre/post only. A disturbance that begins and fully clears inside a single
+launch is invisible to it. That is a documented limitation of this design, not something the
+harness can measure away — in-flight telemetry would perturb the very timings being measured.

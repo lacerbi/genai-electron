@@ -84,6 +84,17 @@ export type {
   LlamaCalibrationBoundaryDecision,
   LlamaCalibrationCleanupRecord,
   LlamaCalibrationResourceMetricDiagnostic,
+  LlamaCalibrationResourceMetric,
+  LlamaCalibrationResourceChangeDirection,
+  LlamaCalibrationResourceBoundaryKind,
+  LlamaCalibrationResourceUntrustedReason,
+  LlamaCalibrationResourceReading,
+  LlamaCalibrationResourceSnapshotDiagnostic,
+  LlamaCalibrationResourceBoundaryDiagnostic,
+  LlamaCalibrationResourceFailure,
+  LlamaCalibrationDiagnosticEvidenceLevel,
+  LlamaCalibrationDiagnosticCandidate,
+  LlamaCalibrationProbeResourceValidity,
   LlamaCalibrationPassiveDiagnostics,
   LlamaCalibrationProbe,
   ResolvedLlamaCalibrationConfig,
@@ -103,6 +114,7 @@ export type {
   LlamaExactCalibrationReport,
   LlamaCalibrationReport,
   LlamaCalibrationPartialReport,
+  LlamaCalibrationResourceFailurePartialReport,
 } from './llm-calibration.js';
 
 // Image generation types

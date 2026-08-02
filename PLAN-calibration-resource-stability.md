@@ -432,41 +432,41 @@ harness/artifact format for small enforcement smokes.
 
 **Goal:** admit only clean observations to the adaptive policy and remove all regime behavior.
 
-1. [ ] Establish the stabilized baseline after provisioning, model/profile/cell preparation, and binary
+1. [x] Establish the stabilized baseline after provisioning, model/profile/cell preparation, and binary
    readiness, but before `policyReadyAt` starts the adaptive probe wall budget.
-2. [ ] Move the pre-launch resource check inside the error/partial-report path. On confirmed drift or a
+2. [x] Move the pre-launch resource check inside the error/partial-report path. On confirmed drift or a
    stability-unverified pre-launch condition, reject before executor invocation and without
    consuming a launch. A confirmation already triggered completes against the caller signal; if it
    recovers after the adaptive wall deadline, do not launch and return the normal
    `budget-exhausted` report. A deadline reached before any trusted suspicious reading also follows
    the normal budget-exhausted path. Caller abort remains aborted.
-3. [ ] After each executor finishes and teardown is confirmed, perform the post-cleanup check before
+3. [x] After each executor finishes and teardown is confirmed, perform the post-cleanup check before
    `applyAdaptivePolicyObservation()`. Use the caller abort signal for the bounded post-check even if
    the internal probe deadline expired.
-4. [ ] Stage every observation-derived mutation until that post-check passes, including verified
+4. [x] Stage every observation-derived mutation until that post-check passes, including verified
    profiles, prompt token-count caches, policy evidence, and recommendation inputs. If post-cleanup
    stability fails, append at most one invalidated chronological probe, commit none of that staged
    state, build diagnostics/candidate from prior clean evidence, emit exactly one terminal
    `phase: 'done'`/`terminalStatus: 'failed'` progress payload, and reject. Avoid duplication through
    generic fatal-observation handling.
-5. [ ] Freeze error precedence: cleanup-unconfirmed wins first; with confirmed cleanup, a resource
+5. [x] Freeze error precedence: cleanup-unconfirmed wins first; with confirmed cleanup, a resource
    stability failure supersedes the probe's operational/OOM/fatal outcome because that outcome is
    no longer interpretable. Preserve the original probe failure only inside the invalidated
    diagnostic trail. If the resource check passes, retain normal fatal-observation behavior.
-6. [ ] Remove adaptive manager state for drift attempts/readings, settled allocations, current regime,
+6. [x] Remove adaptive manager state for drift attempts/readings, settled allocations, current regime,
    re-anchoring, confirmed-allocation exceptions, and launch repeats caused by telemetry.
-7. [ ] Remove `AdaptiveResourceDriftStatus`, `resourceRegime`, material-drift classification, comparable
+7. [x] Remove `AdaptiveResourceDriftStatus`, `resourceRegime`, material-drift classification, comparable
    regime filters, and superseded-regime branches from
    `src/utils/llama-adaptive-calibration-policy.ts`. Every policy observation now has implicit clean
    resource validity.
-8. [ ] Add or expose one internal policy helper that derives a diagnostic candidate only when clean
+8. [x] Add or expose one internal policy helper that derives a diagnostic candidate only when clean
    state already meets the normal independent-reproduction requirement; do not promote a single
    adaptive launch merely because drift ended the search. Maintain an explicit mapping from
    accepted policy-evidence indexes to public chronological probe indexes; invalidated probes make
    those index spaces diverge.
-9. [ ] Preserve abort, timeout, cleanup-unconfirmed, prompt-redaction, lifecycle-neutrality, and manager
+9. [x] Preserve abort, timeout, cleanup-unconfirmed, prompt-redaction, lifecycle-neutrality, and manager
    unlock behavior.
-10. [ ] Convert adaptive manager observe/shadow wiring in place to the approved enforcing path. Delete
+10. [x] Convert adaptive manager observe/shadow wiring in place to the approved enforcing path. Delete
     its shadow branch, replay-threshold control, and runtime selector after freezing the defaults.
     Keep only the development harness and retained artifact, which thereafter observe the ordinary
     enforcing API/report path.
@@ -480,22 +480,22 @@ adaptive manager branch can select observe/shadow behavior.
 **Goal:** exact diagnostic sweeps receive the same comparability guarantee and documented reject
 path.
 
-1. [ ] Establish the same stabilized baseline after exact candidate/binary preparation and before the
+1. [~] Establish the same stabilized baseline after exact candidate/binary preparation and before the
    first combo launch.
-2. [ ] Guard every pre-launch boundary before invoking the executor.
-3. [ ] Replace the current debug-only 25% post-run log with the shared post-cleanup confirmation guard.
-4. [ ] Maintain a clean-runs collection distinct from the chronological probe trail. A post-drift run
+2. [~] Guard every pre-launch boundary before invoking the executor.
+3. [~] Replace the current debug-only 25% post-run log with the shared post-cleanup confirmation guard.
+4. [~] Maintain a clean-runs collection distinct from the chronological probe trail. A post-drift run
    can be displayed as invalidated but cannot influence `recommendLlamaCalibrationRun()`.
-5. [ ] Build `diagnosticCandidate` only from earlier clean exact runs. Confirmed post-cleanup drift on
+5. [~] Build `diagnosticCandidate` only from earlier clean exact runs. Confirmed post-cleanup drift on
    the first run yields no candidate because that run is contaminated; pre-launch drift before the
    second run may report the already-clean first run under exact mode's single-launch evidence rule.
    Make exact ranking retain the winning clean public probe index.
-6. [ ] Preserve cleanup-failure precedence and structured details through exact and outer catch paths.
+6. [~] Preserve cleanup-failure precedence and structured details through exact and outer catch paths.
    Stage verified-profile/token-count and ranking mutations until post-cleanup acceptance, matching
    adaptive behavior.
-7. [ ] Update exact progress to emit exactly one `phase: 'done'`/`terminalStatus: 'failed'` payload and
+7. [~] Update exact progress to emit exactly one `phase: 'done'`/`terminalStatus: 'failed'` payload and
    never report a completed sweep after stability failure.
-8. [ ] Convert exact manager observe/shadow wiring to the identical enforcing path and delete its
+8. [~] Convert exact manager observe/shadow wiring to the identical enforcing path and delete its
    shadow branch, replay-threshold control, and runtime selector.
 
 **Verification:** exact mode launches no later combos after confirmed drift and exposes no usable

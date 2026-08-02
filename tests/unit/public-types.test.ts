@@ -88,9 +88,12 @@ describe('public context-capacity types', () => {
     };
     const probeTypeCheck = (report: LlamaCalibrationReport) =>
       report.probes.map((probe) => ({
-        // Adaptive probes carry the settled resource level they were measured
-        // under; exact probes omit it.
-        regime: probe.resourceRegime ?? 0,
+        // Resource regimes are gone: one calibration has ONE fixed baseline and never re-anchors,
+        // so a probe is either usable evidence or explicitly invalidated. A build still reading
+        // `resourceRegime` must fail to compile rather than silently read `undefined`.
+        // @ts-expect-error resourceRegime was removed with the re-anchoring behaviour it described
+        regime: probe.resourceRegime,
+        validity: probe.resourceValidity ?? 'accepted',
         boundary: probe.boundaryDecision.classification,
       }));
     const progressTypeCheck = (progress: LlamaCalibrationProgress) => {

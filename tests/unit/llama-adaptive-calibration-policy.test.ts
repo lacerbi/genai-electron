@@ -246,12 +246,6 @@ describe('pure adaptive LLM calibration policy', () => {
           operationalStatus: 'request-timeout',
           terminatedAtAdaptiveCap: true,
         }),
-        evidence(3, {
-          cellId,
-          gpuLayers: 6,
-          durationMs: 1_000,
-          resourceDriftStatus: 'material',
-        }),
       ],
     };
     expect(summarizeAdaptiveTimingAdmission(observedState)).toMatchObject({
@@ -401,73 +395,6 @@ describe('pure adaptive LLM calibration policy', () => {
       boundaryDecision: 'ambiguous',
       reason: 'missing-or-invalid-score',
     });
-  });
-
-  it('never lets materially drifted evidence reproduce a non-memory boundary failure', () => {
-    const lower = [
-      evidence(0, { cellId: 'cell', gpuLayers: 4, scoreMs: 100 }),
-      evidence(1, { cellId: 'cell', gpuLayers: 4, scoreMs: 100 }),
-    ];
-    const driftedCap = evidence(2, {
-      cellId: 'cell',
-      gpuLayers: 8,
-      operationalStatus: 'request-timeout',
-      terminatedAtAdaptiveCap: true,
-      aggregateLowerBoundMs: 200,
-      resourceDriftStatus: 'material',
-      boundaryDecision: 'ambiguous',
-    });
-    const cap: AdaptiveProbeObservation = {
-      cellId: 'cell',
-      gpuLayers: 8,
-      purpose: 'ambiguity-repeat',
-      fidelity: 'search',
-      operationalStatus: 'request-timeout',
-      memoryEvidence: 'unknown',
-      terminatedAtAdaptiveCap: true,
-      aggregateLowerBoundMs: 200,
-      durationMs: 1,
-    };
-    expect(classifyAdaptiveObservation([...lower, driftedCap], cap)).toMatchObject({
-      boundaryDecision: 'ambiguous',
-      reason: 'adaptive-cap',
-    });
-    expect(
-      classifyAdaptiveObservation([...lower], { ...cap, resourceDriftStatus: 'material' })
-    ).toEqual({ boundaryDecision: 'ambiguous', reason: 'resource-drift' });
-
-    const driftedGross = evidence(3, {
-      cellId: 'cell',
-      gpuLayers: 8,
-      scoreMs: 200,
-      resourceDriftStatus: 'material',
-      boundaryDecision: 'ambiguous',
-    });
-    expect(
-      classifyAdaptiveObservation([...lower, driftedGross], {
-        ...cap,
-        operationalStatus: 'ok',
-        terminatedAtAdaptiveCap: false,
-        aggregateLowerBoundMs: undefined,
-        scoreMs: 200,
-      })
-    ).toEqual({ boundaryDecision: 'ambiguous', reason: 'first-performance-cliff' });
-
-    const driftedFailure = evidence(4, {
-      cellId: 'cell',
-      gpuLayers: 8,
-      operationalStatus: 'request-timeout',
-      scoreMs: undefined,
-      resourceDriftStatus: 'material',
-      boundaryDecision: 'ambiguous',
-    });
-    expect(
-      classifyAdaptiveObservation([driftedFailure], {
-        ...cap,
-        terminatedAtAdaptiveCap: false,
-        aggregateLowerBoundMs: undefined,
-      })
-    ).toEqual({ boundaryDecision: 'ambiguous', reason: 'generic-operational-failure' });
   });
 
   it('lets an inconclusive second capped launch continue in place and classify its full outcome', () => {
@@ -681,46 +608,6 @@ describe('pure adaptive LLM calibration policy', () => {
       boundaryDecision: 'unsuitable',
       reason: 'confirmed-allocation-failure',
     });
-    expect(
-      classifyAdaptiveObservation([], {
-        ...timeout,
-        operationalStatus: 'oom',
-        memoryEvidence: 'confirmed',
-        resourceDriftStatus: 'material',
-      })
-    ).toEqual({
-      boundaryDecision: 'unsuitable',
-      reason: 'confirmed-allocation-failure',
-    });
-  });
-
-  it('keeps material-drift evidence in the trail without poisoning a clean repeated point', () => {
-    const drifted = evidence(0, {
-      fidelity: 'full',
-      operationalStatus: 'ok',
-      scoreMs: 500,
-      resourceDriftStatus: 'material',
-      boundaryDecision: 'ambiguous',
-      decisionReason: 'resource-drift',
-    });
-    const cleanOne = evidence(1, {
-      fidelity: 'full',
-      operationalStatus: 'ok',
-      scoreMs: 100,
-      resourceDriftStatus: 'available',
-    });
-    const cleanTwo = evidence(2, {
-      fidelity: 'full',
-      operationalStatus: 'ok',
-      scoreMs: 104,
-      resourceDriftStatus: 'available',
-    });
-
-    expect(assessMixedFidelityStability([drifted, cleanOne, cleanTwo])).toMatchObject({
-      status: 'stable',
-      recommendationScoreMs: 102,
-      evidenceIndices: [1, 2],
-    });
   });
 
   it('uses all search launches with one full launch, then all full launches only', () => {
@@ -755,40 +642,6 @@ describe('pure adaptive LLM calibration policy', () => {
       status: 'unstable',
       recommendationScoreMs: 90,
       evidenceIndices: [1, 2],
-    });
-  });
-
-  it('does not let an excluded drifted full launch consume the clean reproduction slot', () => {
-    const created = createAdaptivePolicyState({
-      profiles: [{ profileIndex: 0, contextSize: 8192, parallelRequests: 2, autoGpuLayers: 4 }],
-      totalLayers: 8,
-      gpuAvailable: true,
-      fixedGpuLayers: 4,
-      hasSharedPrefixWorkload: false,
-      includeKvCacheComparison: false,
-      baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { maxProbes: 20, maxWallTimeMs: 2_000_000 },
-    });
-    const cellId = created.cells[0]!.id;
-    const trace = [
-      evidence(0, { cellId, gpuLayers: 4, scoreMs: 100 }),
-      evidence(1, {
-        cellId,
-        gpuLayers: 4,
-        fidelity: 'full',
-        scoreMs: 500,
-        resourceDriftStatus: 'material',
-        boundaryDecision: 'ambiguous',
-      }),
-      evidence(2, { cellId, gpuLayers: 4, fidelity: 'full', scoreMs: 123 }),
-    ];
-
-    expect(nextAdaptivePolicyAction({ ...created, evidence: trace, elapsedMs: 3 })).toMatchObject({
-      kind: 'probe',
-      purpose: 'winner-validation',
-      fidelity: 'full',
-      gpuLayers: 4,
     });
   });
 
@@ -1068,54 +921,6 @@ describe('pure adaptive LLM calibration policy', () => {
       'probe',
       'terminal',
     ]);
-  });
-
-  it('never reproduces a point across a resource-regime change', () => {
-    const cellId = 'cell';
-    const before = [
-      evidence(0, { cellId, gpuLayers: 40, fidelity: 'full', scoreMs: 100, resourceRegime: 0 }),
-      evidence(1, { cellId, gpuLayers: 40, fidelity: 'full', scoreMs: 104, resourceRegime: 0 }),
-    ];
-    // Two agreeing full-fidelity launches in one regime reproduce the point.
-    expect(assessMixedFidelityStability(before)).toMatchObject({ status: 'stable' });
-
-    // A confirmed step change re-anchors the reference. The newest regime now has
-    // a single launch, so the point is no longer reproduced and needs another
-    // launch under the current conditions - the earlier pair cannot stand in.
-    const afterStep = [
-      ...before,
-      evidence(2, { cellId, gpuLayers: 40, fidelity: 'full', scoreMs: 103, resourceRegime: 1 }),
-    ];
-    expect(assessMixedFidelityStability(afterStep)).toMatchObject({ status: 'insufficient' });
-
-    // Once the new regime has its own agreeing pair, it reproduces again, and the
-    // recommendation score comes only from that regime.
-    const settled = [
-      ...afterStep,
-      evidence(3, { cellId, gpuLayers: 40, fidelity: 'full', scoreMs: 107, resourceRegime: 1 }),
-    ];
-    const resolved = assessMixedFidelityStability(settled);
-    expect(resolved).toMatchObject({ status: 'stable' });
-    expect(resolved.recommendationScoreMs).toBe(105);
-    expect(resolved.evidenceIndices).toEqual([2, 3]);
-
-    // If the ONLY launch in the current regime was itself materially drifting,
-    // the comparable set is empty and the point must ask for a fresh launch -
-    // never fall back to the pre-step pair, which was measured elsewhere.
-    const driftedIntoNewRegime = [
-      ...before,
-      evidence(2, {
-        cellId,
-        gpuLayers: 40,
-        fidelity: 'full',
-        scoreMs: 103,
-        resourceRegime: 1,
-        resourceDriftStatus: 'material',
-      }),
-    ];
-    expect(assessMixedFidelityStability(driftedIntoNewRegime)).toMatchObject({
-      status: 'insufficient',
-    });
   });
 
   it('explores a second cell rather than pruning it on a slow low-layer reference', () => {

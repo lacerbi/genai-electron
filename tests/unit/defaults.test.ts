@@ -56,10 +56,17 @@ describe('LLM calibration defaults', () => {
       guardDistanceMinLayers: 2,
       guardDistanceFraction: 0.1,
       stabilityTolerancePct: 25,
-      resourceDriftThresholdPct: 25,
-      resourceDriftRetries: 1,
+      hostMemoryDecreaseThresholdPct: 10,
+      vramDecreaseThresholdPct: 10,
+      hostMemoryIncreaseThresholdPct: 20,
+      vramIncreaseThresholdPct: 10,
+      resourceBaselineSamples: 3,
+      resourceBaselineSettleMs: 5_000,
+      resourceDriftConfirmationReads: 1,
+      resourceTelemetryTimeoutMs: 10_000,
+      resourceCooldownMs: 750,
       unobservedProbeDurationPolicy: 'configured-conservative-estimate',
-      policyVersion: 'llama-runtime-v2',
+      policyVersion: 'llama-runtime-v3',
       maxRunnerStartAttempts: 2,
       capacityCheckTimeoutCapMs: 5_000,
       processExitConfirmationMs: 2_000,
@@ -84,6 +91,45 @@ describe('LLM calibration defaults', () => {
       },
       maxCandidates: 10,
     });
+  });
+
+  it('removes every re-anchoring resource key the fixed-baseline guard replaced', () => {
+    // Re-anchoring is gone, so a build that still reads these keys must fail loudly rather than
+    // silently fall back to `undefined` inside a threshold comparison.
+    for (const removed of [
+      'resourceDriftThresholdPct',
+      'resourceSettledTolerancePct',
+      'resourceDriftRetries',
+    ]) {
+      expect(LLAMA_CALIBRATION_DEFAULTS).not.toHaveProperty(removed);
+    }
+  });
+
+  it('keeps every resource band and schedule value inside its stated invariant', () => {
+    const bands = [
+      LLAMA_CALIBRATION_DEFAULTS.hostMemoryDecreaseThresholdPct,
+      LLAMA_CALIBRATION_DEFAULTS.vramDecreaseThresholdPct,
+      LLAMA_CALIBRATION_DEFAULTS.hostMemoryIncreaseThresholdPct,
+      LLAMA_CALIBRATION_DEFAULTS.vramIncreaseThresholdPct,
+    ];
+    for (const band of bands) {
+      expect(Number.isFinite(band)).toBe(true);
+      expect(band).toBeGreaterThan(0);
+      expect(band).toBeLessThanOrEqual(100);
+    }
+    // At least two trusted values are required for a median, and a suspicious reading is never
+    // admitted without at least one confirmation.
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples).toBeGreaterThanOrEqual(2);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads).toBeGreaterThanOrEqual(1);
+    expect(Number.isSafeInteger(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSettleMs)).toBe(true);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSettleMs).toBeGreaterThanOrEqual(0);
+    for (const duration of [
+      LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
+      LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs,
+    ]) {
+      expect(Number.isSafeInteger(duration)).toBe(true);
+      expect(duration).toBeGreaterThan(0);
+    }
   });
 
   it.each([

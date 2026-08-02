@@ -338,6 +338,98 @@ export interface LlamaCalibrationResourceMetricDiagnostic {
   decreasePct?: number;
 }
 
+/** The two independently guarded resources. There is no weighting and no combined score. */
+export type LlamaCalibrationResourceMetric = 'hostMemory' | 'vram';
+
+/** Which side of the fixed baseline a suspicious reading fell on. Diagnostic; both are fatal. */
+export type LlamaCalibrationResourceChangeDirection = 'decrease' | 'increase';
+
+/** Which side of a launch a resource boundary check belongs to. */
+export type LlamaCalibrationResourceBoundaryKind = 'pre-launch' | 'post-cleanup';
+
+/** Why a boundary reading could not be compared against the fixed baseline. */
+export type LlamaCalibrationResourceUntrustedReason =
+  | 'telemetry-refresh-failed'
+  | 'reading-unavailable'
+  | 'reading-invalid';
+
+/** One metric's reading inside one boundary snapshot. */
+export interface LlamaCalibrationResourceReading {
+  metric: LlamaCalibrationResourceMetric;
+  /** False when the metric has no usable baseline; such a metric never triggers anything. */
+  enabled: boolean;
+  trusted: boolean;
+  untrustedReason?: LlamaCalibrationResourceUntrustedReason;
+  availableBytes?: number;
+  /** Signed: positive means less availability than the baseline, negative means more. */
+  decreasePctFromBaseline?: number;
+  decreaseThresholdPct?: number;
+  increaseThresholdPct?: number;
+  suspicious: boolean;
+  suspiciousDirection?: LlamaCalibrationResourceChangeDirection;
+}
+
+/** One whole-machine snapshot evaluated against the fixed baseline. */
+export interface LlamaCalibrationResourceSnapshotDiagnostic {
+  readings: readonly LlamaCalibrationResourceReading[];
+  suspiciousMetrics: readonly LlamaCalibrationResourceMetric[];
+  /** Enabled but untrusted metrics. Recorded only; they never indicate drift on their own. */
+  untrustedMetrics: readonly LlamaCalibrationResourceMetric[];
+}
+
+/**
+ * One launch boundary: an initial snapshot plus, only when it was suspicious, one confirmation.
+ */
+export interface LlamaCalibrationResourceBoundaryDiagnostic {
+  boundary: LlamaCalibrationResourceBoundaryKind;
+  confirmationPerformed: boolean;
+  initial: LlamaCalibrationResourceSnapshotDiagnostic;
+  confirmation?: LlamaCalibrationResourceSnapshotDiagnostic;
+  initiallySuspiciousMetrics: readonly LlamaCalibrationResourceMetric[];
+  warnings: readonly string[];
+}
+
+/**
+ * The single source of truth for a resource-stability rejection.
+ *
+ * `probeIndex` is absent for a pre-launch failure, which by construction has no probe.
+ */
+export interface LlamaCalibrationResourceFailure {
+  boundary: LlamaCalibrationResourceBoundaryKind;
+  affectedMetrics: readonly LlamaCalibrationResourceMetric[];
+  /** Band crossed per affected metric; absent for a metric affected only by lost telemetry. */
+  affectedDirections: Readonly<
+    Partial<Record<LlamaCalibrationResourceMetric, LlamaCalibrationResourceChangeDirection>>
+  >;
+  probeIndex?: number;
+  diagnostics: LlamaCalibrationResourceBoundaryDiagnostic;
+}
+
+/** Strength of the evidence behind a diagnostic-only candidate. */
+export type LlamaCalibrationDiagnosticEvidenceLevel =
+  | 'independent-reproduction'
+  | 'single-launch-measurement';
+
+/**
+ * A candidate supported entirely by clean pre-failure evidence.
+ *
+ * It carries no application-ready payload on purpose: only chronological probe indexes, the
+ * evidence level, and a literal usability marker. Referenced probes already hold configs and
+ * scores. It is never copied into `selected`, `provisional`, or `fallback`, and its probe indexes
+ * cannot be pasted into `start()`.
+ */
+export interface LlamaCalibrationDiagnosticCandidate {
+  /** Chronological indexes of accepted clean probes. Non-empty, unique, ascending, in range. */
+  sourceProbeIndexes: readonly number[];
+  evidenceLevel: LlamaCalibrationDiagnosticEvidenceLevel;
+  usability: 'diagnostic-only';
+}
+
+/** Whether an observation may be used for any decision. */
+export type LlamaCalibrationProbeResourceValidity =
+  | 'accepted'
+  | 'invalidated-by-resource-stability';
+
 export interface LlamaCalibrationPassiveDiagnostics {
   /** Full-attention upper-bound-style estimate; not SWA-correct for windowed models. */
   kvBytesEstimate?: number;
@@ -366,13 +458,13 @@ export interface LlamaCalibrationProbe {
   memoryEvidence: LlamaCalibrationMemoryEvidence;
   boundaryDecision: LlamaCalibrationBoundaryDecision;
   /**
-   * Settled resource level this adaptive launch was measured under. Starts at 0
-   * and increments when a confirmed step change in available memory re-anchors
-   * the reference. A selected configuration's independent launches always share
-   * one regime, so probes from different regimes never reproduce each other.
-   * Absent in exact mode, which does not search or re-anchor.
+   * Whether this observation is usable for any decision.
+   *
+   * `invalidated-by-resource-stability` probes stay in the chronological trail for auditing but
+   * never reach adaptive classification, exact ranking, selection, fallback, or the diagnostic
+   * candidate. Absent means the observation was not resource-guarded.
    */
-  resourceRegime?: number;
+  resourceValidity?: LlamaCalibrationProbeResourceValidity;
   loadTimeMs?: number;
   effectiveContextSize?: number;
   effectiveParallelRequests?: number;
@@ -629,4 +721,19 @@ export interface LlamaCalibrationPartialReport {
   probes: readonly LlamaCalibrationProbe[];
   warnings: readonly string[];
   cleanupConfirmed: boolean;
+}
+
+/**
+ * Partial report attached to a resource-stability rejection.
+ *
+ * Deliberately a distinct type from {@link LlamaCalibrationPartialReport}: abort and unrelated
+ * failure partials keep their existing surface, while this one guarantees a `resourceFailure` and
+ * may carry a diagnostic-only candidate.
+ */
+export interface LlamaCalibrationResourceFailurePartialReport
+  extends LlamaCalibrationPartialReport {
+  status: 'failed';
+  resourceFailure: LlamaCalibrationResourceFailure;
+  /** Present only when clean pre-failure evidence already met the normal reproduction rule. */
+  diagnosticCandidate?: LlamaCalibrationDiagnosticCandidate;
 }
