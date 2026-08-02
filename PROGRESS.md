@@ -9,7 +9,6 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 877/877 passing (35 suites), including serial open-handle diagnostics
-- **Branch:** `feat/adaptive-llm-calibration`
 - **Last Updated:** 2026-08-02 (unreleased adaptive calibration work)
 
 ---
