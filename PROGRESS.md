@@ -1,16 +1,45 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.18.0 release candidate — automated LLM runtime calibration
-> (2026-07-31)
+> **Current Status**: Unreleased — adaptive LLM runtime calibration
+> (2026-08-02)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 764/764 passing (32 suites)
-- **Branch:** `release/v0.18.0`
-- **Last Updated:** 2026-07-31 (v0.18.0 release preparation)
+- **Tests:** ✅ 877/877 passing (35 suites), including serial open-handle diagnostics
+- **Branch:** `main`
+- **Last Updated:** 2026-08-02 (unreleased adaptive calibration work)
+
+---
+
+## Unreleased: Adaptive LLM Runtime Calibration
+
+- Replaced the omitted-`combos` generated ladder with a bounded cell-local adaptive strategy.
+  Adaptive callers pass one or two comparable `profiles`; the policy searches each relevant
+  context/SWA/KV cell at its own `gpuLayers` boundary, independently reproduces the selected exact
+  configuration, and records a measured lower-layer fallback when evidence and budget permit.
+- Retained singular `profile` plus non-empty `combos` as a caller-ordered, full-fidelity exact
+  diagnostic strategy. The runtime validator now discriminates these modes before provisioning and
+  gives targeted migration errors for the former singular-profile default call shape.
+- Added globally anchored larger-context and f16 preference bands, explicit operational/memory/
+  boundary evidence separation, conservative ambiguity and non-monotonicity handling, resource
+  drift diagnostics, completion-only early-stop seams, prompt redaction, token-count reuse with
+  per-launch `/props` checks, and fatal orphan protection. Adaptive MoE placement remains pinned;
+  advanced MoE comparisons use exact combos.
+- Added cell-count-scaled probe and wall-time budgets with finalist reserves, honest
+  `budget-exhausted`/`no-viable-candidate` outcomes, strategy-discriminated monotonic progress, typed
+  partial reports for abort/failure, and schema-v2 reports containing chronological fresh-launch
+  probes, cell/profile states, preference resolution, cleanup, confidence, selected/provisional/
+  fallback distinctions, and directly applicable exact start configs.
+- Updated current README, LLM server/type reference, troubleshooting documentation, and resource
+  orchestration cross-reference for the new contract. The v0.18 release record and migration
+  documentation remain historical snapshots.
+- Completed a three-reviewer final audit covering policy/statistics, lifecycle cleanup, and public
+  contract/documentation consistency; all reported implementation defects have regression fixes.
+  Additional post-fix hardware and normal-start validation remains intentionally pending after the
+  host Electron GPU helper crashed before that follow-up could start a probe.
 
 ---
 

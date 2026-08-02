@@ -1,6 +1,6 @@
 /** Lifecycle-neutral llama-server process used by runtime calibration. */
 
-import { LLAMA_CALIBRATION_DEFAULTS } from '../config/defaults.js';
+import { DEFAULT_TIMEOUTS, LLAMA_CALIBRATION_DEFAULTS } from '../config/defaults.js';
 import { ServerError } from '../errors/index.js';
 import type { LlamaServerConfig, ModelInfo } from '../types/index.js';
 import { promises as fs } from 'node:fs';
@@ -42,6 +42,8 @@ export interface LlamaServerRunnerOptions {
   slotSavePath?: string;
   /** Remove slotSavePath after confirmed teardown. */
   cleanupSlotSavePath?: boolean;
+  /** Test seam for verifying that temporary slot-state cleanup remains mandatory. */
+  slotSaveDirectoryRemover?: (slotSavePath: string) => Promise<void>;
 }
 
 function boundedTail(previous: string, next: string, maxBytes: number): string {
@@ -80,6 +82,7 @@ export class LlamaServerRunner {
   private readonly stderrMaxBytes: number;
   private readonly slotSavePath?: string;
   private readonly cleanupSlotSavePath: boolean;
+  private readonly slotSaveDirectoryRemover: (slotSavePath: string) => Promise<void>;
   private _pid?: number;
   private stderr = '';
   private stdout = '';
@@ -99,6 +102,9 @@ export class LlamaServerRunner {
     this.stderrMaxBytes = options.stderrMaxBytes ?? LLAMA_CALIBRATION_DEFAULTS.stderrMaxBytes;
     this.slotSavePath = options.slotSavePath;
     this.cleanupSlotSavePath = options.cleanupSlotSavePath === true;
+    this.slotSaveDirectoryRemover =
+      options.slotSaveDirectoryRemover ??
+      ((slotSavePath) => fs.rm(slotSavePath, { recursive: true, force: true }));
     this.config = normalizeLlamaVCacheConfig({
       ...options.config,
       contextSize: options.contextSize,
@@ -191,7 +197,7 @@ export class LlamaServerRunner {
             this.port,
             '127.0.0.1',
             this.config.parallelRequests!,
-            Math.min(this.startupTimeoutMs, 5_000),
+            Math.min(this.startupTimeoutMs, LLAMA_CALIBRATION_DEFAULTS.capacityCheckTimeoutCapMs),
             this.operationSignal
           )
         );
@@ -250,20 +256,23 @@ export class LlamaServerRunner {
       this.lifecycleAbort.abort(new DOMException('Runner stopping', 'AbortError'));
     }
     const pid = this._pid;
-    if (!pid || this.exitRecord || !this.processManager.isRunning(pid)) {
-      await this.removeSlotSaveDirectory();
-      return;
-    }
     try {
-      await this.processManager.kill(pid);
-      const deadline = Date.now() + 2_000;
+      if (!pid || this.exitRecord || !this.processManager.isRunning(pid)) {
+        await this.removeSlotSaveDirectory();
+        return;
+      }
+      await this.processManager.kill(pid, DEFAULT_TIMEOUTS.serverStop);
+      const deadline = Date.now() + LLAMA_CALIBRATION_DEFAULTS.processExitConfirmationMs;
       while (this.processManager.isRunning(pid) && Date.now() < deadline) {
         await delay(25);
       }
       if (this.processManager.isRunning(pid)) {
         throw new Error('process is still alive after kill completed');
       }
-      await Promise.race([this.exitPromise, delay(250)]);
+      await Promise.race([
+        this.exitPromise,
+        delay(LLAMA_CALIBRATION_DEFAULTS.processExitSettleGraceMs),
+      ]);
       await this.removeSlotSaveDirectory();
     } catch (error) {
       throw new ServerError(`Could not confirm cleanup of calibration process ${pid}`, {
@@ -277,7 +286,7 @@ export class LlamaServerRunner {
 
   private async removeSlotSaveDirectory(): Promise<void> {
     if (!this.cleanupSlotSavePath || !this.slotSavePath) return;
-    await fs.rm(this.slotSavePath, { recursive: true, force: true }).catch(() => void 0);
+    await this.slotSaveDirectoryRemover(this.slotSavePath);
   }
 
   isBindCollision(): boolean {
@@ -290,7 +299,7 @@ export async function startLlamaServerRunner(
   options: LlamaServerRunnerOptions
 ): Promise<LlamaServerRunner> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < LLAMA_CALIBRATION_DEFAULTS.maxRunnerStartAttempts; attempt++) {
     const port = await findFreePort('127.0.0.1');
     const slotSavePath = await fs.mkdtemp(
       path.join(os.tmpdir(), 'genai-electron-llama-calibration-')
@@ -304,7 +313,15 @@ export async function startLlamaServerRunner(
       return runner;
     } catch (error) {
       lastError = error;
-      if (!runner.isBindCollision() || attempt === 1) throw error;
+      if (errorDetails(error).code === 'CALIBRATION_CLEANUP_FAILED') {
+        throw error;
+      }
+      if (
+        !runner.isBindCollision() ||
+        attempt === LLAMA_CALIBRATION_DEFAULTS.maxRunnerStartAttempts - 1
+      ) {
+        throw error;
+      }
     }
   }
   throw lastError;

@@ -2,6 +2,7 @@ import { jest } from '@jest/globals';
 import { ServerError } from '../../src/errors/index.js';
 import type {
   LlamaCalibrationConfig,
+  LlamaCalibrationProgress,
   LlamaCalibrationRequestTiming,
   ModelInfo,
   SystemCapabilities,
@@ -184,10 +185,11 @@ describe('LlamaServerManager.calibrate', () => {
     for (const call of mockStartRunner.mock.calls) {
       expect(call[0]).toMatchObject({ contextSize: 12_288, parallelRequests: 2 });
     }
-    expect(report.comboSource).toBe('custom');
+    expect(report).toMatchObject({ schemaVersion: 2, strategy: 'exact', status: 'complete' });
+    if (report.strategy !== 'exact') throw new Error('expected exact report');
     expect(report.runs.map((run) => run.scoreMs)).toEqual([100, 90]);
-    expect(report.recommended?.combo.label).toBe('b');
-    expect(report.recommended?.startConfig).toMatchObject({
+    expect(report.selected?.combo?.label).toBe('b');
+    expect(report.selected?.startConfig).toMatchObject({
       contextSize: 12_288,
       parallelRequests: 2,
       gpuLayers: 32,
@@ -210,10 +212,12 @@ describe('LlamaServerManager.calibrate', () => {
 
     const report = await manager.calibrate(config);
 
+    if (report.strategy !== 'exact') throw new Error('expected exact report');
     expect(report.runs).toHaveLength(2);
     expect(report.runs.every((run) => run.status === 'error')).toBe(true);
     expect(report.runs.every((run) => run.workloadResults.length === 1)).toBe(true);
-    expect(report.recommended).toBeUndefined();
+    expect(report.selected).toBeUndefined();
+    expect(report.status).toBe('no-viable-candidate');
   });
 
   it('classifies startup OOM and continues to the next candidate', async () => {
@@ -225,8 +229,9 @@ describe('LlamaServerManager.calibrate', () => {
 
     const report = await manager.calibrate(config);
 
+    if (report.strategy !== 'exact') throw new Error('expected exact report');
     expect(report.runs.map((run) => run.status)).toEqual(['oom', 'ok']);
-    expect(report.recommended?.combo.label).toBe('b');
+    expect(report.selected?.combo?.label).toBe('b');
     expect(runnerStops).toHaveLength(1);
   });
 
@@ -246,17 +251,91 @@ describe('LlamaServerManager.calibrate', () => {
     expect(mockStartRunner).not.toHaveBeenCalled();
   });
 
-  it('does not generate positive GPU placements for a CPU binary fallback', async () => {
+  it('runs an explicit CPU-only exact candidate without manufacturing GPU placement', async () => {
     mockBinaryIdentity.mockResolvedValue({
       version: 'b9860',
       variant: 'cpu',
       checksum: 'binary-sha',
     });
 
-    const report = await manager.calibrate({ ...config, combos: undefined });
+    const report = await manager.calibrate({
+      ...config,
+      combos: [{ label: 'cpu', overrides: { gpuLayers: 0 } }],
+    });
 
+    if (report.strategy !== 'exact') throw new Error('expected exact report');
     expect(report.combos).toHaveLength(1);
     expect(report.combos[0]!.overrides.gpuLayers).toBe(0);
+  });
+
+  it('runs the adaptive controller and emits progress suitable for a host progress bar', async () => {
+    mockBinaryIdentity.mockResolvedValue({
+      version: 'b9860',
+      variant: 'cpu',
+      checksum: 'binary-sha',
+    });
+    mockStartRunner.mockImplementation(async () => {
+      actions.push('start');
+      const stop = jest.fn(async () => actions.push('stop'));
+      runnerStops.push(stop);
+      return {
+        pid: 500 + runnerStops.length,
+        port: 25_000 + runnerStops.length,
+        loadTimeMs: 10,
+        capacity: { effectiveContextSize: 4096, totalSlots: 1 },
+        stderrTail: '',
+        stop,
+      };
+    });
+    const callbackProgress: LlamaCalibrationProgress[] = [];
+    const eventProgress: LlamaCalibrationProgress[] = [];
+    manager.on('calibration-progress', (event) =>
+      eventProgress.push(event as LlamaCalibrationProgress)
+    );
+
+    const report = await manager.calibrate({
+      modelId: model.id,
+      profiles: [{ contextSize: 4096, parallelRequests: 1 }],
+      workloads: [{ id: 'cold', kind: 'cold-prefill', prompt: 'PRIVATE-PROMPT', nPredict: 8 }],
+      samples: 1,
+      onProgress: (progress) => callbackProgress.push(progress),
+    });
+
+    expect(report.strategy).toBe('adaptive');
+    if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+    expect(report.status).toBe('complete');
+    expect(report.selectionEvidence).toBe('independent-reproduction');
+    expect(report.selected?.startConfig).toMatchObject({
+      contextSize: 4096,
+      parallelRequests: 1,
+      gpuLayers: 0,
+    });
+    expect(report.probes.map((probe) => [probe.purpose, probe.fidelity])).toEqual([
+      ['reference', 'search'],
+      ['finalist', 'full'],
+    ]);
+    expect(report.workloadComparability).toBe('verified');
+    expect(report.budget.completedProbes).toBe(2);
+    expect(callbackProgress[0]).toMatchObject({
+      strategy: 'adaptive',
+      phase: 'preparing',
+      budget: { resolved: false },
+    });
+    expect(callbackProgress.some((progress) => progress.phase === 'policy-ready')).toBe(true);
+    expect(callbackProgress.at(-1)).toMatchObject({
+      strategy: 'adaptive',
+      phase: 'done',
+      terminalStatus: 'complete',
+      overallPercent: 100,
+    });
+    expect(
+      callbackProgress.every(
+        (progress, index) =>
+          index === 0 || progress.overallPercent >= callbackProgress[index - 1]!.overallPercent
+      )
+    ).toBe(true);
+    expect(eventProgress).toEqual(callbackProgress);
+    expect(JSON.stringify(report)).not.toContain('PRIVATE-PROMPT');
   });
 
   it('erases, primes, and times a complete shared-prefix burst on one slot', async () => {

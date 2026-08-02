@@ -483,29 +483,31 @@ Rotation is configured at the `LogManager` level via `LogRotationOptions` (`maxF
 
 ## Runtime Calibration
 
-`llamaServer.calibrate()` benchmarks a bounded set of real `llama-server` configurations on the
-current machine. One call fixes an exact total `contextSize` (`-c`) and exact
-`parallelRequests` (`-np`) across every candidate. The verified effective capacity per slot is
-`floor(contextSize / parallelRequests)`; `contextSize` is not a per-slot value and is not swept
-inside a call.
+`llamaServer.calibrate()` measures real `llama-server` launches on the current machine. Its default
+strategy is a bounded adaptive search for the largest reproducible operational `gpuLayers` point in
+each relevant context/SWA/KV cell. It accepts one or two comparable context profiles and returns a
+schema-v2 report with the complete chronological probe trail. Supplying explicit `combos` selects a
+separate caller-ordered exact diagnostic strategy.
 
-The server must be stopped. Calibration uses isolated loopback-only processes, runs all candidates
-and requests serially, returns a report, and leaves the normal manager stopped. It does not apply or
-persist the winner. Stop diffusion generation and other competing GPU work first so the timings
-describe the intended production environment.
+The normal server must be stopped. Every probe uses a fresh loopback-only process, requests run
+serially, and cleanup is confirmed before the next probe. Calibration leaves the normal manager
+stopped and never applies or persists a result. Stop diffusion generation, other llama-server
+processes, and unrelated GPU-heavy work first so the observations describe the intended production
+environment.
+
+### Adaptive calibration (default)
+
+Use `profiles` and omit `combos`:
 
 ```typescript
 const report = await llamaServer.calibrate({
   modelId: 'gemma-3-12b',
-  profile: {
-    contextSize: 12_288,       // exact total -c
-    parallelRequests: 2        // two slots, verified as 6,144 tokens per slot
-  },
+  profiles: [
+    { contextSize: 12_288, parallelRequests: 2 },
+    { contextSize: 16_384, parallelRequests: 2 }
+  ],
   fixedConfig: {
-    threads: 8,
-    cacheTypeK: 'q8_0',
-    cacheTypeV: 'q8_0',
-    flashAttention: 'on'
+    threads: 8
   },
   workloads: [
     {
@@ -524,34 +526,91 @@ const report = await llamaServer.calibrate({
       weight: 2
     }
   ],
+  includeKvCacheComparison: true,
+  contextPreferencePct: 10,
+  kvPrecisionPreferencePct: 10,
   samples: 3,
   onProgress: progress => sendToRenderer('llm-calibration-progress', progress)
 });
 
-if (report.recommended) {
+if (report.strategy === 'adaptive' && report.selected) {
   await llamaServer.start({
     modelId: report.model.id,
-    ...report.recommended.startConfig
+    ...report.selected.startConfig
   });
-  // Persist this config in the consumer app if desired; the library does not.
 }
 ```
 
-A sole workload may omit `weight` and then resolves to `1`. With multiple workloads, every
-workload needs a finite positive weight. A weight is the relative production frequency of the
-complete scenario: one cold request or one entire shared-prefix burst. Per-workload samples and
-diagnostics are always returned; prompt content is hashed and omitted from the report.
+Each `contextSize` is the exact total `-c` allocation; `parallelRequests` is the exact `-np` slot
+count. `/props` verifies `floor(contextSize / parallelRequests)` effective tokens per slot on every
+fresh launch. Adaptive profiles must have unique context sizes and the same slot count. Caller order
+is preserved as `profileIndex`, while the search schedules smaller context first. With two profiles,
+the workloads, output lengths, weights, seed, and sample method stay identical: larger context is a
+product-capacity choice, not permission to benchmark a different or longer workload. Use separate
+calibrations for different slot counts or context-specific workloads.
 
-### Candidate selection and scoring
+A sole workload may omit `weight` (it becomes `1`). With multiple workloads, every weight must be
+finite and positive. A weight is the relative production frequency of one whole scenario: one cold
+request or one complete shared-prefix burst. Scores are normalized weighted sums of per-workload
+median scenario wall times; startup time is diagnostic only. Raw prompts, prefixes, and suffixes are
+hashed and omitted from reports, and literal configured prompt fragments are redacted from captured
+errors and stderr.
 
-The generated core policy is deliberately bounded to at most ten candidates. It tests a baseline,
-nearby GPU-layer headroom/aggressive placements, and full offload where the backend supports them;
-adds SWA-full pairs only when model metadata and a shared-prefix workload make that comparison
-relevant; and may add one measured-MoE counterfactual. It is not a Cartesian sweep over every
-llama.cpp flag.
+#### What adaptive search varies
 
-`fixedConfig` is inherited by every run and cannot be overridden by a candidate. Passing `combos`
-replaces generated candidates completely and preserves caller order:
+Each adaptive cell fixes the exact profile and every normalized launch argument except
+`gpuLayers`. Depending on model metadata and configuration, cells cover:
+
+- one or two requested profiles;
+- windowed and full SWA only when sliding-window metadata, effective context, and a shared-prefix
+  workload make the comparison relevant and `swaFull` is not fixed;
+- the resolved baseline KV precision, or separate `q8_0/q8_0` and `f16/f16` cells when
+  `includeKvCacheComparison: true`.
+
+The search finds a directly observed admissible reference, establishes an upper endpoint, bisects
+the local layer interval, and spends its reserved launches on competitive finalists, winner
+reproduction, and a lower-layer fallback when needed. Search probes use one timed sample per
+workload. Finalists use `samples` (default `3`) and the full request timeout. Adaptive `complete`
+requires two successful fresh launches at the exact selected arguments, including at least one
+full-fidelity launch. The result is empirical reproducibility under the observed machine state, not
+a statistical failure-probability guarantee.
+
+Operational status, memory evidence, and boundary decisions are separate. A generic CUDA error,
+timeout, crash, or slow result can make a probe operationally ambiguous without proving an
+allocation-memory threshold. Contradictions and unstable boundaries trigger a repeat or a measured
+step down when budget permits. The full trail remains in `report.probes`; do not infer safety from a
+single `oom` label or from estimated memory bytes.
+
+`fixedConfig` is inherited by every cell. In adaptive mode, MoE placement is also pinned to the
+resolved default/fixed placement: the policy searches GPU layers but does not compare `cpuMoe`,
+`nCpuMoe`, or `overrideTensors`. This is intentionally narrower than the historical v0.18 generated
+ladder. Use exact combos for MoE-placement experiments. Every adaptive report marks
+`pinnedMoePlacement: true`, so its selection is conditional on that placement.
+
+#### Context and KV preferences
+
+The global fastest independently reproduced finalist anchors both product preferences:
+
+- with two profiles, `contextPreferencePct` (default `10`) permits the larger context when it is no
+  more than that percentage slower;
+- with `includeKvCacheComparison: true`, `kvPrecisionPreferencePct` (default `10`) permits the larger
+  f16 KV representation within its band.
+
+The bands do not compound. Inside the chosen product class, the ordinary 5% equivalence rule favors
+lower memory pressure (fewer GPU layers, then windowed SWA) before measured speed and deterministic
+cell order. These are explicit capacity/precision preferences, not claims that larger context or f16
+is faster. Adding a second profile approximately doubles the number of cells; enabling KV comparison
+approximately doubles it again, increasing both probe and wall-time budgets.
+
+If `fixedConfig.gpuLayers` is supplied, each relevant cell directly measures only that value; the
+report does not claim that a boundary search occurred. `includeKvCacheComparison` cannot be combined
+with fixed K/V-cache or flash-attention fields. For q4, bf16, mixed K/V, fixed flash-attention, or
+other custom comparisons, use exact mode.
+
+### Exact custom-combo mode
+
+Use one singular `profile` and a non-empty `combos` tuple. Each combo receives one fresh,
+full-fidelity launch in caller order:
 
 ```typescript
 const report = await llamaServer.calibrate({
@@ -573,56 +632,121 @@ const report = await llamaServer.calibrate({
 });
 ```
 
-KV-cache quantization is supported but stays caller-controlled: generated defaults pin the
-baseline K/V types and do not vary them. Set `includeKvCacheComparison: true` to add one bounded
-f16/q8 counterfactual, or provide explicit custom KV combos as above. The default
-`kvPrecisionPreferencePct: 10` allows the larger KV element footprint to win when it is no more
-than 10% slower than the fastest candidate; set it to `0` to remove that extra precision slack.
+Exact mode does not search boundaries or claim independent-launch reproducibility. A successful
+selection has `confidence: 'single-launch-measurement'`; if every combo fails, status is
+`no-viable-candidate`. Adaptive-only budgets, `contextPreferencePct`, and
+`includeKvCacheComparison` are rejected with exact combos. To compare exact combos at different
+contexts, make separate serial calls.
 
-Each workload uses the median successful scenario wall time. The score is the normalized weighted
-sum of those medians. After the precision rule, candidates within the ordinary 5% robustness
-window prefer fewer explicitly forced fields and then stable candidate order. Load time does not
-enter the score. If every candidate fails, the method still returns the diagnostic report with no
-`recommended` field.
+### Budgets and terminal status
 
-### Comparing context sizes
+Adaptive defaults scale with the number of enumerated cells:
 
-Run independent calibrations when context capacity is itself a product choice. This keeps each
-measurement and recommendation tied to an exact deployable profile:
-
-```typescript
-const reports = [];
-for (const contextSize of [8192, 10_240, 12_288]) {
-  reports.push(await llamaServer.calibrate({
-    modelId: 'gemma-3-12b',
-    profile: { contextSize, parallelRequests: 1 },
-    workloads: productionWorkloads,
-    // Pass the same custom combos here when a flag-for-flag comparison is required.
-  }));
-}
-
-// The consumer chooses the capacity/performance tradeoff from the separate reports.
+```text
+targetProbes = min(24, 6 + 2 * cellCount)       # soft target
+maxProbes = min(36, 7 + 4 * cellCount)          # hard launch limit
+finalistReserve = min(6, max(2, cellCount))
+maxWallTimeMs = min(4,500,000, 900,000 + 450,000 * cellCount)
+finalistTimeReserveMs = min(900,000, 150,000 * cellCount)
 ```
 
-Calls must be serial because calibration requires exclusive machine resources.
+For example, two cells resolve to 10 target probes, 15 maximum probes, and a 30-minute wall-time
+budget; four cells resolve to 14/23 and 45 minutes; eight cells resolve to 22/36 and 75 minutes.
+These are global per-call budgets, not per-profile allowances. `targetProbes`, `maxProbes`, and
+`maxWallTimeMs` may be overridden with internally consistent positive values. A small valid budget
+is allowed to return unresolved rather than weakening evidence requirements.
 
-### Progress, cancellation, and persistence
+Returned report statuses are:
 
-Progress is delivered to `onProgress` and the `'calibration-progress'` event. Phases are
-`preparing`, `starting`, `warmup`, `sampling`, `stopping`, and `done`. Abort with an
-`AbortController`; an abort rejects with `ServerError.details.code === 'CALIBRATION_ABORTED'` and
-includes completed runs. Initial binary download/extraction/validation can only observe abort
-before and after provisioning in this version.
+- `complete`: adaptive has a selected independently reproduced finalist, or exact has a selected
+  single-launch measurement;
+- `budget-exhausted`: adaptive uncertainty that could change the decision remains; `selected` is
+  absent and `provisional` may be present;
+- `no-viable-candidate`: all requested search space was resolved without an admissible point;
+- `aborted` and `failed`: rejection outcomes represented by a typed partial report after cleanup.
+
+The hard adaptive deadline can interrupt a probe, but cleanup may run beyond it and is reported as
+`cleanupOverrunMs`. Cleanup failure takes precedence, rejects as failed, and activates the orphan
+guard.
+Every adaptive report includes `terminalReason`, explaining why the controller completed,
+exhausted its budget, or found no viable point.
+
+### Progress UI
+
+The callback and `'calibration-progress'` event receive equivalent strategy-discriminated payloads.
+Narrow on `strategy` and then `phase`; a `done` event has `terminalStatus` and no active candidate.
+Adaptive progress starts with an unresolved budget, then `policy-ready` exposes the resolved budget.
+Its percentage estimates work against `maxProbes`, so a long startup or request can leave it
+temporarily unchanged. Show phase/purpose text and an indeterminate activity cue rather than
+inventing intermediate percentage movement.
+
+```typescript
+import type { LlamaCalibrationProgress } from 'genai-electron';
+
+function updateCalibrationUI(progress: LlamaCalibrationProgress) {
+  if (progress.phase === 'done') {
+    renderCalibrationDone(progress.terminalStatus, progress.overallPercent);
+    return;
+  }
+
+  if (progress.strategy === 'adaptive') {
+    const budgetText = progress.budget.resolved
+      ? `${progress.completedProbes}/${progress.budget.maxProbes} launches`
+      : 'resolving search budget';
+    const probeText = progress.activeProbe
+      ? `${progress.activeProbe.purpose}: g=${progress.activeProbe.gpuLayers}`
+      : progress.phase;
+    renderCalibrationProgress(progress.overallPercent, `${probeText} · ${budgetText}`);
+  } else {
+    const candidate = progress.activeCandidate;
+    const count = progress.candidates.resolved ? progress.candidates.comboCount : undefined;
+    renderCalibrationProgress(
+      progress.overallPercent,
+      candidate && count
+        ? `candidate ${candidate.comboIndex + 1}/${count}`
+        : progress.phase
+    );
+  }
+}
+
+llamaServer.on('calibration-progress', updateCalibrationUI);
+```
+
+Abort with an `AbortController`. Caller abort rejects with
+`ServerError.details.code === 'CALIBRATION_ABORTED'`; completed chronological probes remain available
+in the typed `ServerError.details.partialReport`. Progress callbacks and event listeners are
+isolated: exceptions they throw do not affect calibration or cleanup.
 
 Other setup codes include `CALIBRATION_INVALID_CONFIG`, `CALIBRATION_SERVER_RUNNING`,
 `CALIBRATION_BUSY`, `CALIBRATION_RESOURCE_BUSY`, `CALIBRATION_SLOTS_UNAVAILABLE`,
 `CALIBRATION_PREPARATION_FAILED`, and `CALIBRATION_CLEANUP_FAILED`. Candidate failures remain in
-the report as `oom`, `startup-timeout`, `request-timeout`, `crashed`, or `error`.
+the probe trail as `oom`, `startup-timeout`, `request-timeout`, `crashed`, or `error`.
+
+### Applying and invalidating results
+
+Apply only `selected.startConfig`; it contains the measured exact context, slot count, and every
+selected launch field. `provisional` is diagnostic and must not be auto-applied. Adaptive `fallback`
+is safe to present as a measured lower-layer option only when its `evidence` is
+`direct-measurement`; `unvalidated-option` is diagnostic only. Independent reproduction applies to
+the adaptive `selected` recommendation, not to the fallback evidence literal.
+
+```typescript
+if (report.selected) {
+  const startConfig = {
+    modelId: report.model.id,
+    ...report.selected.startConfig
+  };
+  await llamaServer.start(startConfig);
+  // Persist startConfig and the report identity in the host app if desired.
+}
+```
 
 Invalidate a saved recommendation when the model files/revision, binary version/backend/checksum,
-hardware/OS/driver/runtime, exact profile, fixed config, workload hashes/weights, sample method, or
-policy version changes. Reports marked `best-effort` lack part of that identity and should be
-recalibrated conservatively.
+hardware/OS/driver/runtime, requested profiles or slot count, fixed config (including pinned MoE
+placement), workload hashes/weights/order, sample or timeout method, adaptive budgets/preferences,
+report schema, or policy version changes. Recalibrate after persistent resource-drift warnings.
+Reports marked `best-effort` lack part of the reproducibility identity and should be treated more
+conservatively.
 
 ---
 

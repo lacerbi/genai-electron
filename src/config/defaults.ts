@@ -8,15 +8,51 @@ import type { DiffusionComponentRole, DiffusionOffloadCombo } from '../types/ind
 /** Stable policy and protocol defaults for LLM runtime calibration. */
 export const LLAMA_CALIBRATION_DEFAULTS = {
   samples: 3,
+  searchSamples: 1,
   seed: 42,
+  grossRegressionMultiplier: 1.5,
+  earlyStopMultiplier: 2,
+  minimumAdaptiveRequestTimeoutMs: 15_000,
   tieTolerancePct: 5,
+  contextPreferencePct: 10,
   includeKvCacheComparison: false,
   kvPrecisionPreferencePct: 10,
-  policyVersion: 'llama-runtime-v1',
+  searchNoiseAllowancePct: 20,
+  nonMonotoneTriggerPct: 20,
+  guardDistanceMinLayers: 2,
+  guardDistanceFraction: 0.1,
+  stabilityTolerancePct: 25,
+  resourceDriftThresholdPct: 25,
+  resourceDriftRetries: 1,
+  unobservedProbeDurationPolicy: 'configured-conservative-estimate',
+  policyVersion: 'llama-runtime-v2',
   startupTimeoutMs: 120_000,
   requestTimeoutMs: 120_000,
   resourceCooldownMs: 750,
   stderrMaxBytes: 16 * 1024,
+  maxRunnerStartAttempts: 2,
+  capacityCheckTimeoutCapMs: 5_000,
+  processExitConfirmationMs: 2_000,
+  processExitSettleGraceMs: 250,
+  adaptiveBudgetFormula: {
+    version: 'cell-count-v1',
+    minCellCount: 1,
+    maxCellCount: 8,
+    targetProbesCap: 24,
+    targetProbesBase: 6,
+    targetProbesPerCell: 2,
+    maxProbesCap: 36,
+    maxProbesBase: 7,
+    maxProbesPerCell: 4,
+    finalistReserveCap: 6,
+    finalistReserveFloor: 2,
+    maxWallTimeCapMs: 4_500_000,
+    maxWallTimeBaseMs: 900_000,
+    maxWallTimePerCellMs: 450_000,
+    finalistTimeReserveCapMs: 900_000,
+    finalistTimeReservePerCellMs: 150_000,
+  },
+  /** v0.18 generated-ladder cap retained only for the internal rollback path. */
   maxCandidates: 10,
   oomPatterns: [
     /out of memory/i,
@@ -27,6 +63,57 @@ export const LLAMA_CALIBRATION_DEFAULTS = {
     /not enough memory/i,
   ] as readonly RegExp[],
 } as const;
+
+export interface ResolvedLlamaCalibrationBudgetDefaults {
+  formulaVersion: string;
+  cellCount: number;
+  targetProbes: number;
+  maxProbes: number;
+  finalistReserve: number;
+  maxWallTimeMs: number;
+  finalistTimeReserveMs: number;
+}
+
+/** Resolve adaptive calibration budgets from the number of enumerated cells. */
+export function resolveLlamaCalibrationBudgetDefaults(
+  cellCount: number
+): ResolvedLlamaCalibrationBudgetDefaults {
+  const formula = LLAMA_CALIBRATION_DEFAULTS.adaptiveBudgetFormula;
+  if (
+    !Number.isSafeInteger(cellCount) ||
+    cellCount < formula.minCellCount ||
+    cellCount > formula.maxCellCount
+  ) {
+    throw new RangeError(
+      `cellCount must be a safe integer from ${formula.minCellCount} through ${formula.maxCellCount}`
+    );
+  }
+
+  return {
+    formulaVersion: formula.version,
+    cellCount,
+    targetProbes: Math.min(
+      formula.targetProbesCap,
+      formula.targetProbesBase + formula.targetProbesPerCell * cellCount
+    ),
+    maxProbes: Math.min(
+      formula.maxProbesCap,
+      formula.maxProbesBase + formula.maxProbesPerCell * cellCount
+    ),
+    finalistReserve: Math.min(
+      formula.finalistReserveCap,
+      Math.max(formula.finalistReserveFloor, cellCount)
+    ),
+    maxWallTimeMs: Math.min(
+      formula.maxWallTimeCapMs,
+      formula.maxWallTimeBaseMs + formula.maxWallTimePerCellMs * cellCount
+    ),
+    finalistTimeReserveMs: Math.min(
+      formula.finalistTimeReserveCapMs,
+      formula.finalistTimeReservePerCellMs * cellCount
+    ),
+  };
+}
 
 /**
  * Default ports for different server types
