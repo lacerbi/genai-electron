@@ -536,9 +536,9 @@ and `resourceRegime` are absent, and reject schema-v2 assumptions.
 
 **Goal:** prove the hard-stop contract at unit, manager, lifecycle, and public-package levels.
 
-1. [~] In `tests/unit/llama-adaptive-calibration-manager.test.ts`, use an atomic scripted snapshot queue
+1. [x] In `tests/unit/llama-adaptive-calibration-manager.test.ts`, use an atomic scripted snapshot queue
    so baseline/pre/post/confirmation host and GPU values cannot become misaligned.
-2. [~] Cover adaptive and exact cases for:
+2. [x] Cover adaptive and exact cases for:
    - bounded baseline collection and refresh-before-read ordering;
    - normal pre/post flow with no confirmation;
    - increases, zero-byte severe drops, and just-under-threshold decreases;
@@ -563,12 +563,12 @@ and `resourceRegime` are absent, and reject schema-v2 assumptions.
      redaction, UI formatting, manager unlock, and cleanup/fatal-error precedence;
    - caller abort, telemetry command timeout, and internal deadline behavior during
      baseline/confirmation.
-3. [~] Remove regime/re-anchor/material-drift policy tests and keep existing inline golden adaptive
+3. [x] Remove regime/re-anchor/material-drift policy tests and keep existing inline golden adaptive
    traces as regression tests.
-4. [~] Expand `SystemInfo`, defaults, error, public-types, report-shape, and process-level calibration
+4. [x] Expand `SystemInfo`, defaults, error, public-types, report-shape, and process-level calibration
    tests. Ensure older fixtures provide explicit trusted host and available-VRAM values rather than
    silently disabling the guard.
-5. [~] Run the probe and runner lifecycle suites unchanged as regressions.
+5. [x] Run the probe and runner lifecycle suites unchanged as regressions.
 
 **Focused verification:**
 
@@ -581,27 +581,27 @@ npm.cmd test -- --runInBand tests/unit/defaults.test.ts tests/unit/SystemInfo.te
 **Goal:** demonstrate that the implemented protocol avoids false aborts in the bounded quiet matrix
 and exercise deliberate rejection at safely reachable boundaries, including post-launch when safe.
 
-1. [ ] Reuse the versioned Phase 0/1 quiet-trace harness and artifact format; do not create a second
+1. [~] Reuse the versioned Phase 0/1 quiet-trace harness and artifact format; do not create a second
    instrumentation path. Run enforcing adaptive one-profile/two-profile and representative exact
    calibrations. Verify the stabilized baseline, absence of false aborts, clean selection evidence,
    and no failed launch.
-2. [ ] Use one safely bounded sub-threshold host allocation to show minor change is tolerated, then one
+2. [~] Use one safely bounded sub-threshold host allocation to show minor change is tolerated, then one
    safely bounded above-threshold host allocation after baseline to show the configured
    confirmation and typed rejection. Exercise both pre-launch no-launch behavior and, where the
    harness can time it safely, post-cleanup invalidation of a completed probe. Preflight a hard
    remaining-memory floor, allocate touched fixed-size chunks, give the helper a TTL/parent-death
    rail plus controller-finally cleanup, and require recovery to the quiet baseline band before the
    next scenario.
-3. [ ] Release a temporary disturbance between initial and confirmation readings to verify recovery
+3. [~] Release a temporary disturbance between initial and confirmation readings to verify recovery
    without another server launch.
-4. [ ] Attempt a VRAM crossing only with a deliberately lower-pressure profile and measured driver/model
+4. [~] Attempt a VRAM crossing only with a deliberately lower-pressure profile and measured driver/model
    reserve. If no safe crossing exists, rely on deterministic manager coverage and record the live
    scenario as not run; never risk OOM/driver reset to satisfy this step.
-5. [ ] Verify unavailable-metric behavior on a controlled telemetry failure where practical; never
+5. [~] Verify unavailable-metric behavior on a controlled telemetry failure where practical; never
    claim a synthetic failure validates the platform command path.
-6. [ ] After each scenario, confirm there is no healthy calibration server or pressure helper, manager
+6. [~] After each scenario, confirm there is no healthy calibration server or pressure helper, manager
    lifecycle remains unlocked, and a subsequent quiet calibration/normal start can succeed.
-7. [ ] Record the results and the Windows/NVIDIA scope in this plan. Do not describe the VRAM default as
+7. [~] Record the results and the Windows/NVIDIA scope in this plan. Do not describe the VRAM default as
    active or validated on Apple, AMD, Intel, or Windows non-NVIDIA paths that currently lack trusted
    available-VRAM telemetry. Record pre/post monitoring's inability to detect a disturbance that
    begins and clears entirely within one launch.
@@ -611,25 +611,25 @@ and exercise deliberate rejection at safely reachable boundaries, including post
 **Goal:** make the host behavior and breaking surface unambiguous without rewriting history or
 prematurely releasing.
 
-1. [ ] Update `genai-electron-docs/llm-server.md` for fixed-baseline machine conditions, minor-change
+1. [x] Update `genai-electron-docs/llm-server.md` for fixed-baseline machine conditions, minor-change
    tolerance, exact/adaptive rejection, pre/post confirmation, try/catch usage, and prohibition on
    applying diagnostic candidates. State plainly that cumulative small decreases can cross the
    original baseline threshold and that a settled material step v0.19.1 would re-anchor now fails.
-2. [ ] Update `genai-electron-docs/typescript-reference.md` for defaults, schema-v3 diagnostics,
+2. [x] Update `genai-electron-docs/typescript-reference.md` for defaults, schema-v3 diagnostics,
    partial report, refresh status, and typed error.
-3. [ ] Update `genai-electron-docs/troubleshooting.md` with `CALIBRATION_RESOURCE_DRIFT` and
+3. [x] Update `genai-electron-docs/troubleshooting.md` with `CALIBRATION_RESOURCE_DRIFT` and
    `CALIBRATION_RESOURCE_STABILITY_UNVERIFIED`, host-facing explanation/retry guidance, and
    cleanup/error precedence.
-4. [ ] Update `genai-electron-docs/system-detection.md` for truthful refresh status.
-5. [ ] Update `genai-electron-docs/integration-guide.md` with `formatErrorForUI()` behavior and a host
+4. [x] Update `genai-electron-docs/system-detection.md` for truthful refresh status.
+5. [x] Update `genai-electron-docs/integration-guide.md` with `formatErrorForUI()` behavior and a host
    catch/display/retry example for both stability error codes.
-6. [ ] Update the calibration orientation in `AGENTS.md` from regimes/schema v2 to the fixed-baseline
+6. [x] Update the calibration orientation in `AGENTS.md` from regimes/schema v2 to the fixed-baseline
    schema-v3 contract.
-7. [ ] Add an Unreleased section to `PROGRESS.md`; separately correct the current v0.19.1 release-status
+7. [x] Add an Unreleased section to `PROGRESS.md`; separately correct the current v0.19.1 release-status
    line to say it is tagged, released, and published on npm.
-8. [ ] Mark `ISSUE-calibration-cross-regime-comparison.md` resolved by this plan and move it to
+8. [x] Mark `ISSUE-calibration-cross-regime-comparison.md` resolved by this plan and move it to
    `docs/dev/issues/`, preserving the original proposal and a resolution note.
-9. [ ] Leave README/package/docs-index version strings and historical migration pages unchanged.
+9. [x] Leave README/package/docs-index version strings and historical migration pages unchanged.
 
 ### Phase 8 - Full validation and release-gated work
 

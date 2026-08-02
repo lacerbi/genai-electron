@@ -486,7 +486,7 @@ Rotation is configured at the `LogManager` level via `LogRotationOptions` (`maxF
 `llamaServer.calibrate()` measures real `llama-server` launches on the current machine. Its default
 strategy is a bounded adaptive search for the largest reproducible operational `gpuLayers` point in
 each relevant context/SWA/KV cell. It accepts one or two comparable context profiles and returns a
-schema-v2 report with the complete chronological probe trail. Supplying explicit `combos` selects a
+schema-v3 report with the complete chronological probe trail. Supplying explicit `combos` selects a
 separate caller-ordered exact diagnostic strategy.
 
 The normal server must be stopped. Every probe uses a fresh loopback-only process, requests run
@@ -504,19 +504,129 @@ machine should be otherwise idle for its duration.
 Because the library cannot control what else the user does, **a host application should tell the
 user that calibration is running and ask them not to start heavy work until it finishes** — other
 model servers, image generation, games, large builds, video encoding, or anything else competing for
-RAM, VRAM, or CPU. Surfacing this alongside the progress UI is usually enough.
+RAM, VRAM, or CPU. Ask the user to close heavy applications *before* starting rather than during:
+the run's reference conditions are captured once at the beginning and are never re-established.
 
-Ordinary light desktop use is expected and does not invalidate a run. What the guard reacts to is a
-large drop in available memory, and it distinguishes two cases:
+**One fixed baseline per call.** After preparation and before the probe budget starts, calibration
+waits a fixed settle delay (5,000 ms), takes three telemetry snapshots one cooldown apart (750 ms),
+and keeps each metric's median as the single baseline for the whole call. Available host RAM and
+available VRAM are guarded independently — no weighting, no combined score. A metric needs at least
+two trusted samples; otherwise it is disabled for the run, an explicit warning is recorded, and
+`report.resourceMonitoring.coverage` degrades to `partial` or `unavailable`. Performance evidence is
+never presented as proof of an unobserved resource.
 
-- **A settled step change** — something took memory once and kept it. The affected point is repeated;
-  when the repeat confirms the same new level, calibration re-anchors its reference, records a
-  warning, and continues in a new *resource regime*. Probes carry the regime they were measured in,
-  and a selected configuration's independent launches always share one regime, so a point is never
-  considered reproduced by launches taken under materially different conditions.
-- **An unsettled environment** — availability is still moving on the repeat. Those launches are not
-  comparable, so calibration ends `budget-exhausted` instead of reporting a number it cannot stand
-  behind. That is a deliberate refusal, not a crash — rerun it on a quiet machine.
+**Both directions are guarded**, inclusively (a change exactly equal to a band is already
+suspicious), as a percentage of that fixed baseline:
+
+| Metric | Decrease band | Increase band |
+|--------|---------------|---------------|
+| Available host RAM | 10% | 20% |
+| Available VRAM | 10% | 10% |
+
+Ordinary light desktop use stays inside these bands. Increases are guarded because a large increase
+both means earlier probes ran under tighter conditions and silently desensitizes the decrease guard
+(10% of the original baseline becomes a much larger drop from the settled level). The bands sit well
+above ordinary settling: a quiet reference machine drifted up to a +10.5% host plateau over a
+13-minute run, which is tolerated and recorded as a diagnostic. These values are heuristic,
+provisional, and screened on a Windows/NVIDIA reference machine; they are exported policy constants
+in `LLAMA_CALIBRATION_DEFAULTS`, not caller-configurable fields. Where trusted available-VRAM
+telemetry does not exist, the VRAM metric disables itself rather than guessing.
+
+**Checked on both sides of every launch.** A boundary check runs immediately before each launch and
+again once teardown is confirmed. A trusted reading at or beyond its band is *suspicious*, not yet
+fatal: calibration waits one more cooldown and takes exactly one whole-boundary confirmation
+snapshot. Confirmation costs telemetry reads only — never another server launch, probe, or launch
+budget. Three outcomes:
+
+- **recovered** — every initially suspicious metric is back inside its bands and no other trusted
+  enabled metric is outside: the boundary is admitted and the run continues normally;
+- **confirmed drift** — the same trusted metric is still outside its band, in either direction:
+  rejection with `details.code === 'CALIBRATION_RESOURCE_DRIFT'`;
+- **stability unverified** — the confirmation reading became untrusted, or a *different* metric
+  became newly suspicious: rejection with
+  `details.code === 'CALIBRATION_RESOURCE_STABILITY_UNVERIFIED'`. An untrusted reading on its own
+  never manufactures drift; it is warned and recorded. If any metric is independently confirmed,
+  confirmed drift takes precedence.
+
+Confirmation does consume wall time. Once triggered it runs to its conclusion against the caller's
+abort signal even if the adaptive wall budget expires meanwhile; if the boundary recovers after that
+deadline, adaptive calibration returns its ordinary `budget-exhausted` report without launching
+again. A post-cleanup check likewise runs after a launch whose internal probe deadline already
+expired, so the final probe is guarded too.
+
+A pre-launch rejection happens before the executor is invoked, so it costs no launch. A post-cleanup
+rejection keeps the completed probe in the chronological trail marked
+`resourceValidity: 'invalidated-by-resource-stability'`; that observation never reaches adaptive
+classification, exact ranking, `selected`/`provisional`/`fallback`, or the diagnostic candidate.
+
+**This is a hard stop in both strategies.** Calibration never restarts, re-anchors, or repeats a
+probe to settle a resource question. Adaptive *and* exact mode reject with
+`LlamaCalibrationResourceStabilityError`, emit exactly one `phase: 'done'` /
+`terminalStatus: 'failed'` progress payload, and return no report.
+**Exact mode's rejection path is new — hosts must catch it.** Cleanup that cannot be confirmed still
+takes precedence and rejects as `CALIBRATION_CLEANUP_FAILED`; an explicit caller abort during the
+baseline or a confirmation remains `CALIBRATION_ABORTED`.
+
+**Temporal blind spot.** The guard samples boundaries; it does not observe continuously. Pressure
+that begins and fully clears between the pre-launch and post-cleanup snapshots of one launch cannot
+be detected. The report states this itself in `methodology.resourceStability.caveat`.
+
+#### Handling a resource-stability rejection
+
+```typescript
+import { LlamaCalibrationResourceStabilityError, llamaServer } from 'genai-electron';
+
+try {
+  const report = await llamaServer.calibrate(config);
+  // ... apply report.selected as usual
+} catch (error) {
+  if (error instanceof LlamaCalibrationResourceStabilityError) {
+    const { code, suggestion, partialReport } = error.details;
+    const failure = partialReport.resourceFailure;
+
+    console.warn(
+      code === 'CALIBRATION_RESOURCE_DRIFT'
+        ? `Machine resources changed at the ${failure.boundary} boundary`
+        : `Resource stability unverifiable at the ${failure.boundary} boundary`,
+      failure.affectedMetrics,     // e.g. ['hostMemory'], ['vram'], or both
+      failure.affectedDirections,  // e.g. { hostMemory: 'decrease' }
+      failure.probeIndex           // undefined for a pre-launch rejection
+    );
+
+    askUserToRetryLater(suggestion);
+    return;
+  }
+  throw error;
+}
+```
+
+The error extends `ServerError`, so existing `instanceof ServerError` handling keeps working: the
+top-level `error.code` is still `'SERVER_ERROR'`, and the calibration-specific discriminant is
+`error.details.code`. `formatErrorForUI()` has a dedicated branch for it — see the
+[Integration Guide](integration-guide.md#error-handling).
+
+Retrying means running the whole calibration again from the beginning on a quiet machine. There is
+no resume: a partially disturbed run has no comparable baseline left to continue from.
+
+**`diagnosticCandidate` is not a start config.** When earlier clean evidence already satisfied the
+normal per-strategy rule, `partialReport.diagnosticCandidate` may be present. It carries only
+`sourceProbeIndexes` (chronological indexes of accepted clean probes), an `evidenceLevel`, and the
+literal `usability: 'diagnostic-only'` — deliberately no config, score, cell, or profile payload.
+**Applying it as a start configuration is forbidden**, and a probe index cannot be pasted into
+`start()`. Any use requires explicit host-side derivation from the referenced probes, with their own
+caveats intact.
+
+#### Behavior changes from v0.19.1
+
+Two consequences are worth stating plainly:
+
+- **Cumulative small decreases can now fail a run.** Every reading is compared against the one fixed
+  baseline, not against the previous reading. Several individually minor drops that together reach
+  the band reject the call.
+- **A settled material step now fails the run.** v0.19.1 confirmed the new level, re-anchored,
+  warned, and continued in a new *resource regime*. Resource regimes no longer exist: the same event
+  now stops the run with `CALIBRATION_RESOURCE_DRIFT`. `probe.resourceRegime` is gone, and persisted
+  schema-v2 reports should be discarded rather than migrated.
 
 ### Adaptive calibration (default)
 
@@ -742,7 +852,10 @@ isolated: exceptions they throw do not affect calibration or cleanup.
 
 Other setup codes include `CALIBRATION_INVALID_CONFIG`, `CALIBRATION_SERVER_RUNNING`,
 `CALIBRATION_BUSY`, `CALIBRATION_RESOURCE_BUSY`, `CALIBRATION_SLOTS_UNAVAILABLE`,
-`CALIBRATION_PREPARATION_FAILED`, and `CALIBRATION_CLEANUP_FAILED`. Candidate failures remain in
+`CALIBRATION_PREPARATION_FAILED`, and `CALIBRATION_CLEANUP_FAILED`. `CALIBRATION_RESOURCE_DRIFT` and
+`CALIBRATION_RESOURCE_STABILITY_UNVERIFIED` are raised as `LlamaCalibrationResourceStabilityError`
+with a `LlamaCalibrationResourceFailurePartialReport` — see
+[Machine conditions during a run](#machine-conditions-during-a-run). Candidate failures remain in
 the probe trail as `oom`, `startup-timeout`, `request-timeout`, `crashed`, or `error`.
 
 ### Applying and invalidating results
@@ -767,9 +880,10 @@ if (report.selected) {
 Invalidate a saved recommendation when the model files/revision, binary version/backend/checksum,
 hardware/OS/driver/runtime, requested profiles or slot count, fixed config (including pinned MoE
 placement), workload hashes/weights/order, sample or timeout method, adaptive budgets/preferences,
-report schema, or policy version changes. Recalibrate after persistent resource-drift warnings.
-Reports marked `best-effort` lack part of the reproducibility identity and should be treated more
-conservatively.
+report schema, or policy version changes. A run that ended in a resource-stability rejection
+produced no recommendation at all — recalibrate on a quiet machine instead. Reports marked
+`best-effort`, or whose `resourceMonitoring.coverage` is not `complete`, lack part of the
+reproducibility identity and should be treated more conservatively.
 
 ---
 

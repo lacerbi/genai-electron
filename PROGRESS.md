@@ -13,6 +13,74 @@
 
 ---
 
+## Unreleased: Calibration Resource-Stability Hard Stop
+
+- Replaced calibration's resource-regime re-anchoring with **one fixed baseline per enabled trusted
+  metric**. Motivation: `ISSUE-calibration-cross-regime-comparison.md` showed that re-anchoring
+  preserved forward progress but never made scores comparable across regimes — cliff classification,
+  cell pruning, competitiveness, and final ranking could still compare measurements taken on either
+  side of a resource change, which is the original drift defect relocated. Closing every
+  cross-regime path would add policy state and re-measurement; refusing to publish a recommendation
+  once comparability is lost is the stronger and simpler invariant. See
+  `PLAN-calibration-resource-stability.md`.
+- The baseline is established after provisioning/preparation and before the probe wall budget
+  starts: a fixed settle delay, then bounded snapshots one cooldown apart, with each metric's median
+  taken independently from at least two trusted values. A metric with fewer trusted values is
+  disabled for the whole run with an explicit warning and a downgraded
+  `resourceMonitoring.coverage`; performance evidence is never presented as proof of an unobserved
+  resource. Available host RAM and available VRAM are guarded independently — no weighting, no
+  combined score, no re-anchoring, no restart.
+- Both launch boundaries (pre-launch, and post-cleanup once teardown is confirmed) compare
+  cumulatively against that single baseline, inclusively and in both directions. A suspicious
+  trusted reading gets one cooldown plus exactly one whole-boundary confirmation, which costs
+  telemetry reads only and never a server launch or launch budget: outcomes are recovered, confirmed
+  drift, or stability-unverified. Contaminated observations stay in the chronological trail marked
+  `invalidated-by-resource-stability` and never reach the adaptive policy, exact ranking,
+  selected/provisional/fallback, or the diagnostic candidate.
+- **Threshold evidence.** A production-timed quiet matrix on the Windows CUDA / Gemma 4 12B
+  reference machine (adaptive one-profile, adaptive two-profile, exact near-capacity/full-offload,
+  exact lower-pressure) put the largest confirmed quiet downward envelope at **3.04% host / 0.00%
+  VRAM**, and a 13.3-minute default-budget adaptive two-profile run settled at a **+10.50% upward
+  host plateau** (stable from ~minute 6, matching an earlier +10.82% peak). User-approved frozen
+  set: host **10%** decrease / **20%** increase, VRAM **10%** / **10%**, settle 5,000 ms, cooldown
+  750 ms, telemetry timeout 10,000 ms, 3 baseline samples, 1 confirmation read. Increases are hard
+  stops rather than warnings because a large increase both means earlier probes ran under tighter
+  conditions and desensitizes the fixed-baseline decrease guard. The values are heuristic,
+  provisional, and scoped to that platform.
+- Made platform memory telemetry truthful: `refreshAvailableMemory()` and
+  `SystemInfo.refreshMemoryTelemetry()` return `MemoryTelemetryRefreshStatus`
+  (`'refreshed' | 'not-required' | 'failed'`) and accept `TelemetryCommandOptions` (abort signal +
+  bounded per-command timeout, also on `getGPUInfo()`). Calibration trusts host RAM only for
+  `refreshed`/`not-required`; GPU trust stays independent, so one metric's failure never invalidates
+  the other.
+- Added one typed rejection, `LlamaCalibrationResourceStabilityError extends ServerError`, with
+  discriminated `details.code` (`CALIBRATION_RESOURCE_DRIFT` or
+  `CALIBRATION_RESOURCE_STABILITY_UNVERIFIED`), a `LlamaCalibrationResourceFailurePartialReport`,
+  and a host-facing `suggestion`. `formatErrorForUI()` surfaces the details code and suggestion
+  ahead of the generic `ServerError` branch. Cleanup-unconfirmed keeps `CALIBRATION_CLEANUP_FAILED`
+  precedence and caller abort stays `CALIBRATION_ABORTED`.
+- Updated current documentation (LLM server, TypeScript reference, troubleshooting, system
+  detection, integration guide) and the AGENTS orientation bullet, and archived the motivating
+  proposal to `docs/dev/issues/ISSUE-calibration-cross-regime-comparison.md` with a resolution note.
+
+**Breaking surface (unreleased; targets v0.20.0):** reports and partial reports are **schema 3**
+with policy `llama-runtime-v3`, adding `resourceMonitoring`, per-probe `resourceBoundaries` and
+required `resourceValidity`, and a `methodology.resourceStability` block; stabilized baselines
+replace the reported machine available-memory values. Removed: `LlamaCalibrationProbe.resourceRegime`,
+`LlamaCalibrationResourceMetricDiagnostic` with the `hostAvailableMemory`/`gpuAvailableMemory`
+passive-diagnostic fields, and the `resourceDriftThresholdPct` / `resourceSettledTolerancePct` /
+`resourceDriftRetries` defaults. Persisted schema-v2 reports should be discarded, not migrated.
+`SystemInfo.refreshMemoryTelemetry()` now resolves a status instead of `void`. **Exact mode gains a
+rejection path callers must catch**, identical to adaptive's.
+
+**Validation so far:** unit/manager/lifecycle coverage for the hard-stop matrix plus the packed
+public-API consumer check. (Phase 6 live validation pending)
+
+**Release status:** Unreleased. Accumulating on `feat/calibration-resource-stability`; no version
+bump, migration guide, tag, GitHub release, or npm publish until explicitly requested.
+
+---
+
 ## v0.19.1: Adaptive Calibration Correctness Patch (2026-08-02)
 
 - Corrected five issues found by a post-release double-check of v0.19.0, four of them introduced by
@@ -54,9 +122,8 @@ suites; the unconditional open-handle diagnostic run also passes. ESLint passes 
 109 warnings, repository formatting and `git diff --check` pass, and the production dependency audit
 reports 0 vulnerabilities. The v0.19.1 package dry-run contains 203 files.
 
-**Release status:** Release preparation on `fix/calibration-doublecheck-followups`. Version metadata
-and the v0.19.0-to-v0.19.1 migration guide are included; PR merge, tag, GitHub release, and
-maintainer-side `npm publish` follow.
+**Release status:** Released. Tagged `v0.19.1`, published as a GitHub release, and published to npm;
+it is the current supported version. The v0.19.0-to-v0.19.1 migration guide ships with it.
 
 ---
 
