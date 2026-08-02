@@ -45,7 +45,9 @@
   `getMemoryInfo()` on Windows.
 - Filed two deferred findings as root `ISSUE-*.md` proposals rather than folding them into a patch:
   finalist starvation under the launch reserve, and regime isolation covering reproduction but not
-  cross-cell score comparison. Both change search behaviour and want their own validation.
+  cross-cell score comparison. Subsequent deterministic reachability triage closed finalist
+  starvation as not reproducible and archived the proposal without a scheduler change; the
+  cross-regime score-comparison proposal remains open for separate validation.
 
 **Release validation:** `prepublishOnly` passes with a clean build and 883/883 tests across 35
 suites; the unconditional open-handle diagnostic run also passes. ESLint passes with 0 errors and

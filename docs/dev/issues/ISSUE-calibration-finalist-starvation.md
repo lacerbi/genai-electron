@@ -1,10 +1,47 @@
 # ISSUE — An exploratory cell can starve another cell's reserved finalist launch
 
 - Created: 2026-08-02
-- Status: PROPOSAL — read and confirm with the user before implementation
+- Status: CLOSED — NOT REPRODUCIBLE (2026-08-02)
 - Package: genai-electron
 - Affected API: `LlamaServerManager.calibrate()` (adaptive strategy)
 - Found by: v0.19.0 post-release double-check (static review, not observed live)
+
+## Resolution
+
+Closed without a code change after deterministic reachability analysis and simulated legal policy
+traces. The local control-flow observation was accurate — admission failure for the first actionable
+plan returns a terminal result — but the proposed cross-cell starvation state is not reachable
+through the controller:
+
+- `nextAdaptivePolicyAction()` handles the first competitive actionable plan before it can reach
+  adaptive completion;
+- a non-finalist exploratory action belongs to an unconverged cell phase, and unconverged cells are
+  unconditionally competitive;
+- scheduling is serial in deterministic cell order, so that exploratory cell necessarily prevents
+  a later cell from accumulating finalist evidence in the first place; and
+- `applyAdaptivePolicyObservation()` rejects any observation that does not match the controller's
+  expected next action, preventing out-of-order evidence from creating the proposed state.
+
+The claimed impact was also incorrect independently of reachability. While a competitive
+unconverged cell remains actionable, adaptive `complete` is unavailable: the controller must either
+probe that cell or return honest `budget-exhausted`. Skipping to validation elsewhere could at most
+strengthen a provisional candidate; it could not produce an evidence-safe `selected` result.
+
+Validation used only controller-approved transitions and required no LLM or hardware:
+
+- 150,000 simulated calibrations across two-context, SWA-pair, and four-cell configurations produced
+  63,849 launch-reserve stops and 60,167 time-reserve stops. Permuting the same pending cells at
+  every stop exposed zero alternative finalist actions.
+- A follow-up specifically varied `resourceDriftStatus` and `resourceRegime`: 60,000 additional
+  traces included 85,412 material-drift launches and 54,802 settled regime changes. Their 50,843
+  launch-reserve stops likewise exposed zero alternative finalists.
+- The focused adaptive-policy suite remained green at 33/33 tests.
+
+One useful semantic clarification remains: reserve slots can go unused when unresolved competitive
+exploration reaches the reserve boundary. This is intentional. Spending those slots elsewhere may
+improve diagnostic provisional evidence, but cannot make the unresolved run complete. The original
+proposal is retained below as an audit record; its problem and impact claims are superseded by this
+resolution.
 
 ## Problem
 
