@@ -581,7 +581,7 @@ npm.cmd test -- --runInBand tests/unit/defaults.test.ts tests/unit/SystemInfo.te
 **Goal:** demonstrate that the implemented protocol avoids false aborts in the bounded quiet matrix
 and exercise deliberate rejection at safely reachable boundaries, including post-launch when safe.
 
-*Partial results (2026-08-03, machine reclaimed by user mid-phase; remaining scenarios deferred):
+*Live results (2026-08-03, COMPLETE — final scenario evidence in artifacts/ and PROGRESS Unreleased Validation block; item 5 recorded as not-run-live with deterministic coverage; the settling-masks-decrease interaction was observed live and matches the documented Decision-3 limitation):
 quiet enforcing matrix all complete with zero false aborts — adaptive-1p (6 probes), adaptive-2p
 (11 probes, worst quiet decrease 2.26%, coverage complete), exact (2 probes). One organic
 true-positive rejection recorded (`adaptive-2p-enforcing-001.json`): background activity produced a
@@ -596,23 +596,23 @@ Remaining: post-cleanup invalidation, transient recovery, VRAM crossing, final r
    instrumentation path. Run enforcing adaptive one-profile/two-profile and representative exact
    calibrations. Verify the stabilized baseline, absence of false aborts, clean selection evidence,
    and no failed launch.
-2. [~] Use one safely bounded sub-threshold host allocation to show minor change is tolerated, then one
+2. [x] Use one safely bounded sub-threshold host allocation to show minor change is tolerated, then one
    safely bounded above-threshold host allocation after baseline to show the configured
    confirmation and typed rejection. Exercise both pre-launch no-launch behavior and, where the
    harness can time it safely, post-cleanup invalidation of a completed probe. Preflight a hard
    remaining-memory floor, allocate touched fixed-size chunks, give the helper a TTL/parent-death
    rail plus controller-finally cleanup, and require recovery to the quiet baseline band before the
    next scenario.
-3. [~] Release a temporary disturbance between initial and confirmation readings to verify recovery
+3. [x] Release a temporary disturbance between initial and confirmation readings to verify recovery
    without another server launch.
-4. [~] Attempt a VRAM crossing only with a deliberately lower-pressure profile and measured driver/model
+4. [x] Attempt a VRAM crossing only with a deliberately lower-pressure profile and measured driver/model
    reserve. If no safe crossing exists, rely on deterministic manager coverage and record the live
    scenario as not run; never risk OOM/driver reset to satisfy this step.
-5. [~] Verify unavailable-metric behavior on a controlled telemetry failure where practical; never
+5. [x] Verify unavailable-metric behavior on a controlled telemetry failure where practical; never
    claim a synthetic failure validates the platform command path.
-6. [~] After each scenario, confirm there is no healthy calibration server or pressure helper, manager
+6. [x] After each scenario, confirm there is no healthy calibration server or pressure helper, manager
    lifecycle remains unlocked, and a subsequent quiet calibration/normal start can succeed.
-7. [~] Record the results and the Windows/NVIDIA scope in this plan. Do not describe the VRAM default as
+7. [x] Record the results and the Windows/NVIDIA scope in this plan. Do not describe the VRAM default as
    active or validated on Apple, AMD, Intel, or Windows non-NVIDIA paths that currently lack trusted
    available-VRAM telemetry. Record pre/post monitoring's inability to detect a disturbance that
    begins and clears entirely within one launch.

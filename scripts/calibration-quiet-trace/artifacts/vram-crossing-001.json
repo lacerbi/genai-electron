@@ -1,0 +1,311 @@
+{
+  "formatVersion": 2,
+  "kind": "calibration-quiet-trace",
+  "cell": "exact-lower-pressure",
+  "cellDescription": "Exact, deliberately lower pressure so post-cleanup recovery is observable away from the capacity edge.",
+  "scenario": {
+    "name": "quiet",
+    "description": "No injected pressure: the quiet enforcement smoke.",
+    "planItems": [
+      "6.1"
+    ],
+    "expectation": "Stabilized baseline, no false abort, clean selection evidence, every probe cleanup confirmed.",
+    "runHostBaselineBytes": 13687664640,
+    "outcome": {
+      "rejected": true,
+      "errorName": "LlamaCalibrationResourceStabilityError",
+      "code": "CALIBRATION_RESOURCE_DRIFT",
+      "probesRecorded": 1,
+      "failureBoundary": "post-cleanup",
+      "failureAffectedMetrics": [
+        "hostMemory",
+        "vram"
+      ],
+      "failureAffectedDirections": {
+        "hostMemory": "decrease",
+        "vram": "decrease"
+      },
+      "failureProbeIndex": 0,
+      "failureConfirmationPerformed": true,
+      "diagnosticCandidatePresent": false
+    },
+    "notes": []
+  },
+  "harness": {
+    "script": "run-quiet-trace.mjs",
+    "repositoryRevision": "341a4e5a9ea6800a7f3a8bdecc93616da4daafab",
+    "repositoryDirty": true,
+    "configFile": "config.default.json"
+  },
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "electron": "43.2.0",
+    "chrome": "150.0.7871.129",
+    "node": "24.18.0",
+    "hardwareAccelerationDisabled": true,
+    "browserWindowsCreated": 0
+  },
+  "timestamps": {
+    "startedAt": "2026-08-03T08:50:08.500Z",
+    "finishedAt": "2026-08-03T08:53:05.882Z",
+    "durationMs": 177297.7029
+  },
+  "identities": {
+    "binary": {
+      "name": "llama-server.exe",
+      "sizeBytes": 9216
+    },
+    "model": {
+      "id": "gemma-4-12b-iq4xs",
+      "name": "Gemma 4 12B IQ4_XS",
+      "architecture": "gemma4",
+      "sizeBytes": 6375732640,
+      "files": [
+        {
+          "name": "gemma-4-12b-it-IQ4_XS.gguf",
+          "sizeBytes": 6375732640
+        }
+      ]
+    }
+  },
+  "calibrateConfig": {
+    "samples": 3,
+    "seed": 42,
+    "startupTimeoutMs": 180000,
+    "requestTimeoutMs": 120000,
+    "fixedConfig": {
+      "flashAttention": "on"
+    },
+    "workloads": [
+      {
+        "workloadId": "cold",
+        "kind": "cold-prefill",
+        "weight": 2,
+        "nPredict": 96,
+        "prompt": {
+          "sha256": "ac02bfa41eb7a7ca51030d514cc38682db541bb3bea373d9819f638ebf23626c",
+          "chars": 162
+        }
+      },
+      {
+        "workloadId": "burst",
+        "kind": "shared-prefix",
+        "weight": 1,
+        "nPredict": 64,
+        "sharedPrefix": {
+          "sha256": "b55d227a0ecfc563eb3b32d19009b3bf3e6b12edf2fafffcd67169cb3597b686",
+          "chars": 239
+        },
+        "suffixes": [
+          {
+            "sha256": "4438acac4ce2f46177e6ec32f717db281e07a174f45f0937c9e98525d7f1c2a5",
+            "chars": 44
+          },
+          {
+            "sha256": "4dadbdd4bfce5d85493cd013d46c8f55f939ae193b8130a98e25c2e1b4ab2939",
+            "chars": 45
+          },
+          {
+            "sha256": "701af8d340db1afceffb2992814c4f0b1727c6b8c23858892718ca1fd2c95794",
+            "chars": 47
+          }
+        ]
+      }
+    ],
+    "modelId": "gemma-4-12b-iq4xs",
+    "profile": {
+      "contextSize": 8192,
+      "parallelRequests": 1
+    },
+    "combos": [
+      {
+        "label": "half-offload",
+        "overrides": {
+          "gpuLayers": 24
+        }
+      },
+      {
+        "label": "two-thirds-offload",
+        "overrides": {
+          "gpuLayers": 32
+        }
+      }
+    ]
+  },
+  "resourcePolicy": {
+    "hostMemoryDecreaseThresholdPct": 10,
+    "vramDecreaseThresholdPct": 10,
+    "hostMemoryIncreaseThresholdPct": 20,
+    "vramIncreaseThresholdPct": 10,
+    "resourceBaselineSamples": 3,
+    "resourceBaselineSettleMs": 5000,
+    "resourceDriftConfirmationReads": 1,
+    "resourceCooldownMs": 750,
+    "resourceTelemetryTimeoutMs": 10000,
+    "policyVersion": "llama-runtime-v3"
+  },
+  "failure": {
+    "message": "Server error: Machine resources changed materially after a probe finished: hostMemory (decrease), vram (decrease)",
+    "name": "LlamaCalibrationResourceStabilityError",
+    "code": "CALIBRATION_RESOURCE_DRIFT",
+    "suggestion": "Ask the user to close heavy applications and other GPU work, then run calibration again from the beginning. Calibration never re-anchors its baseline, so a partially disturbed run cannot be resumed.",
+    "partialReport": {
+      "schemaVersion": 3,
+      "strategy": "exact",
+      "status": "failed",
+      "probeCount": 1,
+      "warnings": [
+        "Resource change confirmed at the post-cleanup boundary for hostMemory (decrease), vram (decrease)."
+      ],
+      "cleanupConfirmed": true,
+      "resourceMonitoring": {
+        "coverage": "complete",
+        "enabledMetrics": [
+          "hostMemory",
+          "vram"
+        ],
+        "metrics": [
+          {
+            "metric": "hostMemory",
+            "enabled": true,
+            "baselineBytes": 13687664640,
+            "decreaseThresholdPct": 10,
+            "increaseThresholdPct": 20,
+            "attempts": 3,
+            "trustedSamples": [
+              13715578880,
+              13687664640,
+              13660160000
+            ]
+          },
+          {
+            "metric": "vram",
+            "enabled": true,
+            "baselineBytes": 8343519232,
+            "decreaseThresholdPct": 10,
+            "increaseThresholdPct": 10,
+            "attempts": 3,
+            "trustedSamples": [
+              8343519232,
+              8343519232,
+              8343519232
+            ]
+          }
+        ]
+      },
+      "resourceFailure": {
+        "boundary": "post-cleanup",
+        "affectedMetrics": [
+          "hostMemory",
+          "vram"
+        ],
+        "affectedDirections": {
+          "hostMemory": "decrease",
+          "vram": "decrease"
+        },
+        "probeIndex": 0,
+        "diagnostics": {
+          "boundary": "post-cleanup",
+          "confirmationPerformed": true,
+          "initial": {
+            "readings": [
+              {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 11170070528,
+                "decreasePctFromBaseline": 18.39316039817878,
+                "decreaseThresholdPct": 10,
+                "increaseThresholdPct": 20,
+                "suspicious": true,
+                "suspiciousDirection": "decrease"
+              },
+              {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 7028604928,
+                "decreasePctFromBaseline": 15.759708432826441,
+                "decreaseThresholdPct": 10,
+                "increaseThresholdPct": 10,
+                "suspicious": true,
+                "suspiciousDirection": "decrease"
+              }
+            ],
+            "suspiciousMetrics": [
+              "hostMemory",
+              "vram"
+            ],
+            "untrustedMetrics": []
+          },
+          "confirmation": {
+            "readings": [
+              {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 11162206208,
+                "decreasePctFromBaseline": 18.450615926253437,
+                "decreaseThresholdPct": 10,
+                "increaseThresholdPct": 20,
+                "suspicious": true,
+                "suspiciousDirection": "decrease"
+              },
+              {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 7028604928,
+                "decreasePctFromBaseline": 15.759708432826441,
+                "decreaseThresholdPct": 10,
+                "increaseThresholdPct": 10,
+                "suspicious": true,
+                "suspiciousDirection": "decrease"
+              }
+            ],
+            "suspiciousMetrics": [
+              "hostMemory",
+              "vram"
+            ],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [
+            "hostMemory",
+            "vram"
+          ],
+          "warnings": [
+            "Resource change confirmed at the post-cleanup boundary for hostMemory (decrease), vram (decrease)."
+          ]
+        }
+      },
+      "probes": [
+        {
+          "probeIndex": 0,
+          "purpose": "exact",
+          "gpuLayers": 24,
+          "operationalStatus": "ok",
+          "boundaryDecision": {
+            "classification": "not-applicable",
+            "reason": "Exact candidates do not participate in adaptive boundary search."
+          },
+          "resourceValidity": "invalidated-by-resource-stability",
+          "terminationReason": "invalidated-by-resource-stability",
+          "cleanupConfirmed": true
+        }
+      ]
+    }
+  },
+  "progress": [
+    {
+      "phase": "done",
+      "terminalStatus": "failed",
+      "elapsedMs": 177291.3607
+    }
+  ],
+  "cleanup": {
+    "calibrating": false,
+    "serverStatus": "stopped",
+    "everyProbeCleanupConfirmed": true
+  }
+}

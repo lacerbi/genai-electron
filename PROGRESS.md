@@ -8,8 +8,8 @@
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 883/883 passing (35 suites), including serial open-handle diagnostics
-- **Last Updated:** 2026-08-02 (v0.19.1 release preparation)
+- **Tests:** ✅ 1004/1004 passing (37 suites)
+- **Last Updated:** 2026-08-03 (unreleased calibration resource-stability batch)
 
 ---
 
@@ -73,8 +73,23 @@ passive-diagnostic fields, and the `resourceDriftThresholdPct` / `resourceSettle
 `SystemInfo.refreshMemoryTelemetry()` now resolves a status instead of `void`. **Exact mode gains a
 rejection path callers must catch**, identical to adaptive's.
 
-**Validation so far:** unit/manager/lifecycle coverage for the hard-stop matrix plus the packed
-public-API consumer check. (Phase 6 live validation pending)
+**Validation:** the full hard-stop behavioral matrix at unit/manager/lifecycle level (1004 tests),
+the packed public-API consumer check, and completed live validation on the Windows CUDA / Gemma 4
+12B reference machine: quiet enforcing runs across adaptive one-profile (complete, 6 probes),
+adaptive two-profile (complete, 11 probes, worst quiet decrease 2.26%), and exact (complete) with
+zero false aborts; one organic true-positive rejection (background activity, confirmed 11.2%→14.1%
+still-falling host decline, probe quarantined, diagnostic candidate from reproduced probes, clean
+teardown); a 7.18% sub-threshold injection tolerated through a full run; a 14.75% injection rejected
+typed at pre-launch with zero launches; a 14.34% injection rejected at post-cleanup with one
+invalidated probe; a 12.42% transient recovering on confirmation and continuing without an extra
+launch; and a safe VRAM crossing (second small model server under the lower-pressure exact profile)
+rejected with both metrics confirmed at post-cleanup. After every scenario: no helper or server
+survivors, manager unlocked, and a final quiet calibration completed cleanly. One recorded
+limitation, matching the documented contract: an injection concurrent with strong upward settling
+(user freeing the machine mid-run) was absorbed by the stale-low baseline — decreases are
+under-detected while a machine settles upward. Live unavailable-metric telemetry failure was not
+exercised (no safe way to break the platform commands); it remains covered deterministically.
+Claims are scoped to the measured Windows/NVIDIA hardware.
 
 **Release status:** Unreleased. Accumulating on `feat/calibration-resource-stability`; no version
 bump, migration guide, tag, GitHub release, or npm publish until explicitly requested.
