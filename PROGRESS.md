@@ -1,7 +1,7 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.19.1 — adaptive LLM runtime calibration correctness patch
-> (2026-08-02)
+> **Current Status**: v0.20.0 — calibration resource-stability hard stop
+> (2026-08-03)
 
 ---
 
@@ -9,11 +9,11 @@
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 1007/1007 passing (37 suites)
-- **Last Updated:** 2026-08-03 (unreleased calibration resource-stability batch)
+- **Last Updated:** 2026-08-03 (v0.20.0 release preparation)
 
 ---
 
-## Unreleased: Calibration Resource-Stability Hard Stop
+## v0.20.0: Calibration Resource-Stability Hard Stop (2026-08-03)
 
 - Replaced calibration's resource-regime re-anchoring with **one fixed baseline per enabled trusted
   metric**. Motivation: `ISSUE-calibration-cross-regime-comparison.md` showed that re-anchoring
@@ -99,8 +99,15 @@ live path produces flaky-then-lost telemetry on demand). Live unavailable-metric
 was likewise not exercised (no safe way to break the platform commands); it remains covered
 deterministically. Claims are scoped to the measured Windows/NVIDIA hardware.
 
-**Release status:** Unreleased. Accumulating on `feat/calibration-resource-stability`; no version
-bump, migration guide, tag, GitHub release, or npm publish until explicitly requested.
+**Release validation:** `prepublishOnly` passes with a clean build and 1007/1007 tests across 37
+suites. ESLint passes with 0 errors (110 pre-existing warnings), repository formatting and
+`git diff --check` pass, the production dependency audit reports 0 vulnerabilities, the packed
+public-API consumer check passes against the v0.20.0 tarball, and the package dry-run contains 211
+files (239.5 kB packed).
+
+**Release status:** Release preparation on `feat/calibration-resource-stability` (explicitly
+requested 2026-08-03). Version metadata and the v0.19.1-to-v0.20.0 migration guide are included;
+PR merge, tag, GitHub release, and maintainer-side `npm publish` follow.
 
 ---
 

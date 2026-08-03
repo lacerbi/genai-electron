@@ -691,7 +691,9 @@ control.
   accepted; inherited "Server error: " message prefix accepted; packed consumer's `skipLibCheck`
   accepted (repo build owns declaration validity).*
 
-5. [ ] Only on that request: bump package/package-lock/README/docs-index and the root `src/index.ts`
+5. [~] (release explicitly requested 2026-08-03; preparation in the release PR — merge, tag, GitHub
+   release, and maintainer npm publish follow) Only on that request: bump
+   package/package-lock/README/docs-index and the root `src/index.ts`
    `@version` to v0.20.0. Create the v0.19.1-to-v0.20 migration guide covering schema-v2 report
    invalidation/recalibration, removed regime/default fields, the refresh return value, and the new
    adaptive/exact `try/catch` paths. Then open one release PR, merge, tag, create the GitHub release,
