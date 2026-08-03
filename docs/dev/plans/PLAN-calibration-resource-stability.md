@@ -670,6 +670,27 @@ control.
 3. [x] (five-verifier Opus fan-out 2026-08-03: zero contract violations; all substantiated findings fixed in the post-doublecheck batch - double-emit ordering, outer-catch partials, stale-cache TSDoc, dead/vacuous test assertions now mutation-verified, injected-vs-measured prose corrections, CI packed-api wiring) Run the `doublecheck` skill against the completed implementation and resolve all substantiated
    findings.
 4. [x] Stop with the work recorded as Unreleased unless the user explicitly requests release.
+*Pre-release notes (2026-08-03, recorded at handoff — review before executing item 5):*
+- *CI has never run on this branch: ci.yml triggers only on push/PR to main, so the release PR is the
+  first cross-platform run of the new system-telemetry/guard/manager tests AND of the new ubuntu
+  `test:packed-api` step (the packed harness's symlink/npm-cli mechanics are untested on Linux —
+  watch that job).*
+- *Open decision, free only while unreleased: convert public `LlamaCalibrationResourceReading` from a
+  flat `trusted: boolean` interface to a trusted/untrusted discriminated union (matches the internal
+  guard and the file's own `fallback` idiom; a doublecheck nit). After v0.20 ships it becomes another
+  breaking change.*
+- *`ISSUE-adaptive-llm-calibration-gqbr.md` (repo root) is an unrelated DEFERRED-RESEARCH proposal
+  (Global Quantile Boundary Racing) predating this batch — user to decide: keep at root as an open
+  proposal or archive under docs/dev/issues/ as deferred. Not blocking.*
+- *Downstream: palimpsest-engine calls `calibrate()` (v0.18 exact shape per the llama-server skill
+  record). v0.20's new exact-mode rejection path must be caught by that caller; the release-owned
+  migration guide covers it, and a downstream heads-up ISSUE (as in prior cycles) is worth filing at
+  release time.*
+- *Verifier sign-offs recorded as accepted: `LlamaCalibrationResourceUntrustedReason` kept (reading-
+  trust taxonomy, not the forbidden conclusion taxonomy); per-reading threshold echo duplication
+  accepted; inherited "Server error: " message prefix accepted; packed consumer's `skipLibCheck`
+  accepted (repo build owns declaration validity).*
+
 5. [ ] Only on that request: bump package/package-lock/README/docs-index and the root `src/index.ts`
    `@version` to v0.20.0. Create the v0.19.1-to-v0.20 migration guide covering schema-v2 report
    invalidation/recalibration, removed regime/default fields, the refresh return value, and the new
