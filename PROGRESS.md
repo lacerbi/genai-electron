@@ -1,15 +1,113 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.19.1 — adaptive LLM runtime calibration correctness patch
-> (2026-08-02)
+> **Current Status**: v0.20.0 — calibration resource-stability hard stop
+> (2026-08-03)
 
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 883/883 passing (35 suites), including serial open-handle diagnostics
-- **Last Updated:** 2026-08-02 (v0.19.1 release preparation)
+- **Tests:** ✅ 1007/1007 passing (37 suites)
+- **Last Updated:** 2026-08-03 (v0.20.0 release preparation)
+
+---
+
+## v0.20.0: Calibration Resource-Stability Hard Stop (2026-08-03)
+
+- Replaced calibration's resource-regime re-anchoring with **one fixed baseline per enabled trusted
+  metric**. Motivation: `ISSUE-calibration-cross-regime-comparison.md` showed that re-anchoring
+  preserved forward progress but never made scores comparable across regimes — cliff classification,
+  cell pruning, competitiveness, and final ranking could still compare measurements taken on either
+  side of a resource change, which is the original drift defect relocated. Closing every
+  cross-regime path would add policy state and re-measurement; refusing to publish a recommendation
+  once comparability is lost is the stronger and simpler invariant. See
+  `docs/dev/plans/PLAN-calibration-resource-stability.md`.
+- The baseline is established after provisioning/preparation and before the probe wall budget
+  starts: a fixed settle delay, then bounded snapshots one cooldown apart, with each metric's median
+  taken independently from at least two trusted values. A metric with fewer trusted values is
+  disabled for the whole run with an explicit warning and a downgraded
+  `resourceMonitoring.coverage`; performance evidence is never presented as proof of an unobserved
+  resource. Available host RAM and available VRAM are guarded independently — no weighting, no
+  combined score, no re-anchoring, no restart.
+- Both launch boundaries (pre-launch, and post-cleanup once teardown is confirmed) compare
+  cumulatively against that single baseline, inclusively and in both directions. A suspicious
+  trusted reading gets one cooldown plus exactly one whole-boundary confirmation, which costs
+  telemetry reads only and never a server launch or launch budget: outcomes are recovered, confirmed
+  drift, or stability-unverified. Contaminated observations stay in the chronological trail marked
+  `invalidated-by-resource-stability` and never reach the adaptive policy, exact ranking,
+  selected/provisional/fallback, or the diagnostic candidate.
+- **Threshold evidence.** A production-timed quiet matrix on the Windows CUDA / Gemma 4 12B
+  reference machine (adaptive one-profile, adaptive two-profile, exact near-capacity/full-offload,
+  exact lower-pressure) put the largest confirmed quiet downward envelope at **3.04% host / 0.00%
+  VRAM**, and a 13.3-minute default-budget adaptive two-profile run settled at a **+10.50% upward
+  host plateau** (stable from ~minute 6, matching an earlier +10.82% peak). User-approved frozen
+  set: host **10%** decrease / **20%** increase, VRAM **10%** / **10%**, settle 5,000 ms, cooldown
+  750 ms, telemetry timeout 10,000 ms, 3 baseline samples, 1 confirmation read. Increases are hard
+  stops rather than warnings because a large increase both means earlier probes ran under tighter
+  conditions and desensitizes the fixed-baseline decrease guard. The values are heuristic,
+  provisional, and scoped to that platform.
+- Made platform memory telemetry truthful: `refreshAvailableMemory()` and
+  `SystemInfo.refreshMemoryTelemetry()` return `MemoryTelemetryRefreshStatus`
+  (`'refreshed' | 'not-required' | 'failed'`) and accept `TelemetryCommandOptions` (abort signal +
+  bounded per-command timeout, also on `getGPUInfo()`). Calibration trusts host RAM only for
+  `refreshed`/`not-required`; GPU trust stays independent, so one metric's failure never invalidates
+  the other.
+- Added one typed rejection, `LlamaCalibrationResourceStabilityError extends ServerError`, with
+  discriminated `details.code` (`CALIBRATION_RESOURCE_DRIFT` or
+  `CALIBRATION_RESOURCE_STABILITY_UNVERIFIED`), a `LlamaCalibrationResourceFailurePartialReport`,
+  and a host-facing `suggestion`. `formatErrorForUI()` surfaces the details code and suggestion
+  ahead of the generic `ServerError` branch. Cleanup-unconfirmed keeps `CALIBRATION_CLEANUP_FAILED`
+  precedence and caller abort stays `CALIBRATION_ABORTED`.
+- Updated current documentation (LLM server, TypeScript reference, troubleshooting, system
+  detection, integration guide) and the AGENTS orientation bullet, and archived the motivating
+  proposal to `docs/dev/issues/ISSUE-calibration-cross-regime-comparison.md` with a resolution note.
+
+**Breaking surface (unreleased; targets v0.20.0):** reports and partial reports are **schema 3**
+with policy `llama-runtime-v3`, adding `resourceMonitoring`, per-probe `resourceBoundaries` and
+required `resourceValidity`, and a `methodology.resourceStability` block; stabilized baselines
+replace the reported machine available-memory values. Removed: `LlamaCalibrationProbe.resourceRegime`,
+`LlamaCalibrationResourceMetricDiagnostic` with the `hostAvailableMemory`/`gpuAvailableMemory`
+passive-diagnostic fields, and the `resourceDriftThresholdPct` / `resourceSettledTolerancePct` /
+`resourceDriftRetries` defaults. Persisted schema-v2 reports should be discarded, not migrated.
+`SystemInfo.refreshMemoryTelemetry()` now resolves a status instead of `void`. **Exact mode gains a
+rejection path callers must catch**, identical to adaptive's.
+
+**Validation:** the full hard-stop behavioral matrix at unit/manager/lifecycle level (1004 tests),
+the packed public-API consumer check, and completed live validation on the Windows CUDA / Gemma 4
+12B reference machine: quiet enforcing runs across adaptive one-profile (complete, 6 probes),
+adaptive two-profile (complete, 11 probes, worst quiet decrease 2.26%), and exact (complete) with
+zero false aborts; one organic true-positive rejection (background activity, measured 11.16%→14.15%
+still-falling host decline, probe quarantined, diagnostic candidate from reproduced probes, clean
+teardown; post-run recovery evidenced by the next run's baseline — non-injected scenarios record no
+recovery block). Injections (injected size vs measured boundary decrease): 7.18% injected
+sub-threshold ran to completion with a maximum observed decrease of 3.33% and no boundary ever
+suspicious — it demonstrates zero false aborts under load, not tolerance near the band; 14.75%
+injected → 14.11% measured, rejected typed at pre-launch with zero launches; 14.34% injected →
+11.8% measured confirmed, rejected at post-cleanup with one invalidated probe; 14.39% injected
+transient → 12.42% measured suspicious initial, confirmation found −2.2% (recovered), admitted and
+continued without an extra launch; and a safe VRAM crossing (second small model server under the
+lower-pressure exact profile) rejected with both metrics confirmed at post-cleanup (host 18.4%,
+VRAM 15.8%). After every scenario: no helper or server survivors, manager unlocked, and a final
+quiet calibration completed cleanly. One recorded limitation, matching the documented contract: a
+13.12% injection concurrent with strong upward settling (user freeing the machine mid-run) peaked
+at only 9.28% measured and was absorbed by the stale-low baseline — decreases are under-detected
+while a machine settles upward; that run's post-release recovery gate also read outside the quiet
+band (the machine was still rising). Every live rejection exercised `CALIBRATION_RESOURCE_DRIFT`;
+`CALIBRATION_RESOURCE_STABILITY_UNVERIFIED` has deterministic coverage only (six tests — no safe
+live path produces flaky-then-lost telemetry on demand). Live unavailable-metric telemetry failure
+was likewise not exercised (no safe way to break the platform commands); it remains covered
+deterministically. Claims are scoped to the measured Windows/NVIDIA hardware.
+
+**Release validation:** `prepublishOnly` passes with a clean build and 1007/1007 tests across 37
+suites. ESLint passes with 0 errors (110 pre-existing warnings), repository formatting and
+`git diff --check` pass, the production dependency audit reports 0 vulnerabilities, the packed
+public-API consumer check passes against the v0.20.0 tarball, and the package dry-run contains 211
+files (239.5 kB packed).
+
+**Release status:** Release preparation on `feat/calibration-resource-stability` (explicitly
+requested 2026-08-03). Version metadata and the v0.19.1-to-v0.20.0 migration guide are included;
+PR merge, tag, GitHub release, and maintainer-side `npm publish` follow.
 
 ---
 
@@ -54,9 +152,8 @@ suites; the unconditional open-handle diagnostic run also passes. ESLint passes 
 109 warnings, repository formatting and `git diff --check` pass, and the production dependency audit
 reports 0 vulnerabilities. The v0.19.1 package dry-run contains 203 files.
 
-**Release status:** Release preparation on `fix/calibration-doublecheck-followups`. Version metadata
-and the v0.19.0-to-v0.19.1 migration guide are included; PR merge, tag, GitHub release, and
-maintainer-side `npm publish` follow.
+**Release status:** Released. Tagged `v0.19.1`, published as a GitHub release, and published to npm;
+it is the current supported version. The v0.19.0-to-v0.19.1 migration guide ships with it.
 
 ---
 

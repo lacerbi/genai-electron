@@ -25,8 +25,25 @@ jest.unstable_mockModule('../../src/utils/binary-identity.js', () => ({
   getInstalledBinaryIdentity: mockBinaryIdentity,
 }));
 
+/**
+ * Pass-through spy on the one call that hands an observation to the adaptive policy.
+ *
+ * Quarantine is a claim about what the policy never saw, and the policy's state is private to the
+ * run, so the call itself is the only place that claim is directly observable. Every other export
+ * is re-exported untouched, so behaviour is identical to the real module.
+ */
+const actualAdaptivePolicy = await import('../../src/utils/llama-adaptive-calibration-policy.js');
+const applyAdaptivePolicyObservation = jest.fn(actualAdaptivePolicy.applyAdaptivePolicyObservation);
+jest.unstable_mockModule('../../src/utils/llama-adaptive-calibration-policy.js', () => ({
+  ...actualAdaptivePolicy,
+  applyAdaptivePolicyObservation,
+}));
+
 const { LlamaServerManager } = await import('../../src/managers/LlamaServerManager.js');
-const { ServerError } = await import('../../src/errors/index.js');
+const { LlamaCalibrationResourceStabilityError, ServerError } = await import(
+  '../../src/errors/index.js'
+);
+const { LLAMA_CALIBRATION_DEFAULTS } = await import('../../src/config/defaults.js');
 
 type ProbeExecutor = (
   options: RunCalibrationProbeOptions
@@ -193,8 +210,10 @@ async function settleCalibration<T>(promise: Promise<T>): Promise<T> {
 }
 
 async function waitForExecutorCall(executor: jest.Mock, calls = 1): Promise<void> {
-  for (let turn = 0; turn < 50 && executor.mock.calls.length < calls; turn++) {
-    await jest.advanceTimersByTimeAsync(0);
+  // Real fake time has to pass here, not just microtasks: the resource guard's fixed settle delay
+  // and its cooldown-spaced baseline samples are paid before the first launch.
+  for (let turn = 0; turn < 200 && executor.mock.calls.length < calls; turn++) {
+    await jest.advanceTimersByTimeAsync(250);
   }
   if (executor.mock.calls.length < calls) {
     throw new Error(`scripted executor did not receive call ${calls}`);
@@ -213,6 +232,15 @@ async function captureRejection(promise: Promise<unknown>): Promise<{
   throw new Error('expected calibration to reject');
 }
 
+/** One whole-machine reading; `'untrusted'` makes that metric's source fail for this snapshot. */
+interface ScriptedSnapshot {
+  host: number | 'untrusted';
+  vram: number | 'untrusted';
+}
+
+/** The quiet reading every unscripted snapshot returns. */
+const QUIET_SNAPSHOT: ScriptedSnapshot = { host: 20_000, vram: 7_000 };
+
 describe('LlamaServerManager adaptive calibration orchestration', () => {
   let manager: InstanceType<typeof LlamaServerManager>;
   let executor: jest.MockedFunction<ProbeExecutor>;
@@ -220,9 +248,47 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
   let getGPUInfo: jest.Mock;
   let refreshMemoryTelemetry: jest.Mock;
 
+  /**
+   * Script the guard's snapshots as one atomic queue keyed by snapshot ordinal.
+   *
+   * Host and GPU values are pinned together by the refresh call that opens every snapshot, so the
+   * two sources cannot drift out of alignment however many reads a boundary happens to take.
+   * Ordinals for one adaptive run are: 0-2 baseline, then per probe one pre-launch read followed
+   * by one post-cleanup read, each immediately followed by its confirmation read when suspicious.
+   */
+  function scriptSnapshots(overrides: Readonly<Record<number, Partial<ScriptedSnapshot>>> = {}): {
+    snapshotCount: () => number;
+  } {
+    let ordinal = -1;
+    let current: ScriptedSnapshot = { ...QUIET_SNAPSHOT };
+    refreshMemoryTelemetry.mockImplementation(async () => {
+      ordinal += 1;
+      current = { ...QUIET_SNAPSHOT, ...(overrides[ordinal] ?? {}) };
+      return current.host === 'untrusted' ? 'failed' : 'refreshed';
+    });
+    getMemoryInfo.mockImplementation(() => {
+      if (current.host === 'untrusted') throw new Error('host telemetry unavailable');
+      return {
+        ...capabilities.memory,
+        available: current.host,
+        used: capabilities.memory.total - current.host,
+      };
+    });
+    getGPUInfo.mockImplementation(async () => ({
+      ...capabilities.gpu,
+      vramAvailable: current.vram === 'untrusted' ? undefined : current.vram,
+    }));
+    return { snapshotCount: () => ordinal + 1 };
+  }
+
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
+    // `resetMocks` strips implementations before every test, so the pass-through has to be re-armed
+    // here or the policy call would silently return undefined for the whole suite.
+    applyAdaptivePolicyObservation.mockImplementation(
+      actualAdaptivePolicy.applyAdaptivePolicyObservation
+    );
     mockBinaryIdentity.mockResolvedValue({
       version: 'b9860',
       variant: 'cuda',
@@ -231,7 +297,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
     executor = jest.fn<ProbeExecutor>();
     getMemoryInfo = jest.fn(() => capabilities.memory);
     getGPUInfo = jest.fn(async () => capabilities.gpu);
-    refreshMemoryTelemetry = jest.fn(async () => undefined);
+    refreshMemoryTelemetry = jest.fn(async () => 'refreshed');
     const modelManager = { getModelInfo: jest.fn(async () => model) };
     const systemInfo = {
       detect: jest.fn(async () => capabilities),
@@ -720,121 +786,14 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       ]);
     });
 
-    it.each(['wholly', 'partially'] as const)(
-      'warns for %s unavailable telemetry without blocking selection',
-      async (availability) => {
-        if (availability === 'wholly') {
-          getMemoryInfo.mockImplementation(() => {
-            throw new Error('host telemetry unavailable');
-          });
-        }
-        getGPUInfo.mockImplementation(async () =>
-          availability === 'wholly'
-            ? Promise.reject(new Error('GPU telemetry unavailable'))
-            : { ...capabilities.gpu, vramAvailable: undefined }
-        );
-        executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
-
-        const report = await settleCalibration(
-          manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
-        );
-
-        if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-        expect(report.status).toBe('complete');
-        expect(report.selected).toBeDefined();
-        expect(report.warnings).toContain(
-          'GPU available-memory telemetry was unavailable for one or both probe snapshots.'
-        );
-        if (availability === 'wholly') {
-          expect(report.warnings).toContain(
-            'Host available-memory telemetry was unavailable for one or both probe snapshots.'
-          );
-        } else {
-          expect(report.warnings).not.toContain(
-            'Host available-memory telemetry was unavailable for one or both probe snapshots.'
-          );
-        }
-        expect(report.probes).not.toHaveLength(0);
-        expect(
-          report.probes.every(
-            (probe) =>
-              probe.diagnostics?.gpuAvailableMemory.comparability === 'unavailable' &&
-              (availability === 'partially' ||
-                probe.diagnostics.hostAvailableMemory.comparability === 'unavailable')
-          )
-        ).toBe(true);
-        expect(
-          report.probes.every((probe) => probe.boundaryDecision.classification !== 'unsuitable')
-        ).toBe(true);
-      }
-    );
-
-    it('repeats a drifting point and ends unresolved when the level never settles', async () => {
-      const memory = (available: number) => ({
-        ...capabilities.memory,
-        available,
-        used: capabilities.memory.total - available,
+    it('disables both metrics after unusable baseline telemetry and still selects a winner', async () => {
+      // Fewer than two trusted baseline samples per metric disables that metric for the whole run
+      // with a warning. A disabled metric can never trigger anything, so calibration proceeds - it
+      // must not manufacture a drift decision out of absent telemetry.
+      scriptSnapshots({
+        0: { host: 'untrusted', vram: 'untrusted' },
+        1: { host: 'untrusted', vram: 'untrusted' },
       });
-      // The repeat lands on a different level again (10_000 then 5_000), so the
-      // environment is still moving and the launches are not comparable.
-      getMemoryInfo
-        .mockReturnValueOnce(memory(20_000))
-        .mockReturnValueOnce(memory(10_000))
-        .mockReturnValueOnce(memory(20_000))
-        .mockReturnValueOnce(memory(5_000));
-      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
-
-      const report = await settleCalibration(manager.calibrate(baseConfig));
-
-      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      expect(report.status).toBe('budget-exhausted');
-      expect(
-        executor.mock.calls.map(([options]) => [options.purpose, options.resolvedConfig.gpuLayers])
-      ).toEqual([
-        ['reference', 4],
-        ['ambiguity-repeat', 4],
-      ]);
-      expect(report.probes).toHaveLength(2);
-      expect(report.probes.map((probe) => probe.boundaryDecision.classification)).toEqual([
-        'ambiguous',
-        'ambiguous',
-      ]);
-      expect(report.probes.at(-1)?.boundaryDecision.reason).toBe('persistent-resource-drift');
-      expect(
-        report.probes.some((probe) => probe.boundaryDecision.classification === 'unsuitable')
-      ).toBe(false);
-      expect(report.warnings).toEqual(
-        expect.arrayContaining([
-          expect.stringContaining('Available resources fell by more than'),
-          'persistent decision-relevant resource drift prevented comparable evidence',
-        ])
-      );
-      // Every host snapshot must be PRECEDED by a telemetry refresh so the
-      // baseline and each probe reading share one measurement regime. Without
-      // it the Windows standby-aware TTL expires mid-run and later snapshots
-      // silently drop to os.freemem(), which excludes reclaimable standby pages.
-      // Counts alone would pass vacuously if host telemetry were ever dropped,
-      // so interleave the invocation order instead.
-      const refreshOrder = refreshMemoryTelemetry.mock.invocationCallOrder;
-      const snapshotOrder = getMemoryInfo.mock.invocationCallOrder;
-      expect(snapshotOrder.length).toBeGreaterThan(0);
-      expect(refreshOrder.length).toBe(snapshotOrder.length);
-      for (const [index, snapshotAt] of snapshotOrder.entries()) {
-        expect(refreshOrder[index]).toBeLessThan(snapshotAt);
-      }
-    });
-
-    it('resolves a one-off material drift after clean reproducible launches', async () => {
-      const memory = (available: number) => ({
-        ...capabilities.memory,
-        available,
-        used: capabilities.memory.total - available,
-      });
-      getMemoryInfo
-        .mockReturnValueOnce(memory(20_000))
-        .mockReturnValueOnce(memory(10_000))
-        .mockReturnValueOnce(memory(20_000))
-        .mockReturnValueOnce(memory(19_000));
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
       const report = await settleCalibration(
@@ -844,32 +803,39 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
       expect(report.status).toBe('complete');
       expect(report.selected).toBeDefined();
-      expect(report.probes[0]?.boundaryDecision).toEqual({
-        classification: 'ambiguous',
-        reason: 'resource-drift',
+      expect(report.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'Resource metric hostMemory is disabled for this calibration run'
+          ),
+          expect.stringContaining('Resource metric vram is disabled for this calibration run'),
+        ])
+      );
+      // Schema v3 states the loss once, as coverage, instead of manufacturing a per-probe
+      // resource conclusion: both metrics are disabled and no boundary was ever evaluated.
+      expect(report.resourceMonitoring).toMatchObject({
+        coverage: 'unavailable',
+        enabledMetrics: [],
       });
-      expect(report).toMatchObject({
-        selectionEvidence: 'independent-reproduction',
-        selected: { scoreMs: 100 },
-      });
-      expect(report.probes.slice(1).every((probe) => probe.operationalStatus === 'ok')).toBe(true);
+      expect(report.resourceMonitoring.metrics.map((metric) => metric.enabled)).toEqual([
+        false,
+        false,
+      ]);
+      expect(
+        report.probes.every(
+          (probe) => probe.resourceValidity === 'accepted' && probe.resourceBoundaries === undefined
+        )
+      ).toBe(true);
     });
 
-    it('re-anchors and continues when a step change settles at a new level', async () => {
-      const memory = (available: number) => ({
-        ...capabilities.memory,
-        available,
-        used: capabilities.memory.total - available,
-      });
-      // Baseline 20_000, then a one-off step to a level that holds across the
-      // repeat - a user opening a browser, not an unstable machine.
-      getMemoryInfo
-        .mockReturnValueOnce(memory(20_000))
-        .mockReturnValueOnce(memory(20_000))
-        .mockReturnValueOnce(memory(10_000))
-        .mockReturnValueOnce(memory(10_000))
-        .mockReturnValueOnce(memory(10_000))
-        .mockReturnValueOnce(memory(10_000));
+    it('bounds every telemetry read and keeps the other metric usable when one source fails', async () => {
+      // Only VRAM is unreadable here. Trust is per metric, so host memory stays guarded and the
+      // report says exactly which half of the coverage was lost.
+      scriptSnapshots({});
+      getGPUInfo.mockImplementation(async () => ({
+        ...capabilities.gpu,
+        vramAvailable: undefined,
+      }));
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
       const report = await settleCalibration(
@@ -877,22 +843,593 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       );
 
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      // The first drop is still treated as drift and repeated; the repeat proves
-      // the level settled, so the reference re-anchors instead of ending the run.
-      expect(report.probes[0]?.diagnostics?.hostAvailableMemory.comparability).toBe('available');
-      expect(report.probes[1]?.boundaryDecision.reason).toBe('resource-drift');
-      // The pre-step launches cannot reproduce the point for the post-step one,
-      // so regime 1 has to earn its own second launch before selection.
-      expect(report.probes.map((probe) => probe.resourceRegime)).toEqual([0, 0, 1, 1]);
-      expect(
-        report.probes.some((probe) => probe.boundaryDecision.reason === 'persistent-resource-drift')
-      ).toBe(false);
+      expect(report.status).toBe('complete');
       expect(report.warnings).toEqual(
         expect.arrayContaining([
-          expect.stringContaining('re-anchored and continued in resource regime 1'),
+          expect.stringContaining('Resource metric vram is disabled for this calibration run'),
         ])
       );
+      expect(report.warnings).not.toEqual(
+        expect.arrayContaining([expect.stringContaining('Resource metric hostMemory is disabled')])
+      );
+      // Partial coverage is explicit, and the surviving metric keeps a real fixed baseline that
+      // every probe boundary was compared against.
+      expect(report.resourceMonitoring.coverage).toBe('partial');
+      expect(report.resourceMonitoring.enabledMetrics).toEqual(['hostMemory']);
+      const hostMonitoring = report.resourceMonitoring.metrics.find(
+        (metric) => metric.metric === 'hostMemory'
+      );
+      expect(hostMonitoring?.enabled).toBe(true);
+      expect(hostMonitoring?.baselineBytes).toBeGreaterThan(0);
+      expect(hostMonitoring?.decreaseThresholdPct).toBe(
+        LLAMA_CALIBRATION_DEFAULTS.hostMemoryDecreaseThresholdPct
+      );
+      expect(hostMonitoring?.increaseThresholdPct).toBe(
+        LLAMA_CALIBRATION_DEFAULTS.hostMemoryIncreaseThresholdPct
+      );
+      expect(
+        report.probes.every((probe) => {
+          const host = probe.resourceBoundaries?.postCleanup?.initial.readings.find(
+            (reading) => reading.metric === 'hostMemory'
+          );
+          const vram = probe.resourceBoundaries?.postCleanup?.initial.readings.find(
+            (reading) => reading.metric === 'vram'
+          );
+          return (
+            probe.resourceBoundaries?.preLaunch?.boundary === 'pre-launch' &&
+            host?.enabled === true &&
+            host.trusted === true &&
+            typeof host.availableBytes === 'number' &&
+            typeof host.decreasePctFromBaseline === 'number' &&
+            vram?.enabled === false
+          );
+        })
+      ).toBe(true);
+      // Every platform read is bounded and carries the caller's signal, so a hung command can
+      // neither stall the run nor leak a child process.
+      for (const [options] of getGPUInfo.mock.calls as [
+        { timeoutMs?: number; signal?: AbortSignal } | undefined,
+      ][]) {
+        expect(options?.timeoutMs).toBe(LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs);
+      }
+      for (const [options] of refreshMemoryTelemetry.mock.calls as [
+        { timeoutMs?: number } | undefined,
+      ][]) {
+        expect(options?.timeoutMs).toBe(LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs);
+      }
+    });
+
+    it('refreshes host telemetry before every single host reading', async () => {
+      // Baseline and boundary samples must share one measurement regime. Without a refresh in
+      // front of each read the Windows standby-aware TTL expires mid-run and later snapshots
+      // silently drop to os.freemem(), which excludes reclaimable standby pages. Counts alone
+      // would pass vacuously if host telemetry were dropped, so interleave the call order.
+      scriptSnapshots({});
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      await settleCalibration(manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } }));
+
+      const refreshOrder = refreshMemoryTelemetry.mock.invocationCallOrder;
+      const snapshotOrder = getMemoryInfo.mock.invocationCallOrder;
+      expect(snapshotOrder.length).toBeGreaterThan(0);
+      expect(refreshOrder.length).toBe(snapshotOrder.length);
+      for (const [index, snapshotAt] of snapshotOrder.entries()) {
+        expect(refreshOrder[index]).toBeLessThan(snapshotAt);
+      }
+    });
+
+    it.each([
+      [
+        'a confirmed host decrease',
+        { 3: { host: 17_000 }, 4: { host: 17_000 } },
+        { metrics: ['hostMemory'], directions: { hostMemory: 'decrease' } },
+      ],
+      [
+        'a confirmed VRAM decrease',
+        { 3: { vram: 6_000 }, 4: { vram: 6_000 } },
+        { metrics: ['vram'], directions: { vram: 'decrease' } },
+      ],
+      [
+        'a confirmed host increase',
+        { 3: { host: 25_000 }, 4: { host: 25_000 } },
+        { metrics: ['hostMemory'], directions: { hostMemory: 'increase' } },
+      ],
+      [
+        'a confirmed VRAM increase',
+        { 3: { vram: 7_800 }, 4: { vram: 7_800 } },
+        { metrics: ['vram'], directions: { vram: 'increase' } },
+      ],
+    ] as const)(
+      'rejects %s at the pre-launch boundary without spending a launch',
+      async (_label, overrides, expected) => {
+        scriptSnapshots(overrides);
+        executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+        const progress: LlamaCalibrationProgress[] = [];
+
+        const error = (await captureRejection(
+          manager.calibrate({ ...baseConfig, onProgress: (value) => progress.push(value) })
+        )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+        expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+        expect(error).toBeInstanceOf(ServerError);
+        expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+        expect(error.details.suggestion).toEqual(expect.stringContaining('close heavy'));
+        // Confirmation is telemetry only: no server was ever launched for this boundary.
+        expect(executor).not.toHaveBeenCalled();
+        const partial = error.details.partialReport;
+        expect(partial).toMatchObject({
+          strategy: 'adaptive',
+          status: 'failed',
+          probes: [],
+          cleanupConfirmed: true,
+        });
+        expect(partial.resourceFailure).toMatchObject({
+          boundary: 'pre-launch',
+          affectedMetrics: expected.metrics,
+          affectedDirections: expected.directions,
+        });
+        // A pre-launch failure has no probe by construction.
+        expect(partial.resourceFailure.probeIndex).toBeUndefined();
+        expect(partial.resourceFailure.diagnostics.confirmationPerformed).toBe(true);
+        expect(partial.resourceFailure.diagnostics.confirmation).toBeDefined();
+        expect(partial.diagnosticCandidate).toBeUndefined();
+        const terminals = progress.filter((value) => value.phase === 'done');
+        expect(terminals).toHaveLength(1);
+        expect(terminals[0]).toMatchObject({ terminalStatus: 'failed' });
+      }
+    );
+
+    it('admits a suspicious pre-launch reading that recovers on its confirmation', async () => {
+      // One transient dip must not cost a run: the confirmation is a cheap telemetry read, and a
+      // recovered boundary proceeds to launch normally.
+      scriptSnapshots({ 3: { host: 17_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
       expect(report.status).toBe('complete');
+      expect(report.selected).toBeDefined();
+      expect(executor).toHaveBeenCalled();
+      expect(report.probes.every((probe) => probe.resourceValidity === 'accepted')).toBe(true);
+    });
+
+    it('fails stability verification when the suspicious metric recovers but another crosses', async () => {
+      // Host recovers while VRAM becomes newly suspicious: nothing is independently confirmed, and
+      // the guard refuses to loop for a third opinion.
+      scriptSnapshots({ 3: { host: 17_000 }, 4: { vram: 6_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_STABILITY_UNVERIFIED');
+      expect(error.details.partialReport.resourceFailure.affectedMetrics).toEqual(['vram']);
+      expect(executor).not.toHaveBeenCalled();
+    });
+
+    it('never manufactures drift from an isolated untrusted reading', async () => {
+      // The boundary reading is untrusted but no trusted reading was ever suspicious, so the
+      // boundary is admitted with a warning rather than rejected.
+      scriptSnapshots({ 3: { host: 'untrusted' } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.status).toBe('complete');
+      expect(report.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('cannot indicate resource drift on its own'),
+        ])
+      );
+    });
+
+    it('quarantines a final-probe post-cleanup drift and commits none of its staged state', async () => {
+      // The 6-probe boundary trace ends with a fallback-validation launch. Its post-cleanup
+      // boundary drifts, so that observation must reach neither the verified-profile cache, the
+      // prompt token-count cache, nor the policy - only the chronological trail, marked invalid.
+      // Snapshot ordinals: 0-2 baseline, then pre/post per probe; probe 5's post read is 14.
+      scriptSnapshots({ 14: { host: 17_000 }, 15: { host: 17_000 } });
+      // Two workload ids make the token cache discriminating: only the drifted final probe ever
+      // reports a count for `late`, so that id can appear in the cache the manager hands its
+      // executor only if the quarantined observation was committed after all. With a single id the
+      // cache is already full before the final probe and its size cannot tell the two cases apart.
+      const workloads = [
+        { ...workload, weight: 1 },
+        { ...workload, id: 'late', weight: 1 },
+      ] as const;
+      const tokenCacheKeys: string[][] = [];
+      /** The manager's live cache: it is passed by reference, so it stays readable after the throw. */
+      let liveTokenCache: ReadonlyMap<string, readonly number[]> | undefined;
+      executor.mockImplementation(async (options) => {
+        liveTokenCache ??= options.cachedPromptTokenCounts;
+        tokenCacheKeys.push([...(options.cachedPromptTokenCounts?.keys() ?? [])]);
+        const gpuLayers = options.resolvedConfig.gpuLayers ?? 0;
+        const scripted =
+          gpuLayers >= 7
+            ? observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
+            : observation(options, { scoreMs: 100 - gpuLayers });
+        if (scripted.promptTokenCounts.size === 0) return scripted;
+        return {
+          ...scripted,
+          promptTokenCounts:
+            options.purpose === 'fallback-validation'
+              ? new Map<string, readonly number[]>([
+                  ['cold', [10]],
+                  ['late', [11]],
+                ])
+              : new Map<string, readonly number[]>([['cold', [10]]]),
+        };
+      });
+      const progress: LlamaCalibrationProgress[] = [];
+
+      const error = (await captureRejection(
+        manager.calibrate({
+          ...baseConfig,
+          workloads,
+          onProgress: (value) => progress.push(value),
+        })
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      const partial = error.details.partialReport;
+      expect(partial.resourceFailure).toMatchObject({
+        boundary: 'post-cleanup',
+        affectedMetrics: ['hostMemory'],
+        affectedDirections: { hostMemory: 'decrease' },
+        probeIndex: 5,
+      });
+      expect(partial.probes).toHaveLength(6);
+      // Exactly one invalidated probe is appended, and it keeps its original operational outcome.
+      const invalidated = partial.probes.filter(
+        (probe) => probe.resourceValidity === 'invalidated-by-resource-stability'
+      );
+      expect(invalidated).toHaveLength(1);
+      expect(invalidated[0]).toMatchObject({
+        probeIndex: 5,
+        operationalStatus: 'ok',
+        boundaryDecision: {
+          classification: 'ambiguous',
+          reason: 'invalidated-by-resource-stability',
+        },
+      });
+      expect(
+        partial.probes.slice(0, 5).every((probe) => probe.resourceValidity === 'accepted')
+      ).toBe(true);
+      // The search stopped at the invalidated launch: no further probe was scheduled from it.
+      expect(executor).toHaveBeenCalledTimes(6);
+      expect(executor.mock.calls.at(-1)![0].purpose).toBe('fallback-validation');
+      expect(progress.filter((value) => value.phase === 'done')).toEqual([
+        expect.objectContaining({ terminalStatus: 'failed' }),
+      ]);
+      expect(JSON.stringify(partial)).not.toContain(workload.prompt);
+      // Token-count cache: `late` was offered exclusively by the quarantined probe, so its absence
+      // after the rejection is direct evidence that nothing from that observation was committed.
+      expect(tokenCacheKeys).toEqual([[], ['cold'], ['cold'], ['cold'], ['cold'], ['cold']]);
+      expect(liveTokenCache).toBeDefined();
+      expect([...liveTokenCache!.keys()]).toEqual(['cold']);
+      // Policy: the invalidated observation was never handed to it. Five accepted probes were.
+      expect(applyAdaptivePolicyObservation).toHaveBeenCalledTimes(5);
+      expect(
+        applyAdaptivePolicyObservation.mock.calls.map(([, applied]) => applied.purpose)
+      ).toEqual(['reference', 'ceiling', 'boundary', 'boundary', 'finalist']);
+      // Verified profiles: this map is read only while the final report is built, so a rejected run
+      // exposes no public observable for it - the residual gap here. What is observable is that the
+      // quarantined probe did carry the capacity readings that would have been staged, and that the
+      // commit is unreachable: the verified-profile write, the token-cache write, and the policy
+      // call sit in one straight-line block after the same early `throw`, so the two assertions
+      // above cover the third by construction.
+      expect(invalidated[0]).toMatchObject({
+        effectiveContextSize: 4096,
+        effectiveParallelRequests: 2,
+      });
+    });
+
+    it('reports a diagnostic-only candidate built solely from reproduced clean probes', async () => {
+      scriptSnapshots({ 14: { host: 17_000 }, 15: { host: 17_000 } });
+      executor.mockImplementation(async (options) => {
+        const gpuLayers = options.resolvedConfig.gpuLayers ?? 0;
+        return gpuLayers >= 7
+          ? observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
+          : observation(options, { scoreMs: 100 - gpuLayers });
+      });
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      const partial = error.details.partialReport;
+      const candidate = partial.diagnosticCandidate;
+      expect(candidate).toBeDefined();
+      expect(candidate!.usability).toBe('diagnostic-only');
+      expect(candidate!.evidenceLevel).toBe('independent-reproduction');
+      const indexes = candidate!.sourceProbeIndexes;
+      // `independent-reproduction` is a claim about more than one launch, so a single cited probe
+      // would contradict the evidence level the candidate advertises.
+      expect(indexes.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(indexes).size).toBe(indexes.length);
+      expect([...indexes].sort((left, right) => left - right)).toEqual([...indexes]);
+      for (const index of indexes) {
+        expect(index).toBeGreaterThanOrEqual(0);
+        expect(index).toBeLessThan(partial.probes.length);
+        // Only accepted clean probes may be cited.
+        expect(partial.probes[index]!.resourceValidity).toBe('accepted');
+      }
+      // The candidate carries no application-ready payload a host could paste into start().
+      expect(Object.keys(candidate!).sort()).toEqual([
+        'evidenceLevel',
+        'sourceProbeIndexes',
+        'usability',
+      ]);
+    });
+
+    it('omits the diagnostic candidate when no point was independently reproduced yet', async () => {
+      // The very first probe's post-cleanup boundary drifts, so no clean evidence was ever
+      // committed. A single launch is never promoted merely because the run ended.
+      scriptSnapshots({ 4: { vram: 6_000 }, 5: { vram: 6_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      const partial = error.details.partialReport;
+      expect(partial.resourceFailure).toMatchObject({ boundary: 'post-cleanup', probeIndex: 0 });
+      expect(partial.probes).toHaveLength(1);
+      expect(partial.diagnosticCandidate).toBeUndefined();
+      expect(executor).toHaveBeenCalledTimes(1);
+    });
+
+    it('quarantines a probe whose post-cleanup boundary confirms a host increase', async () => {
+      // The upward band is guarded on the post-cleanup side too: a large release right after a
+      // probe means the machine that produced the measurement is not the machine that was
+      // baselined, so the observation is invalidated exactly as a decrease would be.
+      scriptSnapshots({ 4: { host: 25_000 }, 5: { host: 25_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+      const progress: LlamaCalibrationProgress[] = [];
+
+      const error = (await captureRejection(
+        manager.calibrate({ ...baseConfig, onProgress: (value) => progress.push(value) })
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      const partial = error.details.partialReport;
+      expect(partial.resourceFailure).toMatchObject({
+        boundary: 'post-cleanup',
+        affectedMetrics: ['hostMemory'],
+        affectedDirections: { hostMemory: 'increase' },
+        probeIndex: 0,
+      });
+      expect(partial.probes).toHaveLength(1);
+      expect(partial.probes[0]).toMatchObject({
+        probeIndex: 0,
+        operationalStatus: 'ok',
+        resourceValidity: 'invalidated-by-resource-stability',
+        terminationReason: 'invalidated-by-resource-stability',
+      });
+      // The increase is recorded as a negative signed change, never as a decrease.
+      const reading = partial.resourceFailure.diagnostics.initial.readings.find(
+        (entry) => entry.metric === 'hostMemory'
+      );
+      expect(reading).toMatchObject({ suspicious: true, suspiciousDirection: 'increase' });
+      expect(reading?.decreasePctFromBaseline).toBeCloseTo(-25, 6);
+      expect(executor).toHaveBeenCalledTimes(1);
+      expect(progress.filter((value) => value.phase === 'done')).toEqual([
+        expect.objectContaining({ terminalStatus: 'failed' }),
+      ]);
+    });
+
+    it('tolerates a sub-threshold decrease and a sub-band increase without confirming', async () => {
+      // 9% down and 15% up on a 20,000-byte host baseline, and 8.6% up on a 7,000-byte VRAM
+      // baseline: every reading is strictly inside its band, so no confirmation is scheduled and
+      // the adaptive search runs to a normal completion.
+      const snapshots = scriptSnapshots({
+        3: { host: 18_200 },
+        4: { host: 23_000 },
+        5: { vram: 7_600 },
+      });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.status).toBe('complete');
+      expect(report.selected).toBeDefined();
+      expect(report.probes.every((probe) => probe.resourceValidity === 'accepted')).toBe(true);
+      // Three baseline reads plus one pre-launch and one post-cleanup read per probe, and nothing
+      // else: a confirmation would show up here as an extra read.
+      expect(snapshots.snapshotCount()).toBe(3 + 2 * report.probes.length);
+      const boundaries = report.probes.flatMap((probe) => [
+        probe.resourceBoundaries?.preLaunch,
+        probe.resourceBoundaries?.postCleanup,
+      ]);
+      expect(boundaries.every((boundary) => boundary?.confirmationPerformed === false)).toBe(true);
+      expect(boundaries.every((boundary) => boundary?.confirmation === undefined)).toBe(true);
+      const readings = boundaries.flatMap((boundary) => boundary?.initial.readings ?? []);
+      expect(readings.every((reading) => reading.suspicious === false)).toBe(true);
+      // The tolerated increase is recorded as a negative signed change, never as a decrease.
+      const increase = report.probes[0]!.resourceBoundaries?.postCleanup?.initial.readings.find(
+        (reading) => reading.metric === 'hostMemory'
+      );
+      expect(increase?.decreasePctFromBaseline).toBeCloseTo(-15, 6);
+    });
+
+    it('lets a confirmed metric decide while the other metric confirmation is untrusted', async () => {
+      // Both metrics are suspicious initially; the confirmation independently confirms host memory
+      // while VRAM's reading becomes untrusted. Confirmed drift takes precedence, the untrusted
+      // metric is recorded and warned about, and it never joins the affected set.
+      scriptSnapshots({
+        3: { host: 17_000, vram: 6_000 },
+        4: { host: 17_000, vram: 'untrusted' },
+      });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      const partial = error.details.partialReport;
+      expect(partial.resourceFailure).toMatchObject({
+        boundary: 'pre-launch',
+        affectedMetrics: ['hostMemory'],
+        affectedDirections: { hostMemory: 'decrease' },
+      });
+      expect(partial.resourceFailure.diagnostics.initiallySuspiciousMetrics).toEqual([
+        'hostMemory',
+        'vram',
+      ]);
+      const confirmedVram = partial.resourceFailure.diagnostics.confirmation?.readings.find(
+        (reading) => reading.metric === 'vram'
+      );
+      expect(confirmedVram).toMatchObject({ enabled: true, trusted: false });
+      expect(confirmedVram?.availableBytes).toBeUndefined();
+      expect(partial.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'Resource metric vram was suspicious at the pre-launch boundary and its confirmation reading was untrusted'
+          ),
+        ])
+      );
+      expect(executor).not.toHaveBeenCalled();
+    });
+
+    it('admits a probe whose suspicious post-cleanup reading recovers on confirmation', async () => {
+      scriptSnapshots({ 4: { host: 17_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.status).toBe('complete');
+      expect(report.probes.every((probe) => probe.resourceValidity === 'accepted')).toBe(true);
+    });
+
+    it('keeps unconfirmed cleanup fatal ahead of a coincident resource failure', async () => {
+      // Precedence: possible process orphaning must never be hidden behind a drift error, so the
+      // guard is not even consulted for an unconfirmed teardown.
+      const snapshots = scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
+      executor.mockRejectedValue(
+        new ServerError('Probe cleanup failed', {
+          code: 'CALIBRATION_CLEANUP_FAILED',
+          pid: 4321,
+          cleanup: { confirmed: false, durationMs: 2_000, pid: 4321 },
+        })
+      );
+
+      const rejection = await captureRejection(manager.calibrate(baseConfig));
+
+      expect(rejection).not.toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(rejection.details?.code).toBe('CALIBRATION_CLEANUP_FAILED');
+      expect(rejection.details?.partialReport).toMatchObject({
+        status: 'failed',
+        cleanupConfirmed: false,
+      });
+      // Three baseline reads plus one pre-launch read: the drift scripted at ordinals 4/5 is never
+      // read at all, which is what proves the guard was not consulted after the unconfirmed
+      // teardown rather than merely outranked by it.
+      expect(snapshots.snapshotCount()).toBe(4);
+    });
+
+    it('supersedes a fatal probe outcome when its confirmed cleanup is followed by drift', async () => {
+      // With cleanup confirmed the probe's own failure is no longer interpretable, so the resource
+      // failure wins - but the original failure survives inside the invalidated probe record.
+      scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
+      executor.mockImplementation(async (options) => {
+        const failed = observation(options, { status: 'error', preflight: false });
+        throw new ServerError('Workload exceeds verified capacity', {
+          code: 'CALIBRATION_INVALID_CONFIG',
+          probeObservation: failed,
+        });
+      });
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      const partial = error.details.partialReport;
+      expect(partial.probes).toHaveLength(1);
+      expect(partial.probes[0]).toMatchObject({
+        resourceValidity: 'invalidated-by-resource-stability',
+        terminationReason: 'CALIBRATION_INVALID_CONFIG',
+        operationalStatus: 'error',
+      });
+    });
+
+    it('preserves the typed error identity, narrowing, and redaction through the adaptive outer catch', async () => {
+      // The final caller boundary is `calibrate()`, whose outer catch re-sanitizes everything it
+      // rethrows. It must not rebuild this as a base ServerError: hosts branch on the class and
+      // then switch on the typed details code.
+      scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error).toBeInstanceOf(ServerError);
+      expect(error.name).toBe('LlamaCalibrationResourceStabilityError');
+      // Both arms of the discriminated details union are reachable from one `instanceof` branch.
+      const narrowed: string =
+        error.details.code === 'CALIBRATION_RESOURCE_DRIFT'
+          ? `drift:${error.details.partialReport.resourceFailure.boundary}`
+          : `unverified:${error.details.partialReport.resourceFailure.boundary}`;
+      expect(narrowed).toBe('drift:post-cleanup');
+      const partial = error.details.partialReport;
+      expect(partial.schemaVersion).toBe(3);
+      expect(partial.policyVersion).toBe('llama-runtime-v3');
+      expect(partial.resourceMonitoring).toMatchObject({
+        coverage: 'complete',
+        enabledMetrics: ['hostMemory', 'vram'],
+      });
+      // Boundary percentages in the failure are only meaningful against the run's fixed baseline,
+      // so the partial report carries that baseline with them.
+      for (const metric of partial.resourceMonitoring.metrics) {
+        expect(metric.baselineBytes).toBeGreaterThan(0);
+        expect(metric.trustedSamples.length).toBeGreaterThanOrEqual(2);
+        expect(metric.attempts).toBe(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples);
+      }
+      expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain(
+        workload.prompt
+      );
+    });
+
+    it('rejects a caller abort raised during baseline collection as an abort, not drift', async () => {
+      const controller = new AbortController();
+      scriptSnapshots({});
+      refreshMemoryTelemetry.mockImplementation(async () => {
+        controller.abort(`stop ${workload.prompt}`);
+        return 'refreshed';
+      });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = await captureRejection(
+        manager.calibrate({ ...baseConfig, signal: controller.signal })
+      );
+
+      expect(error).not.toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details?.code).toBe('CALIBRATION_ABORTED');
+      expect(executor).not.toHaveBeenCalled();
+      expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain(
+        workload.prompt
+      );
     });
 
     it('returns a redacted aborted partial report when already aborted during preparation', async () => {
@@ -1147,26 +1684,34 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       });
     });
 
-    it('does not let unavailable GPU telemetry outlive the hard deadline', async () => {
-      getGPUInfo.mockImplementation(() => new Promise(() => undefined));
-      executor.mockImplementation(async (options) => {
-        expect(options.signal?.aborted).toBe(true);
-        return observation(options, { scoreMs: 100 });
-      });
+    it('bounds a hung GPU telemetry command instead of stalling the run', async () => {
+      // The guard hands every platform read the configured bound rather than racing a bare
+      // promise, which would leave the child process running. A command that honours that bound
+      // and gives up simply disables its metric; the run itself stays bounded and completes.
+      scriptSnapshots({});
+      getGPUInfo.mockImplementation(
+        (options: { timeoutMs?: number } | undefined) =>
+          new Promise((_resolve, reject) => {
+            setTimeout(
+              () => reject(new Error('GPU telemetry command timed out')),
+              options?.timeoutMs ?? 10_000
+            );
+          })
+      );
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
-      const pending = manager.calibrate({
-        ...baseConfig,
-        fixedConfig: { gpuLayers: 0 },
-        startupTimeoutMs: 1,
-        requestTimeoutMs: 1,
-        maxWallTimeMs: 200_000,
-      });
-      await jest.advanceTimersByTimeAsync(200_001);
-      const report = await settleCalibration(pending);
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
 
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      expect(report.status).toBe('budget-exhausted');
-      expect(executor).toHaveBeenCalledTimes(1);
+      expect(report.status).toBe('complete');
+      expect(report.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining('Resource metric vram is disabled for this calibration run'),
+        ])
+      );
+      expect(executor).toHaveBeenCalled();
     });
 
     it('uses the lowest workload weight when deciding whether a repeated cap can close', async () => {
@@ -1205,6 +1750,432 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
             options.purpose === 'ambiguity-repeat' && options.resolvedConfig.gpuLayers === 8
         )
       ).toBe(true);
+    });
+
+    it('tolerates a decrease just under the threshold without paying for a confirmation', async () => {
+      // 9% of the 20,000-byte baseline: strictly inside the 10% band, so the boundary is admitted
+      // from its single read. (The inclusive at-threshold case is pinned in the guard's own suite.)
+      const snapshots = scriptSnapshots({ 3: { host: 18_200 }, 4: { host: 18_200 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.status).toBe('complete');
+      expect(report.probes.every((probe) => probe.resourceValidity === 'accepted')).toBe(true);
+      // Three baseline attempts plus exactly one pre-launch and one post-cleanup read per probe:
+      // a sub-threshold reading never enters the confirmation schedule.
+      expect(snapshots.snapshotCount()).toBe(3 + 2 * report.probes.length);
+      const boundaries = report.probes.flatMap((probe) => [
+        probe.resourceBoundaries?.preLaunch,
+        probe.resourceBoundaries?.postCleanup,
+      ]);
+      expect(boundaries.every((boundary) => boundary?.confirmationPerformed === false)).toBe(true);
+      expect(boundaries.every((boundary) => boundary?.confirmation === undefined)).toBe(true);
+      const host = report.probes[0]!.resourceBoundaries?.preLaunch?.initial.readings.find(
+        (reading) => reading.metric === 'hostMemory'
+      );
+      expect(host).toMatchObject({ enabled: true, trusted: true, suspicious: false });
+      expect(host?.decreasePctFromBaseline).toBeCloseTo(9, 6);
+      expect(host?.suspiciousDirection).toBeUndefined();
+    });
+
+    it.each([
+      ['host memory', { 3: { host: 0 }, 4: { host: 0 } }, 'hostMemory'],
+      ['VRAM', { 3: { vram: 0 }, 4: { vram: 0 } }, 'vram'],
+    ] as const)(
+      'rejects a confirmed zero-byte %s reading as the most severe valid decrease',
+      async (_label, overrides, metric) => {
+        // Zero available bytes is a real, maximally severe reading - never "telemetry missing" -
+        // so it must be trusted, compared, confirmed, and fatal.
+        scriptSnapshots(overrides);
+        executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+        const error = (await captureRejection(
+          manager.calibrate(baseConfig)
+        )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+        expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+        const failure = error.details.partialReport.resourceFailure;
+        expect(failure).toMatchObject({
+          boundary: 'pre-launch',
+          affectedMetrics: [metric],
+          affectedDirections: { [metric]: 'decrease' },
+        });
+        const reading = failure.diagnostics.initial.readings.find(
+          (entry) => entry.metric === metric
+        );
+        expect(reading).toMatchObject({ enabled: true, trusted: true, suspicious: true });
+        expect(reading?.availableBytes).toBe(0);
+        expect(reading?.decreasePctFromBaseline).toBe(100);
+        expect(executor).not.toHaveBeenCalled();
+      }
+    );
+
+    it('hard-fails on cumulative sub-threshold decreases measured from the one fixed baseline', async () => {
+      // Steps of 5.0%, then 2.1%, then 3.8% against the reading before them: a guard that
+      // re-anchored on each boundary would never fire. Against the ONE fixed 20,000-byte baseline
+      // the third reading is a 10.5% decrease, which is the comparison that actually matters.
+      scriptSnapshots({
+        3: { host: 19_000 },
+        4: { host: 18_600 },
+        5: { host: 17_900 },
+        6: { host: 17_900 },
+      });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      const partial = error.details.partialReport;
+      expect(partial.resourceFailure).toMatchObject({
+        boundary: 'pre-launch',
+        affectedMetrics: ['hostMemory'],
+        affectedDirections: { hostMemory: 'decrease' },
+      });
+      // The first probe's own boundaries were admitted on one read each - each step was minor.
+      expect(partial.probes).toHaveLength(1);
+      expect(partial.probes[0]!.resourceValidity).toBe('accepted');
+      expect(partial.probes[0]!.resourceBoundaries?.preLaunch?.confirmationPerformed).toBe(false);
+      expect(partial.probes[0]!.resourceBoundaries?.postCleanup?.confirmationPerformed).toBe(false);
+      expect(executor).toHaveBeenCalledTimes(1);
+      // The baseline never moved, and the fatal percentage is measured against it rather than
+      // against the 18,600 reading that immediately preceded it.
+      const hostMonitoring = partial.resourceMonitoring.metrics.find(
+        (entry) => entry.metric === 'hostMemory'
+      );
+      expect(hostMonitoring?.baselineBytes).toBe(20_000);
+      const reading = partial.resourceFailure.diagnostics.initial.readings.find(
+        (entry) => entry.metric === 'hostMemory'
+      );
+      expect(reading?.availableBytes).toBe(17_900);
+      expect(reading?.decreasePctFromBaseline).toBeCloseTo(10.5, 6);
+    });
+
+    it('fails stability verification when VRAM recovers but host memory becomes newly suspicious', async () => {
+      // The mirror of the host-recovers/VRAM-crosses case: nothing is independently confirmed in
+      // either direction, so the boundary is unverifiable rather than confirmed drift.
+      scriptSnapshots({ 3: { vram: 6_000 }, 4: { host: 17_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_STABILITY_UNVERIFIED');
+      const failure = error.details.partialReport.resourceFailure;
+      expect(failure.affectedMetrics).toEqual(['hostMemory']);
+      expect(failure.diagnostics.initiallySuspiciousMetrics).toEqual(['vram']);
+      // Exactly one confirmation was taken; the guard never loops for a third opinion.
+      expect(failure.diagnostics.confirmationPerformed).toBe(true);
+      expect(executor).not.toHaveBeenCalled();
+    });
+
+    it('fails stability verification when the suspicious metric loses telemetry in its confirmation', async () => {
+      // A trusted suspicion followed by an untrusted confirmation can never be admitted, and it is
+      // never mislabelled as confirmed drift either.
+      scriptSnapshots({ 3: { host: 17_000 }, 4: { host: 'untrusted' } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_STABILITY_UNVERIFIED');
+      const failure = error.details.partialReport.resourceFailure;
+      expect(failure.affectedMetrics).toEqual(['hostMemory']);
+      expect(failure.affectedDirections).toEqual({ hostMemory: 'decrease' });
+      expect(failure.diagnostics.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining('its confirmation reading was untrusted')])
+      );
+      const confirmed = failure.diagnostics.confirmation?.readings.find(
+        (entry) => entry.metric === 'hostMemory'
+      );
+      expect(confirmed).toMatchObject({ trusted: false, suspicious: false });
+      expect(confirmed?.availableBytes).toBeUndefined();
+      expect(executor).not.toHaveBeenCalled();
+    });
+
+    it('confirms drift in one metric while the other is disabled for the whole run', async () => {
+      // An unavailable metric must not mask its neighbour: partial coverage still rejects.
+      scriptSnapshots({
+        0: { vram: 'untrusted' },
+        1: { vram: 'untrusted' },
+        3: { host: 17_000 },
+        4: { host: 17_000 },
+      });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      const partial = error.details.partialReport;
+      expect(partial.resourceMonitoring).toMatchObject({
+        coverage: 'partial',
+        enabledMetrics: ['hostMemory'],
+      });
+      expect(partial.resourceFailure.affectedMetrics).toEqual(['hostMemory']);
+      const vram = partial.resourceFailure.diagnostics.initial.readings.find(
+        (entry) => entry.metric === 'vram'
+      );
+      expect(vram).toMatchObject({ enabled: false, suspicious: false });
+      expect(executor).not.toHaveBeenCalled();
+    });
+
+    it('spends no launch or probe budget on confirmation reads', async () => {
+      // Two boundaries go suspicious and recover. The whole cost is two extra telemetry reads:
+      // no relaunch, no repeated probe, no budget consumption.
+      const snapshots = scriptSnapshots({ 3: { host: 17_000 }, 6: { vram: 6_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.status).toBe('complete');
+      expect(report.probes.length).toBeGreaterThanOrEqual(2);
+      expect(executor).toHaveBeenCalledTimes(report.probes.length);
+      expect(report.budget.completedProbes).toBe(report.probes.length);
+      const confirmedBoundaries = report.probes
+        .flatMap((probe) => [
+          probe.resourceBoundaries?.preLaunch,
+          probe.resourceBoundaries?.postCleanup,
+        ])
+        .filter((boundary) => boundary?.confirmationPerformed === true);
+      expect(confirmedBoundaries).toHaveLength(2);
+      // Baseline attempts + one read per boundary + exactly one read per confirmation.
+      expect(snapshots.snapshotCount()).toBe(3 + 2 * report.probes.length + 2);
+      expect(report.probes.every((probe) => probe.resourceValidity === 'accepted')).toBe(true);
+    });
+
+    it('quarantines confirmed-OOM memory evidence that coincides with post-cleanup drift', async () => {
+      // The probe's own memory verdict is no longer interpretable once the environment moved, so
+      // it must reach neither the controller nor the boundary classification - only the trail.
+      scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
+      executor.mockImplementation(async (options) =>
+        observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
+      );
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      const partial = error.details.partialReport;
+      // A confirmed OOM that reached the policy would have driven a descent probe; none happened.
+      expect(executor).toHaveBeenCalledTimes(1);
+      expect(partial.probes).toHaveLength(1);
+      expect(partial.probes[0]).toMatchObject({
+        operationalStatus: 'oom',
+        memoryEvidence: { classification: 'confirmed' },
+        resourceValidity: 'invalidated-by-resource-stability',
+        terminationReason: 'invalidated-by-resource-stability',
+        boundaryDecision: {
+          classification: 'ambiguous',
+          reason: 'invalidated-by-resource-stability',
+        },
+      });
+      // `unsuitable` is the classification a confirmed OOM earns from the controller; the guard
+      // must have prevented that verdict from ever being computed.
+      expect(partial.probes[0]!.boundaryDecision.classification).not.toBe('unsuitable');
+      expect(partial.diagnosticCandidate).toBeUndefined();
+    });
+
+    it('completes the post-cleanup guard on the caller signal after the internal deadline expired', async () => {
+      // Plan decision 8: once a launch begins, the bounded post-check follows the caller's signal,
+      // not an expired per-probe deadline. Without it this contaminated final probe would be
+      // published as an ordinary budget exhaustion.
+      const snapshots = scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
+      executor.mockImplementation(
+        async (options) =>
+          new Promise<RunCalibrationProbeObservation>((resolve) => {
+            options.onProgress?.({ phase: 'starting' });
+            options.signal?.addEventListener(
+              'abort',
+              () => resolve(observation(options, { scoreMs: 100 })),
+              { once: true }
+            );
+          })
+      );
+
+      const pending = manager.calibrate({ ...baseConfig, maxWallTimeMs: 200_000 });
+      await waitForExecutorCall(executor);
+      await jest.advanceTimersByTimeAsync(200_001);
+      const error = (await captureRejection(pending)) as unknown as InstanceType<
+        typeof LlamaCalibrationResourceStabilityError
+      >;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      expect(error.details.partialReport.resourceFailure).toMatchObject({
+        boundary: 'post-cleanup',
+        probeIndex: 0,
+      });
+      expect(error.details.partialReport.probes[0]!.resourceValidity).toBe(
+        'invalidated-by-resource-stability'
+      );
+      // Baseline, pre-launch, post-cleanup, and its confirmation all happened.
+      expect(snapshots.snapshotCount()).toBe(6);
+    });
+
+    it('rejects a caller abort raised during the bounded confirmation as an abort, not drift', async () => {
+      const controller = new AbortController();
+      scriptSnapshots({ 3: { host: 17_000 } });
+      let gpuReads = 0;
+      getGPUInfo.mockImplementation(async () => {
+        gpuReads += 1;
+        // Read 5 is the pre-launch confirmation snapshot (3 baseline + 1 suspicious initial).
+        if (gpuReads === 5) controller.abort(`stop ${workload.prompt}`);
+        return { ...capabilities.gpu, vramAvailable: 7_000 };
+      });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = await captureRejection(
+        manager.calibrate({ ...baseConfig, signal: controller.signal })
+      );
+
+      expect(error).not.toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details?.code).toBe('CALIBRATION_ABORTED');
+      expect(gpuReads).toBe(5);
+      expect(executor).not.toHaveBeenCalled();
+      expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain(
+        workload.prompt
+      );
+    });
+
+    it('cannot manufacture drift from a telemetry command that times out during confirmation', async () => {
+      // A bounded command that gives up mid-confirmation makes that reading untrusted. Since no
+      // trusted reading of that metric was ever suspicious, the boundary is admitted with a
+      // warning instead of being turned into a resource conclusion.
+      scriptSnapshots({ 3: { host: 17_000 } });
+      let gpuReads = 0;
+      getGPUInfo.mockImplementation(async (options: { timeoutMs?: number } | undefined) => {
+        gpuReads += 1;
+        if (gpuReads === 5) {
+          throw new Error(`GPU telemetry command timed out after ${options?.timeoutMs ?? 0} ms`);
+        }
+        return { ...capabilities.gpu, vramAvailable: 7_000 };
+      });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.status).toBe('complete');
+      expect(report.probes.every((probe) => probe.resourceValidity === 'accepted')).toBe(true);
+      const preLaunch = report.probes[0]!.resourceBoundaries?.preLaunch;
+      expect(preLaunch?.confirmationPerformed).toBe(true);
+      // The lost reading is recorded verbatim, with no byte value that could be compared by
+      // accident, and it neither confirms the host suspicion nor invents one of its own.
+      expect(
+        preLaunch?.confirmation?.readings.find((reading) => reading.metric === 'vram')
+      ).toEqual({
+        metric: 'vram',
+        enabled: true,
+        trusted: false,
+        untrustedReason: 'reading-unavailable',
+        decreaseThresholdPct: LLAMA_CALIBRATION_DEFAULTS.vramDecreaseThresholdPct,
+        increaseThresholdPct: LLAMA_CALIBRATION_DEFAULTS.vramIncreaseThresholdPct,
+        suspicious: false,
+      });
+      expect(preLaunch?.confirmation?.suspiciousMetrics).toEqual([]);
+      expect(preLaunch?.confirmation?.untrustedMetrics).toEqual(['vram']);
+    });
+
+    it('emits exactly one terminal failed payload to both the callback and the event listener', async () => {
+      scriptSnapshots({ 3: { host: 17_000 }, 4: { host: 17_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+      const callbackProgress: LlamaCalibrationProgress[] = [];
+      const eventProgress: LlamaCalibrationProgress[] = [];
+      manager.on('calibration-progress', (event) =>
+        eventProgress.push(event as LlamaCalibrationProgress)
+      );
+
+      await captureRejection(
+        manager.calibrate({ ...baseConfig, onProgress: (value) => callbackProgress.push(value) })
+      );
+
+      const terminal = (values: LlamaCalibrationProgress[]) =>
+        values.filter((value) => value.phase === 'done');
+      expect(terminal(callbackProgress)).toHaveLength(1);
+      expect(terminal(callbackProgress)[0]).toMatchObject({
+        strategy: 'adaptive',
+        terminalStatus: 'failed',
+      });
+      expect(eventProgress).toEqual(callbackProgress);
+      expect(callbackProgress.some((value) => value.overallPercent === 100)).toBe(false);
+    });
+
+    it('unlocks the manager after a resource-stability rejection and allows the next run', async () => {
+      scriptSnapshots({ 3: { host: 17_000 }, 4: { host: 17_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = await captureRejection(manager.calibrate(baseConfig));
+
+      expect(error.details?.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      expect(manager.isCalibrating()).toBe(false);
+      // A rejected run leaves no lock and no orphan: recalibrating from the beginning is the
+      // documented remedy, so it has to actually work.
+      scriptSnapshots({});
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+      expect(report.status).toBe('complete');
+      expect(manager.isCalibrating()).toBe(false);
+    });
+
+    it('reports schema-v3 boundaries, the fixed baseline, and protocol-only methodology', async () => {
+      scriptSnapshots({});
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.schemaVersion).toBe(3);
+      expect(report.policyVersion).toBe('llama-runtime-v3');
+      expect(report.resourceMonitoring.coverage).toBe('complete');
+      const hostBaseline = report.resourceMonitoring.metrics.find(
+        (metric) => metric.metric === 'hostMemory'
+      );
+      const vramBaseline = report.resourceMonitoring.metrics.find(
+        (metric) => metric.metric === 'vram'
+      );
+      for (const metric of report.resourceMonitoring.metrics) {
+        expect(metric.attempts).toBe(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples);
+        expect(metric.trustedSamples).toHaveLength(
+          LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples
+        );
+      }
+      // Report-level machine memory is the stabilized baseline, independently per metric, so the
+      // numbers a reader compares probe boundaries against are the ones the guard actually used.
+      expect(report.machine.availableMemoryBytes).toBe(hostBaseline?.baselineBytes);
+      expect(report.machine.gpu[0]?.availableMemoryBytes).toBe(vramBaseline?.baselineBytes);
+      expect(report.methodology.resourceStability).toMatchObject({
+        baselineSamples: LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples,
+        confirmationReads: LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads,
+        guardedDirections: ['decrease', 'increase'],
+        guardedBoundaries: ['pre-launch', 'post-cleanup'],
+        thresholdComparison: 'inclusive',
+      });
+      expect(JSON.stringify(report.methodology.resourceStability)).not.toContain(
+        String(hostBaseline?.baselineBytes)
+      );
+      for (const probe of report.probes) {
+        expect(probe.resourceBoundaries?.preLaunch).toMatchObject({ boundary: 'pre-launch' });
+        expect(probe.resourceBoundaries?.postCleanup).toMatchObject({ boundary: 'post-cleanup' });
+      }
     });
   });
 

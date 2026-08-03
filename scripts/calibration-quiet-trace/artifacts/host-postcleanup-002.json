@@ -1,0 +1,462 @@
+{
+  "formatVersion": 2,
+  "kind": "calibration-quiet-trace",
+  "cell": "adaptive-1p",
+  "cellDescription": "Adaptive, one profile at the calibrated production context.",
+  "scenario": {
+    "name": "host-postcleanup",
+    "description": "Above-threshold host allocation (~14%) armed while probe 0 is running its workloads and held through confirmation.",
+    "planItems": [
+      "6.2"
+    ],
+    "expectation": "Probe 0 completes and its POST-CLEANUP boundary confirms the decrease: the probe is invalidated, calibrate() rejects with CALIBRATION_RESOURCE_DRIFT, and no completed report is produced. Host pressure only - never run this against VRAM while a model is loaded.",
+    "armAt": "probe-sampling",
+    "releasePolicy": "end-of-run",
+    "helperScript": "host-pressure-helper.mjs",
+    "pressure": {
+      "requestedPctOfBaseline": 14,
+      "targetMib": 1941,
+      "workers": 1,
+      "chunkMib": 64,
+      "floorMib": 4096,
+      "ttlMs": 600000,
+      "stagedTtlMs": 1800000,
+      "armDelayMs": 0,
+      "freeMibAtPreflight": 13865,
+      "committedMib": 1941,
+      "actualPctOfRunBaseline": 14.335120838338694
+    },
+    "baselineProxy": {
+      "at": "2026-08-03T08:31:05.215Z",
+      "refreshStatus": "refreshed",
+      "availableBytes": 14538559488,
+      "totalBytes": 25095553024,
+      "freememBytes": 14538846208
+    },
+    "runHostBaselineBytes": 14197899264,
+    "armedAtMs": 53153.3862,
+    "armedAt": "2026-08-03T08:31:57.826Z",
+    "releaseRequestedAtMs": 98301.003,
+    "releaseRequestedAt": "2026-08-03T08:32:42.973Z",
+    "releaseReason": "end-of-run",
+    "helpers": [
+      {
+        "id": "w0",
+        "pid": 8508,
+        "targetMib": 1941,
+        "allocatedMib": 1941,
+        "floorStopped": false,
+        "commitMs": 362,
+        "spawnedAt": "2026-08-03T08:31:05.225Z",
+        "spawnedAtMs": 552.3711000000001,
+        "stagedAt": "2026-08-03T08:31:05.296Z",
+        "stagedAtMs": 623.8626999999999,
+        "armedAt": "2026-08-03T08:31:57.826Z",
+        "armedAtMs": 53153.3862,
+        "readyAt": "2026-08-03T08:31:58.190Z",
+        "readyAtMs": 53517.7177,
+        "releaseRequestedAt": "2026-08-03T08:32:42.973Z",
+        "releaseRequestedAtMs": 98301.003,
+        "exitedAt": "2026-08-03T08:32:43.043Z",
+        "exitedAtMs": 98370.8374,
+        "exitReason": "released",
+        "exitCode": 0,
+        "exitSignal": null,
+        "heldMibAtExit": 1941,
+        "lines": [
+          {
+            "atMs": 623.7802999999999,
+            "line": "STAGED 1941 10980"
+          },
+          {
+            "atMs": 53517.5175,
+            "line": "READY 1941 362"
+          },
+          {
+            "atMs": 98301.5329,
+            "line": "EXIT released 1941 97679"
+          }
+        ],
+        "stderr": [
+          "# w0: target=1941MiB chunk=64MiB floor=4096MiB ttl=600000ms stagedTtl=1800000ms hold=none ppid=10980"
+        ]
+      }
+    ],
+    "teardown": {
+      "helperCount": 1,
+      "helpersExited": true,
+      "livePids": [],
+      "totalAllocatedMib": 1941
+    },
+    "recovery": {
+      "settleMs": 2000,
+      "referenceSource": "run-baseline",
+      "referenceBytes": 14197899264,
+      "availableBytes": 14552576000,
+      "refreshStatus": "refreshed",
+      "decreasePctFromReference": -2.498093058733791,
+      "withinQuietBand": true
+    },
+    "timeline": [
+      {
+        "kind": "harness",
+        "atMs": 623.9439,
+        "event": "helpers-staged"
+      },
+      {
+        "kind": "progress",
+        "atMs": 626.2918999999999,
+        "elapsedMs": 1,
+        "phase": "preparing"
+      },
+      {
+        "kind": "progress",
+        "atMs": 10257.231600000001,
+        "elapsedMs": 9632,
+        "phase": "policy-ready"
+      },
+      {
+        "kind": "progress",
+        "atMs": 10880.409,
+        "elapsedMs": 10255,
+        "phase": "finding-reference",
+        "launch": "p0:c16384:swa-window:kv-q8_0@ngl9"
+      },
+      {
+        "kind": "progress",
+        "atMs": 10880.797700000001,
+        "elapsedMs": 10256,
+        "phase": "finding-reference",
+        "probePhase": "starting",
+        "launch": "p0:c16384:swa-window:kv-q8_0@ngl9"
+      },
+      {
+        "kind": "progress",
+        "atMs": 15910.770100000002,
+        "elapsedMs": 15286,
+        "phase": "finding-reference",
+        "probePhase": "capacity-check",
+        "launch": "p0:c16384:swa-window:kv-q8_0@ngl9"
+      },
+      {
+        "kind": "progress",
+        "atMs": 15924.360700000001,
+        "elapsedMs": 15299,
+        "phase": "finding-reference",
+        "probePhase": "warmup",
+        "launch": "p0:c16384:swa-window:kv-q8_0@ngl9"
+      },
+      {
+        "kind": "progress",
+        "atMs": 53153.2063,
+        "elapsedMs": 52528,
+        "phase": "finding-reference",
+        "probePhase": "sampling",
+        "launch": "p0:c16384:swa-window:kv-q8_0@ngl9"
+      },
+      {
+        "kind": "harness",
+        "atMs": 53153.611,
+        "event": "armed",
+        "armAt": "probe-sampling"
+      },
+      {
+        "kind": "progress",
+        "atMs": 94413.9697,
+        "elapsedMs": 93789,
+        "phase": "finding-reference",
+        "probePhase": "stopping",
+        "launch": "p0:c16384:swa-window:kv-q8_0@ngl9"
+      },
+      {
+        "kind": "progress",
+        "atMs": 98298.8973,
+        "elapsedMs": 97674,
+        "phase": "done",
+        "terminalStatus": "failed"
+      }
+    ],
+    "outcome": {
+      "rejected": true,
+      "errorName": "LlamaCalibrationResourceStabilityError",
+      "code": "CALIBRATION_RESOURCE_DRIFT",
+      "probesRecorded": 1,
+      "failureBoundary": "post-cleanup",
+      "failureAffectedMetrics": [
+        "hostMemory"
+      ],
+      "failureAffectedDirections": {
+        "hostMemory": "decrease"
+      },
+      "failureProbeIndex": 0,
+      "failureConfirmationPerformed": true,
+      "diagnosticCandidatePresent": false
+    },
+    "notes": []
+  },
+  "harness": {
+    "script": "run-quiet-trace.mjs",
+    "repositoryRevision": "341a4e5a9ea6800a7f3a8bdecc93616da4daafab",
+    "repositoryDirty": true,
+    "configFile": "config.default.json"
+  },
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "electron": "43.2.0",
+    "chrome": "150.0.7871.129",
+    "node": "24.18.0",
+    "hardwareAccelerationDisabled": true,
+    "browserWindowsCreated": 0
+  },
+  "timestamps": {
+    "startedAt": "2026-08-03T08:31:04.672Z",
+    "finishedAt": "2026-08-03T08:32:45.697Z",
+    "durationMs": 98370.8948
+  },
+  "identities": {
+    "binary": {
+      "name": "llama-server.exe",
+      "sizeBytes": 9216
+    },
+    "model": {
+      "id": "gemma-4-12b-iq4xs",
+      "name": "Gemma 4 12B IQ4_XS",
+      "architecture": "gemma4",
+      "sizeBytes": 6375732640,
+      "files": [
+        {
+          "name": "gemma-4-12b-it-IQ4_XS.gguf",
+          "sizeBytes": 6375732640
+        }
+      ]
+    }
+  },
+  "calibrateConfig": {
+    "samples": 3,
+    "seed": 42,
+    "startupTimeoutMs": 180000,
+    "requestTimeoutMs": 120000,
+    "fixedConfig": {
+      "flashAttention": "on"
+    },
+    "workloads": [
+      {
+        "workloadId": "cold",
+        "kind": "cold-prefill",
+        "weight": 2,
+        "nPredict": 96,
+        "prompt": {
+          "sha256": "ac02bfa41eb7a7ca51030d514cc38682db541bb3bea373d9819f638ebf23626c",
+          "chars": 162
+        }
+      },
+      {
+        "workloadId": "burst",
+        "kind": "shared-prefix",
+        "weight": 1,
+        "nPredict": 64,
+        "sharedPrefix": {
+          "sha256": "b55d227a0ecfc563eb3b32d19009b3bf3e6b12edf2fafffcd67169cb3597b686",
+          "chars": 239
+        },
+        "suffixes": [
+          {
+            "sha256": "4438acac4ce2f46177e6ec32f717db281e07a174f45f0937c9e98525d7f1c2a5",
+            "chars": 44
+          },
+          {
+            "sha256": "4dadbdd4bfce5d85493cd013d46c8f55f939ae193b8130a98e25c2e1b4ab2939",
+            "chars": 45
+          },
+          {
+            "sha256": "701af8d340db1afceffb2992814c4f0b1727c6b8c23858892718ca1fd2c95794",
+            "chars": 47
+          }
+        ]
+      }
+    ],
+    "modelId": "gemma-4-12b-iq4xs",
+    "profiles": [
+      {
+        "contextSize": 16384,
+        "parallelRequests": 1
+      }
+    ],
+    "maxProbes": 8,
+    "maxWallTimeMs": 1800000
+  },
+  "resourcePolicy": {
+    "hostMemoryDecreaseThresholdPct": 10,
+    "vramDecreaseThresholdPct": 10,
+    "hostMemoryIncreaseThresholdPct": 20,
+    "vramIncreaseThresholdPct": 10,
+    "resourceBaselineSamples": 3,
+    "resourceBaselineSettleMs": 5000,
+    "resourceDriftConfirmationReads": 1,
+    "resourceCooldownMs": 750,
+    "resourceTelemetryTimeoutMs": 10000,
+    "policyVersion": "llama-runtime-v3"
+  },
+  "failure": {
+    "message": "Server error: Machine resources changed materially after a probe finished: hostMemory (decrease)",
+    "name": "LlamaCalibrationResourceStabilityError",
+    "code": "CALIBRATION_RESOURCE_DRIFT",
+    "suggestion": "Ask the user to close heavy applications and other GPU work, then run calibration again from the beginning. Calibration never re-anchors its baseline, so a partially disturbed run cannot be resumed.",
+    "partialReport": {
+      "schemaVersion": 3,
+      "strategy": "adaptive",
+      "status": "failed",
+      "probeCount": 1,
+      "warnings": [
+        "The configured conservative first-probe estimate (2314500 ms) exceeds the pre-provisioning wall-time allowance (1800000 ms); calibration may end budget-exhausted before search evidence is available.",
+        "Resource change confirmed at the post-cleanup boundary for hostMemory (decrease)."
+      ],
+      "cleanupConfirmed": true,
+      "resourceMonitoring": {
+        "coverage": "complete",
+        "enabledMetrics": [
+          "hostMemory",
+          "vram"
+        ],
+        "metrics": [
+          {
+            "metric": "hostMemory",
+            "enabled": true,
+            "baselineBytes": 14197899264,
+            "decreaseThresholdPct": 10,
+            "increaseThresholdPct": 20,
+            "attempts": 3,
+            "trustedSamples": [
+              14199652352,
+              14197899264,
+              14181146624
+            ]
+          },
+          {
+            "metric": "vram",
+            "enabled": true,
+            "baselineBytes": 8343519232,
+            "decreaseThresholdPct": 10,
+            "increaseThresholdPct": 10,
+            "attempts": 3,
+            "trustedSamples": [
+              8343519232,
+              8343519232,
+              8343519232
+            ]
+          }
+        ]
+      },
+      "resourceFailure": {
+        "boundary": "post-cleanup",
+        "affectedMetrics": [
+          "hostMemory"
+        ],
+        "affectedDirections": {
+          "hostMemory": "decrease"
+        },
+        "probeIndex": 0,
+        "diagnostics": {
+          "boundary": "post-cleanup",
+          "confirmationPerformed": true,
+          "initial": {
+            "readings": [
+              {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 12532068352,
+                "decreasePctFromBaseline": 11.732939366768562,
+                "decreaseThresholdPct": 10,
+                "increaseThresholdPct": 20,
+                "suspicious": true,
+                "suspiciousDirection": "decrease"
+              },
+              {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decreaseThresholdPct": 10,
+                "increaseThresholdPct": 10,
+                "suspicious": false
+              }
+            ],
+            "suspiciousMetrics": [
+              "hostMemory"
+            ],
+            "untrustedMetrics": []
+          },
+          "confirmation": {
+            "readings": [
+              {
+                "metric": "hostMemory",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 12517163008,
+                "decreasePctFromBaseline": 11.83792210909435,
+                "decreaseThresholdPct": 10,
+                "increaseThresholdPct": 20,
+                "suspicious": true,
+                "suspiciousDirection": "decrease"
+              },
+              {
+                "metric": "vram",
+                "enabled": true,
+                "trusted": true,
+                "availableBytes": 8343519232,
+                "decreasePctFromBaseline": 0,
+                "decreaseThresholdPct": 10,
+                "increaseThresholdPct": 10,
+                "suspicious": false
+              }
+            ],
+            "suspiciousMetrics": [
+              "hostMemory"
+            ],
+            "untrustedMetrics": []
+          },
+          "initiallySuspiciousMetrics": [
+            "hostMemory"
+          ],
+          "warnings": [
+            "Resource change confirmed at the post-cleanup boundary for hostMemory (decrease)."
+          ]
+        }
+      },
+      "probes": [
+        {
+          "probeIndex": 0,
+          "purpose": "reference",
+          "gpuLayers": 9,
+          "operationalStatus": "ok",
+          "boundaryDecision": {
+            "classification": "ambiguous",
+            "reason": "invalidated-by-resource-stability"
+          },
+          "resourceValidity": "invalidated-by-resource-stability",
+          "terminationReason": "invalidated-by-resource-stability",
+          "cleanupConfirmed": true
+        }
+      ]
+    }
+  },
+  "progress": [
+    {
+      "phase": "policy-ready",
+      "elapsedMs": 9632.1044
+    },
+    {
+      "phase": "done",
+      "terminalStatus": "failed",
+      "elapsedMs": 97673.77590000001
+    }
+  ],
+  "cleanup": {
+    "calibrating": false,
+    "serverStatus": "stopped",
+    "everyProbeCleanupConfirmed": true
+  }
+}

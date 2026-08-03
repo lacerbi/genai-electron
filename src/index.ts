@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.19.1
+ * @version 0.20.0
  * @license MIT
  *
  * @example
@@ -268,6 +268,8 @@ export type {
   GPUInfo,
   CPUInfo,
   MemoryInfo,
+  MemoryTelemetryRefreshStatus,
+  TelemetryCommandOptions,
   SystemCapabilities,
   SystemRecommendations,
   // Model types
@@ -332,7 +334,22 @@ export type {
   LlamaCalibrationMemoryEvidence,
   LlamaCalibrationBoundaryDecision,
   LlamaCalibrationCleanupRecord,
-  LlamaCalibrationResourceMetricDiagnostic,
+  // Fixed-baseline resource-stability diagnostics (schema v3)
+  LlamaCalibrationResourceMetric,
+  LlamaCalibrationResourceChangeDirection,
+  LlamaCalibrationResourceBoundaryKind,
+  LlamaCalibrationResourceUntrustedReason,
+  LlamaCalibrationResourceReading,
+  LlamaCalibrationResourceSnapshotDiagnostic,
+  LlamaCalibrationResourceBoundaryDiagnostic,
+  LlamaCalibrationProbeResourceBoundaries,
+  LlamaCalibrationResourceMonitoringCoverage,
+  LlamaCalibrationResourceMetricMonitoring,
+  LlamaCalibrationResourceMonitoring,
+  LlamaCalibrationResourceFailure,
+  LlamaCalibrationDiagnosticEvidenceLevel,
+  LlamaCalibrationDiagnosticCandidate,
+  LlamaCalibrationProbeResourceValidity,
   LlamaCalibrationPassiveDiagnostics,
   LlamaCalibrationProbe,
   ResolvedLlamaCalibrationConfig,
@@ -347,11 +364,13 @@ export type {
   LlamaAdaptiveCalibrationProfileReport,
   LlamaAdaptiveCalibrationCellReport,
   LlamaCalibrationBudgetReport,
+  LlamaCalibrationResourceStabilityMethodology,
   LlamaCalibrationMethodology,
   LlamaAdaptiveCalibrationReport,
   LlamaExactCalibrationReport,
   LlamaCalibrationReport,
   LlamaCalibrationPartialReport,
+  LlamaCalibrationResourceFailurePartialReport,
   // Image generation types (Phase 2)
   ImageSampler,
   ImageGenerationStage,
@@ -393,6 +412,7 @@ export {
   DownloadError,
   InsufficientResourcesError,
   ServerError,
+  LlamaCalibrationResourceStabilityError,
   PortInUseError,
   FileSystemError,
   ChecksumError,
@@ -404,4 +424,7 @@ export type {
   ContextConstraintStage,
   ContextConstraintDetails,
   InsufficientResourcesDetails,
+  LlamaCalibrationResourceStabilityCode,
+  LlamaCalibrationResourceStabilityDetailsCommon,
+  LlamaCalibrationResourceStabilityDetails,
 } from './errors/index.js';

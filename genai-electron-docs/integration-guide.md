@@ -164,6 +164,8 @@ ipcMain.handle('server:start', async (_event, config) => {
 | DownloadError | DOWNLOAD_FAILED | Download Failed | Check your internet connection... |
 | InsufficientResourcesError | INSUFFICIENT_RESOURCES | Not Enough Resources | Try closing other applications... |
 | PortInUseError | PORT_IN_USE | Port Already In Use | Choose a different port... |
+| LlamaCalibrationResourceStabilityError | CALIBRATION_RESOURCE_DRIFT | Machine Resources Changed During Calibration | Close heavy applications and other GPU work, then recalibrate from the beginning |
+| LlamaCalibrationResourceStabilityError | CALIBRATION_RESOURCE_STABILITY_UNVERIFIED | Machine Resource Stability Could Not Be Verified | Close heavy applications and other GPU work, then recalibrate from the beginning |
 | ServerError | SERVER_ERROR | Server Error | Check the server logs... |
 | FileSystemError | FILE_SYSTEM_ERROR | File System Error | Check permissions and disk space... |
 | ChecksumError | CHECKSUM_ERROR | Checksum Verification Failed | The file may be corrupted... |
@@ -208,6 +210,72 @@ manager entered `running`. `minimum-exceeds-native` and `model-context-unknown` 
 problems; `INSUFFICIENT_RESOURCES` means the policy itself is valid but no permitted placement
 fits its minimum. `preferredContextSize` is advisory, so runtime capacity above it never produces
 a context error.
+
+### Handling a calibration resource-stability rejection
+
+`LlamaCalibrationResourceStabilityError` extends `ServerError` but is matched **before** it, so
+`formatErrorForUI()` reports the calibration-specific `details.code` rather than the generic
+`SERVER_ERROR`, and surfaces `details.suggestion` as the remediation instead of "check the server
+logs". Both codes therefore reach a UI with an actionable retry message.
+
+`llamaServer.calibrate()` stops with this error — in adaptive **and** exact mode — when machine
+conditions changed materially around a launch boundary, or could not be verified stable. There is no
+resume: the correct host response is to explain, then offer a full retry.
+
+```typescript
+import {
+  LlamaCalibrationResourceStabilityError,
+  formatErrorForUI,
+  llamaServer
+} from 'genai-electron';
+
+ipcMain.handle('llm:calibrate', async (_event, config) => {
+  try {
+    const report = await llamaServer.calibrate(config);
+    return { success: true, report };
+  } catch (error) {
+    if (error instanceof LlamaCalibrationResourceStabilityError) {
+      const formatted = formatErrorForUI(error); // code = error.details.code
+      const failure = error.details.partialReport.resourceFailure;
+
+      return {
+        success: false,
+        retryable: true,               // retry means: run the whole thing again
+        error: formatted,              // title + message + remediation for the UI
+        // Optional diagnostics for a "details" pane:
+        boundary: failure.boundary,           // 'pre-launch' | 'post-cleanup'
+        metrics: failure.affectedMetrics,     // ['hostMemory'] | ['vram'] | both
+        directions: failure.affectedDirections, // { hostMemory: 'decrease' }
+        probes: error.details.partialReport.probes.length
+      };
+    }
+    return { success: false, retryable: false, error: formatErrorForUI(error) };
+  }
+});
+```
+
+In the renderer, branch on `formatted.code`:
+
+```typescript
+switch (result.error.code) {
+  case 'CALIBRATION_RESOURCE_DRIFT':
+    // Machine conditions really did change: name what moved, then offer Retry.
+    showBanner(result.error.title, result.error.message, result.error.remediation);
+    break;
+  case 'CALIBRATION_RESOURCE_STABILITY_UNVERIFIED':
+    // Ambiguous rather than proven: same remediation, but repeated failures on
+    // a genuinely idle machine point at platform telemetry, not real pressure.
+    showBanner(result.error.title, result.error.message, result.error.remediation);
+    break;
+  default:
+    showBanner(result.error.title, result.error.message, result.error.remediation);
+}
+```
+
+Do not auto-retry in a loop: the run costs minutes and the user has to quiet the machine first.
+`error.details.partialReport.diagnosticCandidate`, when present, is `usability: 'diagnostic-only'`
+and must never be applied as a start config. See
+[Machine conditions during a run](llm-server.md#machine-conditions-during-a-run).
 
 **Benefits:**
 - Eliminates brittle substring matching on error messages

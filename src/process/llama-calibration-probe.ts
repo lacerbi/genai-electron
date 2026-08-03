@@ -1,7 +1,8 @@
 /** One lifecycle-neutral, fresh-launch llama-server calibration observation. */
 
 import { LLAMA_CALIBRATION_DEFAULTS } from '../config/defaults.js';
-import { ServerError } from '../errors/index.js';
+import { LlamaCalibrationResourceStabilityError, ServerError } from '../errors/index.js';
+import type { LlamaCalibrationResourceStabilityDetails } from '../errors/index.js';
 import type {
   LlamaCalibrationCombo,
   LlamaCalibrationCleanupRecord,
@@ -130,6 +131,17 @@ function redactUnknown(
 /** Return an error whose serializable text no longer contains configured prompts. */
 export function redactCalibrationError(error: unknown, redact: (value: string) => string): Error {
   const message = redact(calibrationErrorMessage(error));
+  // Specialized calibration errors must survive redaction with their identity intact: a host's
+  // `instanceof` branch and typed `details.code` switch are part of the public contract, and
+  // rebuilding them as a base ServerError would silently destroy both.
+  if (error instanceof LlamaCalibrationResourceStabilityError) {
+    const sanitized = new LlamaCalibrationResourceStabilityError(
+      message.replace(/^Server error: /, ''),
+      redactUnknown(error.details, redact) as LlamaCalibrationResourceStabilityDetails
+    );
+    sanitized.stack = error.stack ? redact(error.stack) : sanitized.stack;
+    return sanitized;
+  }
   if (error instanceof ServerError) {
     const cleanMessage = message.replace(/^Server error: /, '');
     const sanitized = new ServerError(cleanMessage, redactUnknown(error.details, redact));

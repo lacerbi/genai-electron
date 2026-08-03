@@ -1,0 +1,767 @@
+{
+  "formatVersion": 2,
+  "kind": "calibration-quiet-trace",
+  "cell": "adaptive-1p",
+  "cellDescription": "Adaptive, one profile at the calibrated production context.",
+  "scenario": {
+    "name": "quiet",
+    "description": "No injected pressure: the quiet enforcement smoke.",
+    "planItems": [
+      "6.1"
+    ],
+    "expectation": "Stabilized baseline, no false abort, clean selection evidence, every probe cleanup confirmed.",
+    "runHostBaselineBytes": 11017654272,
+    "outcome": {
+      "rejected": false,
+      "reportStatus": "complete",
+      "terminalReason": "all active preferences and empirical reproduction requirements are resolved",
+      "probesRecorded": 6,
+      "diagnosticCandidatePresent": false
+    },
+    "notes": []
+  },
+  "harness": {
+    "script": "run-quiet-trace.mjs",
+    "repositoryRevision": "8ff0bcf47eaf720c25c94cdd993f83185a578cb2",
+    "repositoryDirty": false,
+    "configFile": "config.default.json"
+  },
+  "environment": {
+    "platform": "win32",
+    "arch": "x64",
+    "electron": "43.2.0",
+    "chrome": "150.0.7871.129",
+    "node": "24.18.0",
+    "hardwareAccelerationDisabled": true,
+    "browserWindowsCreated": 0
+  },
+  "timestamps": {
+    "startedAt": "2026-08-02T22:32:16.240Z",
+    "finishedAt": "2026-08-02T22:41:19.487Z",
+    "durationMs": 543146.1849999999
+  },
+  "identities": {
+    "binary": {
+      "name": "llama-server.exe",
+      "sizeBytes": 9216
+    },
+    "model": {
+      "id": "gemma-4-12b-iq4xs",
+      "name": "Gemma 4 12B IQ4_XS",
+      "architecture": "gemma4",
+      "sizeBytes": 6375732640,
+      "files": [
+        {
+          "name": "gemma-4-12b-it-IQ4_XS.gguf",
+          "sizeBytes": 6375732640
+        }
+      ]
+    }
+  },
+  "calibrateConfig": {
+    "samples": 3,
+    "seed": 42,
+    "startupTimeoutMs": 180000,
+    "requestTimeoutMs": 120000,
+    "fixedConfig": {
+      "flashAttention": "on"
+    },
+    "workloads": [
+      {
+        "workloadId": "cold",
+        "kind": "cold-prefill",
+        "weight": 2,
+        "nPredict": 96,
+        "tokenCounts": [
+          31
+        ],
+        "prompt": {
+          "sha256": "ac02bfa41eb7a7ca51030d514cc38682db541bb3bea373d9819f638ebf23626c",
+          "chars": 162
+        }
+      },
+      {
+        "workloadId": "burst",
+        "kind": "shared-prefix",
+        "weight": 1,
+        "nPredict": 64,
+        "tokenCounts": [
+          46,
+          44,
+          49
+        ],
+        "sharedPrefix": {
+          "sha256": "b55d227a0ecfc563eb3b32d19009b3bf3e6b12edf2fafffcd67169cb3597b686",
+          "chars": 239
+        },
+        "suffixes": [
+          {
+            "sha256": "4438acac4ce2f46177e6ec32f717db281e07a174f45f0937c9e98525d7f1c2a5",
+            "chars": 44
+          },
+          {
+            "sha256": "4dadbdd4bfce5d85493cd013d46c8f55f939ae193b8130a98e25c2e1b4ab2939",
+            "chars": 45
+          },
+          {
+            "sha256": "701af8d340db1afceffb2992814c4f0b1727c6b8c23858892718ca1fd2c95794",
+            "chars": 47
+          }
+        ]
+      }
+    ],
+    "modelId": "gemma-4-12b-iq4xs",
+    "profiles": [
+      {
+        "contextSize": 16384,
+        "parallelRequests": 1
+      }
+    ],
+    "maxProbes": 8,
+    "maxWallTimeMs": 1800000
+  },
+  "resourcePolicy": {
+    "hostMemoryDecreaseThresholdPct": 10,
+    "vramDecreaseThresholdPct": 10,
+    "hostMemoryIncreaseThresholdPct": 20,
+    "vramIncreaseThresholdPct": 10,
+    "resourceBaselineSamples": 3,
+    "resourceBaselineSettleMs": 5000,
+    "resourceDriftConfirmationReads": 1,
+    "resourceCooldownMs": 750,
+    "resourceTelemetryTimeoutMs": 10000,
+    "policyVersion": "llama-runtime-v3"
+  },
+  "report": {
+    "schemaVersion": 3,
+    "policyVersion": "llama-runtime-v3",
+    "strategy": "adaptive",
+    "status": "complete",
+    "terminalReason": "all active preferences and empirical reproduction requirements are resolved",
+    "createdAt": "2026-08-02T22:41:19.387Z",
+    "probeCount": 6,
+    "warnings": [
+      "The configured conservative first-probe estimate (2314500 ms) exceeds the pre-provisioning wall-time allowance (1800000 ms); calibration may end budget-exhausted before search evidence is available."
+    ],
+    "resourceMonitoring": {
+      "coverage": "complete",
+      "enabledMetrics": [
+        "hostMemory",
+        "vram"
+      ],
+      "metrics": [
+        {
+          "metric": "hostMemory",
+          "enabled": true,
+          "baselineBytes": 11017654272,
+          "decreaseThresholdPct": 10,
+          "increaseThresholdPct": 20,
+          "attempts": 3,
+          "trustedSamples": [
+            11169607680,
+            10936291328,
+            11017654272
+          ]
+        },
+        {
+          "metric": "vram",
+          "enabled": true,
+          "baselineBytes": 8343519232,
+          "decreaseThresholdPct": 10,
+          "increaseThresholdPct": 10,
+          "attempts": 3,
+          "trustedSamples": [
+            8343519232,
+            8343519232,
+            8343519232
+          ]
+        }
+      ]
+    },
+    "selected": {
+      "profileIndex": 0,
+      "cellId": "p0:c16384:swa-window:kv-q8_0",
+      "scoreMs": 4588.3350333333365,
+      "gpuLayers": 48,
+      "contextSize": 16384
+    },
+    "selectionEvidence": "independent-reproduction",
+    "confidence": "empirical-reproducibility",
+    "probes": [
+      {
+        "probeIndex": 0,
+        "purpose": "reference",
+        "fidelity": "search",
+        "cellId": "p0:c16384:swa-window:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 9,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 23114.58543333333,
+        "durationMs": 118571.2087,
+        "resourceValidity": "accepted",
+        "cleanupConfirmed": true,
+        "resourceBoundaries": {
+          "preLaunch": {
+            "boundary": "pre-launch",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 11027972096,
+                  "decreasePctFromBaseline": -0.09364810099570349,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          },
+          "postCleanup": {
+            "boundary": "post-cleanup",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 11907530752,
+                  "decreasePctFromBaseline": -8.076823414776324,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          }
+        },
+        "diagnostics": {
+          "kvBytesEstimate": 5846859776,
+          "warnings": []
+        }
+      },
+      {
+        "probeIndex": 1,
+        "purpose": "ceiling",
+        "fidelity": "search",
+        "cellId": "p0:c16384:swa-window:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 48,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 3788.2284333333373,
+        "durationMs": 25820.6477,
+        "resourceValidity": "accepted",
+        "cleanupConfirmed": true,
+        "resourceBoundaries": {
+          "preLaunch": {
+            "boundary": "pre-launch",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 11902803968,
+                  "decreasePctFromBaseline": -8.033921505864438,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          },
+          "postCleanup": {
+            "boundary": "post-cleanup",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 11928297472,
+                  "decreasePctFromBaseline": -8.265309271087645,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          }
+        },
+        "diagnostics": {
+          "kvBytesEstimate": 5846859776,
+          "warnings": []
+        }
+      },
+      {
+        "probeIndex": 2,
+        "purpose": "finalist",
+        "fidelity": "full",
+        "cellId": "p0:c16384:swa-window:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 48,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 4626.105233333345,
+        "durationMs": 53798.98859999998,
+        "resourceValidity": "accepted",
+        "cleanupConfirmed": true,
+        "resourceBoundaries": {
+          "preLaunch": {
+            "boundary": "pre-launch",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 11910426624,
+                  "decreasePctFromBaseline": -8.103107339906918,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          },
+          "postCleanup": {
+            "boundary": "post-cleanup",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 11869716480,
+                  "decreasePctFromBaseline": -7.733608143481234,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          }
+        },
+        "diagnostics": {
+          "kvBytesEstimate": 5846859776,
+          "warnings": []
+        }
+      },
+      {
+        "probeIndex": 3,
+        "purpose": "winner-validation",
+        "fidelity": "full",
+        "cellId": "p0:c16384:swa-window:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 48,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 4550.564833333327,
+        "durationMs": 55329.5276,
+        "resourceValidity": "accepted",
+        "cleanupConfirmed": true,
+        "resourceBoundaries": {
+          "preLaunch": {
+            "boundary": "pre-launch",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 11865845760,
+                  "decreasePctFromBaseline": -7.698476164346284,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          },
+          "postCleanup": {
+            "boundary": "post-cleanup",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 11853570048,
+                  "decreasePctFromBaseline": -7.58705760194687,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          }
+        },
+        "diagnostics": {
+          "kvBytesEstimate": 5846859776,
+          "warnings": []
+        }
+      },
+      {
+        "probeIndex": 4,
+        "purpose": "reference",
+        "fidelity": "search",
+        "cellId": "p0:c16384:swa-full:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 9,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 38409.780799999964,
+        "durationMs": 208545.49419999996,
+        "resourceValidity": "accepted",
+        "cleanupConfirmed": true,
+        "resourceBoundaries": {
+          "preLaunch": {
+            "boundary": "pre-launch",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 11850989568,
+                  "decreasePctFromBaseline": -7.56363628252357,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          },
+          "postCleanup": {
+            "boundary": "post-cleanup",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 12199858176,
+                  "decreasePctFromBaseline": -10.730087138461265,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          }
+        },
+        "diagnostics": {
+          "kvBytesEstimate": 5846859776,
+          "warnings": []
+        }
+      },
+      {
+        "probeIndex": 5,
+        "purpose": "ceiling",
+        "fidelity": "search",
+        "cellId": "p0:c16384:swa-full:kv-q8_0",
+        "profileIndex": 0,
+        "gpuLayers": 48,
+        "contextSize": 16384,
+        "operationalStatus": "ok",
+        "boundaryDecision": {
+          "classification": "admissible",
+          "reason": "completed-within-cliff-limit"
+        },
+        "memoryEvidence": {
+          "classification": "none",
+          "reason": "The probe completed without an operational failure.",
+          "source": "not-observed"
+        },
+        "scoreMs": 8058.6011333333245,
+        "durationMs": 52636.35280000005,
+        "resourceValidity": "accepted",
+        "cleanupConfirmed": true,
+        "resourceBoundaries": {
+          "preLaunch": {
+            "boundary": "pre-launch",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 12184772608,
+                  "decreasePctFromBaseline": -10.5931653615787,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          },
+          "postCleanup": {
+            "boundary": "post-cleanup",
+            "confirmationPerformed": false,
+            "initial": {
+              "readings": [
+                {
+                  "metric": "hostMemory",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 12498735104,
+                  "decreasePctFromBaseline": -13.44279640144439,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 20,
+                  "suspicious": false
+                },
+                {
+                  "metric": "vram",
+                  "enabled": true,
+                  "trusted": true,
+                  "availableBytes": 8343519232,
+                  "decreasePctFromBaseline": 0,
+                  "decreaseThresholdPct": 10,
+                  "increaseThresholdPct": 10,
+                  "suspicious": false
+                }
+              ],
+              "suspiciousMetrics": [],
+              "untrustedMetrics": []
+            },
+            "initiallySuspiciousMetrics": [],
+            "warnings": []
+          }
+        },
+        "diagnostics": {
+          "kvBytesEstimate": 5846859776,
+          "warnings": []
+        }
+      }
+    ]
+  },
+  "progress": [
+    {
+      "phase": "policy-ready",
+      "elapsedMs": 12391.8999
+    },
+    {
+      "phase": "done",
+      "terminalStatus": "complete",
+      "elapsedMs": 543144.6474
+    }
+  ],
+  "cleanup": {
+    "calibrating": false,
+    "serverStatus": "stopped",
+    "everyProbeCleanupConfirmed": true
+  }
+}

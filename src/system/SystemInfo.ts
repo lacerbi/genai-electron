@@ -10,6 +10,8 @@ import type {
   LlamaServerConfig,
   KVCacheType,
   OptimalConfigHints,
+  MemoryTelemetryRefreshStatus,
+  TelemetryCommandOptions,
 } from '../types/index.js';
 import { getCPUInfo, getRecommendedThreads } from './cpu-detect.js';
 import { getMemoryInfo, estimateVRAM, refreshAvailableMemory } from './memory-detect.js';
@@ -85,7 +87,8 @@ export class SystemInfo {
     }
 
     // Detect hardware (refresh the standby-aware Windows available-memory
-    // reading first so getMemoryInfo() reflects reclaimable RAM)
+    // reading first so getMemoryInfo() reflects reclaimable RAM). Best-effort:
+    // a 'failed' status simply leaves the os.freemem() fallback in place.
     await refreshAvailableMemory();
     const cpu = getCPUInfo();
     const memory = getMemoryInfo();
@@ -137,6 +140,10 @@ export class SystemInfo {
    * Unlike detect(), this method always queries the system for current GPU state,
    * ensuring fresh VRAM availability data.
    *
+   * @param options - Optional abort signal and per-command timeout (default 10 s)
+   * for the underlying platform telemetry commands. A timed-out or failed command
+   * yields the ordinary "no GPU"/undefined-VRAM result; an aborted signal rejects
+   * with the signal's reason.
    * @returns Current GPU information
    *
    * @example
@@ -147,12 +154,12 @@ export class SystemInfo {
    * }
    * ```
    */
-  public async getGPUInfo() {
-    const gpu = await detectGPU();
+  public async getGPUInfo(options?: TelemetryCommandOptions) {
+    const gpu = await detectGPU(options);
 
     // Estimate VRAM if GPU is available but VRAM is not detected
     if (gpu.available && !gpu.vram) {
-      gpu.vram = (await estimateVRAM(gpu)) ?? undefined;
+      gpu.vram = (await estimateVRAM(gpu, options)) ?? undefined;
     }
 
     return gpu;
@@ -960,14 +967,42 @@ export class SystemInfo {
    * regimes within one measurement series makes released file-backed pages look
    * like a large availability drop.
    *
+   * The returned status describes THIS invocation, never a stale cached value:
+   *
+   * - `'refreshed'` - the platform command produced a valid finite non-negative
+   *   reading that is now behind {@link getMemoryInfo}.
+   * - `'not-required'` - the platform needs no command (non-Windows); nothing is
+   *   spawned and the direct `os.freemem()` reading is trusted as-is.
+   * - `'failed'` - the command failed, timed out, or returned unusable output.
+   *   Nothing is thrown, and nothing is invalidated either: the last successful
+   *   standby-aware reading stays in effect behind {@link getMemoryInfo} for the
+   *   rest of its 60 s TTL, after which that reading is dropped and
+   *   {@link getMemoryInfo} falls back to the direct `os.freemem()` value. So a
+   *   failure means the reading is no longer known to be fresh, and callers that
+   *   compare readings across time should treat the following samples as a
+   *   different measurement regime from the moment it is reported.
+   *
+   * Callers may bound the command with `timeoutMs` (default 10 s) and pass their
+   * abort signal. Both kill the underlying child process; an aborted signal
+   * rejects with the signal's reason rather than returning `'failed'`, so caller
+   * cancellation stays distinguishable from telemetry degradation.
+   *
+   * @param options - Optional abort signal and per-command timeout
+   * @returns The status of this refresh attempt
+   * @throws The caller's abort reason if `options.signal` is aborted
+   *
    * @example
    * ```typescript
-   * await systemInfo.refreshMemoryTelemetry();
-   * const memory = systemInfo.getMemoryInfo();
+   * const status = await systemInfo.refreshMemoryTelemetry({ timeoutMs: 2000 });
+   * if (status !== 'failed') {
+   *   const memory = systemInfo.getMemoryInfo(); // trusted reading
+   * }
    * ```
    */
-  public async refreshMemoryTelemetry(): Promise<void> {
-    await refreshAvailableMemory();
+  public async refreshMemoryTelemetry(
+    options?: TelemetryCommandOptions
+  ): Promise<MemoryTelemetryRefreshStatus> {
+    return refreshAvailableMemory(options);
   }
 
   /**

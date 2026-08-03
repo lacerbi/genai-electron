@@ -8,6 +8,7 @@ import type { UIErrorFormat } from '../../src/utils/error-helpers.js';
 import {
   GenaiElectronError,
   ContextConstraintError,
+  LlamaCalibrationResourceStabilityError,
   ModelNotFoundError,
   DownloadError,
   InsufficientResourcesError,
@@ -17,6 +18,7 @@ import {
   ChecksumError,
   BinaryError,
 } from '../../src/errors/index.js';
+import type { LlamaCalibrationResourceFailurePartialReport } from '../../src/types/index.js';
 
 describe('error-helpers', () => {
   describe('formatErrorForUI', () => {
@@ -105,6 +107,107 @@ describe('error-helpers', () => {
       expect(formatted.message).toContain('Failed to start server');
       expect(formatted.remediation).toBeDefined();
       expect(formatted.remediation).toContain('logs');
+    });
+
+    describe('LlamaCalibrationResourceStabilityError', () => {
+      const partialReport = (
+        boundary: 'pre-launch' | 'post-cleanup'
+      ): LlamaCalibrationResourceFailurePartialReport => ({
+        schemaVersion: 3,
+        policyVersion: 'llama-runtime-v3',
+        strategy: 'adaptive',
+        status: 'failed',
+        createdAt: '2026-08-02T12:00:00.000Z',
+        resourceMonitoring: {
+          coverage: 'complete',
+          enabledMetrics: ['hostMemory', 'vram'],
+          metrics: [
+            {
+              metric: 'hostMemory',
+              enabled: true,
+              baselineBytes: 16_000_000_000,
+              decreaseThresholdPct: 10,
+              increaseThresholdPct: 20,
+              attempts: 3,
+              trustedSamples: [16_000_000_000, 16_000_000_000, 16_100_000_000],
+            },
+            {
+              metric: 'vram',
+              enabled: true,
+              baselineBytes: 8_000_000_000,
+              decreaseThresholdPct: 10,
+              increaseThresholdPct: 10,
+              attempts: 3,
+              trustedSamples: [8_000_000_000, 8_000_000_000, 8_000_000_000],
+            },
+          ],
+        },
+        probes: [],
+        warnings: [],
+        cleanupConfirmed: true,
+        resourceFailure: {
+          boundary,
+          affectedMetrics: ['hostMemory'],
+          affectedDirections: { hostMemory: 'decrease' },
+          diagnostics: {
+            boundary,
+            confirmationPerformed: true,
+            initial: { readings: [], suspiciousMetrics: ['hostMemory'], untrustedMetrics: [] },
+            initiallySuspiciousMetrics: ['hostMemory'],
+            warnings: [],
+          },
+        },
+      });
+
+      it('formats confirmed drift with its own code and retry guidance', () => {
+        const error = new LlamaCalibrationResourceStabilityError(
+          'Machine resources changed materially before a calibration launch: hostMemory (decrease)',
+          {
+            code: 'CALIBRATION_RESOURCE_DRIFT',
+            suggestion: 'Ask the user to close heavy applications and other GPU work, then retry.',
+            partialReport: partialReport('pre-launch'),
+          }
+        );
+        const formatted = formatErrorForUI(error);
+
+        // The details code, not the generic SERVER_ERROR class code, is what a host branches on.
+        expect(formatted.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+        expect(formatted.title).toBe('Machine Resources Changed During Calibration');
+        expect(formatted.message).toContain('hostMemory (decrease)');
+        expect(formatted.message).toContain('close heavy applications');
+        expect(formatted.message).toContain('again from the beginning');
+        expect(formatted.remediation).toBe(error.details.suggestion);
+      });
+
+      it('formats an unverifiable boundary distinctly from confirmed drift', () => {
+        const error = new LlamaCalibrationResourceStabilityError(
+          'Machine resource stability could not be verified after a probe finished: vram (unverifiable)',
+          {
+            code: 'CALIBRATION_RESOURCE_STABILITY_UNVERIFIED',
+            suggestion: 'Ask the user to close heavy applications and other GPU work, then retry.',
+            partialReport: partialReport('post-cleanup'),
+          }
+        );
+        const formatted = formatErrorForUI(error);
+
+        expect(formatted.code).toBe('CALIBRATION_RESOURCE_STABILITY_UNVERIFIED');
+        expect(formatted.title).toBe('Machine Resource Stability Could Not Be Verified');
+        expect(formatted.message).toContain('could not be verified');
+        expect(formatted.message).toContain('close heavy applications');
+        expect(formatted.remediation).toBe(error.details.suggestion);
+      });
+
+      it('is matched before the generic ServerError branch it extends', () => {
+        const error = new LlamaCalibrationResourceStabilityError('stopped', {
+          code: 'CALIBRATION_RESOURCE_DRIFT',
+          suggestion: 'retry from the beginning',
+          partialReport: partialReport('pre-launch'),
+        });
+
+        expect(error).toBeInstanceOf(ServerError);
+        expect(formatErrorForUI(error).code).not.toBe('SERVER_ERROR');
+        expect(formatErrorForUI(error).title).not.toBe('Server Error');
+      });
     });
 
     it('should format FileSystemError correctly', () => {

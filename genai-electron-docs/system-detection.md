@@ -137,29 +137,59 @@ refresh it explicitly, or successive readings will not be comparable with each o
 
 ### refreshMemoryTelemetry()
 
-Refreshes the platform available-memory reading that backs `getMemoryInfo()`.
+Refreshes the platform available-memory reading that backs `getMemoryInfo()`, and reports whether
+that refresh actually succeeded.
 
 **Signature**:
 ```typescript
-refreshMemoryTelemetry(): Promise<void>
+refreshMemoryTelemetry(
+  options?: TelemetryCommandOptions
+): Promise<MemoryTelemetryRefreshStatus>
+
+type MemoryTelemetryRefreshStatus = 'refreshed' | 'not-required' | 'failed';
+
+interface TelemetryCommandOptions {
+  signal?: AbortSignal;   // aborting rejects with the signal's reason
+  timeoutMs?: number;     // per-command wall-clock bound (default: 10000)
+}
 ```
 
-**Returns**: `Promise<void>` - resolves whether or not the platform probe succeeded; it never rejects
+**Returns**: `Promise<MemoryTelemetryRefreshStatus>` - the status of **this** invocation, never a
+stale cached value:
+
+| Status | Meaning |
+|--------|---------|
+| `'refreshed'` | The platform command produced a valid finite non-negative reading, now behind `getMemoryInfo()` (Windows standby-aware path). |
+| `'not-required'` | The platform needs no command (non-Windows); nothing is spawned and the direct `os.freemem()` reading is trusted as-is. |
+| `'failed'` | The command failed, timed out, or returned unusable output. Nothing is thrown and nothing is invalidated: the last successful standby-aware reading stays in effect for the rest of its 60 s TTL, and only after it expires does `getMemoryInfo()` fall back to `os.freemem()`. |
 
 **Example**:
 ```typescript
 // Keep a long series of samples in one measurement regime
-await systemInfo.refreshMemoryTelemetry();
-const memory = systemInfo.getMemoryInfo();
+const status = await systemInfo.refreshMemoryTelemetry({ timeoutMs: 2000 });
+if (status !== 'failed') {
+  const memory = systemInfo.getMemoryInfo(); // trusted reading
+}
 ```
 
 **Use Case**: long-running work that samples memory repeatedly without re-running `detect()` — LLM
-calibration probes do this before every snapshot. Without it, readings taken more than 60 seconds
-apart on Windows can come from two different measurement regimes, making a process's own released
-file-backed pages look like a large drop in available memory.
+calibration does this before every resource snapshot. Without it, readings taken more than 60
+seconds apart on Windows can come from two different measurement regimes, making a process's own
+released file-backed pages look like a large drop in available memory.
 
-**Note**: `clearCache()` does *not* refresh this value; it only clears the `detect()` capabilities
-cache.
+**Trust semantics**: a `'failed'` result means the *following* samples come from a different
+measurement regime and must not be compared with earlier ones. LLM calibration trusts host RAM only
+for `'refreshed'` and `'not-required'`, and disables the host metric for a snapshot otherwise; it
+never infers failure from a stale numeric value. GPU trust is independent — see
+[getGPUInfo()](#getgpuinfo).
+
+**Bounding and cancellation**: `timeoutMs` and `signal` both kill the underlying child process, so a
+hung platform command cannot stall a run or leak a process. An aborted signal **rejects** with the
+signal's reason rather than returning `'failed'`, keeping caller cancellation distinguishable from
+telemetry degradation.
+
+**Note**: `detect()` also performs this refresh but is best-effort and may ignore the status.
+`clearCache()` does *not* refresh this value; it only clears the `detect()` capabilities cache.
 
 ---
 
@@ -169,8 +199,13 @@ Gets current GPU information (not cached, real-time).
 
 **Signature**:
 ```typescript
-getGPUInfo(): Promise<GPUInfo>
+getGPUInfo(options?: TelemetryCommandOptions): Promise<GPUInfo>
 ```
+
+**Parameters**:
+- `options?: TelemetryCommandOptions` - Optional abort signal and per-command timeout (default 10 s)
+  for the underlying platform telemetry commands. A timed-out or failed command yields the ordinary
+  "no GPU" / undefined-VRAM result; an aborted signal rejects with the signal's reason.
 
 **Returns**: `Promise<GPUInfo>` - Current GPU state
 
@@ -190,6 +225,11 @@ if (gpu.available) {
 ```
 
 **Use Case**: Real-time VRAM monitoring during active workloads like image generation. Unlike `detect()`, this method always queries the system for current GPU state, ensuring fresh VRAM availability data.
+
+**Trust semantics**: GPU trust is independent of host-memory trust. A fresh result with a finite
+non-negative `vramAvailable` is trusted; absence or command failure disables only the VRAM metric
+for that reading and never invalidates a good host-memory reading (or vice versa). Platforms without
+available-VRAM telemetry simply report `vramAvailable: undefined`.
 
 ---
 

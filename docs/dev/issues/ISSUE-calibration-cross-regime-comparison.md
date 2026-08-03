@@ -1,10 +1,36 @@
 # ISSUE — Resource-regime isolation covers reproduction but not comparison
 
 - Created: 2026-08-02
-- Status: PROPOSAL — read and confirm with the user before implementation
+- Status: RESOLVED (2026-08-02) — see Resolution below; original proposal preserved unchanged
 - Package: genai-electron
 - Affected API: `LlamaServerManager.calibrate()` (adaptive strategy)
 - Found by: v0.19.0 post-release double-check (static review, not observed live)
+
+## Resolution (2026-08-02)
+
+Resolved by the fixed-baseline hard-stop contract implemented on
+`feat/calibration-resource-stability` per `docs/dev/plans/PLAN-calibration-resource-stability.md`, which is the
+durable owner of the delivered behavior.
+
+None of the three options below was adopted as written. Instead, resource regimes were removed
+entirely: one `calibrate()` call now establishes **one fixed baseline** per enabled trusted metric
+(available host RAM, available VRAM) after preparation, never re-anchors, and compares every launch
+boundary cumulatively against it. A confirmed material change in either direction, or a suspicious
+boundary that cannot be verified clean, hard-stops adaptive **and** exact calibration with
+`LlamaCalibrationResourceStabilityError`. Only clean observations ever reach the pure controller, so
+every comparison listed above — cliff denominator, gross-regression classification, capped/gross
+closure, non-monotone promotion, cell competitiveness, and final recommendation — is comparable by
+construction and no longer needs regime filtering. `AdaptiveResourceDriftStatus`,
+`probe.resourceRegime`, settled-level logic, and regime filters are deleted; reports move to schema
+3 / policy `llama-runtime-v3`.
+
+This is closest in spirit to option 1 (invalidate on re-anchor) taken to its conclusion: rather than
+re-measuring after a regime change, the library refuses to publish a recommendation it can no longer
+stand behind, and asks the host to recalibrate on a quiet machine. Option 3's reporting concern is
+covered by run-level `resourceMonitoring`, per-probe `resourceBoundaries`/`resourceValidity`, and
+the typed failure's partial report. The documentation constraint below is satisfied: the current
+docs no longer claim regime isolation and instead state the fixed-baseline guarantee, its bands, the
+retry contract, and the pre/post sampling blind spot.
 
 ## Problem
 

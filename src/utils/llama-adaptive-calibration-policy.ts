@@ -17,7 +17,6 @@ export type AdaptiveOperationalStatus =
   | 'crashed'
   | 'error';
 export type AdaptiveMemoryEvidenceKind = 'none' | 'suspected' | 'confirmed' | 'unknown';
-export type AdaptiveResourceDriftStatus = 'available' | 'material' | 'unavailable';
 export type AdaptiveBoundaryDecision = 'admissible' | 'unsuitable' | 'ambiguous';
 export type AdaptiveProbePurpose =
   | 'reference'
@@ -93,6 +92,13 @@ export interface AdaptivePassiveDiagnostics {
   warnings?: readonly string[];
 }
 
+/**
+ * One launch the controller may reason about.
+ *
+ * Every observation reaching this module has already passed the manager's fixed-baseline resource
+ * guard at both launch boundaries, so resource validity is implicit and there is no regime,
+ * settled-level, or drift state here to reason about.
+ */
 export interface AdaptiveProbeObservation {
   cellId: string;
   gpuLayers: number;
@@ -104,19 +110,6 @@ export interface AdaptiveProbeObservation {
   /** True only when the completion was actually terminated at the adaptive cap. */
   terminatedAtAdaptiveCap?: boolean;
   aggregateLowerBoundMs?: number;
-  /**
-   * Whether host/GPU availability remained comparable around this launch. Materially drifting
-   * launches remain in the chronological evidence trail, but do not contribute performance timing
-   * after a clean repeat resolves the point.
-   */
-  resourceDriftStatus?: AdaptiveResourceDriftStatus;
-  /**
-   * Which settled resource level this launch was measured under. Incremented
-   * when a confirmed step change re-anchors the reference, so a point is never
-   * considered reproduced by launches taken under materially different
-   * conditions. Absent is treated as regime 0.
-   */
-  resourceRegime?: number;
   durationMs: number;
   diagnostics?: AdaptivePassiveDiagnostics;
 }
@@ -752,7 +745,6 @@ export function canCloseCappedPoint(
     (item) =>
       item.cellId === current.cellId &&
       item.gpuLayers === current.gpuLayers &&
-      item.resourceDriftStatus !== 'material' &&
       item.terminatedAtAdaptiveCap &&
       item.aggregateLowerBoundMs !== undefined
   );
@@ -782,7 +774,6 @@ function canCloseSuccessfulGrossPoint(
     (item) =>
       item.cellId === current.cellId &&
       item.gpuLayers === current.gpuLayers &&
-      item.resourceDriftStatus !== 'material' &&
       item.operationalStatus === 'ok' &&
       item.scoreMs !== undefined &&
       item.scoreMs > threshold
@@ -811,10 +802,6 @@ export function classifyAdaptiveObservation(
     return { boundaryDecision: 'unsuitable', reason: 'confirmed-allocation-failure' };
   }
 
-  if (observation.resourceDriftStatus === 'material') {
-    return { boundaryDecision: 'ambiguous', reason: 'resource-drift' };
-  }
-
   if (observation.terminatedAtAdaptiveCap) {
     if (
       canCloseCappedPoint(
@@ -834,7 +821,6 @@ export function classifyAdaptiveObservation(
       (item) =>
         item.operationalStatus !== 'ok' &&
         item.memoryEvidence !== 'confirmed' &&
-        item.resourceDriftStatus !== 'material' &&
         // A timed-sample cap with an aggregate lower bound is a policy-driven censoring event, not
         // an independent generic failure. A warmup/control-path cap has no score lower bound; if the
         // one allowed full-timeout repeat also fails, the pair is reproduced operational evidence.
@@ -902,37 +888,17 @@ export function classifyAdaptiveObservation(
 /**
  * The launches at one point that may be compared with each other.
  *
- * A material-drift launch is intentionally retained in the chronological trail, but it is not a
- * comparable timing observation. The controller permits one clean repeat; persistent drift is
- * terminated by the manager before recommendation. Excluding only explicitly material launches
- * avoids making a single resolved telemetry disturbance permanently poison an otherwise stable
- * point while preserving every ordinary operational conflict.
- *
- * Reproduction may also never span a confirmed resource-regime change, so the set is confined to
- * the newest regime present: it describes the environment the run is now in, and requiring fresh
- * launches there is the conservative reading — older evidence stays in the trail but cannot
- * reproduce a point on its own.
- *
- * Every caller that counts or scores launches at a point must use this one subset. A gate that
- * counted a wider set than the assessment scored would see enough launches while the assessment
- * saw too few, and would stop scheduling the very launch needed to resolve the point.
+ * Every observation admitted to this controller started and ended with each enabled trusted metric
+ * inside its band around the run's ONE fixed baseline: the manager rejects the whole calibration
+ * otherwise and never hands the contaminated launch over. So all evidence at a point is comparable,
+ * and this is the identity function — kept as a named seam so the single "which launches may be
+ * compared" concept still has one place to live, and so counting callers and scoring callers cannot
+ * drift apart.
  */
 function comparableLaunchEvidence(
   evidence: readonly AdaptiveEvidence[]
 ): readonly AdaptiveEvidence[] {
-  // The newest regime is taken over ALL evidence, not just the drift-free subset.
-  // If the only launch in the current regime was itself materially drifting, the
-  // comparable set is empty and the point reports `insufficient`, scheduling a
-  // fresh launch under present conditions. Deriving the regime from the drift-free
-  // subset instead would silently fall back to the pre-step regime and let stale
-  // evidence reproduce the point.
-  const activeRegime = evidence.reduce(
-    (latest, item) => Math.max(latest, item.resourceRegime ?? 0),
-    0
-  );
-  return evidence.filter(
-    (item) => item.resourceDriftStatus !== 'material' && (item.resourceRegime ?? 0) === activeRegime
-  );
+  return evidence;
 }
 
 /** Assess launch-level stability without ever mixing search scores into the recommendation score. */
@@ -1342,10 +1308,8 @@ function candidateAtPoint(
   policy: Readonly<AdaptivePolicyDefaults>
 ): { candidate?: AdaptiveCandidate; action?: AdaptiveProbeAction; unstable?: boolean } {
   const point = pointEvidenceForStability(evidence, cell.id, gpuLayers);
-  // Must be the same subset `assessMixedFidelityStability` scores below: counting
-  // full launches from a superseded resource regime here would satisfy the
-  // "enough attempts" gate while the assessment still reported `insufficient`,
-  // leaving the point permanently unresolvable.
+  // Same subset `assessMixedFidelityStability` scores below, so the "enough attempts" gate and the
+  // assessment can never disagree about how many launches a point has.
   const fullAttempts = comparableLaunchEvidence(point).filter((item) => item.fidelity === 'full');
   if (fullAttempts.length === 0) {
     return {
@@ -1693,10 +1657,7 @@ function comparableDurationEstimate(state: AdaptivePolicyState): number {
   const comparable = state.evidence
     .filter(
       (item) =>
-        item.operationalStatus === 'ok' &&
-        item.resourceDriftStatus !== 'material' &&
-        !item.terminatedAtAdaptiveCap &&
-        item.durationMs > 0
+        item.operationalStatus === 'ok' && !item.terminatedAtAdaptiveCap && item.durationMs > 0
     )
     .map((item) => item.durationMs);
   return comparable.length > 0
@@ -1713,7 +1674,6 @@ function effectiveFinalistTimeReserve(
       (item) =>
         item.fidelity === 'full' &&
         item.operationalStatus === 'ok' &&
-        item.resourceDriftStatus !== 'material' &&
         !item.terminatedAtAdaptiveCap &&
         item.durationMs > 0
     )
@@ -1784,10 +1744,7 @@ export function summarizeAdaptiveTimingAdmission(state: AdaptivePolicyState): {
   const comparableDurations = state.evidence
     .filter(
       (item) =>
-        item.operationalStatus === 'ok' &&
-        item.resourceDriftStatus !== 'material' &&
-        !item.terminatedAtAdaptiveCap &&
-        item.durationMs > 0
+        item.operationalStatus === 'ok' && !item.terminatedAtAdaptiveCap && item.durationMs > 0
     )
     .map((item) => item.durationMs);
   return {
@@ -1940,7 +1897,6 @@ export function nextAdaptivePolicyAction(state: AdaptivePolicyState): AdaptivePo
       .filter(
         (item) =>
           item.boundaryDecision === 'admissible' &&
-          item.resourceDriftStatus !== 'material' &&
           item.scoreMs !== undefined &&
           Number.isFinite(item.scoreMs) &&
           item.scoreMs > 0
@@ -1954,7 +1910,6 @@ export function nextAdaptivePolicyAction(state: AdaptivePolicyState): AdaptivePo
           (item) =>
             item.gpuLayers < plan.boundaryGpuLayers! &&
             item.boundaryDecision === 'admissible' &&
-            item.resourceDriftStatus !== 'material' &&
             item.scoreMs !== undefined &&
             ((cellBestDirectScoreMs - item.scoreMs) / cellBestDirectScoreMs) * 100 >=
               state.policy.nonMonotoneTriggerPct
@@ -2090,6 +2045,43 @@ export function nextAdaptivePolicyAction(state: AdaptivePolicyState): AdaptivePo
     preferenceResolution: preference,
     referenceGuard: guard,
   };
+}
+
+/** A candidate exposed for diagnosis only, never for application. */
+export interface AdaptiveDiagnosticCandidate {
+  candidate: AdaptiveCandidate;
+  /** Always the normal adaptive bar: at least two agreeing comparable full launches at the point. */
+  evidenceLevel: 'independent-reproduction';
+}
+
+/**
+ * Derive a diagnostic-only candidate from the clean state a failed run leaves behind.
+ *
+ * This runs the ordinary planning and preference machinery over the committed evidence, so a
+ * candidate exists here only when a point already satisfied the normal independent-reproduction
+ * requirement (`assessMixedFidelityStability` returns `stable`, which one launch can never do). A
+ * single adaptive launch is never promoted merely because a resource failure ended the search.
+ *
+ * The caller must map `candidate.evidenceIndices` (policy-evidence indexes) to public chronological
+ * probe indexes; the two spaces diverge as soon as an invalidated probe is appended to the trail.
+ */
+export function deriveAdaptiveDiagnosticCandidate(
+  state: AdaptivePolicyState
+): AdaptiveDiagnosticCandidate | undefined {
+  const plans = state.cells.map((cell) => planCell(state, cell));
+  const preference = resolveAdaptiveRecommendation(
+    plans.flatMap((plan) => plan.candidates),
+    {
+      contextPreferencePct: state.config.contextPreferencePct ?? state.policy.contextPreferencePct,
+      kvPrecisionPreferencePct:
+        state.config.kvPrecisionPreferencePct ?? state.policy.kvPrecisionPreferencePct,
+      tieTolerancePct: state.config.tieTolerancePct ?? state.policy.tieTolerancePct,
+      contextPreferenceActive: state.config.profiles.length > 1,
+      kvPreferenceActive: state.config.includeKvCacheComparison,
+    }
+  );
+  if (!preference.selected) return undefined;
+  return { candidate: preference.selected, evidenceLevel: 'independent-reproduction' };
 }
 
 /** Append one matching raw observation, classifying it from the prior immutable trace. */

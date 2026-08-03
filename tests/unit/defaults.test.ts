@@ -56,10 +56,17 @@ describe('LLM calibration defaults', () => {
       guardDistanceMinLayers: 2,
       guardDistanceFraction: 0.1,
       stabilityTolerancePct: 25,
-      resourceDriftThresholdPct: 25,
-      resourceDriftRetries: 1,
+      hostMemoryDecreaseThresholdPct: 10,
+      vramDecreaseThresholdPct: 10,
+      hostMemoryIncreaseThresholdPct: 20,
+      vramIncreaseThresholdPct: 10,
+      resourceBaselineSamples: 3,
+      resourceBaselineSettleMs: 5_000,
+      resourceDriftConfirmationReads: 1,
+      resourceTelemetryTimeoutMs: 10_000,
+      resourceCooldownMs: 750,
       unobservedProbeDurationPolicy: 'configured-conservative-estimate',
-      policyVersion: 'llama-runtime-v2',
+      policyVersion: 'llama-runtime-v3',
       maxRunnerStartAttempts: 2,
       capacityCheckTimeoutCapMs: 5_000,
       processExitConfirmationMs: 2_000,
@@ -84,6 +91,70 @@ describe('LLM calibration defaults', () => {
       },
       maxCandidates: 10,
     });
+  });
+
+  it('pins the frozen resource-stability protocol values approved on 2026-08-02', () => {
+    // These are exported policy constants, not caller-configurable calibration fields: a report
+    // that claims policy `llama-runtime-v3` must have been produced by exactly this protocol.
+    expect(LLAMA_CALIBRATION_DEFAULTS.hostMemoryDecreaseThresholdPct).toBe(10);
+    expect(LLAMA_CALIBRATION_DEFAULTS.hostMemoryIncreaseThresholdPct).toBe(20);
+    expect(LLAMA_CALIBRATION_DEFAULTS.vramDecreaseThresholdPct).toBe(10);
+    expect(LLAMA_CALIBRATION_DEFAULTS.vramIncreaseThresholdPct).toBe(10);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSettleMs).toBe(5_000);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs).toBe(750);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs).toBe(10_000);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples).toBe(3);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads).toBe(1);
+    expect(LLAMA_CALIBRATION_DEFAULTS.policyVersion).toBe('llama-runtime-v3');
+  });
+
+  it('exposes no field that would let a caller weaken or disable the guard', () => {
+    // Confirmation cannot be switched off, and no key hints that any of this is per-call tunable.
+    // (The compile-time half - that a calibration config literal rejects these names - lives in
+    // public-types.test.ts.)
+    const tunableLookingKeys = Object.keys(LLAMA_CALIBRATION_DEFAULTS).filter((key) =>
+      /(disable|skip|override|enabled|allowUnverified)/i.test(key)
+    );
+    expect(tunableLookingKeys).toEqual([]);
+  });
+
+  it('removes every re-anchoring resource key the fixed-baseline guard replaced', () => {
+    // Re-anchoring is gone, so a build that still reads these keys must fail loudly rather than
+    // silently fall back to `undefined` inside a threshold comparison.
+    for (const removed of [
+      'resourceDriftThresholdPct',
+      'resourceSettledTolerancePct',
+      'resourceDriftRetries',
+    ]) {
+      expect(LLAMA_CALIBRATION_DEFAULTS).not.toHaveProperty(removed);
+    }
+  });
+
+  it('keeps every resource band and schedule value inside its stated invariant', () => {
+    const bands = [
+      LLAMA_CALIBRATION_DEFAULTS.hostMemoryDecreaseThresholdPct,
+      LLAMA_CALIBRATION_DEFAULTS.vramDecreaseThresholdPct,
+      LLAMA_CALIBRATION_DEFAULTS.hostMemoryIncreaseThresholdPct,
+      LLAMA_CALIBRATION_DEFAULTS.vramIncreaseThresholdPct,
+    ];
+    for (const band of bands) {
+      expect(Number.isFinite(band)).toBe(true);
+      expect(band).toBeGreaterThan(0);
+      expect(band).toBeLessThanOrEqual(100);
+    }
+    // At least two trusted values are required for a median, and a suspicious reading is never
+    // admitted without at least one confirmation.
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples).toBeGreaterThanOrEqual(2);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads).toBeGreaterThanOrEqual(1);
+    expect(Number.isSafeInteger(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSettleMs)).toBe(true);
+    expect(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSettleMs).toBeGreaterThanOrEqual(0);
+    for (const duration of [
+      LLAMA_CALIBRATION_DEFAULTS.resourceCooldownMs,
+      LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs,
+    ]) {
+      expect(Number.isSafeInteger(duration)).toBe(true);
+      expect(duration).toBeGreaterThan(0);
+    }
   });
 
   it.each([

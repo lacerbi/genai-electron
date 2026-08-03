@@ -101,3 +101,6 @@ jobs:
 
       - name: Validate package
         run: npm pack --dry-run
+
+      - name: Validate packed public API
+        run: npm run test:packed-api

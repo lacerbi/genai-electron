@@ -4,3 +4,4 @@ node_modules
 *.log
 *.md
 package-lock.json
+scripts/calibration-quiet-trace/artifacts/

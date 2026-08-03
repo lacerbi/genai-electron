@@ -22,19 +22,32 @@ export const LLAMA_CALIBRATION_DEFAULTS = {
   guardDistanceMinLayers: 2,
   guardDistanceFraction: 0.1,
   stabilityTolerancePct: 25,
-  resourceDriftThresholdPct: 25,
   /**
-   * How close two consecutive readings at one point must be before a material
-   * drop counts as a settled new level rather than an environment still in
-   * motion. Deliberately much tighter than `resourceDriftThresholdPct`: reusing
-   * the drift threshold here would let a steady decline (each step just under
-   * the drift band) re-anchor repeatedly and never register as persistent
-   * drift, which is the condition the guard exists to catch.
+   * Resource-stability bands, in percent of the run's ONE fixed baseline.
+   *
+   * Heuristic, provisional, and scoped to the measured Windows/NVIDIA reference machine (plan
+   * Phase 1 quiet traces, approved 2026-08-02). Comparison is inclusive in both directions, and a
+   * confirmed crossing of either band stops calibration under one error code.
+   *
+   * Increases are guarded too: a quiet machine settles upward (+10.5 % host measured over a
+   * 13-minute run), and a larger increase both means earlier probes ran under tighter conditions
+   * and desensitizes the fixed-baseline decrease guard. The host increase band therefore sits at
+   * ~1.9x the measured settling plateau; VRAM showed zero settling and keeps a symmetric band.
    */
-  resourceSettledTolerancePct: 5,
-  resourceDriftRetries: 1,
+  hostMemoryDecreaseThresholdPct: 10,
+  vramDecreaseThresholdPct: 10,
+  hostMemoryIncreaseThresholdPct: 20,
+  vramIncreaseThresholdPct: 10,
+  /** Bounded baseline attempts; never extended, and at least two must be trusted per metric. */
+  resourceBaselineSamples: 3,
+  /** Fixed settle delay before the first baseline attempt. Never condition-driven. */
+  resourceBaselineSettleMs: 5_000,
+  /** Whole-boundary confirmation snapshots taken for a suspicious trusted reading. */
+  resourceDriftConfirmationReads: 1,
+  /** Per-command bound for each host/GPU telemetry capture. */
+  resourceTelemetryTimeoutMs: 10_000,
   unobservedProbeDurationPolicy: 'configured-conservative-estimate',
-  policyVersion: 'llama-runtime-v2',
+  policyVersion: 'llama-runtime-v3',
   startupTimeoutMs: 120_000,
   requestTimeoutMs: 120_000,
   resourceCooldownMs: 750,

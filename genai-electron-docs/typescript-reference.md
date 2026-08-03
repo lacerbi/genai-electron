@@ -58,6 +58,40 @@ interface MemoryInfo {
 }
 ```
 
+### MemoryTelemetryRefreshStatus
+
+Outcome of one `systemInfo.refreshMemoryTelemetry()` call. It describes *that* invocation, never a
+cached value.
+
+```typescript
+type MemoryTelemetryRefreshStatus = 'refreshed' | 'not-required' | 'failed';
+```
+
+- `'refreshed'` — the platform command produced a valid finite non-negative reading, now behind
+  `getMemoryInfo()` (Windows standby-aware path).
+- `'not-required'` — the platform needs no command (non-Windows); the direct `os.freemem()` reading
+  is trusted as-is.
+- `'failed'` — the command failed, timed out, or returned unusable output. Nothing is thrown and
+  nothing is invalidated: the last successful standby-aware reading stays in effect for the rest of
+  its 60 s TTL, and only after it expires does `getMemoryInfo()` fall back to `os.freemem()`.
+
+LLM calibration trusts host RAM only for `'refreshed'` and `'not-required'`.
+
+### TelemetryCommandOptions
+
+Bounding options accepted by `systemInfo.refreshMemoryTelemetry()` and `systemInfo.getGPUInfo()`.
+
+```typescript
+interface TelemetryCommandOptions {
+  signal?: AbortSignal;   // aborting rejects with the signal's reason
+  timeoutMs?: number;     // per-command wall-clock bound (default: 10_000)
+}
+```
+
+Both bounds kill the underlying child process, so a hung platform command cannot stall a long run or
+leak a process. An aborted signal rejects rather than returning `'failed'`, keeping caller
+cancellation distinguishable from telemetry degradation.
+
 ### GPUInfo
 
 ```typescript
@@ -883,21 +917,119 @@ interface LlamaCalibrationCleanupRecord {
   error?: string;
 }
 
-interface LlamaCalibrationResourceMetricDiagnostic {
-  // For adaptive probes these are the stable baseline and the lowest complete
-  // launch-adjacent observation, respectively.
-  beforeBytes?: number;
-  afterBytes?: number;
-  comparability: 'available' | 'material' | 'unavailable';
-  decreasePct?: number;
+// --- Fixed-baseline resource stability (schema v3) ---
+
+// The two independently guarded resources. No weighting, no combined score.
+type LlamaCalibrationResourceMetric = 'hostMemory' | 'vram';
+
+// Which side of the fixed baseline a suspicious reading fell on.
+// Diagnostic only: both directions are fatal once confirmed.
+type LlamaCalibrationResourceChangeDirection = 'decrease' | 'increase';
+
+type LlamaCalibrationResourceBoundaryKind = 'pre-launch' | 'post-cleanup';
+
+type LlamaCalibrationResourceUntrustedReason =
+  | 'telemetry-refresh-failed'
+  | 'reading-unavailable'
+  | 'reading-invalid';
+
+interface LlamaCalibrationResourceReading {
+  metric: LlamaCalibrationResourceMetric;
+  enabled: boolean;   // false → no usable baseline; the metric triggers nothing
+  trusted: boolean;
+  untrustedReason?: LlamaCalibrationResourceUntrustedReason;
+  availableBytes?: number;
+  // Signed: positive = less availability than baseline, negative = more.
+  decreasePctFromBaseline?: number;
+  decreaseThresholdPct?: number;
+  increaseThresholdPct?: number;
+  suspicious: boolean;
+  suspiciousDirection?: LlamaCalibrationResourceChangeDirection;
 }
 
+interface LlamaCalibrationResourceSnapshotDiagnostic {
+  readings: readonly LlamaCalibrationResourceReading[];
+  suspiciousMetrics: readonly LlamaCalibrationResourceMetric[];
+  // Enabled but untrusted. Recorded only; never drift on their own.
+  untrustedMetrics: readonly LlamaCalibrationResourceMetric[];
+}
+
+// One launch boundary: an initial snapshot plus, only when it was
+// suspicious, exactly one confirmation.
+interface LlamaCalibrationResourceBoundaryDiagnostic {
+  boundary: LlamaCalibrationResourceBoundaryKind;
+  confirmationPerformed: boolean;
+  initial: LlamaCalibrationResourceSnapshotDiagnostic;
+  confirmation?: LlamaCalibrationResourceSnapshotDiagnostic;
+  initiallySuspiciousMetrics: readonly LlamaCalibrationResourceMetric[];
+  warnings: readonly string[];
+}
+
+// `postCleanup` exists only when teardown was confirmed; either side is
+// absent when resource monitoring was unavailable for the run.
+interface LlamaCalibrationProbeResourceBoundaries {
+  preLaunch?: LlamaCalibrationResourceBoundaryDiagnostic;
+  postCleanup?: LlamaCalibrationResourceBoundaryDiagnostic;
+}
+
+type LlamaCalibrationResourceMonitoringCoverage =
+  | 'complete' | 'partial' | 'unavailable';
+
+// Exactly one of these per metric per calibrate() call: no re-anchoring.
+interface LlamaCalibrationResourceMetricMonitoring {
+  metric: LlamaCalibrationResourceMetric;
+  enabled: boolean;         // false → too few trusted baseline samples
+  baselineBytes?: number;   // median of trustedSamples; only when enabled
+  decreaseThresholdPct: number;
+  increaseThresholdPct: number;
+  attempts: number;                        // bounded; never extended
+  trustedSamples: readonly number[];       // capture order
+}
+
+interface LlamaCalibrationResourceMonitoring {
+  coverage: LlamaCalibrationResourceMonitoringCoverage;
+  enabledMetrics: readonly LlamaCalibrationResourceMetric[];
+  metrics: readonly LlamaCalibrationResourceMetricMonitoring[]; // incl. disabled
+}
+
+// Single source of truth for a resource-stability rejection.
+// `probeIndex` is absent for a pre-launch failure, which has no probe.
+interface LlamaCalibrationResourceFailure {
+  boundary: LlamaCalibrationResourceBoundaryKind;
+  affectedMetrics: readonly LlamaCalibrationResourceMetric[];
+  affectedDirections: Readonly<
+    Partial<Record<
+      LlamaCalibrationResourceMetric,
+      LlamaCalibrationResourceChangeDirection
+    >>
+  >;
+  probeIndex?: number;
+  diagnostics: LlamaCalibrationResourceBoundaryDiagnostic;
+}
+
+type LlamaCalibrationDiagnosticEvidenceLevel =
+  | 'independent-reproduction'
+  | 'single-launch-measurement';
+
+// Pointers into the probe trail only — never an application-ready payload,
+// and never copied into selected/provisional/fallback.
+interface LlamaCalibrationDiagnosticCandidate {
+  sourceProbeIndexes: readonly number[]; // non-empty, unique, ascending
+  evidenceLevel: LlamaCalibrationDiagnosticEvidenceLevel;
+  usability: 'diagnostic-only';
+}
+
+type LlamaCalibrationProbeResourceValidity =
+  | 'accepted'
+  | 'invalidated-by-resource-stability';
+
+// Machine-resource readings are NOT here: they live on the probe's
+// `resourceBoundaries`, compared against the run's one fixed baseline in
+// report-level `resourceMonitoring`.
 interface LlamaCalibrationPassiveDiagnostics {
   kvBytesEstimate?: number;
   modelBytes?: number;
   expertWeightBytes?: number;
-  hostAvailableMemory: LlamaCalibrationResourceMetricDiagnostic;
-  gpuAvailableMemory: LlamaCalibrationResourceMetricDiagnostic;
   warnings: readonly string[];
 }
 
@@ -917,8 +1049,17 @@ interface LlamaCalibrationProbe {
   operationalStatus: LlamaCalibrationOperationalStatus;
   memoryEvidence: LlamaCalibrationMemoryEvidence;
   boundaryDecision: LlamaCalibrationBoundaryDecision;
-  /** Settled resource level this adaptive launch was measured under. Absent in exact mode. */
-  resourceRegime?: number;
+  // Whether this observation may be used for any decision. An
+  // `invalidated-by-resource-stability` probe stays in the chronological
+  // trail for auditing but never reaches classification, ranking, selection,
+  // fallback, or the diagnostic candidate. `accepted` only means the resource
+  // guard did not invalidate it — including a record the guard never evaluated
+  // at all, and it may still carry an operational failure.
+  resourceValidity: LlamaCalibrationProbeResourceValidity;
+  // Absent when the boundary was never evaluated: monitoring unavailable for
+  // the run, the launch ended earlier (unconfirmed teardown, caller abort), or
+  // the launch was interrupted by the internal probe deadline.
+  resourceBoundaries?: LlamaCalibrationProbeResourceBoundaries;
   loadTimeMs?: number;
   effectiveContextSize?: number;
   effectiveParallelRequests?: number;
@@ -1022,6 +1163,20 @@ interface LlamaCalibrationBudgetReport {
   };
 }
 
+// Protocol facts only. Baselines and band values live in
+// `resourceMonitoring`, which is their single source of truth.
+interface LlamaCalibrationResourceStabilityMethodology {
+  baselineSettleMs: number;          // fixed delay; never condition-driven
+  baselineSamples: number;           // bounded attempts; never extended
+  minTrustedBaselineSamples: number; // below this, the metric is disabled
+  confirmationReads: number;         // whole-boundary confirmations
+  telemetryTimeoutMs: number;        // per platform telemetry command
+  guardedDirections: readonly LlamaCalibrationResourceChangeDirection[];
+  guardedBoundaries: readonly LlamaCalibrationResourceBoundaryKind[];
+  thresholdComparison: 'inclusive';
+  caveat: string;                    // states the sampling blind spot
+}
+
 interface LlamaCalibrationMethodology {
   layerCount: number;
   layerCountSource: 'metadata' | 'fallback';
@@ -1041,10 +1196,11 @@ interface LlamaCalibrationMethodology {
   kvPrecisionPreferencePct: number;
   contextPreferencePct?: number;
   scoreUnit: 'scenario-median-wall-ms';
+  resourceStability: LlamaCalibrationResourceStabilityMethodology;
 }
 
 interface LlamaCalibrationReportBase {
-  schemaVersion: 2;
+  schemaVersion: 3;
   policyVersion: string;
   createdAt: string;
   status: LlamaCalibrationTerminalStatus;
@@ -1055,6 +1211,10 @@ interface LlamaCalibrationReportBase {
   fixedConfig: LlamaCalibrationFixedConfig;
   workloads: readonly LlamaCalibrationWorkloadSignature[];
   methodology: LlamaCalibrationMethodology;
+  // The run's one fixed baseline per metric, plus how much of the guard was
+  // active. Reported machine available-memory values are the stabilized
+  // baselines when they exist.
+  resourceMonitoring: LlamaCalibrationResourceMonitoring;
   probes: readonly LlamaCalibrationProbe[];
   warnings: readonly string[];
 }
@@ -1111,24 +1271,46 @@ type LlamaCalibrationReport =
   | LlamaExactCalibrationReport;
 
 interface LlamaCalibrationPartialReport {
-  schemaVersion: 2;
+  schemaVersion: 3;
   policyVersion: string;
   strategy: 'adaptive' | 'exact';
   status: 'aborted' | 'failed';
   createdAt: string;
+  // Absent only when the run failed before its fixed baseline existed.
+  resourceMonitoring?: LlamaCalibrationResourceMonitoring;
   probes: readonly LlamaCalibrationProbe[];
   warnings: readonly string[];
   cleanupConfirmed: boolean;
 }
+
+// Attached to a resource-stability rejection only. Abort and unrelated
+// failure partials keep the surface above.
+interface LlamaCalibrationResourceFailurePartialReport
+  extends LlamaCalibrationPartialReport {
+  status: 'failed';
+  resourceMonitoring: LlamaCalibrationResourceMonitoring; // always present
+  resourceFailure: LlamaCalibrationResourceFailure;
+  // Only when clean pre-failure evidence already met the normal
+  // per-strategy rule. Diagnostic-only; never applicable as a start config.
+  diagnosticCandidate?: LlamaCalibrationDiagnosticCandidate;
+}
 ```
 
 `LlamaAdaptiveCalibrationProfileReport`, `LlamaAdaptiveCalibrationCellReport`,
-`LlamaCalibrationBudgetReport`, `LlamaCalibrationMethodology`, `LlamaCalibrationRequestTiming`,
-`LlamaCalibrationSample`, `LlamaCalibrationWorkloadResult`, the workload signature, and
-model/binary/machine identity types are also exported from the package root. Aborted and failed
-calls reject with the typed partial report at `ServerError.details.partialReport`. See
+`LlamaCalibrationBudgetReport`, `LlamaCalibrationMethodology`,
+`LlamaCalibrationResourceStabilityMethodology`, `LlamaCalibrationRequestTiming`,
+`LlamaCalibrationSample`, `LlamaCalibrationWorkloadResult`, every resource-diagnostic type above,
+the workload signature, and model/binary/machine identity types are also exported from the package
+root. Aborted and failed calls reject with the typed partial report at
+`ServerError.details.partialReport`; a resource-stability rejection uses the dedicated
+[`LlamaCalibrationResourceStabilityError`](#llamacalibrationresourcestabilityerror). See
 [LLM Runtime Calibration](llm-server.md#runtime-calibration) for search semantics, budgets,
 application, and invalidation.
+
+**Removed in schema v3** (present in schema-v2 reports, which should be discarded rather than
+migrated): `LlamaCalibrationProbe.resourceRegime`, `LlamaCalibrationResourceMetricDiagnostic`, and
+the `hostAvailableMemory` / `gpuAvailableMemory` fields of
+`LlamaCalibrationPassiveDiagnostics`.
 
 ---
 
@@ -1518,6 +1700,44 @@ interface ContextConstraintDetails {
 Invalid combinations and unverifiable runtime capacity use this error. A valid minimum that no
 permitted hardware placement can satisfy uses `InsufficientResourcesError` instead.
 
+### LlamaCalibrationResourceStabilityError
+
+Thrown by `llamaServer.calibrate()` — in **both** adaptive and exact mode — when machine conditions
+either changed materially around a launch boundary or could not be verified stable. It extends
+`ServerError`, so `error.code` is still `'SERVER_ERROR'` and existing
+`instanceof ServerError` handling keeps working; the calibration-specific discriminant is
+`error.details.code`.
+
+```typescript
+type LlamaCalibrationResourceStabilityCode =
+  | 'CALIBRATION_RESOURCE_DRIFT'
+  | 'CALIBRATION_RESOURCE_STABILITY_UNVERIFIED';
+
+// Only fields guaranteed for BOTH variants belong here.
+interface LlamaCalibrationResourceStabilityDetailsCommon {
+  partialReport: LlamaCalibrationResourceFailurePartialReport;
+  suggestion: string;
+}
+
+type LlamaCalibrationResourceStabilityDetails =
+  LlamaCalibrationResourceStabilityDetailsCommon &
+    (
+      | { code: 'CALIBRATION_RESOURCE_DRIFT' }
+      | { code: 'CALIBRATION_RESOURCE_STABILITY_UNVERIFIED' }
+    );
+
+class LlamaCalibrationResourceStabilityError extends ServerError {
+  declare readonly details: LlamaCalibrationResourceStabilityDetails;
+}
+```
+
+`CALIBRATION_RESOURCE_DRIFT` means the same trusted metric stayed outside its band in the
+confirmation snapshot, in either direction. `CALIBRATION_RESOURCE_STABILITY_UNVERIFIED` means a
+trusted suspicious boundary could not be resolved — its confirmation reading became untrusted, or a
+different metric became newly suspicious. The two are never conflated. One `instanceof` branch plus
+a typed `switch (error.details.code)` covers both; the boundary, affected metrics and directions,
+optional probe index, and full readings live once, on `details.partialReport.resourceFailure`.
+
 ### InsufficientResourcesDetails
 
 ```typescript
@@ -1638,13 +1858,22 @@ const LLAMA_CALIBRATION_DEFAULTS = {
   guardDistanceMinLayers: 2,
   guardDistanceFraction: 0.1,
   stabilityTolerancePct: 25,
-  resourceDriftThresholdPct: 25,
-  resourceDriftRetries: 1,
+  // Fixed-baseline resource-stability bands, in percent of the run's one
+  // baseline. Inclusive comparison; a confirmed crossing in either direction
+  // stops calibration under one error class.
+  hostMemoryDecreaseThresholdPct: 10,
+  vramDecreaseThresholdPct: 10,
+  hostMemoryIncreaseThresholdPct: 20,
+  vramIncreaseThresholdPct: 10,
+  resourceBaselineSamples: 3,        // bounded; ≥2 must be trusted per metric
+  resourceBaselineSettleMs: 5_000,   // fixed settle before the first attempt
+  resourceDriftConfirmationReads: 1, // whole-boundary confirmations
+  resourceTelemetryTimeoutMs: 10_000,// per host/GPU telemetry capture
   unobservedProbeDurationPolicy: 'configured-conservative-estimate',
-  policyVersion: 'llama-runtime-v2',
+  policyVersion: 'llama-runtime-v3',
   startupTimeoutMs: 120_000,
   requestTimeoutMs: 120_000,
-  resourceCooldownMs: 750,
+  resourceCooldownMs: 750,           // also the confirmation spacing
   stderrMaxBytes: 16 * 1024,
   maxRunnerStartAttempts: 2,
   capacityCheckTimeoutCapMs: 5_000,
@@ -1692,6 +1921,12 @@ The resolver accepts `cellCount` from 1 through 8. Its formulas are
 `min(24, 6 + 2c)`, `min(36, 7 + 4c)`, `min(6, max(2, c))`,
 `min(4_500_000, 900_000 + 450_000c)`, and
 `min(900_000, 150_000c)` respectively.
+
+The resource-stability values are exported policy constants, not caller-configurable calibration
+fields, and there is no override that disables confirmation. They are heuristic, provisional, and
+screened on a Windows/NVIDIA reference machine. **Removed in this policy version:**
+`resourceDriftThresholdPct`, `resourceSettledTolerancePct`, and `resourceDriftRetries`;
+`policyVersion` changed from `llama-runtime-v2` to `llama-runtime-v3`.
 
 ### DIFFUSION_COMPONENT_FLAGS
 

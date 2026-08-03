@@ -1,4 +1,9 @@
 import { describe, expect, it } from '@jest/globals';
+// Value import from the error module, not the package root: this suite must stay free of the
+// Electron runtime. The root's re-export is proven type-side below and at runtime by
+// `npm run test:packed-api`.
+import { LlamaCalibrationResourceStabilityError } from '../../src/errors/index.js';
+import type { LlamaCalibrationResourceStabilityError as RootStabilityError } from '../../src/index.js';
 import type {
   ContextConstraintDetails,
   ContextConstraintError,
@@ -10,14 +15,32 @@ import type {
   LlamaAdaptiveCalibrationConfig,
   LlamaAdaptiveCalibrationReport,
   LlamaCalibrationConfig,
+  LlamaCalibrationDiagnosticCandidate,
+  LlamaCalibrationDiagnosticEvidenceLevel,
+  LlamaCalibrationPartialReport,
+  LlamaCalibrationProbeResourceBoundaries,
+  LlamaCalibrationProbeResourceValidity,
   LlamaCalibrationProfile,
   LlamaCalibrationProgress,
   LlamaCalibrationReport,
+  LlamaCalibrationResourceBoundaryDiagnostic,
+  LlamaCalibrationResourceBoundaryKind,
+  LlamaCalibrationResourceChangeDirection,
+  LlamaCalibrationResourceFailure,
+  LlamaCalibrationResourceFailurePartialReport,
+  LlamaCalibrationResourceMetric,
+  LlamaCalibrationResourceMonitoring,
+  LlamaCalibrationResourceReading,
+  LlamaCalibrationResourceStabilityCode,
+  LlamaCalibrationResourceStabilityDetails,
+  LlamaCalibrationResourceUntrustedReason,
   LlamaExactCalibrationConfig,
   LlamaExactCalibrationReport,
+  MemoryTelemetryRefreshStatus,
   OptimalConfigHints,
   ServerEvent,
   ServerInfo,
+  TelemetryCommandOptions,
 } from '../../src/index.js';
 
 describe('public context-capacity types', () => {
@@ -88,9 +111,13 @@ describe('public context-capacity types', () => {
     };
     const probeTypeCheck = (report: LlamaCalibrationReport) =>
       report.probes.map((probe) => ({
-        // Adaptive probes carry the settled resource level they were measured
-        // under; exact probes omit it.
-        regime: probe.resourceRegime ?? 0,
+        // Resource regimes are gone: one calibration has ONE fixed baseline and never re-anchors,
+        // so a probe is either usable evidence or explicitly invalidated. A build still reading
+        // `resourceRegime` must fail to compile rather than silently read `undefined`.
+        // @ts-expect-error resourceRegime was removed with the re-anchoring behaviour it described
+        regime: probe.resourceRegime,
+        // Required, not optional: every probe states whether the guard invalidated it.
+        validity: probe.resourceValidity satisfies LlamaCalibrationProbeResourceValidity,
         boundary: probe.boundaryDecision.classification,
       }));
     const progressTypeCheck = (progress: LlamaCalibrationProgress) => {
@@ -115,7 +142,254 @@ describe('public context-capacity types', () => {
   });
 });
 
-describe('public LLM calibration schema-v2 types', () => {
+describe('public LLM calibration schema-v3 resource types', () => {
+  const monitoring: LlamaCalibrationResourceMonitoring = {
+    coverage: 'complete',
+    enabledMetrics: ['hostMemory', 'vram'],
+    metrics: [
+      {
+        metric: 'hostMemory',
+        enabled: true,
+        baselineBytes: 16_000_000_000,
+        decreaseThresholdPct: 10,
+        increaseThresholdPct: 20,
+        attempts: 3,
+        trustedSamples: [16_000_000_000, 16_050_000_000, 16_100_000_000],
+      },
+      {
+        metric: 'vram',
+        enabled: false,
+        decreaseThresholdPct: 10,
+        increaseThresholdPct: 10,
+        attempts: 3,
+        trustedSamples: [],
+      },
+    ],
+  };
+  const trustedReading: LlamaCalibrationResourceReading = {
+    metric: 'hostMemory',
+    enabled: true,
+    trusted: true,
+    availableBytes: 14_000_000_000,
+    // Signed: positive is less availability than the baseline, negative is more.
+    decreasePctFromBaseline: 12.5,
+    decreaseThresholdPct: 10,
+    increaseThresholdPct: 20,
+    suspicious: true,
+    suspiciousDirection: 'decrease',
+  };
+  const untrustedReading: LlamaCalibrationResourceReading = {
+    metric: 'vram',
+    enabled: false,
+    trusted: false,
+    untrustedReason: 'reading-unavailable',
+    suspicious: false,
+  };
+  const boundary: LlamaCalibrationResourceBoundaryDiagnostic = {
+    boundary: 'post-cleanup',
+    confirmationPerformed: true,
+    initial: {
+      readings: [trustedReading, untrustedReading],
+      suspiciousMetrics: ['hostMemory'],
+      untrustedMetrics: [],
+    },
+    confirmation: {
+      readings: [trustedReading, untrustedReading],
+      suspiciousMetrics: ['hostMemory'],
+      untrustedMetrics: [],
+    },
+    initiallySuspiciousMetrics: ['hostMemory'],
+    warnings: ['Resource change confirmed at the post-cleanup boundary for hostMemory (decrease).'],
+  };
+
+  it('consumes monitoring, boundary diagnostics, and the typed rejection through the package root', () => {
+    const boundaries: LlamaCalibrationProbeResourceBoundaries = {
+      preLaunch: { ...boundary, boundary: 'pre-launch' },
+      postCleanup: boundary,
+    };
+    const failure: LlamaCalibrationResourceFailure = {
+      boundary: 'post-cleanup',
+      affectedMetrics: ['hostMemory'],
+      affectedDirections: { hostMemory: 'decrease' },
+      probeIndex: 2,
+      diagnostics: boundary,
+    };
+    const candidate: LlamaCalibrationDiagnosticCandidate = {
+      sourceProbeIndexes: [0, 1],
+      evidenceLevel: 'independent-reproduction',
+      usability: 'diagnostic-only',
+    };
+    const partial: LlamaCalibrationResourceFailurePartialReport = {
+      schemaVersion: 3,
+      policyVersion: 'llama-runtime-v3',
+      strategy: 'adaptive',
+      status: 'failed',
+      createdAt: '2026-08-02T12:00:00.000Z',
+      resourceMonitoring: monitoring,
+      probes: [],
+      warnings: [],
+      cleanupConfirmed: true,
+      resourceFailure: failure,
+      diagnosticCandidate: candidate,
+    };
+
+    // One `instanceof` branch, then a typed switch on the details discriminant.
+    const describeRejection = (error: unknown): string => {
+      if (!(error instanceof LlamaCalibrationResourceStabilityError)) return 'other';
+      const details: LlamaCalibrationResourceStabilityDetails = error.details;
+      switch (details.code) {
+        case 'CALIBRATION_RESOURCE_DRIFT':
+          return `drift:${details.partialReport.resourceFailure.affectedMetrics.join(',')}`;
+        case 'CALIBRATION_RESOURCE_STABILITY_UNVERIFIED':
+          return `unverified:${details.partialReport.resourceFailure.boundary}`;
+      }
+    };
+    const codes: readonly LlamaCalibrationResourceStabilityCode[] = [
+      'CALIBRATION_RESOURCE_DRIFT',
+      'CALIBRATION_RESOURCE_STABILITY_UNVERIFIED',
+    ];
+    const error = new LlamaCalibrationResourceStabilityError('resources changed', {
+      code: 'CALIBRATION_RESOURCE_DRIFT',
+      suggestion: 'close heavy work and recalibrate',
+      partialReport: partial,
+    });
+    // The package root exports the same class, so a host needs no deep import to branch on it.
+    const rootTyped: RootStabilityError = error;
+    const telemetryOptions: TelemetryCommandOptions = {
+      timeoutMs: 10_000,
+      signal: new AbortController().signal,
+    };
+    const refreshStatuses: readonly MemoryTelemetryRefreshStatus[] = [
+      'refreshed',
+      'not-required',
+      'failed',
+    ];
+    // The vocabulary types the diagnostics are written in are exported in their own right, so a
+    // host can name them when it stores or renders a boundary rather than re-deriving them from
+    // the structures above. Every literal each admits is consumed here, so narrowing one of these
+    // unions is a compile break rather than a silently unreachable branch.
+    const directions = [
+      'decrease',
+      'increase',
+    ] as const satisfies readonly LlamaCalibrationResourceChangeDirection[];
+    const boundaryKinds = [
+      'pre-launch',
+      'post-cleanup',
+    ] as const satisfies readonly LlamaCalibrationResourceBoundaryKind[];
+    const untrustedReasons = [
+      'telemetry-refresh-failed',
+      'reading-unavailable',
+      'reading-invalid',
+    ] as const satisfies readonly LlamaCalibrationResourceUntrustedReason[];
+    const evidenceLevels = [
+      'independent-reproduction',
+      'single-launch-measurement',
+    ] as const satisfies readonly LlamaCalibrationDiagnosticEvidenceLevel[];
+
+    expect(describeRejection(rootTyped)).toBe('drift:hostMemory');
+    expect(codes).toHaveLength(2);
+    expect(boundaries.preLaunch?.boundary).toBe('pre-launch');
+    expect(telemetryOptions.timeoutMs).toBe(10_000);
+    expect(refreshStatuses).toHaveLength(3);
+    expect(directions).toEqual([failure.affectedDirections.hostMemory, 'increase']);
+    expect(boundaryKinds).toContain(failure.boundary);
+    expect(untrustedReasons).toContain(untrustedReading.untrustedReason);
+    expect(evidenceLevels).toContain(candidate.evidenceLevel);
+  });
+
+  it('rejects removed schema-v2 resource assumptions at compile time', () => {
+    const reportSchema = (report: LlamaCalibrationReport) => {
+      const version: 3 = report.schemaVersion;
+      // @ts-expect-error schema v2 reports cannot satisfy the v3 literal
+      const staleVersion: 2 = report.schemaVersion;
+      return { version, staleVersion };
+    };
+    const probeShape = (report: LlamaCalibrationReport) =>
+      report.probes.map((probe) => ({
+        // @ts-expect-error per-probe before/after memory reduction was replaced by boundaries
+        legacyHostMemory: probe.diagnostics?.hostAvailableMemory,
+        // @ts-expect-error per-probe before/after memory reduction was replaced by boundaries
+        legacyGpuMemory: probe.diagnostics?.gpuAvailableMemory,
+        boundaries: probe.resourceBoundaries,
+      }));
+    // Resource policy is not caller-configurable: no override may reach calibrate().
+    const adaptiveWithThresholdOverride: LlamaAdaptiveCalibrationConfig = {
+      modelId: 'model',
+      profiles: [{ contextSize: 12_288, parallelRequests: 2 }],
+      workloads: [{ id: 'chat', kind: 'cold-prefill', prompt: 'hello', nPredict: 32 }],
+      // @ts-expect-error resource bands are exported policy constants, never per-call fields
+      hostMemoryDecreaseThresholdPct: 25,
+    };
+    const exactWithConfirmationOverride: LlamaExactCalibrationConfig = {
+      modelId: 'model',
+      profile: { contextSize: 12_288, parallelRequests: 2 },
+      workloads: [{ id: 'chat', kind: 'cold-prefill', prompt: 'hello', nPredict: 32 }],
+      combos: [{ overrides: {} }],
+      // @ts-expect-error confirmation cannot be disabled by a caller
+      resourceDriftConfirmationReads: 0,
+    };
+    const metrics: readonly LlamaCalibrationResourceMetric[] = ['hostMemory', 'vram'];
+    // @ts-expect-error there is no third guarded metric and no combined score
+    const invalidMetric: LlamaCalibrationResourceMetric = 'disk';
+    // @ts-expect-error a diagnostic candidate is never application-ready
+    const invalidUsability: LlamaCalibrationDiagnosticCandidate['usability'] = 'applicable';
+    // A diagnostic candidate is offered only by the resource-failure partial report. Reading it off
+    // the general partial report (an abort, an unrelated failure) must not compile, or a host would
+    // branch on a field that is never populated there.
+    const generalPartialShape = (partial: LlamaCalibrationPartialReport) => ({
+      // @ts-expect-error only the resource-failure partial report carries a diagnostic candidate
+      candidate: partial.diagnosticCandidate,
+      monitoring: partial.resourceMonitoring,
+    });
+    // The resource-failure partial report is defined by its failure record, so omitting it must not
+    // compile: that record is the entire reason the type is distinct from the general one.
+    // @ts-expect-error resourceFailure is required on the resource-failure partial report
+    const partialWithoutFailure: LlamaCalibrationResourceFailurePartialReport = {
+      schemaVersion: 3,
+      policyVersion: 'llama-runtime-v3',
+      strategy: 'exact',
+      status: 'failed',
+      createdAt: '2026-08-02T12:00:00.000Z',
+      resourceMonitoring: monitoring,
+      probes: [],
+      warnings: [],
+      cleanupConfirmed: true,
+    };
+    // The candidate carries indexes and markers only - never a startable config or a score - so a
+    // host cannot mistake it for a recommendation.
+    const candidateWithStartConfig: LlamaCalibrationDiagnosticCandidate = {
+      sourceProbeIndexes: [0, 1],
+      evidenceLevel: 'independent-reproduction',
+      usability: 'diagnostic-only',
+      // @ts-expect-error a diagnostic candidate never carries an application-ready start config
+      startConfig: { contextSize: 12_288, parallelRequests: 2 },
+    };
+    const candidateWithScore: LlamaCalibrationDiagnosticCandidate = {
+      sourceProbeIndexes: [0, 1],
+      evidenceLevel: 'independent-reproduction',
+      usability: 'diagnostic-only',
+      // @ts-expect-error a diagnostic candidate never carries a score of its own
+      scoreMs: 1234,
+    };
+
+    expect({
+      reportSchema,
+      probeShape,
+      adaptiveWithThresholdOverride,
+      exactWithConfirmationOverride,
+      metrics,
+      invalidMetric,
+      invalidUsability,
+      generalPartialShape,
+      partialWithoutFailure,
+      candidateWithStartConfig,
+      candidateWithScore,
+      monitoring,
+    }).toBeDefined();
+  });
+});
+
+describe('public LLM calibration schema-v3 types', () => {
   const profile: LlamaCalibrationProfile = { contextSize: 12_288, parallelRequests: 2 };
   const workloads = [{ id: 'chat', kind: 'cold-prefill', prompt: 'hello', nPredict: 32 }] as const;
 
@@ -147,7 +421,7 @@ describe('public LLM calibration schema-v2 types', () => {
       return comboCount;
     };
     const reportTypeCheck = (report: LlamaCalibrationReport) => {
-      const schemaVersion: 2 = report.schemaVersion;
+      const schemaVersion: 3 = report.schemaVersion;
       if (report.strategy === 'adaptive') {
         const confidence: 'empirical-reproducibility' = report.confidence;
         // @ts-expect-error exact combo runs are unavailable in adaptive reports
@@ -266,7 +540,7 @@ describe('public LLM calibration schema-v2 types', () => {
     }).toBeDefined();
   });
 
-  it('rejects invalid schema-v2 shapes at compile time', () => {
+  it('rejects invalid schema-v3 shapes at compile time', () => {
     // @ts-expect-error legacy profile-only input is neither adaptive nor exact
     const legacyProfileOnly: LlamaCalibrationConfig = {
       modelId: 'model',

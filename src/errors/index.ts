@@ -3,6 +3,8 @@
  * @module errors
  */
 
+import type { LlamaCalibrationResourceFailurePartialReport } from '../types/llm-calibration.js';
+
 /**
  * Base error class for all genai-electron errors
  *
@@ -174,6 +176,66 @@ export class ServerError extends GenaiElectronError {
   constructor(message: string, details?: unknown) {
     super(`Server error: ${message}`, 'SERVER_ERROR', details);
     this.name = 'ServerError';
+  }
+}
+
+/**
+ * Details codes for a calibration resource-stability rejection.
+ *
+ * - `CALIBRATION_RESOURCE_DRIFT` - the same trusted metric stayed outside its band in the
+ *   confirmation snapshot, in either direction.
+ * - `CALIBRATION_RESOURCE_STABILITY_UNVERIFIED` - a trusted suspicious boundary could not be
+ *   resolved: its confirmation reading became untrusted, or a different metric became newly
+ *   suspicious. It is never mislabelled confirmed drift.
+ */
+export type LlamaCalibrationResourceStabilityCode =
+  | 'CALIBRATION_RESOURCE_DRIFT'
+  | 'CALIBRATION_RESOURCE_STABILITY_UNVERIFIED';
+
+/**
+ * Fields guaranteed for BOTH variants.
+ *
+ * Any future field whose presence or shape differs between confirmed drift and
+ * stability-unverified belongs on its `code` union arm, not here as an optional common field.
+ */
+export interface LlamaCalibrationResourceStabilityDetailsCommon {
+  partialReport: LlamaCalibrationResourceFailurePartialReport;
+  suggestion: string;
+}
+
+export type LlamaCalibrationResourceStabilityDetails =
+  LlamaCalibrationResourceStabilityDetailsCommon &
+    (
+      | { code: 'CALIBRATION_RESOURCE_DRIFT' }
+      | { code: 'CALIBRATION_RESOURCE_STABILITY_UNVERIFIED' }
+    );
+
+/**
+ * Thrown when LLM runtime calibration observes that machine conditions either changed materially
+ * or could not be verified stable around a launch boundary.
+ *
+ * Extends {@link ServerError} so existing `instanceof ServerError` handling keeps working, while
+ * hosts get one `instanceof` branch followed by a typed `switch (error.details.code)`. Calibration
+ * never restarts or re-anchors: the host should ask the user to close heavy work and recalibrate
+ * from the beginning.
+ *
+ * @example
+ * ```typescript
+ * try {
+ *   await llamaServer.calibrate(config);
+ * } catch (error) {
+ *   if (error instanceof LlamaCalibrationResourceStabilityError) {
+ *     console.log(error.details.code, error.details.partialReport.resourceFailure.affectedMetrics);
+ *   }
+ * }
+ * ```
+ */
+export class LlamaCalibrationResourceStabilityError extends ServerError {
+  declare public readonly details: LlamaCalibrationResourceStabilityDetails;
+
+  constructor(message: string, details: LlamaCalibrationResourceStabilityDetails) {
+    super(message, details);
+    this.name = 'LlamaCalibrationResourceStabilityError';
   }
 }
 
