@@ -71,8 +71,9 @@ type MemoryTelemetryRefreshStatus = 'refreshed' | 'not-required' | 'failed';
   `getMemoryInfo()` (Windows standby-aware path).
 - `'not-required'` — the platform needs no command (non-Windows); the direct `os.freemem()` reading
   is trusted as-is.
-- `'failed'` — the command failed, timed out, or returned unusable output. Nothing is thrown;
-  `getMemoryInfo()` silently falls back to `os.freemem()`.
+- `'failed'` — the command failed, timed out, or returned unusable output. Nothing is thrown and
+  nothing is invalidated: the last successful standby-aware reading stays in effect for the rest of
+  its 60 s TTL, and only after it expires does `getMemoryInfo()` fall back to `os.freemem()`.
 
 LLM calibration trusts host RAM only for `'refreshed'` and `'not-required'`.
 
@@ -1052,10 +1053,12 @@ interface LlamaCalibrationProbe {
   // `invalidated-by-resource-stability` probe stays in the chronological
   // trail for auditing but never reaches classification, ranking, selection,
   // fallback, or the diagnostic candidate. `accepted` only means the resource
-  // guard did not invalidate it — it may still carry an operational failure.
+  // guard did not invalidate it — including a record the guard never evaluated
+  // at all, and it may still carry an operational failure.
   resourceValidity: LlamaCalibrationProbeResourceValidity;
   // Absent when the boundary was never evaluated: monitoring unavailable for
-  // the run, or the launch ended earlier (unconfirmed teardown, caller abort).
+  // the run, the launch ended earlier (unconfirmed teardown, caller abort), or
+  // the launch was interrupted by the internal probe deadline.
   resourceBoundaries?: LlamaCalibrationProbeResourceBoundaries;
   loadTimeMs?: number;
   effectiveContextSize?: number;

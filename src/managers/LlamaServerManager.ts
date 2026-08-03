@@ -1067,6 +1067,26 @@ export class LlamaServerManager extends ServerManager {
      * not claim any resource coverage.
      */
     let exactResourceMonitoring: LlamaCalibrationResourceMonitoring | undefined;
+    /**
+     * The exact run's live warning list, hoisted so the outer catch can attach it too.
+     *
+     * Baseline and boundary warnings (a disabled metric, an untrusted boundary reading) are the only
+     * record of degraded telemetry, so a partial report that reports `coverage: 'partial'` must not
+     * drop them.
+     */
+    const exactWarnings: string[] = [];
+    /**
+     * Live adaptive run state the outer catch reads when the strategy throws without already having
+     * described itself.
+     *
+     * `runAdaptiveCalibration` owns both, but escapes after its baseline exists (a caller abort
+     * after a committed probe, an invariant failure inside the loop or during report construction)
+     * must still surface the coverage and the warnings that were accumulated by then.
+     */
+    const adaptiveRunState: {
+      warnings: string[];
+      resourceMonitoring?: LlamaCalibrationResourceMonitoring;
+    } = { warnings: [] };
     let adaptiveProgressSnapshot: {
       overallPercent: number;
       budget: LlamaAdaptiveProgressBudget;
@@ -1168,7 +1188,8 @@ export class LlamaServerManager extends ServerManager {
           probes,
           (snapshot) => {
             adaptiveProgressSnapshot = snapshot;
-          }
+          },
+          adaptiveRunState
         );
       }
 
@@ -1284,7 +1305,7 @@ export class LlamaServerManager extends ServerManager {
         | { effectiveContextSize: number; effectiveParallelRequests: number }
         | undefined;
       const observedPromptTokenCounts = new Map<string, readonly number[]>();
-      const warnings: string[] = [];
+      const warnings = exactWarnings;
       // Candidate resolution and binary readiness are complete and no combo has launched yet: the
       // same baseline placement plan decision 2 gives adaptive mode. A metric with too few trusted
       // samples is disabled for the whole run and says so in the report warnings.
@@ -1323,15 +1344,30 @@ export class LlamaServerManager extends ServerManager {
         return diagnosticOnlyCandidate([probeIndex], 'single-launch-measurement');
       };
       /**
-       * Terminal resource rejection: emit the single `done`/`terminalStatus: 'failed'` payload and
-       * build the typed error. The outer catch recognises the error class, so it never emits a
-       * second terminal payload nor rebuilds the rejection as a generic exact failure.
+       * Terminal resource rejection: build the typed error, then emit the single
+       * `done`/`terminalStatus: 'failed'` payload. The outer catch recognises the error class, so it
+       * never emits a second terminal payload nor rebuilds the rejection as a generic exact failure.
+       *
+       * Order matters: candidate derivation and report construction run BEFORE the terminal payload,
+       * so a throw in either escapes as an untyped error with no terminal payload emitted yet, and
+       * the outer catch emits exactly one - rather than a second one after this function's.
        */
       const resourceStabilityRejection = (
         boundary: ResourceBoundaryKind,
         result: ResourceBoundaryResult,
         probeIndex?: number
       ): LlamaCalibrationResourceStabilityError => {
+        const diagnosticCandidate = exactDiagnosticCandidate();
+        const rejection = buildResourceStabilityError({
+          boundary,
+          result,
+          ...(probeIndex !== undefined ? { probeIndex } : {}),
+          strategy: 'exact',
+          probes,
+          warnings,
+          resourceMonitoring,
+          ...(diagnosticCandidate ? { diagnosticCandidate } : {}),
+        });
         exactProgress(
           'done',
           exactCandidateCount,
@@ -1342,17 +1378,7 @@ export class LlamaServerManager extends ServerManager {
           undefined,
           'failed'
         );
-        const diagnosticCandidate = exactDiagnosticCandidate();
-        return buildResourceStabilityError({
-          boundary,
-          result,
-          ...(probeIndex !== undefined ? { probeIndex } : {}),
-          strategy: 'exact',
-          probes,
-          warnings,
-          resourceMonitoring,
-          ...(diagnosticCandidate ? { diagnosticCandidate } : {}),
-        });
+        return rejection;
       };
 
       for (let comboIndex = 0; comboIndex < candidates.length; comboIndex++) {
@@ -1790,10 +1816,17 @@ export class LlamaServerManager extends ServerManager {
               strategy: 'adaptive',
               status: terminalStatus,
               createdAt: new Date().toISOString(),
-              // Reached only for a failure the strategy did not already describe, which is before
-              // its baseline exists; claiming coverage here would overstate what was observed.
+              // Reached for any failure the strategy did not already describe, which includes
+              // post-baseline escapes (a caller abort observed after a committed probe, an invariant
+              // failure inside the loop or during report construction). Coverage is therefore
+              // attached whenever the baseline exists and omitted only before it, and the warnings
+              // accumulated so far - the sole record of a disabled metric or an untrusted boundary
+              // reading - travel with it.
+              ...(adaptiveRunState.resourceMonitoring
+                ? { resourceMonitoring: adaptiveRunState.resourceMonitoring }
+                : {}),
               probes,
-              warnings: [],
+              warnings: [...adaptiveRunState.warnings],
               cleanupConfirmed: calibrationErrorCode(sanitized) !== 'CALIBRATION_CLEANUP_FAILED',
             },
           }
@@ -1827,7 +1860,10 @@ export class LlamaServerManager extends ServerManager {
             createdAt: new Date().toISOString(),
             resourceMonitoring: exactResourceMonitoring,
             probes,
-            warnings: [],
+            // The baseline's disabled-metric warning and every boundary warning accumulated so far
+            // are the only record of degraded telemetry, so they must survive alongside the
+            // (possibly `partial`) coverage this report already claims.
+            warnings: [...exactWarnings],
             cleanupConfirmed,
           },
         });
@@ -1855,7 +1891,10 @@ export class LlamaServerManager extends ServerManager {
             createdAt: new Date().toISOString(),
             resourceMonitoring: exactResourceMonitoring,
             probes,
-            warnings: [],
+            // The baseline's disabled-metric warning and every boundary warning accumulated so far
+            // are the only record of degraded telemetry, so they must survive alongside the
+            // (possibly `partial`) coverage this report already claims.
+            warnings: [...exactWarnings],
             cleanupConfirmed,
           },
         });
@@ -1871,7 +1910,10 @@ export class LlamaServerManager extends ServerManager {
           createdAt: new Date().toISOString(),
           resourceMonitoring: exactResourceMonitoring,
           probes,
-          warnings: [],
+          // The baseline's disabled-metric warning and every boundary warning accumulated so far
+          // are the only record of degraded telemetry, so they must survive alongside the
+          // (possibly `partial`) coverage this report already claims.
+          warnings: [...exactWarnings],
           cleanupConfirmed,
         },
       });
@@ -1890,10 +1932,19 @@ export class LlamaServerManager extends ServerManager {
     onProgressSnapshot: (snapshot: {
       overallPercent: number;
       budget: LlamaAdaptiveProgressBudget;
-    }) => void
+    }) => void,
+    /**
+     * Shared with the caller's outer catch, exactly like `publicProbes`: the warning list is
+     * accumulated in place and the monitoring record is published the moment the baseline exists, so
+     * an escape this strategy did not describe itself still reports what was actually observed.
+     */
+    runState: {
+      warnings: string[];
+      resourceMonitoring?: LlamaCalibrationResourceMonitoring;
+    }
   ): Promise<LlamaCalibrationReport> {
     const redact = createCalibrationPromptRedactor(validated.workloads);
-    const warnings: string[] = [];
+    const warnings = runState.warnings;
     const tokenCounts = new Map<string, readonly number[]>();
     const verifiedProfiles = new Map<
       number,
@@ -2280,6 +2331,7 @@ export class LlamaServerManager extends ServerManager {
     );
     mergeCalibrationWarnings(warnings, resourceBaseline.warnings);
     const resourceMonitoring = resourceMonitoringRecord(resourceBaseline);
+    runState.resourceMonitoring = resourceMonitoring;
     const policyReadyAt = performance.now();
     policyTiming.readyAt = policyReadyAt;
     progressBudget = resolvedProgressBudget();
@@ -2392,14 +2444,22 @@ export class LlamaServerManager extends ServerManager {
         ? diagnosticOnlyCandidate(sourceProbeIndexes, diagnostic.evidenceLevel)
         : undefined;
     };
-    /** Build the typed rejection for a boundary the guard refused to admit. */
+    /**
+     * Build the typed rejection for a boundary the guard refused to admit, then emit the single
+     * `done`/`terminalStatus: 'failed'` payload.
+     *
+     * Order matters: candidate derivation and report construction run BEFORE the terminal payload,
+     * so a throw in either escapes as an untyped error with no terminal payload emitted yet, and the
+     * outer catch emits exactly one - rather than a second one after this function's. The emit lives
+     * here rather than at the call sites so that ordering cannot be lost by a future caller.
+     */
     const resourceStabilityError = (
       boundary: ResourceBoundaryKind,
       result: ResourceBoundaryResult,
       probeIndex?: number
     ): LlamaCalibrationResourceStabilityError => {
       const diagnosticCandidate = adaptiveDiagnosticCandidate();
-      return buildResourceStabilityError({
+      const rejection = buildResourceStabilityError({
         boundary,
         result,
         ...(probeIndex !== undefined ? { probeIndex } : {}),
@@ -2409,6 +2469,8 @@ export class LlamaServerManager extends ServerManager {
         resourceMonitoring,
         ...(diagnosticCandidate ? { diagnosticCandidate } : {}),
       });
+      emitProgress('done', { terminalStatus: 'failed' });
+      return rejection;
     };
     const inheritedCeilingByCell = new Map<
       string,
@@ -2508,7 +2570,6 @@ export class LlamaServerManager extends ServerManager {
       // runs on the caller's signal, so a suspicion raised just before the wall deadline finishes.
       const preLaunchBoundary = await checkResourceBoundary('pre-launch');
       if (preLaunchBoundary && preLaunchBoundary.conclusion !== 'admitted') {
-        emitProgress('done', { terminalStatus: 'failed' });
         throw resourceStabilityError('pre-launch', preLaunchBoundary);
       }
       mergeCalibrationWarnings(warnings, preLaunchBoundary?.warnings);
@@ -2653,7 +2714,6 @@ export class LlamaServerManager extends ServerManager {
             resourceValidity: 'invalidated-by-resource-stability',
             terminationReason: 'invalidated-by-resource-stability',
           });
-          emitProgress('done', { terminalStatus: 'failed' });
           throw resourceStabilityError(
             'post-cleanup',
             postCleanupBoundary,
@@ -2765,7 +2825,6 @@ export class LlamaServerManager extends ServerManager {
               ...(fatalBoundaries ? { resourceBoundaries: fatalBoundaries } : {}),
               resourceValidity: 'invalidated-by-resource-stability',
             });
-            emitProgress('done', { terminalStatus: 'failed' });
             throw resourceStabilityError('post-cleanup', fatalBoundary, publicProbes.length - 1);
           }
           publicProbes.push({

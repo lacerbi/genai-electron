@@ -1,14 +1,14 @@
-# genai-electron Implementation Progress
+﻿# genai-electron Implementation Progress
 
-> **Current Status**: v0.19.1 — adaptive LLM runtime calibration correctness patch
+> **Current Status**: v0.19.1 â€” adaptive LLM runtime calibration correctness patch
 > (2026-08-02)
 
 ---
 
 ## Current Build Status
 
-- **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 1004/1004 passing (37 suites)
+- **Build:** âœ… 0 TypeScript errors
+- **Tests:** âœ… 1004/1004 passing (37 suites)
 - **Last Updated:** 2026-08-03 (unreleased calibration resource-stability batch)
 
 ---
@@ -17,18 +17,18 @@
 
 - Replaced calibration's resource-regime re-anchoring with **one fixed baseline per enabled trusted
   metric**. Motivation: `ISSUE-calibration-cross-regime-comparison.md` showed that re-anchoring
-  preserved forward progress but never made scores comparable across regimes — cliff classification,
+  preserved forward progress but never made scores comparable across regimes â€” cliff classification,
   cell pruning, competitiveness, and final ranking could still compare measurements taken on either
   side of a resource change, which is the original drift defect relocated. Closing every
   cross-regime path would add policy state and re-measurement; refusing to publish a recommendation
   once comparability is lost is the stronger and simpler invariant. See
-  `PLAN-calibration-resource-stability.md`.
+  `docs/dev/plans/PLAN-calibration-resource-stability.md`.
 - The baseline is established after provisioning/preparation and before the probe wall budget
   starts: a fixed settle delay, then bounded snapshots one cooldown apart, with each metric's median
   taken independently from at least two trusted values. A metric with fewer trusted values is
   disabled for the whole run with an explicit warning and a downgraded
   `resourceMonitoring.coverage`; performance evidence is never presented as proof of an unobserved
-  resource. Available host RAM and available VRAM are guarded independently — no weighting, no
+  resource. Available host RAM and available VRAM are guarded independently â€” no weighting, no
   combined score, no re-anchoring, no restart.
 - Both launch boundaries (pre-launch, and post-cleanup once teardown is confirmed) compare
   cumulatively against that single baseline, inclusively and in both directions. A suspicious
@@ -77,19 +77,27 @@ rejection path callers must catch**, identical to adaptive's.
 the packed public-API consumer check, and completed live validation on the Windows CUDA / Gemma 4
 12B reference machine: quiet enforcing runs across adaptive one-profile (complete, 6 probes),
 adaptive two-profile (complete, 11 probes, worst quiet decrease 2.26%), and exact (complete) with
-zero false aborts; one organic true-positive rejection (background activity, confirmed 11.2%→14.1%
+zero false aborts; one organic true-positive rejection (background activity, measured 11.16%â†’14.15%
 still-falling host decline, probe quarantined, diagnostic candidate from reproduced probes, clean
-teardown); a 7.18% sub-threshold injection tolerated through a full run; a 14.75% injection rejected
-typed at pre-launch with zero launches; a 14.34% injection rejected at post-cleanup with one
-invalidated probe; a 12.42% transient recovering on confirmation and continuing without an extra
-launch; and a safe VRAM crossing (second small model server under the lower-pressure exact profile)
-rejected with both metrics confirmed at post-cleanup. After every scenario: no helper or server
-survivors, manager unlocked, and a final quiet calibration completed cleanly. One recorded
-limitation, matching the documented contract: an injection concurrent with strong upward settling
-(user freeing the machine mid-run) was absorbed by the stale-low baseline — decreases are
-under-detected while a machine settles upward. Live unavailable-metric telemetry failure was not
-exercised (no safe way to break the platform commands); it remains covered deterministically.
-Claims are scoped to the measured Windows/NVIDIA hardware.
+teardown; post-run recovery evidenced by the next run's baseline â€” non-injected scenarios record no
+recovery block). Injections (injected size vs measured boundary decrease): 7.18% injected
+sub-threshold ran to completion with a maximum observed decrease of 3.33% and no boundary ever
+suspicious â€” it demonstrates zero false aborts under load, not tolerance near the band; 14.75%
+injected â†’ 14.11% measured, rejected typed at pre-launch with zero launches; 14.34% injected â†’
+11.8% measured confirmed, rejected at post-cleanup with one invalidated probe; 14.39% injected
+transient â†’ 12.42% measured suspicious initial, confirmation found âˆ’2.2% (recovered), admitted and
+continued without an extra launch; and a safe VRAM crossing (second small model server under the
+lower-pressure exact profile) rejected with both metrics confirmed at post-cleanup (host 18.4%,
+VRAM 15.8%). After every scenario: no helper or server survivors, manager unlocked, and a final
+quiet calibration completed cleanly. One recorded limitation, matching the documented contract: a
+13.12% injection concurrent with strong upward settling (user freeing the machine mid-run) peaked
+at only 9.28% measured and was absorbed by the stale-low baseline â€” decreases are under-detected
+while a machine settles upward; that run's post-release recovery gate also read outside the quiet
+band (the machine was still rising). Every live rejection exercised `CALIBRATION_RESOURCE_DRIFT`;
+`CALIBRATION_RESOURCE_STABILITY_UNVERIFIED` has deterministic coverage only (six tests â€” no safe
+live path produces flaky-then-lost telemetry on demand). Live unavailable-metric telemetry failure
+was likewise not exercised (no safe way to break the platform commands); it remains covered
+deterministically. Claims are scoped to the measured Windows/NVIDIA hardware.
 
 **Release status:** Unreleased. Accumulating on `feat/calibration-resource-stability`; no version
 bump, migration guide, tag, GitHub release, or npm publish until explicitly requested.
@@ -121,7 +129,7 @@ bump, migration guide, tag, GitHub release, or npm publish until explicitly requ
   exercised the degraded-telemetry path is fixed, and `SystemInfo.refreshMemoryTelemetry()` plus the
   public `resourceRegime` field gained direct coverage.
 - Corrected documentation that contradicted the code: the v0.18-to-v0.19 guide told exact-mode
-  callers nothing changed when `recommended` had become `selected` and `comboSource` was removed —
+  callers nothing changed when `recommended` had become `selected` and `comboSource` was removed â€”
   a silent `undefined` for the one caller class it told to relax. Also fixed the returned-report
   status list, documented `refreshMemoryTelemetry()` in the SystemInfo reference, added
   `resourceRegime` to the TypeScript reference, and corrected the "always fresh" claim for
@@ -195,7 +203,7 @@ it is the current supported version. The v0.19.0-to-v0.19.1 migration guide ship
   bisection remains covered by golden traces only: on this card the boundary sits adjacent to the
   physical ceiling, so it is reached by ceiling probe rather than by halving an interval.
 
-**Breaking change:** `LlamaServerManager.calibrate()` only. The config is a discriminated union —
+**Breaking change:** `LlamaServerManager.calibrate()` only. The config is a discriminated union â€”
 adaptive mode takes one or two `profiles` and no `combos`; exact diagnostic mode keeps the singular
 `profile` plus non-empty caller-ordered `combos`. Callers on the v0.18 default wrap their `profile`
 in `profiles: [ ... ]`; `combos` callers are unchanged. Reports are schema v2 and persisted v0.18
@@ -277,7 +285,7 @@ packed; 694,703 bytes unpacked).
   allocation with the same granularity and multi-slot accounting as `maximumContextSize`, while
   allowing the running server to expose additional harmless capacity.
 - Preserved hard `minimumContextSize` and `maximumContextSize` runtime enforcement. Validation now
-  accepts minimum + preferred without a maximum, enforces minimum ≤ preferred ≤ maximum for fields
+  accepts minimum + preferred without a maximum, enforces minimum â‰¤ preferred â‰¤ maximum for fields
   present, and reports typed preferred-value/order/overflow diagnostics.
 - Retained preferred policy through direct-spread recommendations, restart, auto-restart, and
   ResourceOrchestrator reload; updated public API documentation and regression coverage.
@@ -318,7 +326,7 @@ the open-handle verification run also passes. Lint passes with 0 errors and the 
 warnings, repository formatting and `git diff --check` pass, and the generated declarations/public
 exports are present. The 0.15.0 package dry-run contains 171 files, and the production dependency
 audit reports 0 vulnerabilities. A live smoke against the healthy GUI-provisioned Gemma 4 12B
-server confirmed the 6,144-context/one-slot `/props` result satisfies a 4,096–8,192 range, while a
+server confirmed the 6,144-context/one-slot `/props` result satisfies a 4,096â€“8,192 range, while a
 deliberate two-slot expectation returns typed `runtime-slots-mismatch` diagnostics.
 
 **Release status:** Published as v0.15.0.
@@ -403,11 +411,11 @@ inspection; `git diff --check`; and the 163-file package dry run.
 
 ### stable-diffusion.cpp `master-782-b290693` refresh (2026-07-26)
 
-- **Binary pin `master-746-2574f59` → `master-782-b290693`** (36 upstream commits;
+- **Binary pin `master-746-2574f59` â†’ `master-782-b290693`** (36 upstream commits;
   release published 2026-07-16). Updated the Metal, Windows CUDA/Vulkan/CPU, and Linux
   Vulkan/CPU asset URLs and SHA-256 checksums from the official GitHub release API. The Windows
   CUDA runtime dependency is byte-identical; its URL moves to the new tag while its digest remains
-  `fe203668…f38d`.
+  `fe203668â€¦f38d`.
 - Preserved the existing variant priority/fallback policy. Upstream now publishes ROCm variants,
   but genai-electron still lacks the AMD/ROCm capability detection needed to select them safely, so
   they are not added by this pin-only refresh.
@@ -428,10 +436,10 @@ inspection; `git diff --check`; and the 163-file package dry run.
   configured release tag and carry a 64-character lowercase SHA-256 pin.
 
 **Live CUDA smoke (RTX 4060 Laptop 8 GB):** the 362 MB Windows CUDA asset matched the official
-`bc7aa2…8a02` digest exactly and passed `sd-cli --help`. Reused the existing byte-identical CUDA
+`bc7aa2â€¦8a02` digest exactly and passed `sd-cli --help`. Reused the existing byte-identical CUDA
 runtime in an isolated `C:\tmp` directory, leaving the control-panel cache untouched. Flux 2 Klein
 Q4_0 with Qwen3-4B Q4_0 + `flux2-vae.safetensors` generated a visually inspected, prompt-correct
-red cube at 512²/4-step Euler in 6.86 s. A second run with all three offload flags generated a
+red cube at 512Â²/4-step Euler in 6.86 s. A second run with all three offload flags generated a
 visually inspected, prompt-correct blue sphere (36.61 s); both outputs were real PNGs, not gray,
 blank, or noise. CUDA initialization and the parser's `sampling using` / `generating image:` /
 `decoding 1 latents` / `decode_first_stage completed` transitions were present.
@@ -440,7 +448,7 @@ blank, or noise. CUDA initialization and the parser's `sampling using` / `genera
 595/595 tests across 25 suites, electron-control-panel production build, generated
 runtime/declaration pin smoke, `git diff --check`, and the 163-file package dry run pass.
 
-**Release status:** Included in v0.13.0. The exact old → new sd.cpp pin must remain explicit in the
+**Release status:** Included in v0.13.0. The exact old â†’ new sd.cpp pin must remain explicit in the
 GitHub release notes so downstream consumers know to re-verify model/VAE compatibility.
 
 ---
@@ -507,18 +515,18 @@ production audit reports zero vulnerabilities, clean-install dry run passed, and
 ## v0.12.0: Calibration Mirrors Production Generation Params (breaking `calibrate()` change) (2026-07-04)
 
 **Problem:** `calibrate()` let the compute-shaping generation params default individually, so a
-partial call silently diverged from production. In particular `cfgScale` defaulted to *omitted →
+partial call silently diverged from production. In particular `cfgScale` defaulted to *omitted â†’
 sd.cpp default (> 1)*, which enables classifier-free guidance = **two model passes per step**. A
 downstream app (palimpsest) benchmarked Flux Klein without passing `cfgScale`, so every calibration
-generation did ~2× the diffusion work of its real generations (`cfgScale: 1`, guidance-distilled) —
+generation did ~2Ã— the diffusion work of its real generations (`cfgScale: 1`, guidance-distilled) â€”
 inflating all times and **inverting the offload ranking** (offload-on measured ~16 s in the sweep
 vs ~8 s in real use; the sweep then recommended the offload-off combo). Root-caused from the app's
 own logs: identical model/size/steps/threads/sampler/flags, only sampling time doubled (10.2 s vs
-5.1 s), load/decode identical → the classifier-free-guidance signature.
+5.1 s), load/decode identical â†’ the classifier-free-guidance signature.
 
-**Fix (breaking):** the compute-shaping params are no longer individually defaultable —
+**Fix (breaking):** the compute-shaping params are no longer individually defaultable â€”
 `DiffusionCalibrationConfig` now takes them as a required unit:
-- New required `sizes: CalibrationSize[]` (was optional, defaulted to 768²) and required
+- New required `sizes: CalibrationSize[]` (was optional, defaulted to 768Â²) and required
   `generation: DiffusionCalibrationGeneration` (`{ steps, cfgScale, sampler }` required, optional
   `threads`/`batchSize`). Removed the flat `steps`/`cfgScale`/`sampler`/`threads`/`batchSize` fields.
 - New exported type `DiffusionCalibrationGeneration`.
@@ -526,7 +534,7 @@ own logs: identical model/size/steps/threads/sampler/flags, only sampling time d
 - `DIFFUSION_CALIBRATION_DEFAULTS` drops `sizes`/`steps`/`sampler` (caller-supplied now).
 
 **Migration:** wrap the old flat fields in `generation` / `sizes`, and **pass your production
-`cfgScale`** (e.g. `1` for Flux Klein / SDXL-Lightning/Turbo; 5–8 for standard models):
+`cfgScale`** (e.g. `1` for Flux Klein / SDXL-Lightning/Turbo; 5â€“8 for standard models):
 `calibrate({ modelId, sizes: [...], generation: { steps, cfgScale, sampler } })`.
 
 **Files:** `src/types/images.ts`, `src/types/index.ts`, `src/index.ts`, `src/config/defaults.ts`,
@@ -535,7 +543,7 @@ own logs: identical model/size/steps/threads/sampler/flags, only sampling time d
 docs (`image-generation`, `typescript-reference`, `migration-0-11-to-0-12.md`, docs index). Downstream
 palimpsest call site tracked in that repo's `ISSUE-diffusion-calibration-cfgscale.md`.
 
-**Build:** ✅ 0 TypeScript errors / 566/566 tests passing (22 suites); example app typechecks clean.
+**Build:** âœ… 0 TypeScript errors / 566/566 tests passing (22 suites); example app typechecks clean.
 
 **Released 2026-07-04 as v0.12.0.** Breaking change scoped to `calibrate()` (added in v0.11.0);
 see `genai-electron-docs/migration-0-11-to-0-12.md`.
@@ -544,7 +552,7 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
 
 ## Completed Phases
 
-### Phase 1: MVP - LLM Support ✅ (2025-10-16)
+### Phase 1: MVP - LLM Support âœ… (2025-10-16)
 
 **Core Features:**
 - SystemInfo: Hardware detection (CPU, RAM, GPU, VRAM), intelligent recommendations
@@ -560,11 +568,11 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
 
 **Detailed Progress:** See `docs/dev/phase1/` for complete Phase 1 planning and logs
 
-### Phase 2: Image Generation ✅ (2025-10-19)
+### Phase 2: Image Generation âœ… (2025-10-19)
 
 **Core Features:**
 - DiffusionServerManager: HTTP wrapper for stable-diffusion.cpp with on-demand spawning
-- Multi-stage progress tracking: Loading → Diffusion → Decoding with self-calibrating estimates
+- Multi-stage progress tracking: Loading â†’ Diffusion â†’ Decoding with self-calibrating estimates
 - ResourceOrchestrator: Automatic LLM offload/reload when RAM/VRAM constrained
 - Binary Management: CUDA dependency handling, variant testing with real functionality tests
 - GGUF Integration: Pre-download metadata extraction, accurate layer counts, generic architecture support
@@ -578,7 +586,7 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
 
 **Detailed Progress:** See `docs/dev/phase2/` for complete Phase 2 planning, logs, and app development details
 
-### Phase 2.5: Async Image Generation API ✅ (2025-10-23)
+### Phase 2.5: Async Image Generation API âœ… (2025-10-23)
 
 **Core Features:**
 - Async polling pattern for image generation (POST returns ID, GET polls status/progress)
@@ -608,7 +616,7 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
 - Example app will need updates to use async API
 - Backward compatibility: None (intentional breaking change for better UX)
 
-### Phase 2.6: genai-lite Integration ✅ (2025-10-23)
+### Phase 2.6: genai-lite Integration âœ… (2025-10-23)
 
 **Core Changes:**
 - Migrated electron-control-panel to use genai-lite 0.5.1 ImageService API
@@ -622,7 +630,7 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
 - All AI operations (LLM + image generation) now go through genai-lite
 - Reduced API surface by removing redundant code paths
 
-### Phase 3 Prep: Library Extraction Phase 1 ✅ COMPLETE (2025-10-23)
+### Phase 3 Prep: Library Extraction Phase 1 âœ… COMPLETE (2025-10-23)
 
 **Goal:** Extract reusable patterns from electron-control-panel into genai-electron library (following LIBRARY-EXTRACTION-PLAN.md)
 
@@ -630,14 +638,14 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
 
 **Completed Tasks:**
 
-1. ✅ **Type Consolidation**
+1. âœ… **Type Consolidation**
    - Exported `SavedLLMState` type from `ResourceOrchestrator.ts` (was internal interface)
    - Added `SavedLLMState` to `src/index.ts` exports
    - Updated `examples/electron-control-panel/renderer/types/api.ts` to import types from genai-electron library
    - App now uses library types instead of duplicates (eliminates type drift)
    - Clear separation: Library types vs app-specific adaptations documented
 
-2. ✅ **Structured Logs API**
+2. âœ… **Structured Logs API**
    - Added `getStructuredLogs(limit?: number): Promise<LogEntry[]>` method to `ServerManager` base class
    - Automatically inherited by `LlamaServerManager` and `DiffusionServerManager`
    - Parses raw log strings into structured `LogEntry` objects (timestamp, level, message)
@@ -646,7 +654,7 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
    - Removed manual `LogManager.parseEntry()` calls from app code (now handled by library)
    - Removed unused `LogManager` import from `ipc-handlers.ts`
 
-3. ✅ **Unit Tests (Part 1)**
+3. âœ… **Unit Tests (Part 1)**
    - Created comprehensive test suite: `tests/unit/structured-logs.test.ts`
    - Tests for both `LlamaServerManager` and `DiffusionServerManager`
    - Tests for `LogManager.parseEntry()` static method
@@ -665,7 +673,7 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
 
 **Completed Tasks:**
 
-1. ✅ **Lifecycle Helper**
+1. âœ… **Lifecycle Helper**
    - Added `attachAppLifecycle(app, managers)` utility in `src/utils/electron-lifecycle.ts`
    - Automatic graceful shutdown with server cleanup on app quit
    - Registers `before-quit` listener and stops all running servers
@@ -673,7 +681,7 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
    - Updated example app `main/index.ts` to use helper (removed manual cleanup)
    - Removed `cleanupServers()` function from `main/genai-api.ts` (now in library)
 
-2. ✅ **Error Normalization Helper**
+2. âœ… **Error Normalization Helper**
    - Added `formatErrorForUI(error)` utility in `src/utils/error-helpers.ts`
    - Converts all 8 library error classes to structured `UIErrorFormat` objects
    - Returns: `{ code, title, message, remediation }` for every error
@@ -682,7 +690,7 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
    - Removed brittle substring matching on error messages
    - Exported `UIErrorFormat` type from `src/index.ts`
 
-3. ✅ **Unit Tests (Part 2)**
+3. âœ… **Unit Tests (Part 2)**
    - Created `tests/unit/electron-lifecycle.test.ts` - 11 test cases
      - Tests app quit handling, server cleanup, error handling
      - Tests with/without servers provided, mixed server states
@@ -702,18 +710,18 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
 - `tests/unit/error-helpers.test.ts` - New test suite (22 tests)
 
 **Build Status:**
-- ✅ Library builds successfully (0 TypeScript errors)
-- ✅ All 320 tests pass (287 existing + 33 new)
-- ✅ 16 test suites, all passing
-- ✅ Example app builds successfully
+- âœ… Library builds successfully (0 TypeScript errors)
+- âœ… All 320 tests pass (287 existing + 33 new)
+- âœ… 16 test suites, all passing
+- âœ… Example app builds successfully
 
 **Overall Impact:**
 
 **All 4 "Move now" items from LIBRARY-EXTRACTION-PLAN.md complete:**
-1. ✅ Type Consolidation (use existing exports)
-2. ✅ Structured Logs API (additive method)
-3. ✅ Lifecycle/Cleanup Helper (optional utility)
-4. ✅ Error Normalization Helper (UI-friendly formatting)
+1. âœ… Type Consolidation (use existing exports)
+2. âœ… Structured Logs API (additive method)
+3. âœ… Lifecycle/Cleanup Helper (optional utility)
+4. âœ… Error Normalization Helper (UI-friendly formatting)
 
 **Benefits Delivered:**
 - Reduces app code by ~27 lines
@@ -728,15 +736,15 @@ see `genai-electron-docs/migration-0-11-to-0-12.md`.
 
 ## Key Features Delivered
 
-- ✅ **System Capability Detection** - Automatic hardware detection with intelligent recommendations
-- ✅ **Model Management** - Download GGUF models with pre-download validation and metadata extraction
-- ✅ **LLM Server Lifecycle** - Start/stop llama-server with auto-configuration and health monitoring
-- ✅ **Image Generation** - Local image generation via stable-diffusion.cpp with progress tracking
-- ✅ **Resource Orchestration** - Automatic LLM offload/reload when resources constrained (prevents crashes)
-- ✅ **Binary Management** - Automatic variant testing (CUDA → Vulkan → CPU) with dependency handling
-- ✅ **GGUF Metadata** - Extract accurate model info (layer count, context length) from any architecture
-- ✅ **Reasoning Models** - Automatic detection and configuration for reasoning-capable models
-- ✅ **Production Example** - Full-featured electron-control-panel demonstrating all capabilities
+- âœ… **System Capability Detection** - Automatic hardware detection with intelligent recommendations
+- âœ… **Model Management** - Download GGUF models with pre-download validation and metadata extraction
+- âœ… **LLM Server Lifecycle** - Start/stop llama-server with auto-configuration and health monitoring
+- âœ… **Image Generation** - Local image generation via stable-diffusion.cpp with progress tracking
+- âœ… **Resource Orchestration** - Automatic LLM offload/reload when resources constrained (prevents crashes)
+- âœ… **Binary Management** - Automatic variant testing (CUDA â†’ Vulkan â†’ CPU) with dependency handling
+- âœ… **GGUF Metadata** - Extract accurate model info (layer count, context length) from any architecture
+- âœ… **Reasoning Models** - Automatic detection and configuration for reasoning-capable models
+- âœ… **Production Example** - Full-featured electron-control-panel demonstrating all capabilities
 
 ---
 
@@ -782,7 +790,7 @@ Key design decisions that inform future development:
 
 ### Cross-Platform Compatibility
 - **Windows, macOS, Linux**: All npm scripts work across platforms (cross-env, rimraf)
-- **Binary variant testing**: Automatic fallback (CUDA → Vulkan → CPU) with real functionality tests
+- **Binary variant testing**: Automatic fallback (CUDA â†’ Vulkan â†’ CPU) with real functionality tests
 - **GitHub Actions CI/CD**: Automated testing on all platforms, code quality checks, security audit
 
 ### Production Readiness
@@ -809,13 +817,13 @@ Key design decisions that inform future development:
 
 ### Immediate Priorities
 
-**Testing & Validation:** ✅ **COMPLETE**
-- ✅ Real workload testing complete (LLM, image generation, various combinations)
-- ✅ Tested with genai-electron example app and genai-lite based apps
-- ✅ Resource orchestration validated (LLM offload/reload during image generation)
-- ✅ Example code verified working
-- ✅ Cross-platform: Windows/WSL tested locally, GitHub CI validates Ubuntu/macOS
-- 🔄 Ready for pull request (pending further review)
+**Testing & Validation:** âœ… **COMPLETE**
+- âœ… Real workload testing complete (LLM, image generation, various combinations)
+- âœ… Tested with genai-electron example app and genai-lite based apps
+- âœ… Resource orchestration validated (LLM offload/reload during image generation)
+- âœ… Example code verified working
+- âœ… Cross-platform: Windows/WSL tested locally, GitHub CI validates Ubuntu/macOS
+- ðŸ”„ Ready for pull request (pending further review)
 
 **Documentation:**
 - Review and update SETUP.md for clarity
@@ -824,7 +832,7 @@ Key design decisions that inform future development:
 
 **Maintenance (noticed 2026-07-03, during the genai-lite 0.11 pairing update):**
 - `examples/electron-control-panel` has pre-existing `npm audit` findings in its
-  dev tooling (electron ≤ 39.8.4, tar ≤ 7.5.15, brace-expansion < 1.1.13) —
+  dev tooling (electron â‰¤ 39.8.4, tar â‰¤ 7.5.15, brace-expansion < 1.1.13) â€”
   unrelated to genai-lite; run `npm audit fix` there and bump electron/forge
   when convenient
 
@@ -870,7 +878,7 @@ Key design decisions that inform future development:
 
 ## Current Focus
 
-**Phase 3 Prep: Library Extraction Phase 1 ✅ COMPLETE (2025-10-23)**
+**Phase 3 Prep: Library Extraction Phase 1 âœ… COMPLETE (2025-10-23)**
 
 **Summary:**
 - **All 4 "Move now" items complete** - Type consolidation, structured logs, lifecycle helper, error normalization
@@ -883,14 +891,14 @@ Key design decisions that inform future development:
 **Completed in 2 Parts:**
 
 **Part 1 (Commit 7d59f9c):**
-1. ✅ Type Consolidation (SavedLLMState exported, app using library types)
-2. ✅ Structured Logs API (getStructuredLogs() added to ServerManager)
-3. ✅ Unit tests (14 test cases)
+1. âœ… Type Consolidation (SavedLLMState exported, app using library types)
+2. âœ… Structured Logs API (getStructuredLogs() added to ServerManager)
+3. âœ… Unit tests (14 test cases)
 
 **Part 2 (Commit a16f264):**
-1. ✅ Lifecycle Helper (attachAppLifecycle() for automatic cleanup)
-2. ✅ Error Normalization Helper (formatErrorForUI() for consistent error handling)
-3. ✅ Unit tests (33 test cases: 11 lifecycle + 22 error formatting)
+1. âœ… Lifecycle Helper (attachAppLifecycle() for automatic cleanup)
+2. âœ… Error Normalization Helper (formatErrorForUI() for consistent error handling)
+3. âœ… Unit tests (33 test cases: 11 lifecycle + 22 error formatting)
 
 **Files Modified (14 total):**
 - Library: 6 files (2 new utilities, 3 updated managers, index.ts)
@@ -910,7 +918,7 @@ Key design decisions that inform future development:
 
 ---
 
-## Documentation Restructuring ✅ COMPLETE (2025-10-24)
+## Documentation Restructuring âœ… COMPLETE (2025-10-24)
 
 **Goal:** Transform documentation from large scattered files into a portable, modular `genai-electron-docs/` folder.
 
@@ -937,10 +945,10 @@ Key design decisions that inform future development:
 - Net project reduction: ~10,755 words
 
 **Result:**
-- ✅ 11 modular, self-contained documentation files
-- ✅ All APIs, types, examples, and utilities documented
-- ✅ No broken links, consistent terminology
-- ✅ Production-ready documentation structure
+- âœ… 11 modular, self-contained documentation files
+- âœ… All APIs, types, examples, and utilities documented
+- âœ… No broken links, consistent terminology
+- âœ… Production-ready documentation structure
 
 For detailed planning: `docs/dev/2025-10-23-documentation-restructure-plan.md`
 
@@ -952,7 +960,7 @@ For detailed planning: `docs/dev/2025-10-23-documentation-restructure-plan.md`
 
 **Core Features:**
 - New type system: `DiffusionComponentRole`, `DiffusionComponentInfo`, `DiffusionModelComponents`, `DiffusionComponentDownload`
-- Multi-file download flow with aggregate progress tracking (smooth 0→100% across all components)
+- Multi-file download flow with aggregate progress tracking (smooth 0â†’100% across all components)
 - Per-model subdirectory storage for multi-component models (flat layout preserved for single-file)
 - Component-aware CLI arg building (`--diffusion-model`, `--llm`, `--vae`, etc.)
 - Auto-detection of `--offload-to-cpu` (model footprint > 85% VRAM) and `--diffusion-fa` (Flux 2 architecture)
@@ -965,20 +973,20 @@ For detailed planning: `docs/dev/2025-10-23-documentation-restructure-plan.md`
 - SDXL Split: `--diffusion-model` + `--clip_l` + `--clip_g` + `--vae` (4 files, ~7 GB)
 
 **Files Modified:**
-- `src/types/models.ts` — 4 new types, extended `ModelInfo` and `DownloadConfig`
-- `src/types/images.ts` — 2 new fields on `DiffusionServerConfig`
-- `src/config/defaults.ts` — `DIFFUSION_COMPONENT_FLAGS`, `DIFFUSION_COMPONENT_ORDER`
-- `src/config/paths.ts` — `getModelDirectory()` helper
-- `src/managers/ModelManager.ts` — `downloadMultiComponentModel()` with aggregate progress
-- `src/managers/StorageManager.ts` — Multi-component delete and verify
-- `src/managers/DiffusionServerManager.ts` — Per-component CLI args, new optimization flags
-- `src/index.ts` — New exports (types, constants, utilities)
+- `src/types/models.ts` â€” 4 new types, extended `ModelInfo` and `DownloadConfig`
+- `src/types/images.ts` â€” 2 new fields on `DiffusionServerConfig`
+- `src/config/defaults.ts` â€” `DIFFUSION_COMPONENT_FLAGS`, `DIFFUSION_COMPONENT_ORDER`
+- `src/config/paths.ts` â€” `getModelDirectory()` helper
+- `src/managers/ModelManager.ts` â€” `downloadMultiComponentModel()` with aggregate progress
+- `src/managers/StorageManager.ts` â€” Multi-component delete and verify
+- `src/managers/DiffusionServerManager.ts` â€” Per-component CLI args, new optimization flags
+- `src/index.ts` â€” New exports (types, constants, utilities)
 - Tests: 22 new test cases across 4 test suites
 - Documentation: typescript-reference, model-management, image-generation, DESIGN.md updated
 
 **Build Status:**
-- ✅ 0 TypeScript errors
-- ✅ 403/403 tests passing (357 existing + 46 new)
+- âœ… 0 TypeScript errors
+- âœ… 403/403 tests passing (357 existing + 46 new)
 
 ---
 
@@ -991,9 +999,9 @@ For detailed planning: `docs/dev/2025-10-23-documentation-restructure-plan.md`
 **Behavioral change:** The promise returned by `orchestrateImageGeneration()` now resolves ~10-30s earlier. The LLM may not yet be running when the promise resolves. Callers that need the LLM should use `waitForReload()` or check `llamaServer.isRunning()` before making inference calls.
 
 **Files modified:**
-- `src/managers/ResourceOrchestrator.ts` — async reload with `pendingReload` field, `waitForReload()` method
-- `tests/unit/ResourceOrchestrator.test.ts` — updated 9 tests, added 1 new concurrency guard test (19 total)
-- `genai-electron-docs/resource-orchestration.md` — documented async behavior and new API
+- `src/managers/ResourceOrchestrator.ts` â€” async reload with `pendingReload` field, `waitForReload()` method
+- `tests/unit/ResourceOrchestrator.test.ts` â€” updated 9 tests, added 1 new concurrency guard test (19 total)
+- `genai-electron-docs/resource-orchestration.md` â€” documented async behavior and new API
 
 ---
 
@@ -1009,70 +1017,70 @@ For detailed historical information:
 **Goal:** Port gmbench's battle-tested llama-server knowledge into the library and pair with genai-lite v0.9.0 (reasoning toggle needs an always-`--jinja` server). Plan: `docs/dev/plans/PLAN-local-server-features.md`.
 
 **Core Features:**
-- llama.cpp pinned b7956 → b9860 (checksums from the releases-API digests; Linux x64 CUDA prebuilts discontinued upstream → Vulkan → CPU chain); fixed a latent macOS/Linux install bug (nested `llama-<tag>/` tar layouts now flattened)
+- llama.cpp pinned b7956 â†’ b9860 (checksums from the releases-API digests; Linux x64 CUDA prebuilts discontinued upstream â†’ Vulkan â†’ CPU chain); fixed a latent macOS/Linux install bug (nested `llama-<tag>/` tar layouts now flattened)
 - Modernized launch contract: unconditional `--jinja` (opt-out), tri-state `flashAttention` (`-fa on|off|auto`), KV-cache quantization (`cacheTypeK/V` + FA constraint enforcement), MoE offload (`overrideTensors`, `cacheRam`, `cpuMoe`, `nCpuMoe`), `reasoningFormat`, `fit` (default `off`), `host`, explicit `-ngl 0` for CPU-only; previously-dead fields wired (`modelAlias`, `batchSize`, `continuousBatching`, `useMmap`, `useMlock`)
 - All health/validation probes use 127.0.0.1 (Windows IPv6 penalty); host-aware health checks
 - Port optional with defaults + `port: 'auto'` (new `findFreePort`/`isPortBindable`); real bind test in availability check; cross-app occupancy safety rail (`occupancyCheck`, `/props` fingerprint)
-- Reliability: per-start `startupTimeout` (default 60 s → 120 s), `ServerInfo.loadTimeMs`, opt-in crash `autoRestart` with backoff + `maxRestarts`, opt-in hang watchdog (`healthCheckInterval`, emits `health-check-ok/failed`), LogManager size-based rotation
+- Reliability: per-start `startupTimeout` (default 60 s â†’ 120 s), `ServerInfo.loadTimeMs`, opt-in crash `autoRestart` with backoff + `maxRestarts`, opt-in hang watchdog (`healthCheckInterval`, emits `health-check-ok/failed`), LogManager size-based rotation
 - Multi-shard GGUF downloads (`-00001-of-0000N` auto-detection, `shardFiles` override, aggregate progress, `ModelInfo.shards`)
-- Diffusion cancellation: `cancelImageGeneration(id)`, `getActiveGenerationId()`, `DELETE /v1/images/generations/:id`, terminal `'cancelled'` status (genai-lite ≤ 0.9.0 caveat documented; follow-up filed in genai-lite)
+- Diffusion cancellation: `cancelImageGeneration(id)`, `getActiveGenerationId()`, `DELETE /v1/images/generations/:id`, terminal `'cancelled'` status (genai-lite â‰¤ 0.9.0 caveat documented; follow-up filed in genai-lite)
 - Debug traces gated behind `GENAI_ELECTRON_DEBUG`
 - Example app v0.4.0: reasoning request toggle, flash-attention/KV-cache form controls, image-generation Cancel button (genai-lite ^0.9.0; pairing live-verified: reasoning toggle end-to-end against Qwen3.5-4B on the b9860 server)
 
 **Files Modified:** `src/config/defaults.ts`, `src/types/{servers,models,images,index}.ts`, `src/managers/{LlamaServerManager,DiffusionServerManager,ModelManager,StorageManager,BinaryManager,ServerManager,ResourceOrchestrator,GenerationRegistry}.ts`, `src/process/{health-check,log-manager,port-utils}.ts`, `src/utils/debug-log.ts`, `src/index.ts`, example app (TestChat, LlamaServerConfig/Control, DiffusionServerControl, preload, ipc-handlers), docs (`genai-electron-docs/*`, `migration-0-5-to-0-6.md`, `docs/dev/UPDATING-BINARIES.md`)
 
-**Build Status:** ✅ 0 TypeScript errors / 486/486 tests passing (20 suites)
+**Build Status:** âœ… 0 TypeScript errors / 486/486 tests passing (20 suites)
 
-**Released:** v0.6.1 published to npm (2026-07-03; 0.6.0 was tagged but never published — the audit patch superseded it). GitHub Release on tag `v0.6.1`.
+**Released:** v0.6.1 published to npm (2026-07-03; 0.6.0 was tagged but never published â€” the audit patch superseded it). GitHub Release on tag `v0.6.1`.
 
 **Follow-ups (agreed, not yet started; updated 2026-07-03 post-v0.9.0):**
-- **palimpsest-engine integration** (downstream, next natural step) — consume v0.8/0.9: drop the MoE filename regex (`/-a\d+b/i`) + manual `cpuMoe`/`gpuLayers: 999`/pinned-context path (v0.8 auto-config covers it), and the `binary-log` percent regex + throttle (subscribe to `'binary-progress'`, v0.9).
-- ~~stable-diffusion.cpp bump~~ — DONE in v0.10.0 (pin `master-746-2574f59`, full surface re-validation, live smoke on all three win32 variants; see the v0.10.0 section and `docs/dev/plans/PLAN-sd-cpp-bump.md`).
-- ~~**Skip byte-identical dependency re-downloads**~~ — RESOLVED in Unreleased
+- **palimpsest-engine integration** (downstream, next natural step) â€” consume v0.8/0.9: drop the MoE filename regex (`/-a\d+b/i`) + manual `cpuMoe`/`gpuLayers: 999`/pinned-context path (v0.8 auto-config covers it), and the `binary-log` percent regex + throttle (subscribe to `'binary-progress'`, v0.9).
+- ~~stable-diffusion.cpp bump~~ â€” DONE in v0.10.0 (pin `master-746-2574f59`, full surface re-validation, live smoke on all three win32 variants; see the v0.10.0 section and `docs/dev/plans/PLAN-sd-cpp-bump.md`).
+- ~~**Skip byte-identical dependency re-downloads**~~ â€” RESOLVED in Unreleased
   binary-provisioning robustness: installed dependencies are reused by checksum
   across release-URL changes.
-- **Example-app toolchain chore** — Electron Forge devDependency chain carries npm-audit highs fixable only via major bumps (electron 35→43 + Forge majors). Dev-only, outside the published package and CI's root-only audit gate.
-- **Example app: forward `'binary-progress'` over IPC** — the control panel still forwards only `'binary-log'`; wire the structured event through preload/renderer for a real progress bar (small; pairs with the toolchain chore).
-- **ROCm/HIP binary variants** — upstream now ships `win-hip-radeon` + `ubuntu-rocm` prebuilts; blocked on Windows AMD GPU detection (DESIGN Phase 4).
-- ~~genai-lite `'cancelled'` terminal status~~ — RESOLVED in genai-lite v0.9.2.
+- **Example-app toolchain chore** â€” Electron Forge devDependency chain carries npm-audit highs fixable only via major bumps (electron 35â†’43 + Forge majors). Dev-only, outside the published package and CI's root-only audit gate.
+- **Example app: forward `'binary-progress'` over IPC** â€” the control panel still forwards only `'binary-log'`; wire the structured event through preload/renderer for a real progress bar (small; pairs with the toolchain chore).
+- **ROCm/HIP binary variants** â€” upstream now ships `win-hip-radeon` + `ubuntu-rocm` prebuilts; blocked on Windows AMD GPU detection (DESIGN Phase 4).
+- ~~genai-lite `'cancelled'` terminal status~~ â€” RESOLVED in genai-lite v0.9.2.
 
 ---
 
 ## v0.7.0: Adaptive Context Sizing & KV-Aware Auto-Configuration (2026-07-03)
 
-**Goal/Problem:** `recommendContextSize` was a stub returning a constant 4096, so every auto-configured server ran a ≤4K context regardless of hardware — silently truncating long prompts (hit by palimpsest-engine; `docs/dev/issues/ISSUE-context-size-recommendation.md`). The flat 2 GB KV reserve in layer packing could also push almost-fitting models into partial offload.
+**Goal/Problem:** `recommendContextSize` was a stub returning a constant 4096, so every auto-configured server ran a â‰¤4K context regardless of hardware â€” silently truncating long prompts (hit by palimpsest-engine; `docs/dev/issues/ISSUE-context-size-recommendation.md`). The flat 2 GB KV reserve in layer packing could also push almost-fitting models into partial offload.
 
 **Core Features:**
 - Real KV-cache arithmetic (`estimateKVBytesPerToken`, GQA-aware via `attention.head_count_kv`; new GGUF fields extracted, raw-metadata fallback for older downloads)
 - `getOptimalConfig(modelInfo, hints?)`: full-GPU-offload-preferring layer packing (KV reserve flexes down to the 4096-token floor), context sized from leftover VRAM/RAM with **no artificial ceiling** (capped by the model's own context_length), rounded to 1024
-- **Automatic q8_0 KV quantization by default** (+ flash attention on) unless f16 at the model's full native context fits — opt out via explicit `cacheTypeK/V: 'f16'` or `flashAttention: 'off'`; pinned hints (contextSize/gpuLayers/cache types) shape the remaining recommendations
+- **Automatic q8_0 KV quantization by default** (+ flash attention on) unless f16 at the model's full native context fits â€” opt out via explicit `cacheTypeK/V: 'f16'` or `flashAttention: 'off'`; pinned hints (contextSize/gpuLayers/cache types) shape the remaining recommendations
 - KV-aware `canRunModel` and ResourceOrchestrator usage estimates; legacy behavior preserved exactly for models without GGUF metadata
 - New exports: `estimateKVBytesPerToken`, `KV_CACHE_BYTES_PER_ELEMENT`, `KV_SIZING`, `OptimalConfigHints`
 
 **Files Modified:** `src/utils/kv-cache-math.ts` (new), `src/utils/model-metadata-helpers.ts`, `src/system/SystemInfo.ts`, `src/managers/{LlamaServerManager,ModelManager,ResourceOrchestrator}.ts`, `src/config/defaults.ts`, `src/types/{models,servers,index}.ts`, `src/index.ts`, docs (`system-detection`, `llm-server`, `typescript-reference`, `image-generation`, `migration-0-6-to-0-7.md`)
 
-**Build Status:** ✅ 0 TypeScript errors / 514/514 tests passing (21 suites); v0.7.1 adds the progressive context-granularity ladder (128→4096 steps by magnitude, `floorContextToGranularity` exported; amends unpublished v0.7.0 — publish 0.7.1). Live GPU smoke: pure auto-config on Qwen3.5-4B → full offload, auto q8_0 KV + FA, context 58368 (→ 57344 with the ladder), 8130-token prompt round-trips without truncation
+**Build Status:** âœ… 0 TypeScript errors / 514/514 tests passing (21 suites); v0.7.1 adds the progressive context-granularity ladder (128â†’4096 steps by magnitude, `floorContextToGranularity` exported; amends unpublished v0.7.0 â€” publish 0.7.1). Live GPU smoke: pure auto-config on Qwen3.5-4B â†’ full offload, auto q8_0 KV + FA, context 58368 (â†’ 57344 with the ladder), 8130-token prompt round-trips without truncation
 
 ---
 
-## v0.11.0: Diffusion Offload Calibration — `diffusionServer.calibrate()` (2026-07-04)
+## v0.11.0: Diffusion Offload Calibration â€” `diffusionServer.calibrate()` (2026-07-04)
 
-**Goal/Problem:** The static VRAM heuristic cannot pick the fastest CPU-offload flag combo — the optimum is machine-dependent and the flags interact (measured on an 8 GB Win11 laptop with Flux 2 Klein: auto ~18 s vs `clipOnCpu:false`+`offloadToCpu:true` ~10–12 s; `vaeOnCpu` ~3× slower; Windows thrashes where Linux hard-OOMs). Only a live sweep on the target machine can decide. Proposal: `docs/dev/issues/ISSUE-diffusion-offload-calibration.md`; plan: `docs/dev/plans/PLAN-diffusion-calibration.md`.
+**Goal/Problem:** The static VRAM heuristic cannot pick the fastest CPU-offload flag combo â€” the optimum is machine-dependent and the flags interact (measured on an 8 GB Win11 laptop with Flux 2 Klein: auto ~18 s vs `clipOnCpu:false`+`offloadToCpu:true` ~10â€“12 s; `vaeOnCpu` ~3Ã— slower; Windows thrashes where Linux hard-OOMs). Only a live sweep on the target machine can decide. Proposal: `docs/dev/issues/ISSUE-diffusion-offload-calibration.md`; plan: `docs/dev/plans/PLAN-diffusion-calibration.md`.
 
 **Core Features:**
-- `calibrate(config)` on DiffusionServerManager: benchmarks offload combos × sizes with real generations (fixed seed/steps/prompt/sampler → identical work per combo), 1 discarded warmup per combo + median-of-samples timing, per-stage split (`stageMs`: load/diffusion/decode), OOM-vs-error classification from stderr/exit code, per-size `recommended` (5% tie tolerance prefers fewer forced flags)
+- `calibrate(config)` on DiffusionServerManager: benchmarks offload combos Ã— sizes with real generations (fixed seed/steps/prompt/sampler â†’ identical work per combo), 1 discarded warmup per combo + median-of-samples timing, per-stage split (`stageMs`: load/diffusion/decode), OOM-vs-error classification from stderr/exit code, per-size `recommended` (5% tie tolerance prefers fewer forced flags)
 - **No server restarts:** per-generation flag overrides threaded through `computeDiffusionOptimizations` (flags resolve per spawn); server must be stopped, is left stopped; `start()` guarded during sweeps; `isCalibrating()`
-- Sweep-level LLM offload/restore via the internal orchestrator (`waitForReload()` → `offloadLLM()` once, `reloadLLM()` in finally; both promoted to public API)
-- Progress for UIs: guarded `onProgress` callback + `'calibration-progress'` event (same payload; smooth monotonic `overallPercent` with within-generation folding) — IPC-forwardable like `'binary-progress'`
-- Abort via `AbortSignal` → `ServerError` with `details.code = 'CALIBRATION_ABORTED'` + partial runs in `details.runs`
-- SD3.5-Large guard: forced `clipOnCpu: true` combos auto-skipped → `report.skippedCombos` (upstream leejet/stable-diffusion.cpp#1578)
+- Sweep-level LLM offload/restore via the internal orchestrator (`waitForReload()` â†’ `offloadLLM()` once, `reloadLLM()` in finally; both promoted to public API)
+- Progress for UIs: guarded `onProgress` callback + `'calibration-progress'` event (same payload; smooth monotonic `overallPercent` with within-generation folding) â€” IPC-forwardable like `'binary-progress'`
+- Abort via `AbortSignal` â†’ `ServerError` with `details.code = 'CALIBRATION_ABORTED'` + partial runs in `details.runs`
+- SD3.5-Large guard: forced `clipOnCpu: true` combos auto-skipped â†’ `report.skippedCombos` (upstream leejet/stable-diffusion.cpp#1578)
 - New exports: `DiffusionOffloadCombo`, `CalibrationSize`, `DiffusionCalibrationConfig/Progress/Report`, `CalibrationRun`, `DIFFUSION_CALIBRATION_DEFAULTS`
 
 **Files Modified:** `src/types/{images,index}.ts`, `src/index.ts`, `src/config/defaults.ts`, `src/managers/{DiffusionServerManager,ResourceOrchestrator}.ts`, `tests/unit/diffusion-calibration.test.ts` (new, 23 cases), docs (`image-generation` "Offload Calibration" section, `typescript-reference`, `resource-orchestration`, index/troubleshooting cross-refs, `migration-0-10-to-0-11.md`), example app (calibration UI)
 
-**Build Status:** ✅ 0 TypeScript errors / 566/566 tests passing (22 suites)
+**Build Status:** âœ… 0 TypeScript errors / 566/566 tests passing (22 suites)
 
-**Live smoke (2026-07-04, RTX 4060 Laptop 8 GB, flux-2-klein-q40 768²/4-step):** full default sweep passed — recommended `clip-gpu` at 17.1 s median vs auto's 33.5 s (~2×); `vaeOnCpu` decode trap confirmed (97.3 s, decode 66 s); 5% tie-break exercised live (`all-resident` 16.9 s / `clip-gpu` 17.1 s / `clip-gpu+offload` 17.4 s → fewest forced flags won); progress monotonic, phases in order, callback/event parity (2303 events); post-sweep normal `start()` + generation with recommended flags OK, server left stopped. Details: `docs/dev/plans/PLAN-diffusion-calibration.md` Phase 6.
+**Live smoke (2026-07-04, RTX 4060 Laptop 8 GB, flux-2-klein-q40 768Â²/4-step):** full default sweep passed â€” recommended `clip-gpu` at 17.1 s median vs auto's 33.5 s (~2Ã—); `vaeOnCpu` decode trap confirmed (97.3 s, decode 66 s); 5% tie-break exercised live (`all-resident` 16.9 s / `clip-gpu` 17.1 s / `clip-gpu+offload` 17.4 s â†’ fewest forced flags won); progress monotonic, phases in order, callback/event parity (2303 events); post-sweep normal `start()` + generation with recommended flags OK, server left stopped. Details: `docs/dev/plans/PLAN-diffusion-calibration.md` Phase 6.
 
 ---
 
@@ -1081,29 +1089,29 @@ For detailed historical information:
 **Goal/Problem:** The diffusion binary pin (`master-504-636d3cb`, 2026-02-10) was 242 releases behind upstream. Bump to the latest release, re-validate the whole sd-cli surface (flags, log formats, asset scheme), and retire workarounds that no longer apply. Plan: `docs/dev/plans/PLAN-sd-cpp-bump.md`.
 
 **Core changes:**
-- **Binary pin `master-504-636d3cb` → `master-746-2574f59`** (2026-07-02; checksums from the releases-API `digest` field). CLI surface verified backward-compatible via upstream source diff: every flag we pass is unchanged; the only removal in the whole range is `--cache-preset` (unused).
-- **Windows CPU variant**: upstream consolidated the four per-ISA zips into a single `win-cpu-x64.zip` with runtime CPU dispatch (`ggml-cpu-<arch>.dll` backends, best picked at runtime) — strictly better than the old AVX2-only pin.
-- **Linux gains a Vulkan variant** ahead of CPU (new upstream asset), mirroring the llama.cpp Linux chain — Linux GPU users get acceleration instead of CPU-only.
-- **CUDA offload guard retired** (behavior change): `--clip-on-cpu`/`--vae-on-cpu`/`--offload-to-cpu` crashed sd.cpp CUDA builds silently (0xC0000005) at the old pin, so auto-detection suppressed them on CUDA installs; fixed upstream. Auto-detection is now identical on all backends — low-VRAM CUDA setups may auto-enable offload flags (explicit `false` restores the old behavior). Added the previously missing variant-aware test coverage. Upstream caveat documented: SD3.5-Large + `--clip-on-cpu` is broken on any backend (leejet/stable-diffusion.cpp#1578).
-- **Progress parsing fixed for the new build** (would have silently broken otherwise): upstream renamed the loading literal (`loading tensors from` → `loading model from`) and switched loading to `#`-style byte bars (`|####| N/M - GB/s`) that the old regex would have misread as sampling steps. The step regex now requires an it-rate unit (`it/s`/`s/it`), and a byte-bar branch feeds loading progress only. 3 new parser tests (+1 guard-retirement test, above).
+- **Binary pin `master-504-636d3cb` â†’ `master-746-2574f59`** (2026-07-02; checksums from the releases-API `digest` field). CLI surface verified backward-compatible via upstream source diff: every flag we pass is unchanged; the only removal in the whole range is `--cache-preset` (unused).
+- **Windows CPU variant**: upstream consolidated the four per-ISA zips into a single `win-cpu-x64.zip` with runtime CPU dispatch (`ggml-cpu-<arch>.dll` backends, best picked at runtime) â€” strictly better than the old AVX2-only pin.
+- **Linux gains a Vulkan variant** ahead of CPU (new upstream asset), mirroring the llama.cpp Linux chain â€” Linux GPU users get acceleration instead of CPU-only.
+- **CUDA offload guard retired** (behavior change): `--clip-on-cpu`/`--vae-on-cpu`/`--offload-to-cpu` crashed sd.cpp CUDA builds silently (0xC0000005) at the old pin, so auto-detection suppressed them on CUDA installs; fixed upstream. Auto-detection is now identical on all backends â€” low-VRAM CUDA setups may auto-enable offload flags (explicit `false` restores the old behavior). Added the previously missing variant-aware test coverage. Upstream caveat documented: SD3.5-Large + `--clip-on-cpu` is broken on any backend (leejet/stable-diffusion.cpp#1578).
+- **Progress parsing fixed for the new build** (would have silently broken otherwise): upstream renamed the loading literal (`loading tensors from` â†’ `loading model from`) and switched loading to `#`-style byte bars (`|####| N/M - GB/s`) that the old regex would have misread as sampling steps. The step regex now requires an it-rate unit (`it/s`/`s/it`), and a byte-bar branch feeds loading progress only. 3 new parser tests (+1 guard-retirement test, above).
 - **Sampler enum** += `er_sde`, `euler_cfg_pp`, `euler_a_cfg_pp` (upstream additions); example-app sampler select + docs updated.
 - Docs: troubleshooting + image-generation offload sections rewritten for the retirement; `docs/dev/UPDATING-BINARIES.md` retitled and generalized with a stable-diffusion.cpp section (tag scheme, asset naming, digest workflow, log-format coupling) and its stale 30 s test-timeout claim fixed (actual: 120 s multi-component / 15 s single-file).
 - Folded into this batch (concurrent docs work already on main): genai-lite 0.11 pairing notes + example pin `genai-lite ^0.11.0` (`36952da`); example dev-tooling audit-findings maintenance note (`fcddb22`).
 
-**Live smoke (RTX 4060 Laptop 8 GB, driver 576.80, Windows 11):** all three win32 variants provisioned from scratch (Phase 1 `--help` + Phase 2 real 64×64 inference) and generated valid PNGs — CUDA: SDXL-Lightning 512²/20-step in 11.1 s and Flux-2-Klein multi-component (`--diffusion-model/--llm/--vae --diffusion-fa` verified in the spawn command) in 8.0 s; forced Vulkan: 34.1 s (slower per upstream perf issue #1647; correctness fine); forced CPU: 256²/4-step in 57 s with all 9 dispatch DLLs surviving install. **CUDA offload matrix all clean: clipOnCpu ✓ (14.8 s) / vaeOnCpu ✓ (22.1 s) / offloadToCpu ✓ (7.9 s, output byte-identical to baseline at the same seed) / all three ✓ (30.9 s)** — the old crash did not reproduce. New `er_sde` sampler ✓. Post-retirement auto-config live-verified: Flux on the CUDA install now auto-enables clip-on-cpu (`auto: clip=true`) and generates correctly.
+**Live smoke (RTX 4060 Laptop 8 GB, driver 576.80, Windows 11):** all three win32 variants provisioned from scratch (Phase 1 `--help` + Phase 2 real 64Ã—64 inference) and generated valid PNGs â€” CUDA: SDXL-Lightning 512Â²/20-step in 11.1 s and Flux-2-Klein multi-component (`--diffusion-model/--llm/--vae --diffusion-fa` verified in the spawn command) in 8.0 s; forced Vulkan: 34.1 s (slower per upstream perf issue #1647; correctness fine); forced CPU: 256Â²/4-step in 57 s with all 9 dispatch DLLs surviving install. **CUDA offload matrix all clean: clipOnCpu âœ“ (14.8 s) / vaeOnCpu âœ“ (22.1 s) / offloadToCpu âœ“ (7.9 s, output byte-identical to baseline at the same seed) / all three âœ“ (30.9 s)** â€” the old crash did not reproduce. New `er_sde` sampler âœ“. Post-retirement auto-config live-verified: Flux on the CUDA install now auto-enables clip-on-cpu (`auto: clip=true`) and generates correctly.
 
 **Files Modified:** `src/config/defaults.ts`, `src/managers/DiffusionServerManager.ts`, `src/types/images.ts`, `tests/unit/DiffusionServerManager.test.ts`, example app (`DiffusionServerControl.tsx`), docs (`image-generation`, `troubleshooting`, `typescript-reference`, `docs/dev/UPDATING-BINARIES.md`, `docs/dev/plans/PLAN-sd-cpp-bump.md` new)
 
-**Build Status:** ✅ 0 TypeScript errors / 543/543 tests passing (21 suites)
+**Build Status:** âœ… 0 TypeScript errors / 543/543 tests passing (21 suites)
 
 ---
 
 ## v0.9.0: Structured Binary-Provisioning Progress (2026-07-03)
 
-- **`'binary-progress'` event**: structured companion to `'binary-log'` for binary-provisioning UIs — `BinaryProgressEvent { phase: downloading|extracting|verifying|testing, file, downloaded?, total?, percent? }`, throttled to whole-percent changes at the source, one event per phase transition, emitted by both server managers. Resolves `docs/dev/issues/ISSUE-binary-progress-event.md` (palimpsest drops its log-regex + chunk throttle). `'binary-log'` unchanged.
+- **`'binary-progress'` event**: structured companion to `'binary-log'` for binary-provisioning UIs â€” `BinaryProgressEvent { phase: downloading|extracting|verifying|testing, file, downloaded?, total?, percent? }`, throttled to whole-percent changes at the source, one event per phase transition, emitted by both server managers. Resolves `docs/dev/issues/ISSUE-binary-progress-event.md` (palimpsest drops its log-regex + chunk throttle). `'binary-log'` unchanged.
 - Orchestrator MoE-estimate test coverage (v0.8.0 review finding 5b, PR #32).
 
-**Build Status:** ✅ 0 TypeScript errors / 539/539 tests passing (21 suites)
+**Build Status:** âœ… 0 TypeScript errors / 539/539 tests passing (21 suites)
 
 ---
 
@@ -1112,12 +1120,12 @@ For detailed historical information:
 **Goal/Problem:** Adaptive sizing (v0.7) treated the whole model file as GPU-resident, so MoE models with `--cpu-moe` got floor-level context and hint-less MoE got slow dense partial offload (`docs/dev/issues/ISSUE-moe-aware-auto-config.md`, filed by palimpsest-engine). Apps resorted to filename heuristics to detect MoE.
 
 **Core Features:**
-- Exact expert-weights measurement from GGUF tensor offsets at download (`expert_weights_bytes`; quant-agnostic — correct for Unsloth Dynamic quants; `_exps` match mirrors llama.cpp's `--cpu-moe` selection, shared experts count as trunk); MoE metadata extracted (`expert_count`, `expert_used_count`, `expert_feed_forward_length`)
-- Auto `cpuMoe` tier in the offload ladder: full dense → **trunk-on-GPU + experts-in-RAM** → dense partial → CPU; context sized against the trunk; KV stays GPU-side
-- `OptimalConfigHints` += `cpuMoe`/`nCpuMoe`/`overrideTensors` (`'exps=CPU'` ≡ cpuMoe; custom `-ot` sized conservatively as dense); parameter-count heuristic fallback for pre-0.8 downloads
+- Exact expert-weights measurement from GGUF tensor offsets at download (`expert_weights_bytes`; quant-agnostic â€” correct for Unsloth Dynamic quants; `_exps` match mirrors llama.cpp's `--cpu-moe` selection, shared experts count as trunk); MoE metadata extracted (`expert_count`, `expert_used_count`, `expert_feed_forward_length`)
+- Auto `cpuMoe` tier in the offload ladder: full dense â†’ **trunk-on-GPU + experts-in-RAM** â†’ dense partial â†’ CPU; context sized against the trunk; KV stays GPU-side
+- `OptimalConfigHints` += `cpuMoe`/`nCpuMoe`/`overrideTensors` (`'exps=CPU'` â‰¡ cpuMoe; custom `-ot` sized conservatively as dense); parameter-count heuristic fallback for pre-0.8 downloads
 - MoE-aware ResourceOrchestrator estimates (CPU-resident experts count against RAM)
 - Hardening from live-smoke failures: per-layer `attention.head_count_kv` arrays (Gemma 4 alternating attention) normalized via mean in KV math (was NaN); Windows standby-aware available-RAM detection (PerfOS `AvailableBytes` refreshed in `detect()`; `os.freemem()` reported 1.5 GB on a box with ~11 GB reclaimable); mmap-aware expert RAM gate (60% of total RAM, trunk-only committed requirement in `canRunModel`)
 
 **Files Modified:** `src/managers/{ModelManager,LlamaServerManager,ResourceOrchestrator}.ts`, `src/system/{SystemInfo,memory-detect}.ts`, `src/utils/model-metadata-helpers.ts`, `src/types/{models,servers}.ts`, `src/config/defaults.ts`, `src/index.ts`, docs (`system-detection`, `llm-server`, `typescript-reference`, `migration-0-7-to-0-8.md`)
 
-**Build Status:** ✅ 0 TypeScript errors / 532/532 tests passing (21 suites); Opus review pass applied (sharded-MoE measurement skip → heuristic fallback; auto tier restricted to MEASURED expert bytes; orchestrator nCpuMoe split). Live GPU smoke: gemma-4-26B-A4B pure auto-config → `--cpu-moe -ngl 30 -c 16384` + q8_0 KV, healthy + /props-confirmed on an 8 GiB GPU / 23 GiB RAM machine; e2e token check: 131 tokens @ ~12.2 tok/s, exact answer with reasoning_content separated
+**Build Status:** âœ… 0 TypeScript errors / 532/532 tests passing (21 suites); Opus review pass applied (sharded-MoE measurement skip â†’ heuristic fallback; auto tier restricted to MEASURED expert bytes; orchestrator nCpuMoe split). Live GPU smoke: gemma-4-26B-A4B pure auto-config â†’ `--cpu-moe -ngl 30 -c 16384` + q8_0 KV, healthy + /props-confirmed on an 8 GiB GPU / 23 GiB RAM machine; e2e token check: 131 tokens @ ~12.2 tok/s, exact answer with reasoning_content separated

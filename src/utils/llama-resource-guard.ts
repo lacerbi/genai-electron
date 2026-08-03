@@ -40,7 +40,10 @@ export const MIN_TRUSTED_BASELINE_SAMPLES = 2;
 
 /** Why a reading cannot be compared against the baseline. */
 export type ResourceReadingUntrustedReason =
-  /** Platform telemetry refresh reported failure, so any value would be from another regime. */
+  /**
+   * Platform telemetry refresh reported failure, so any value would belong to another measurement
+   * series rather than this run's baseline.
+   */
   | 'telemetry-refresh-failed'
   /** The source threw, or reported no value at all. */
   | 'reading-unavailable'

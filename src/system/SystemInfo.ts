@@ -974,9 +974,13 @@ export class SystemInfo {
    * - `'not-required'` - the platform needs no command (non-Windows); nothing is
    *   spawned and the direct `os.freemem()` reading is trusted as-is.
    * - `'failed'` - the command failed, timed out, or returned unusable output.
-   *   Nothing is thrown; {@link getMemoryInfo} silently falls back to
-   *   `os.freemem()`, so callers that compare readings across time should treat
-   *   the following samples as a different measurement regime.
+   *   Nothing is thrown, and nothing is invalidated either: the last successful
+   *   standby-aware reading stays in effect behind {@link getMemoryInfo} for the
+   *   rest of its 60 s TTL, after which that reading is dropped and
+   *   {@link getMemoryInfo} falls back to the direct `os.freemem()` value. So a
+   *   failure means the reading is no longer known to be fresh, and callers that
+   *   compare readings across time should treat the following samples as a
+   *   different measurement regime from the moment it is reported.
    *
    * Callers may bound the command with `timeoutMs` (default 10 s) and pass their
    * abort signal. Both kill the underlying child process; an aborted signal

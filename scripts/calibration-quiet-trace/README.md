@@ -86,7 +86,7 @@ Flags:
 | `--pressure-pct`       | Override the target as a percent of the host baseline (hard cap 40).                |
 | `--pressure-workers`   | Number of helper processes the target is split across.                              |
 | `--pressure-floor-mib` | Hard remaining-memory floor passed to every helper. Default 4096.                   |
-| `--pressure-ttl-ms`    | Helper TTL for the armed hold. Default 120000.                                      |
+| `--pressure-ttl-ms`    | Helper TTL for the armed hold. Overrides the per-scenario TTL (see Safety rails); 120000 only where the scenario sets no longer hold. |
 | `--pressure-chunk-mib` | Allocation chunk size. Default 64.                                                  |
 | `--transient-hold-ms`  | `host-transient` only: milliseconds from ARM to release. Default 2600.              |
 | `--transient-delay-ms` | Delay between the arm-point event and the ARM write. Default 0.                     |

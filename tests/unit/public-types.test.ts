@@ -16,12 +16,16 @@ import type {
   LlamaAdaptiveCalibrationReport,
   LlamaCalibrationConfig,
   LlamaCalibrationDiagnosticCandidate,
+  LlamaCalibrationDiagnosticEvidenceLevel,
+  LlamaCalibrationPartialReport,
   LlamaCalibrationProbeResourceBoundaries,
   LlamaCalibrationProbeResourceValidity,
   LlamaCalibrationProfile,
   LlamaCalibrationProgress,
   LlamaCalibrationReport,
   LlamaCalibrationResourceBoundaryDiagnostic,
+  LlamaCalibrationResourceBoundaryKind,
+  LlamaCalibrationResourceChangeDirection,
   LlamaCalibrationResourceFailure,
   LlamaCalibrationResourceFailurePartialReport,
   LlamaCalibrationResourceMetric,
@@ -29,6 +33,7 @@ import type {
   LlamaCalibrationResourceReading,
   LlamaCalibrationResourceStabilityCode,
   LlamaCalibrationResourceStabilityDetails,
+  LlamaCalibrationResourceUntrustedReason,
   LlamaExactCalibrationConfig,
   LlamaExactCalibrationReport,
   MemoryTelemetryRefreshStatus,
@@ -259,12 +264,37 @@ describe('public LLM calibration schema-v3 resource types', () => {
       'not-required',
       'failed',
     ];
+    // The vocabulary types the diagnostics are written in are exported in their own right, so a
+    // host can name them when it stores or renders a boundary rather than re-deriving them from
+    // the structures above. Every literal each admits is consumed here, so narrowing one of these
+    // unions is a compile break rather than a silently unreachable branch.
+    const directions = [
+      'decrease',
+      'increase',
+    ] as const satisfies readonly LlamaCalibrationResourceChangeDirection[];
+    const boundaryKinds = [
+      'pre-launch',
+      'post-cleanup',
+    ] as const satisfies readonly LlamaCalibrationResourceBoundaryKind[];
+    const untrustedReasons = [
+      'telemetry-refresh-failed',
+      'reading-unavailable',
+      'reading-invalid',
+    ] as const satisfies readonly LlamaCalibrationResourceUntrustedReason[];
+    const evidenceLevels = [
+      'independent-reproduction',
+      'single-launch-measurement',
+    ] as const satisfies readonly LlamaCalibrationDiagnosticEvidenceLevel[];
 
     expect(describeRejection(rootTyped)).toBe('drift:hostMemory');
     expect(codes).toHaveLength(2);
     expect(boundaries.preLaunch?.boundary).toBe('pre-launch');
     expect(telemetryOptions.timeoutMs).toBe(10_000);
     expect(refreshStatuses).toHaveLength(3);
+    expect(directions).toEqual([failure.affectedDirections.hostMemory, 'increase']);
+    expect(boundaryKinds).toContain(failure.boundary);
+    expect(untrustedReasons).toContain(untrustedReading.untrustedReason);
+    expect(evidenceLevels).toContain(candidate.evidenceLevel);
   });
 
   it('rejects removed schema-v2 resource assumptions at compile time', () => {
@@ -303,6 +333,44 @@ describe('public LLM calibration schema-v3 resource types', () => {
     const invalidMetric: LlamaCalibrationResourceMetric = 'disk';
     // @ts-expect-error a diagnostic candidate is never application-ready
     const invalidUsability: LlamaCalibrationDiagnosticCandidate['usability'] = 'applicable';
+    // A diagnostic candidate is offered only by the resource-failure partial report. Reading it off
+    // the general partial report (an abort, an unrelated failure) must not compile, or a host would
+    // branch on a field that is never populated there.
+    const generalPartialShape = (partial: LlamaCalibrationPartialReport) => ({
+      // @ts-expect-error only the resource-failure partial report carries a diagnostic candidate
+      candidate: partial.diagnosticCandidate,
+      monitoring: partial.resourceMonitoring,
+    });
+    // The resource-failure partial report is defined by its failure record, so omitting it must not
+    // compile: that record is the entire reason the type is distinct from the general one.
+    // @ts-expect-error resourceFailure is required on the resource-failure partial report
+    const partialWithoutFailure: LlamaCalibrationResourceFailurePartialReport = {
+      schemaVersion: 3,
+      policyVersion: 'llama-runtime-v3',
+      strategy: 'exact',
+      status: 'failed',
+      createdAt: '2026-08-02T12:00:00.000Z',
+      resourceMonitoring: monitoring,
+      probes: [],
+      warnings: [],
+      cleanupConfirmed: true,
+    };
+    // The candidate carries indexes and markers only - never a startable config or a score - so a
+    // host cannot mistake it for a recommendation.
+    const candidateWithStartConfig: LlamaCalibrationDiagnosticCandidate = {
+      sourceProbeIndexes: [0, 1],
+      evidenceLevel: 'independent-reproduction',
+      usability: 'diagnostic-only',
+      // @ts-expect-error a diagnostic candidate never carries an application-ready start config
+      startConfig: { contextSize: 12_288, parallelRequests: 2 },
+    };
+    const candidateWithScore: LlamaCalibrationDiagnosticCandidate = {
+      sourceProbeIndexes: [0, 1],
+      evidenceLevel: 'independent-reproduction',
+      usability: 'diagnostic-only',
+      // @ts-expect-error a diagnostic candidate never carries a score of its own
+      scoreMs: 1234,
+    };
 
     expect({
       reportSchema,
@@ -312,6 +380,10 @@ describe('public LLM calibration schema-v3 resource types', () => {
       metrics,
       invalidMetric,
       invalidUsability,
+      generalPartialShape,
+      partialWithoutFailure,
+      candidateWithStartConfig,
+      candidateWithScore,
       monitoring,
     }).toBeDefined();
   });

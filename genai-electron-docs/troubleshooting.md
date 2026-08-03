@@ -626,9 +626,11 @@ drops to `partial` or `unavailable`, and an explicit warning says so. A disabled
 the stated resource coverage; it never makes the other metric's confirmed change less fatal.
 
 Retry the same way: quiet the machine, then recalibrate from the beginning. Persistent
-stability-unverified failures on a genuinely idle machine point at platform telemetry (a failing
-Windows standby-aware refresh, or missing `nvidia-smi`-style available-VRAM data) rather than at
-real resource pressure.
+stability-unverified failures on a genuinely idle machine point at *intermittent* platform telemetry
+— a source that read cleanly at baseline and then failed at a confirmation, such as a Windows
+standby-aware refresh that fails only sometimes, or flaky `nvidia-smi`-style available-VRAM data —
+rather than at real resource pressure. Telemetry that is missing outright cannot cause this: a source
+that never produces trusted baseline samples disables its metric at baseline instead.
 
 ### A partial report offers a `diagnosticCandidate` — can I start it?
 

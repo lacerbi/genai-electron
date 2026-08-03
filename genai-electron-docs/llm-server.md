@@ -552,7 +552,11 @@ Confirmation does consume wall time. Once triggered it runs to its conclusion ag
 abort signal even if the adaptive wall budget expires meanwhile; if the boundary recovers after that
 deadline, adaptive calibration returns its ordinary `budget-exhausted` report without launching
 again. A post-cleanup check likewise runs after a launch whose internal probe deadline already
-expired, so the final probe is guarded too.
+expired but whose teardown was still confirmed, so the final probe is guarded too. The guard covers
+every launch whose teardown was confirmed with an uninterrupted observation; a launch that the
+internal deadline itself interrupted produces a synthetic record with no post-cleanup boundary and
+contributes no resource evidence, so its `resourceValidity: 'accepted'` means only "never
+invalidated", not "checked".
 
 A pre-launch rejection happens before the executor is invoked, so it costs no launch. A post-cleanup
 rejection keeps the completed probe in the chronological trail marked
@@ -882,8 +886,9 @@ hardware/OS/driver/runtime, requested profiles or slot count, fixed config (incl
 placement), workload hashes/weights/order, sample or timeout method, adaptive budgets/preferences,
 report schema, or policy version changes. A run that ended in a resource-stability rejection
 produced no recommendation at all — recalibrate on a quiet machine instead. Reports marked
-`best-effort`, or whose `resourceMonitoring.coverage` is not `complete`, lack part of the
-reproducibility identity and should be treated more conservatively.
+`best-effort` lack part of the reproducibility identity; a report whose `resourceMonitoring.coverage`
+is not `complete` keeps its full identity but was measured with part of the resource guard inactive,
+so its resource-stability claim is weaker. Treat either more conservatively.
 
 ---
 

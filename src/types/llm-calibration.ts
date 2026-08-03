@@ -503,15 +503,20 @@ export interface LlamaCalibrationProbe {
    *
    * `invalidated-by-resource-stability` probes stay in the chronological trail for auditing but
    * never reach adaptive classification, exact ranking, selection, fallback, or the diagnostic
-   * candidate. `accepted` means only that the resource guard did not invalidate it; a probe can
-   * still be `accepted` and carry its own operational failure.
+   * candidate. `accepted` means only that the resource-stability guard did not invalidate this
+   * observation - including records the guard never evaluated at all, because a launch interrupted
+   * by the internal probe deadline or by a caller abort produces a synthetic record with no
+   * post-cleanup boundary. So `accepted` is not evidence that the machine was checked, and a probe
+   * can still be `accepted` and carry its own operational failure; read `resourceBoundaries` to see
+   * which sides were actually evaluated.
    */
   resourceValidity: LlamaCalibrationProbeResourceValidity;
   /**
    * The guarded boundaries around this launch, compared against the run's fixed baseline.
    *
    * Absent sides mean that boundary was never evaluated: resource monitoring was unavailable for
-   * the run, or the launch ended before it (an unconfirmed teardown, a caller abort).
+   * the run, the launch ended before it (an unconfirmed teardown, a caller abort), or the launch was
+   * interrupted by the internal probe deadline.
    */
   resourceBoundaries?: LlamaCalibrationProbeResourceBoundaries;
   loadTimeMs?: number;

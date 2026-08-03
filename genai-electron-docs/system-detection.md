@@ -161,7 +161,7 @@ stale cached value:
 |--------|---------|
 | `'refreshed'` | The platform command produced a valid finite non-negative reading, now behind `getMemoryInfo()` (Windows standby-aware path). |
 | `'not-required'` | The platform needs no command (non-Windows); nothing is spawned and the direct `os.freemem()` reading is trusted as-is. |
-| `'failed'` | The command failed, timed out, or returned unusable output. Nothing is thrown; `getMemoryInfo()` silently falls back to `os.freemem()`. |
+| `'failed'` | The command failed, timed out, or returned unusable output. Nothing is thrown and nothing is invalidated: the last successful standby-aware reading stays in effect for the rest of its 60 s TTL, and only after it expires does `getMemoryInfo()` fall back to `os.freemem()`. |
 
 **Example**:
 ```typescript

@@ -1,7 +1,10 @@
 # Plan: Calibration Resource Stability Hard Stop
 
 - Created: 2026-08-02
-- Status: IN PROGRESS (plan approved 2026-08-02; implementing on `feat/calibration-resource-stability`)
+- Status: IMPLEMENTATION COMPLETE (2026-08-03) — all phases done and doublechecked on
+  `feat/calibration-resource-stability`; work recorded as Unreleased. Only the release-gated Phase 8
+  item 5 (v0.20 versioning, migration guide, PR, tag, GitHub release) remains, awaiting an explicit
+  release request.
 - Target: unreleased breaking calibration work after published v0.19.1; eventual v0.20.0
 - Tracking: work-plan items carry checkboxes — `[ ]` pending, `[~]` in progress, `[x]` done, `[!]` blocked
 
@@ -590,7 +593,18 @@ diagnostic candidate correctly derived from reproduced probes [2,3], clean teard
 recovered. Injections: 7.18% sub-threshold held through a full run and tolerated everywhere;
 14.75% above-threshold rejected typed at pre-launch with zero launches. Earlier task kills were
 session-harness artifacts, not machine failures (three same-shape runs completed untouched).
-Remaining: post-cleanup invalidation, transient recovery, VRAM crossing, final recovery run.*
+Completed scenarios (2026-08-03, after the machine was freed): post-cleanup invalidation — 14.34%
+injected, 11.8% measured confirmed, typed rejection with one invalidated probe (a first attempt
+during active upward settling peaked at 9.28% measured of 13.12% injected and was correctly
+absorbed — the documented settling-masks-decrease limitation, retained as
+`host-postcleanup-001.json` with its recovery gate reading outside the quiet band while the machine
+was still rising); transient recovery — 14.39% injected for ~4 s, 12.42% measured suspicious at the
+post-cleanup initial read, confirmation −2.2% (recovered), admitted with no extra launch; VRAM
+crossing — e4b model server (~1.5 GiB at `-ngl 14`) loaded during combo 0 of the lower-pressure
+exact cell with >2.5 GiB VRAM headroom, both metrics confirmed at post-cleanup (host 18.4%, VRAM
+15.8%), typed rejection; final recovery run complete (5 probes) with VRAM byte-identical to the
+canonical baseline. Every live rejection was `CALIBRATION_RESOURCE_DRIFT`; the
+stability-unverified code has deterministic coverage only.*
 
 1. [x] Reuse the versioned Phase 0/1 quiet-trace harness and artifact format; do not create a second
    instrumentation path. Run enforcing adaptive one-profile/two-profile and representative exact
@@ -608,7 +622,9 @@ Remaining: post-cleanup invalidation, transient recovery, VRAM crossing, final r
 4. [x] Attempt a VRAM crossing only with a deliberately lower-pressure profile and measured driver/model
    reserve. If no safe crossing exists, rely on deterministic manager coverage and record the live
    scenario as not run; never risk OOM/driver reset to satisfy this step.
-5. [x] Verify unavailable-metric behavior on a controlled telemetry failure where practical; never
+5. [x] (not run live — no safe controlled failure of the platform commands exists on this machine;
+   covered deterministically by the disabled-metric and untrusted-confirmation test matrix)
+   Verify unavailable-metric behavior on a controlled telemetry failure where practical; never
    claim a synthetic failure validates the platform command path.
 6. [x] After each scenario, confirm there is no healthy calibration server or pressure helper, manager
    lifecycle remains unlocked, and a subsequent quiet calibration/normal start can succeed.
@@ -647,13 +663,13 @@ prematurely releasing.
 **Goal:** finish implementation quality gates while keeping publication under explicit user
 control.
 
-1. [ ] Run formatting, build, lint, full tests, packed API verification, package dry-run, diff checks,
+1. [x] (2026-08-03: format clean, build clean, lint 0 errors/110 pre-existing warnings, 1007/1007 tests across 37 suites, packed-api OK, 211-file pack dry-run, 0 production vulnerabilities, git diff --check clean) Run formatting, build, lint, full tests, packed API verification, package dry-run, diff checks,
    and production audit in the repository's normal order.
-2. [ ] Inspect generated declarations and package contents for the new public types/error and removal of
+2. [x] (declarations carry the new error+types, resourceRegime absent from all of dist; verified by the regime-purity and public-surface doublecheck verifiers plus the packed consumer) Inspect generated declarations and package contents for the new public types/error and removal of
    regime/default fields.
-3. [ ] Run the `doublecheck` skill against the completed implementation and resolve all substantiated
+3. [x] (five-verifier Opus fan-out 2026-08-03: zero contract violations; all substantiated findings fixed in the post-doublecheck batch - double-emit ordering, outer-catch partials, stale-cache TSDoc, dead/vacuous test assertions now mutation-verified, injected-vs-measured prose corrections, CI packed-api wiring) Run the `doublecheck` skill against the completed implementation and resolve all substantiated
    findings.
-4. [ ] Stop with the work recorded as Unreleased unless the user explicitly requests release.
+4. [x] Stop with the work recorded as Unreleased unless the user explicitly requests release.
 5. [ ] Only on that request: bump package/package-lock/README/docs-index and the root `src/index.ts`
    `@version` to v0.20.0. Create the v0.19.1-to-v0.20 migration guide covering schema-v2 report
    invalidation/recalibration, removed regime/default fields, the refresh return value, and the new

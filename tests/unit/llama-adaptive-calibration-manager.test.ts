@@ -25,6 +25,20 @@ jest.unstable_mockModule('../../src/utils/binary-identity.js', () => ({
   getInstalledBinaryIdentity: mockBinaryIdentity,
 }));
 
+/**
+ * Pass-through spy on the one call that hands an observation to the adaptive policy.
+ *
+ * Quarantine is a claim about what the policy never saw, and the policy's state is private to the
+ * run, so the call itself is the only place that claim is directly observable. Every other export
+ * is re-exported untouched, so behaviour is identical to the real module.
+ */
+const actualAdaptivePolicy = await import('../../src/utils/llama-adaptive-calibration-policy.js');
+const applyAdaptivePolicyObservation = jest.fn(actualAdaptivePolicy.applyAdaptivePolicyObservation);
+jest.unstable_mockModule('../../src/utils/llama-adaptive-calibration-policy.js', () => ({
+  ...actualAdaptivePolicy,
+  applyAdaptivePolicyObservation,
+}));
+
 const { LlamaServerManager } = await import('../../src/managers/LlamaServerManager.js');
 const { LlamaCalibrationResourceStabilityError, ServerError } = await import(
   '../../src/errors/index.js'
@@ -270,6 +284,11 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.clearAllMocks();
+    // `resetMocks` strips implementations before every test, so the pass-through has to be re-armed
+    // here or the policy call would silently return undefined for the whole suite.
+    applyAdaptivePolicyObservation.mockImplementation(
+      actualAdaptivePolicy.applyAdaptivePolicyObservation
+    );
     mockBinaryIdentity.mockResolvedValue({
       version: 'b9860',
       variant: 'cuda',
@@ -830,8 +849,8 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
           expect.stringContaining('Resource metric vram is disabled for this calibration run'),
         ])
       );
-      expect(report.warnings).not.toContain(
-        expect.stringContaining('Resource metric hostMemory is disabled')
+      expect(report.warnings).not.toEqual(
+        expect.arrayContaining([expect.stringContaining('Resource metric hostMemory is disabled')])
       );
       // Partial coverage is explicit, and the surviving metric keeps a real fixed baseline that
       // every probe boundary was compared against.
@@ -1018,18 +1037,45 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       // prompt token-count cache, nor the policy - only the chronological trail, marked invalid.
       // Snapshot ordinals: 0-2 baseline, then pre/post per probe; probe 5's post read is 14.
       scriptSnapshots({ 14: { host: 17_000 }, 15: { host: 17_000 } });
-      const tokenCacheSizes: number[] = [];
+      // Two workload ids make the token cache discriminating: only the drifted final probe ever
+      // reports a count for `late`, so that id can appear in the cache the manager hands its
+      // executor only if the quarantined observation was committed after all. With a single id the
+      // cache is already full before the final probe and its size cannot tell the two cases apart.
+      const workloads = [
+        { ...workload, weight: 1 },
+        { ...workload, id: 'late', weight: 1 },
+      ] as const;
+      const tokenCacheKeys: string[][] = [];
+      /** The manager's live cache: it is passed by reference, so it stays readable after the throw. */
+      let liveTokenCache: ReadonlyMap<string, readonly number[]> | undefined;
       executor.mockImplementation(async (options) => {
-        tokenCacheSizes.push(options.cachedPromptTokenCounts?.size ?? -1);
+        liveTokenCache ??= options.cachedPromptTokenCounts;
+        tokenCacheKeys.push([...(options.cachedPromptTokenCounts?.keys() ?? [])]);
         const gpuLayers = options.resolvedConfig.gpuLayers ?? 0;
-        return gpuLayers >= 7
-          ? observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
-          : observation(options, { scoreMs: 100 - gpuLayers });
+        const scripted =
+          gpuLayers >= 7
+            ? observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
+            : observation(options, { scoreMs: 100 - gpuLayers });
+        if (scripted.promptTokenCounts.size === 0) return scripted;
+        return {
+          ...scripted,
+          promptTokenCounts:
+            options.purpose === 'fallback-validation'
+              ? new Map<string, readonly number[]>([
+                  ['cold', [10]],
+                  ['late', [11]],
+                ])
+              : new Map<string, readonly number[]>([['cold', [10]]]),
+        };
       });
       const progress: LlamaCalibrationProgress[] = [];
 
       const error = (await captureRejection(
-        manager.calibrate({ ...baseConfig, onProgress: (value) => progress.push(value) })
+        manager.calibrate({
+          ...baseConfig,
+          workloads,
+          onProgress: (value) => progress.push(value),
+        })
       )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
 
       expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
@@ -1060,11 +1106,31 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       ).toBe(true);
       // The search stopped at the invalidated launch: no further probe was scheduled from it.
       expect(executor).toHaveBeenCalledTimes(6);
+      expect(executor.mock.calls.at(-1)![0].purpose).toBe('fallback-validation');
       expect(progress.filter((value) => value.phase === 'done')).toEqual([
         expect.objectContaining({ terminalStatus: 'failed' }),
       ]);
       expect(JSON.stringify(partial)).not.toContain(workload.prompt);
-      expect(tokenCacheSizes).toEqual([0, 1, 1, 1, 1, 1]);
+      // Token-count cache: `late` was offered exclusively by the quarantined probe, so its absence
+      // after the rejection is direct evidence that nothing from that observation was committed.
+      expect(tokenCacheKeys).toEqual([[], ['cold'], ['cold'], ['cold'], ['cold'], ['cold']]);
+      expect(liveTokenCache).toBeDefined();
+      expect([...liveTokenCache!.keys()]).toEqual(['cold']);
+      // Policy: the invalidated observation was never handed to it. Five accepted probes were.
+      expect(applyAdaptivePolicyObservation).toHaveBeenCalledTimes(5);
+      expect(
+        applyAdaptivePolicyObservation.mock.calls.map(([, applied]) => applied.purpose)
+      ).toEqual(['reference', 'ceiling', 'boundary', 'boundary', 'finalist']);
+      // Verified profiles: this map is read only while the final report is built, so a rejected run
+      // exposes no public observable for it - the residual gap here. What is observable is that the
+      // quarantined probe did carry the capacity readings that would have been staged, and that the
+      // commit is unreachable: the verified-profile write, the token-cache write, and the policy
+      // call sit in one straight-line block after the same early `throw`, so the two assertions
+      // above cover the third by construction.
+      expect(invalidated[0]).toMatchObject({
+        effectiveContextSize: 4096,
+        effectiveParallelRequests: 2,
+      });
     });
 
     it('reports a diagnostic-only candidate built solely from reproduced clean probes', async () => {
@@ -1086,7 +1152,9 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(candidate!.usability).toBe('diagnostic-only');
       expect(candidate!.evidenceLevel).toBe('independent-reproduction');
       const indexes = candidate!.sourceProbeIndexes;
-      expect(indexes.length).toBeGreaterThan(0);
+      // `independent-reproduction` is a claim about more than one launch, so a single cited probe
+      // would contradict the evidence level the candidate advertises.
+      expect(indexes.length).toBeGreaterThanOrEqual(2);
       expect(new Set(indexes).size).toBe(indexes.length);
       expect([...indexes].sort((left, right) => left - right)).toEqual([...indexes]);
       for (const index of indexes) {
@@ -1120,6 +1188,124 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(executor).toHaveBeenCalledTimes(1);
     });
 
+    it('quarantines a probe whose post-cleanup boundary confirms a host increase', async () => {
+      // The upward band is guarded on the post-cleanup side too: a large release right after a
+      // probe means the machine that produced the measurement is not the machine that was
+      // baselined, so the observation is invalidated exactly as a decrease would be.
+      scriptSnapshots({ 4: { host: 25_000 }, 5: { host: 25_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+      const progress: LlamaCalibrationProgress[] = [];
+
+      const error = (await captureRejection(
+        manager.calibrate({ ...baseConfig, onProgress: (value) => progress.push(value) })
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      const partial = error.details.partialReport;
+      expect(partial.resourceFailure).toMatchObject({
+        boundary: 'post-cleanup',
+        affectedMetrics: ['hostMemory'],
+        affectedDirections: { hostMemory: 'increase' },
+        probeIndex: 0,
+      });
+      expect(partial.probes).toHaveLength(1);
+      expect(partial.probes[0]).toMatchObject({
+        probeIndex: 0,
+        operationalStatus: 'ok',
+        resourceValidity: 'invalidated-by-resource-stability',
+        terminationReason: 'invalidated-by-resource-stability',
+      });
+      // The increase is recorded as a negative signed change, never as a decrease.
+      const reading = partial.resourceFailure.diagnostics.initial.readings.find(
+        (entry) => entry.metric === 'hostMemory'
+      );
+      expect(reading).toMatchObject({ suspicious: true, suspiciousDirection: 'increase' });
+      expect(reading?.decreasePctFromBaseline).toBeCloseTo(-25, 6);
+      expect(executor).toHaveBeenCalledTimes(1);
+      expect(progress.filter((value) => value.phase === 'done')).toEqual([
+        expect.objectContaining({ terminalStatus: 'failed' }),
+      ]);
+    });
+
+    it('tolerates a sub-threshold decrease and a sub-band increase without confirming', async () => {
+      // 9% down and 15% up on a 20,000-byte host baseline, and 8.6% up on a 7,000-byte VRAM
+      // baseline: every reading is strictly inside its band, so no confirmation is scheduled and
+      // the adaptive search runs to a normal completion.
+      const snapshots = scriptSnapshots({
+        3: { host: 18_200 },
+        4: { host: 23_000 },
+        5: { vram: 7_600 },
+      });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const report = await settleCalibration(
+        manager.calibrate({ ...baseConfig, fixedConfig: { gpuLayers: 0 } })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.status).toBe('complete');
+      expect(report.selected).toBeDefined();
+      expect(report.probes.every((probe) => probe.resourceValidity === 'accepted')).toBe(true);
+      // Three baseline reads plus one pre-launch and one post-cleanup read per probe, and nothing
+      // else: a confirmation would show up here as an extra read.
+      expect(snapshots.snapshotCount()).toBe(3 + 2 * report.probes.length);
+      const boundaries = report.probes.flatMap((probe) => [
+        probe.resourceBoundaries?.preLaunch,
+        probe.resourceBoundaries?.postCleanup,
+      ]);
+      expect(boundaries.every((boundary) => boundary?.confirmationPerformed === false)).toBe(true);
+      expect(boundaries.every((boundary) => boundary?.confirmation === undefined)).toBe(true);
+      const readings = boundaries.flatMap((boundary) => boundary?.initial.readings ?? []);
+      expect(readings.every((reading) => reading.suspicious === false)).toBe(true);
+      // The tolerated increase is recorded as a negative signed change, never as a decrease.
+      const increase = report.probes[0]!.resourceBoundaries?.postCleanup?.initial.readings.find(
+        (reading) => reading.metric === 'hostMemory'
+      );
+      expect(increase?.decreasePctFromBaseline).toBeCloseTo(-15, 6);
+    });
+
+    it('lets a confirmed metric decide while the other metric confirmation is untrusted', async () => {
+      // Both metrics are suspicious initially; the confirmation independently confirms host memory
+      // while VRAM's reading becomes untrusted. Confirmed drift takes precedence, the untrusted
+      // metric is recorded and warned about, and it never joins the affected set.
+      scriptSnapshots({
+        3: { host: 17_000, vram: 6_000 },
+        4: { host: 17_000, vram: 'untrusted' },
+      });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+
+      const error = (await captureRejection(
+        manager.calibrate(baseConfig)
+      )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      const partial = error.details.partialReport;
+      expect(partial.resourceFailure).toMatchObject({
+        boundary: 'pre-launch',
+        affectedMetrics: ['hostMemory'],
+        affectedDirections: { hostMemory: 'decrease' },
+      });
+      expect(partial.resourceFailure.diagnostics.initiallySuspiciousMetrics).toEqual([
+        'hostMemory',
+        'vram',
+      ]);
+      const confirmedVram = partial.resourceFailure.diagnostics.confirmation?.readings.find(
+        (reading) => reading.metric === 'vram'
+      );
+      expect(confirmedVram).toMatchObject({ enabled: true, trusted: false });
+      expect(confirmedVram?.availableBytes).toBeUndefined();
+      expect(partial.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            'Resource metric vram was suspicious at the pre-launch boundary and its confirmation reading was untrusted'
+          ),
+        ])
+      );
+      expect(executor).not.toHaveBeenCalled();
+    });
+
     it('admits a probe whose suspicious post-cleanup reading recovers on confirmation', async () => {
       scriptSnapshots({ 4: { host: 17_000 } });
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
@@ -1136,7 +1322,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
     it('keeps unconfirmed cleanup fatal ahead of a coincident resource failure', async () => {
       // Precedence: possible process orphaning must never be hidden behind a drift error, so the
       // guard is not even consulted for an unconfirmed teardown.
-      scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
+      const snapshots = scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
       executor.mockRejectedValue(
         new ServerError('Probe cleanup failed', {
           code: 'CALIBRATION_CLEANUP_FAILED',
@@ -1153,6 +1339,10 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         status: 'failed',
         cleanupConfirmed: false,
       });
+      // Three baseline reads plus one pre-launch read: the drift scripted at ordinals 4/5 is never
+      // read at all, which is what proves the guard was not consulted after the unconfirmed
+      // teardown rather than merely outranked by it.
+      expect(snapshots.snapshotCount()).toBe(4);
     });
 
     it('supersedes a fatal probe outcome when its confirmed cleanup is followed by drift', async () => {

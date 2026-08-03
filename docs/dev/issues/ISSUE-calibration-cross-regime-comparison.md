@@ -1,7 +1,7 @@
-# ISSUE — Resource-regime isolation covers reproduction but not comparison
+﻿# ISSUE â€” Resource-regime isolation covers reproduction but not comparison
 
 - Created: 2026-08-02
-- Status: RESOLVED (2026-08-02) — see Resolution below; original proposal preserved unchanged
+- Status: RESOLVED (2026-08-02) â€” see Resolution below; original proposal preserved unchanged
 - Package: genai-electron
 - Affected API: `LlamaServerManager.calibrate()` (adaptive strategy)
 - Found by: v0.19.0 post-release double-check (static review, not observed live)
@@ -9,7 +9,7 @@
 ## Resolution (2026-08-02)
 
 Resolved by the fixed-baseline hard-stop contract implemented on
-`feat/calibration-resource-stability` per `PLAN-calibration-resource-stability.md`, which is the
+`feat/calibration-resource-stability` per `docs/dev/plans/PLAN-calibration-resource-stability.md`, which is the
 durable owner of the delivered behavior.
 
 None of the three options below was adopted as written. Instead, resource regimes were removed
@@ -18,8 +18,8 @@ entirely: one `calibrate()` call now establishes **one fixed baseline** per enab
 boundary cumulatively against it. A confirmed material change in either direction, or a suspicious
 boundary that cannot be verified clean, hard-stops adaptive **and** exact calibration with
 `LlamaCalibrationResourceStabilityError`. Only clean observations ever reach the pure controller, so
-every comparison listed above — cliff denominator, gross-regression classification, capped/gross
-closure, non-monotone promotion, cell competitiveness, and final recommendation — is comparable by
+every comparison listed above â€” cliff denominator, gross-regression classification, capped/gross
+closure, non-monotone promotion, cell competitiveness, and final recommendation â€” is comparable by
 construction and no longer needs regime filtering. `AdaptiveResourceDriftStatus`,
 `probe.resourceRegime`, settled-level logic, and regime filters are deleted; reports move to schema
 3 / policy `llama-runtime-v3`.
@@ -43,18 +43,18 @@ of a step.
 That guarantee is real but narrow. Every other score comparison in the policy remains
 regime-agnostic:
 
-- `findStableCliffReference()` — the cliff denominator can be built from two pre-step launches and
+- `findStableCliffReference()` â€” the cliff denominator can be built from two pre-step launches and
   then used to classify a post-step probe.
-- `classifyAdaptiveObservation()` — the gross-regression test compares `observation.scoreMs` against
+- `classifyAdaptiveObservation()` â€” the gross-regression test compares `observation.scoreMs` against
   a lower reference that may belong to a superseded regime. If the step change also slowed the
   machine, a healthy point can exceed `grossRegressionMultiplier`, and its repeat can then close it
   as `unsuitable`, permanently moving the boundary down. **This is the same failure class as the
   original drift bug, relocated.**
-- `canCloseCappedPoint()` / `canCloseSuccessfulGrossPoint()` — filter material drift but not regime.
-- `nonMonotonePromotionLayer()` — an interior point from an older regime can trigger promotion.
-- `isAdaptiveCellCompetitive()` — a regime-1 cell's best score is compared against a global best
+- `canCloseCappedPoint()` / `canCloseSuccessfulGrossPoint()` â€” filter material drift but not regime.
+- `nonMonotonePromotionLayer()` â€” an interior point from an older regime can trigger promotion.
+- `isAdaptiveCellCompetitive()` â€” a regime-1 cell's best score is compared against a global best
   that may be regime-0, so a cell can be pruned against a score measured under different conditions.
-- `resolveAdaptiveRecommendation()` — candidates from different cells can carry different regimes
+- `resolveAdaptiveRecommendation()` â€” candidates from different cells can carry different regimes
   and are ranked head to head. A cell fully measured before the step keeps its regime-0 score and
   competes against post-step cells.
 
@@ -65,7 +65,7 @@ regime" is true, while the comparison that *chose* that configuration may span r
 
 The approved scope was same-regime reproduction only. Extending regime isolation to classification
 and selection changes which candidates survive and which cells get pruned, so it needs its own
-golden traces and ideally a live run — not a patch riding on a correctness fix.
+golden traces and ideally a live run â€” not a patch riding on a correctness fix.
 
 ## Suggested direction (not decided)
 
@@ -81,7 +81,7 @@ Options, roughly in increasing cost:
 3. **Report and do not act.** Keep today's behaviour, but record in the report when a selection was
    chosen against cross-regime evidence so a consumer can decide whether to trust or recalibrate.
 
-Worth noting that re-anchoring is rare — it needs a material drop plus a confirming repeat — so
+Worth noting that re-anchoring is rare â€” it needs a material drop plus a confirming repeat â€” so
 option 3 may be adequate in practice, and it composes with either of the others later.
 
 ## Constraints
@@ -93,7 +93,7 @@ option 3 may be adequate in practice, and it composes with either of the others 
 
 ## Related
 
-- `docs/dev/plans/PLAN-adaptive-llm-calibration.md` — the drift-re-anchoring erratum records this
+- `docs/dev/plans/PLAN-adaptive-llm-calibration.md` â€” the drift-re-anchoring erratum records this
   residual scope explicitly
-- `src/utils/llama-adaptive-calibration-policy.ts` — `comparableLaunchEvidence` is the single place
+- `src/utils/llama-adaptive-calibration-policy.ts` â€” `comparableLaunchEvidence` is the single place
   regime filtering currently happens
