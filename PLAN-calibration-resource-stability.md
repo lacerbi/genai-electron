@@ -581,7 +581,18 @@ npm.cmd test -- --runInBand tests/unit/defaults.test.ts tests/unit/SystemInfo.te
 **Goal:** demonstrate that the implemented protocol avoids false aborts in the bounded quiet matrix
 and exercise deliberate rejection at safely reachable boundaries, including post-launch when safe.
 
-1. [~] Reuse the versioned Phase 0/1 quiet-trace harness and artifact format; do not create a second
+*Partial results (2026-08-03, machine reclaimed by user mid-phase; remaining scenarios deferred):
+quiet enforcing matrix all complete with zero false aborts — adaptive-1p (6 probes), adaptive-2p
+(11 probes, worst quiet decrease 2.26%, coverage complete), exact (2 probes). One organic
+true-positive rejection recorded (`adaptive-2p-enforcing-001.json`): background activity produced a
+confirmed 11.2%→14.1% still-falling host decrease at probe 6's post-cleanup; probe quarantined,
+diagnostic candidate correctly derived from reproduced probes [2,3], clean teardown, availability
+recovered. Injections: 7.18% sub-threshold held through a full run and tolerated everywhere;
+14.75% above-threshold rejected typed at pre-launch with zero launches. Earlier task kills were
+session-harness artifacts, not machine failures (three same-shape runs completed untouched).
+Remaining: post-cleanup invalidation, transient recovery, VRAM crossing, final recovery run.*
+
+1. [x] Reuse the versioned Phase 0/1 quiet-trace harness and artifact format; do not create a second
    instrumentation path. Run enforcing adaptive one-profile/two-profile and representative exact
    calibrations. Verify the stabilized baseline, absence of false aborts, clean selection evidence,
    and no failed launch.
