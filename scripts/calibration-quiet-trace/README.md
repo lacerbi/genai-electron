@@ -7,7 +7,7 @@ JSON. There is no shadow to arm any more: plan Phase 2.10 converted the observe 
 ordinary enforcing behaviour of `calibrate()`, so the harness simply drives the public API and
 records what it returned — a report, or the typed
 `LlamaCalibrationResourceStabilityError` with its partial report, resource-failure diagnostics, and
-optional diagnostic-only candidate.
+optional clean prior `bestKnown` result.
 
 This directory is outside the npm package (`package.json` `files` is `["dist","README.md","LICENSE"]`),
 so nothing here ships. Phase 6 reuses this same harness and artifact format for enforcement smokes;
@@ -19,6 +19,7 @@ Files:
 | File                       | Role                                                                     |
 | -------------------------- | ------------------------------------------------------------------------ |
 | `run-quiet-trace.mjs`      | The harness. One `calibrate()` call, one artifact, optional scenario.     |
+| `summarize.mjs`            | Pure Node summary helpers for schema-v4 reports and resource errors.      |
 | `host-pressure-helper.mjs` | Bounded host-memory pressure process, spawned only by the harness.        |
 | `config.default.json`      | Matrix cells, model id, userData, workloads.                             |
 | `replay-thresholds.mjs`    | Offline threshold replay for the retained `formatVersion: 1` artifacts.  |
@@ -103,10 +104,10 @@ so the harness contributes no GPU load of its own.
 | `exact-near-capacity`  | exact    | near-capacity / full-offload combos                     |
 | `exact-lower-pressure` | exact    | deliberately lower pressure                             |
 
-Each call runs with an ample explicit wall budget (`maxWallTimeMs` per cell in the config), because
-the guard's settle, cooldown, and confirmation waits are real wall time that the adaptive budget
-sees. The baseline schedule is paid before the probe wall clock starts; the per-boundary cooldowns
-are not.
+Adaptive cells omit `maxWallTimeMs` and therefore use the fixed 60-minute library default.
+`adaptive-1p` intentionally omits `maxProbes` so the normal unbounded-by-probe contract crosses the
+packed/live harness boundary. The guard's settle, cooldown, and confirmation waits are real wall
+time inside the same method-entry deadline as preparation, probes, and per-boundary work.
 
 ## Phase 6 scenarios
 
@@ -259,28 +260,28 @@ node scripts\calibration-quiet-trace\replay-thresholds.mjs `
   scripts\calibration-quiet-trace\artifacts\*.json --thresholds 10,15,20,25
 ```
 
-Enforcement-era artifacts (`formatVersion: 2`) have nothing to replay: the guard's conclusions are
+Enforcement-era artifacts (`formatVersion: 2` or `3`) have nothing to replay: the guard's conclusions are
 the run's own conclusions, and thresholds are shipped policy constants rather than a swept
 parameter. Both the script and the Phase 1 artifacts are retained unchanged so the threshold
 decision stays auditable.
 
-## Artifact schema (`formatVersion: 2`)
+## Artifact schema (`formatVersion: 3`)
 
 One file per calibration call, committed under `artifacts/`.
 
 | Field                 | Contents                                                                                                                                   |
 | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
-| `formatVersion`       | `2` for enforcing runs; `1` marks the retained Phase 1 shadow traces that `replay-thresholds.mjs` reads. |
+| `formatVersion`       | `3` for current schema-v4 summaries; `2` for retained enforcing-era artifacts; `1` for retained Phase 1 shadow traces read by `replay-thresholds.mjs`. |
 | `cell`                | Matrix cell name, plus `cellDescription`.                                                                                                    |
-| `scenario`            | Additive in `formatVersion: 2`. Scenario name/description/plan items/expectation, arm point, release policy, the pressure plan and what was actually committed, the pre-run baseline proxy and the run's real host baseline, the helper registry, the progress+helper timeline, the outcome summary, and the recovery/teardown gates. See below. |
+| `scenario`            | Present since `formatVersion: 2`. Scenario name/description/plan items/expectation, arm point, release policy, the pressure plan and what was actually committed, the pre-run baseline proxy and the run's real host baseline, the helper registry, the progress+helper timeline, the outcome summary, and the recovery/teardown gates. See below. |
 | `harness`             | Script name, repository git SHA, dirty flag, config file basename.                                                                           |
 | `environment`         | Platform/arch, Electron/Chrome/Node versions, hardware-acceleration and window-count facts.                                                   |
 | `timestamps`          | ISO start/finish and monotonic `durationMs`.                                                                                                 |
 | `identities`          | Binary and model **basenames + byte sizes only**, model id/name/architecture. No directories.                                                 |
 | `calibrateConfig`     | The exact config passed to `calibrate()`, with every prompt replaced by `{workloadId, sha256, chars, tokenCounts}`.                            |
 | `resourcePolicy`      | The enforced bands and schedule read from `LLAMA_CALIBRATION_DEFAULTS`, plus `policyVersion`.                                                  |
-| `report`              | Report summary: status, terminal reason, probe count, warnings, selected/provisional/fallback, and per probe scoreMs, operationalStatus, boundaryDecision, memoryEvidence, `resourceValidity`, cleanup confirmation, resource diagnostics. |
-| `failure`             | Present only when `calibrate()` rejected: message, error name, details code, suggestion, and the partial report including `resourceFailure` boundary diagnostics and any `diagnosticCandidate`. |
+| `report`              | Report summary: status, search completeness, terminal reason, time budget, probe count, warnings, selected/evidence/fallback, and per probe scoreMs, operationalStatus, boundaryDecision, memoryEvidence, `resourceValidity`, cleanup confirmation, resource diagnostics. |
+| `failure`             | Present only when `calibrate()` rejected: message, error name, details code, suggestion, and the partial report including `resourceFailure` boundary diagnostics and any clean prior `bestKnown`. |
 | `progress`            | `policy-ready` and terminal `done` progress payloads.                                                                                         |
 | `cleanup`             | `isCalibrating()`, manager status, and whether every probe reported confirmed cleanup.                                                         |
 
@@ -295,7 +296,7 @@ One file per calibration call, committed under `artifacts/`.
 | `armedAt(Ms)` / `releaseRequestedAt(Ms)` / `releaseReason` | Controller-level instants, ISO plus milliseconds from the call.                              |
 | `helpers[]`                | Per helper: pid, target, `allocatedMib`, `floorStopped`, `commitMs`, spawn/staged/armed/ready/release/exit timestamps (ISO **and** ms), `exitReason` (`released`, `ttl`, `staged-ttl`, `hold-elapsed`, `parent-death`, or the OS code/signal), any kill escalation, and the raw protocol lines. |
 | `timeline`                 | Chronological progress-phase transitions and harness events (`helpers-staged`, `armed`, `timed-release`), each with `atMs`.  |
-| `outcome`                  | `rejected`, `errorName`, `code` (`error.details.code`), `reportStatus`, `probesRecorded`, and from `resourceFailure`: `failureBoundary`, `failureAffectedMetrics`, `failureAffectedDirections`, `failureProbeIndex`, `failureConfirmationPerformed`, plus `diagnosticCandidatePresent`. |
+| `outcome`                  | `rejected`, `errorName`, `code` (`error.details.code`), `reportStatus`, `probesRecorded`, and from `resourceFailure`: `failureBoundary`, `failureAffectedMetrics`, `failureAffectedDirections`, `failureProbeIndex`, `failureConfirmationPerformed`, plus `bestKnownPresent`. |
 | `recovery`                 | Post-release host reading, its delta from the reference baseline, and `withinQuietBand`.                                     |
 | `teardown`                 | Helper count, whether all exited, any live PIDs, total committed MiB.                                                        |
 | `notes`                    | Anything the scenario wiring caught that did not belong in the run itself.                                                   |
@@ -313,11 +314,11 @@ committing it. Scenario helper output is numeric line protocol and carries no pa
 ## Known cost and blind spot (recorded, not hidden)
 
 The guard costs real wall time in every run, harness or not: the fixed settle delay plus
-cooldown-spaced baseline samples before the adaptive wall clock starts, then per launch a
+cooldown-spaced baseline samples inside the adaptive method-entry clock, then per launch a
 pre-launch read, a post-cleanup cooldown and read, and one further cooldown plus read whenever a
-reading is suspicious. Near an exhausted wall budget that time can change which branch the search
-takes; keep `maxWallTimeMs` ample, and read the budget and terminal reason off the artifact rather
-than assuming.
+reading is suspicious. Near the host-selected time limit that owned work may settle past the
+deadline; read `elapsedMs`, `overrunMs`, selected evidence, completeness, and terminal reason from the
+artifact rather than assuming.
 
 Boundary sampling is pre/post only. A disturbance that begins and fully clears inside a single
 launch is invisible to it. That is a documented limitation of this design, not something the

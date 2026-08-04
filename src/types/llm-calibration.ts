@@ -130,31 +130,31 @@ export type LlamaCalibrationPhase =
   | LlamaExactCalibrationPhase
   | 'done';
 
-export type LlamaCalibrationTerminalStatus =
+type LlamaAdaptiveCalibrationTerminalStatus =
   | 'complete'
-  | 'budget-exhausted'
+  | 'time-limited'
+  | 'probe-limited'
+  | 'inconclusive'
+  | 'no-viable-candidate';
+
+export type LlamaCalibrationTerminalStatus =
+  | LlamaAdaptiveCalibrationTerminalStatus
+  | 'aborted'
+  | 'failed';
+
+export type LlamaExactCalibrationTerminalStatus =
+  | 'complete'
   | 'no-viable-candidate'
   | 'aborted'
   | 'failed';
 
-export type LlamaExactCalibrationTerminalStatus = Exclude<
-  LlamaCalibrationTerminalStatus,
-  'budget-exhausted'
->;
-
-export type LlamaAdaptiveProgressBudget =
-  | { resolved: false }
-  | {
-      resolved: true;
-      targetProbes: number;
-      maxProbes: number;
-      finalistReserve: number;
-      maxWallTimeMs: number;
-      finalistTimeReserveMs: number;
-      remainingWallTimeMs: number;
-      probeReserveActive: boolean;
-      timeReserveActive: boolean;
-    };
+export type LlamaAdaptiveProgressBudget = {
+  maxWallTimeMs: number;
+  remainingMs: number;
+} & (
+  | { maxProbes?: never; remainingProbes?: never }
+  | { maxProbes: number; remainingProbes: number }
+);
 
 /** Start-ready measured fields returned for every exact or adaptive launch. */
 export type ResolvedLlamaCalibrationConfig = LlamaCalibrationProfile &
@@ -258,8 +258,9 @@ export interface LlamaAdaptiveCalibrationConfig extends LlamaCalibrationConfigCo
   kvPrecisionPreferencePct?: number;
   /** Prefer the larger requested context inside this global-fastest band. Default: 10. */
   contextPreferencePct?: number;
-  targetProbes?: number;
+  /** Optional expert/test launch cap. Omission means no caller-configured probe limit. */
   maxProbes?: number;
+  /** Total elapsed limit from `calibrate()` method entry. Default: 60 minutes. */
   maxWallTimeMs?: number;
 }
 
@@ -271,7 +272,6 @@ export interface LlamaExactCalibrationConfig extends LlamaCalibrationConfigCommo
   kvPrecisionPreferencePct?: number;
   includeKvCacheComparison?: never;
   contextPreferencePct?: never;
-  targetProbes?: never;
   maxProbes?: never;
   maxWallTimeMs?: never;
 }
@@ -442,25 +442,11 @@ export interface LlamaCalibrationResourceFailure {
   diagnostics: LlamaCalibrationResourceBoundaryDiagnostic;
 }
 
-/** Strength of the evidence behind a diagnostic-only candidate. */
-export type LlamaCalibrationDiagnosticEvidenceLevel =
+/** Strength of the directly measured evidence behind an adaptive recommendation. */
+export type LlamaAdaptiveCalibrationSelectionEvidence =
   | 'independent-reproduction'
-  | 'single-launch-measurement';
-
-/**
- * A candidate supported entirely by clean pre-failure evidence.
- *
- * It carries no application-ready payload on purpose: only chronological probe indexes, the
- * evidence level, and a literal usability marker. Referenced probes already hold configs and
- * scores. It is never copied into `selected`, `provisional`, or `fallback`, and its probe indexes
- * cannot be pasted into `start()`.
- */
-export interface LlamaCalibrationDiagnosticCandidate {
-  /** Chronological indexes of accepted clean probes. Non-empty, unique, ascending, in range. */
-  sourceProbeIndexes: readonly number[];
-  evidenceLevel: LlamaCalibrationDiagnosticEvidenceLevel;
-  usability: 'diagnostic-only';
-}
+  | 'single-full-launch'
+  | 'single-search-launch';
 
 /** Whether an observation may be used for any decision. */
 export type LlamaCalibrationProbeResourceValidity =
@@ -658,29 +644,14 @@ export interface LlamaAdaptiveCalibrationCellReport {
   warnings: readonly string[];
 }
 
-export interface LlamaCalibrationBudgetReport {
-  formulaVersion: string;
-  cellCount: number;
-  targetProbes: number;
-  maxProbes: number;
-  finalistReserve: number;
+export interface LlamaAdaptiveCalibrationBudgetReport {
   maxWallTimeMs: number;
-  finalistTimeReserveMs: number;
-  effectiveFinalistTimeReserveMs: number;
-  completedProbes: number;
+  /** Method entry through completion/restoration of all library-owned work. */
   elapsedMs: number;
-  cleanupOverrunMs: number;
-  overrides: readonly ('targetProbes' | 'maxProbes' | 'maxWallTimeMs')[];
-  timeAdmission: {
-    policy: 'configured-conservative-estimate' | 'observed-comparable-launches';
-    estimatedNextProbeDurationMs?: number;
-    plannedPostStartupRequestCount?: number;
-    maxRunnerStartAttempts: number;
-    startupTimeoutMs: number;
-    resolvedCapacityCheckTimeoutMs: number;
-    configuredAttemptTeardownMs: number;
-    caveat: string;
-  };
+  /** `max(0, elapsedMs - maxWallTimeMs)`. */
+  overrunMs: number;
+  /** Optional expert/test cap. Omission means no count-based limit. */
+  maxProbes?: number;
 }
 
 /**
@@ -733,7 +704,8 @@ export interface LlamaCalibrationMethodology {
 }
 
 interface LlamaCalibrationReportBase {
-  schemaVersion: 3;
+  resultKind: 'report';
+  schemaVersion: 4;
   policyVersion: string;
   createdAt: string;
   status: LlamaCalibrationTerminalStatus;
@@ -750,19 +722,17 @@ interface LlamaCalibrationReportBase {
   warnings: readonly string[];
 }
 
-export interface LlamaAdaptiveCalibrationReport extends LlamaCalibrationReportBase {
+interface LlamaAdaptiveCalibrationReportFields extends LlamaCalibrationReportBase {
   strategy: 'adaptive';
-  status: Extract<
-    LlamaCalibrationTerminalStatus,
-    'complete' | 'budget-exhausted' | 'no-viable-candidate'
-  >;
+  status: LlamaAdaptiveCalibrationTerminalStatus;
+  searchCompleteness: 'resolved' | 'partial';
   /** Human-readable explanation for the terminal controller decision. */
   terminalReason: string;
   profiles: readonly LlamaAdaptiveCalibrationProfileReport[];
   schedulingProfileIndexes: readonly number[];
   workloadComparability: 'verified' | 'unverified';
   cells: readonly LlamaAdaptiveCalibrationCellReport[];
-  budget: LlamaCalibrationBudgetReport;
+  budget: LlamaAdaptiveCalibrationBudgetReport;
   globalFastestScoreMs?: number;
   contextBandMaxScoreMs?: number;
   kvBandMaxScoreMs?: number;
@@ -772,15 +742,21 @@ export interface LlamaAdaptiveCalibrationReport extends LlamaCalibrationReportBa
     | 'largest-in-joint-band'
     | 'fallback-no-joint-eligible'
     | 'unresolved';
-  selected?: LlamaCalibrationRecommendation;
-  provisional?: LlamaCalibrationRecommendation;
   fallback?: LlamaCalibrationFallback;
-  selectionEvidence?: 'independent-reproduction';
-  confidence: 'empirical-reproducibility';
   pinnedMoePlacement: true;
 }
 
-export interface LlamaExactCalibrationReport extends LlamaCalibrationReportBase {
+type LlamaAdaptiveSelection =
+  | {
+      selected: LlamaCalibrationRecommendation;
+      selectionEvidence: LlamaAdaptiveCalibrationSelectionEvidence;
+    }
+  | { selected?: never; selectionEvidence?: never };
+
+export type LlamaAdaptiveCalibrationReport = LlamaAdaptiveCalibrationReportFields &
+  LlamaAdaptiveSelection;
+
+interface LlamaExactCalibrationReportFields extends LlamaCalibrationReportBase {
   strategy: 'exact';
   status: Extract<LlamaExactCalibrationTerminalStatus, 'complete' | 'no-viable-candidate'>;
   profile: LlamaCalibrationProfile;
@@ -788,16 +764,45 @@ export interface LlamaExactCalibrationReport extends LlamaCalibrationReportBase 
   combos: readonly LlamaCalibrationCombo[];
   skippedCombos: readonly { combo: LlamaCalibrationCombo; reason: string }[];
   runs: readonly LlamaCalibrationRun[];
-  selected?: LlamaCalibrationRecommendation;
-  selectionEvidence?: 'single-launch-measurement';
   confidence: 'single-launch-measurement';
 }
 
-export type LlamaCalibrationReport = LlamaAdaptiveCalibrationReport | LlamaExactCalibrationReport;
+type LlamaExactSelection =
+  | {
+      selected: LlamaCalibrationRecommendation;
+      selectionEvidence: 'single-launch-measurement';
+    }
+  | { selected?: never; selectionEvidence?: never };
+
+export type LlamaExactCalibrationReport = LlamaExactCalibrationReportFields & LlamaExactSelection;
+
+/** Adaptive time limit reached before ordinary report identity and the fixed baseline existed. */
+export interface LlamaAdaptiveCalibrationPreparationTimeLimit {
+  resultKind: 'preparation-time-limit';
+  schemaVersion: 4;
+  policyVersion: 'llama-runtime-v4';
+  createdAt: string;
+  strategy: 'adaptive';
+  phase: 'preparing';
+  status: 'time-limited';
+  searchCompleteness: 'partial';
+  terminalReason: string;
+  budget: LlamaAdaptiveCalibrationBudgetReport;
+  probes: readonly [];
+  warnings: readonly string[];
+  cleanupConfirmed: true;
+  selected?: never;
+  selectionEvidence?: never;
+}
+
+export type LlamaCalibrationReport =
+  | LlamaAdaptiveCalibrationReport
+  | LlamaExactCalibrationReport
+  | LlamaAdaptiveCalibrationPreparationTimeLimit;
 
 /** Partial report attached to aborted/failed calibration errors. */
 export interface LlamaCalibrationPartialReport {
-  schemaVersion: 3;
+  schemaVersion: 4;
   policyVersion: string;
   strategy: 'adaptive' | 'exact';
   status: Extract<LlamaCalibrationTerminalStatus, 'aborted' | 'failed'>;
@@ -809,19 +814,40 @@ export interface LlamaCalibrationPartialReport {
   cleanupConfirmed: boolean;
 }
 
-/**
- * Partial report attached to a resource-stability rejection.
- *
- * Deliberately a distinct type from {@link LlamaCalibrationPartialReport}: abort and unrelated
- * failure partials keep their existing surface, while this one guarantees a `resourceFailure` and
- * may carry a diagnostic-only candidate.
- */
-export interface LlamaCalibrationResourceFailurePartialReport
-  extends LlamaCalibrationPartialReport {
-  status: 'failed';
-  /** Always present: a resource rejection can only happen once a fixed baseline exists. */
-  resourceMonitoring: LlamaCalibrationResourceMonitoring;
-  resourceFailure: LlamaCalibrationResourceFailure;
-  /** Present only when clean pre-failure evidence already met the normal reproduction rule. */
-  diagnosticCandidate?: LlamaCalibrationDiagnosticCandidate;
+type NonEmptyProbeIndexes = readonly [number, ...number[]];
+
+/** Start-ready adaptive recommendation supported only by clean pre-failure evidence. */
+export interface LlamaAdaptiveCalibrationBestKnown {
+  recommendation: LlamaCalibrationRecommendation;
+  evidence: LlamaAdaptiveCalibrationSelectionEvidence;
+  sourceProbeIndexes: NonEmptyProbeIndexes;
 }
+
+/** Start-ready exact recommendation supported only by clean pre-failure evidence. */
+export interface LlamaExactCalibrationBestKnown {
+  recommendation: LlamaCalibrationRecommendation;
+  evidence: 'single-launch-measurement';
+  sourceProbeIndexes: NonEmptyProbeIndexes;
+}
+
+/** Partial report attached specifically to a typed resource-stability rejection. */
+export type LlamaCalibrationResourceFailurePartialReport =
+  | (Omit<LlamaCalibrationPartialReport, 'strategy' | 'status' | 'cleanupConfirmed'> & {
+      strategy: 'adaptive';
+      status: 'failed';
+      cleanupConfirmed: true;
+      resourceMonitoring: LlamaCalibrationResourceMonitoring;
+      resourceFailure: LlamaCalibrationResourceFailure;
+      searchCompleteness: 'partial';
+      budget: LlamaAdaptiveCalibrationBudgetReport;
+      bestKnown?: LlamaAdaptiveCalibrationBestKnown;
+    })
+  | (Omit<LlamaCalibrationPartialReport, 'strategy' | 'status' | 'cleanupConfirmed'> & {
+      strategy: 'exact';
+      status: 'failed';
+      cleanupConfirmed: true;
+      resourceMonitoring: LlamaCalibrationResourceMonitoring;
+      resourceFailure: LlamaCalibrationResourceFailure;
+      searchCompleteness?: never;
+      bestKnown?: LlamaExactCalibrationBestKnown;
+    });

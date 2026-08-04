@@ -46,8 +46,9 @@ export const LLAMA_CALIBRATION_DEFAULTS = {
   resourceDriftConfirmationReads: 1,
   /** Per-command bound for each host/GPU telemetry capture. */
   resourceTelemetryTimeoutMs: 10_000,
-  unobservedProbeDurationPolicy: 'configured-conservative-estimate',
-  policyVersion: 'llama-runtime-v3',
+  policyVersion: 'llama-runtime-v4',
+  /** Default adaptive total elapsed limit. Hosts may provide their own explicit value. */
+  adaptiveMaxWallTimeMs: 60 * 60 * 1_000,
   startupTimeoutMs: 120_000,
   requestTimeoutMs: 120_000,
   resourceCooldownMs: 750,
@@ -56,24 +57,6 @@ export const LLAMA_CALIBRATION_DEFAULTS = {
   capacityCheckTimeoutCapMs: 5_000,
   processExitConfirmationMs: 2_000,
   processExitSettleGraceMs: 250,
-  adaptiveBudgetFormula: {
-    version: 'cell-count-v1',
-    minCellCount: 1,
-    maxCellCount: 8,
-    targetProbesCap: 24,
-    targetProbesBase: 6,
-    targetProbesPerCell: 2,
-    maxProbesCap: 36,
-    maxProbesBase: 7,
-    maxProbesPerCell: 4,
-    finalistReserveCap: 6,
-    finalistReserveFloor: 2,
-    maxWallTimeCapMs: 4_500_000,
-    maxWallTimeBaseMs: 900_000,
-    maxWallTimePerCellMs: 450_000,
-    finalistTimeReserveCapMs: 900_000,
-    finalistTimeReservePerCellMs: 150_000,
-  },
   /** v0.18 generated-ladder cap retained only for the internal rollback path. */
   maxCandidates: 10,
   oomPatterns: [
@@ -86,54 +69,36 @@ export const LLAMA_CALIBRATION_DEFAULTS = {
   ] as readonly RegExp[],
 } as const;
 
-export interface ResolvedLlamaCalibrationBudgetDefaults {
-  formulaVersion: string;
-  cellCount: number;
-  targetProbes: number;
-  maxProbes: number;
-  finalistReserve: number;
-  maxWallTimeMs: number;
-  finalistTimeReserveMs: number;
+interface LlamaCalibrationTimeBudgetOverrides {
+  maxWallTimeMs?: number;
+  maxProbes?: number;
 }
 
-/** Resolve adaptive calibration budgets from the number of enumerated cells. */
-export function resolveLlamaCalibrationBudgetDefaults(
-  cellCount: number
-): ResolvedLlamaCalibrationBudgetDefaults {
-  const formula = LLAMA_CALIBRATION_DEFAULTS.adaptiveBudgetFormula;
+interface ResolvedLlamaCalibrationTimeBudget {
+  maxWallTimeMs: number;
+  maxProbes?: number;
+}
+
+/** Resolve the time-first adaptive budget without deriving policy from search-space size. */
+export function resolveLlamaCalibrationTimeBudget(
+  overrides: LlamaCalibrationTimeBudgetOverrides = {}
+): ResolvedLlamaCalibrationTimeBudget {
   if (
-    !Number.isSafeInteger(cellCount) ||
-    cellCount < formula.minCellCount ||
-    cellCount > formula.maxCellCount
+    overrides.maxWallTimeMs !== undefined &&
+    (!Number.isSafeInteger(overrides.maxWallTimeMs) || overrides.maxWallTimeMs <= 0)
   ) {
-    throw new RangeError(
-      `cellCount must be a safe integer from ${formula.minCellCount} through ${formula.maxCellCount}`
-    );
+    throw new RangeError('maxWallTimeMs must be a positive safe integer');
+  }
+  if (
+    overrides.maxProbes !== undefined &&
+    (!Number.isSafeInteger(overrides.maxProbes) || overrides.maxProbes <= 0)
+  ) {
+    throw new RangeError('maxProbes must be a positive safe integer');
   }
 
   return {
-    formulaVersion: formula.version,
-    cellCount,
-    targetProbes: Math.min(
-      formula.targetProbesCap,
-      formula.targetProbesBase + formula.targetProbesPerCell * cellCount
-    ),
-    maxProbes: Math.min(
-      formula.maxProbesCap,
-      formula.maxProbesBase + formula.maxProbesPerCell * cellCount
-    ),
-    finalistReserve: Math.min(
-      formula.finalistReserveCap,
-      Math.max(formula.finalistReserveFloor, cellCount)
-    ),
-    maxWallTimeMs: Math.min(
-      formula.maxWallTimeCapMs,
-      formula.maxWallTimeBaseMs + formula.maxWallTimePerCellMs * cellCount
-    ),
-    finalistTimeReserveMs: Math.min(
-      formula.finalistTimeReserveCapMs,
-      formula.finalistTimeReservePerCellMs * cellCount
-    ),
+    maxWallTimeMs: overrides.maxWallTimeMs ?? LLAMA_CALIBRATION_DEFAULTS.adaptiveMaxWallTimeMs,
+    ...(overrides.maxProbes === undefined ? {} : { maxProbes: overrides.maxProbes }),
   };
 }
 

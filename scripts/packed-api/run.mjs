@@ -10,7 +10,7 @@
  *
  * Why compile-only: importing the package at runtime outside Electron fails on `electron`'s own
  * stub (`import { app } from 'electron'` has no named exports in a plain Node process). The contract
- * this harness protects - specialized error identity, details narrowing, schema-v3 shapes, and the
+ * this harness protects - specialized error identity, details narrowing, schema-v4 shapes, and the
  * absence of removed fields - is entirely a declaration-level contract.
  *
  * Usage:
@@ -54,13 +54,23 @@ import {
   ServerError,
   formatErrorForUI,
 } from 'genai-electron';
+// @ts-expect-error the unreleased public budget resolver was removed from the package root
+import { resolveLlamaCalibrationTimeBudget } from 'genai-electron';
+// @ts-expect-error the internal adaptive terminal-status helper is not a package-root export
+import type { LlamaAdaptiveCalibrationTerminalStatus } from 'genai-electron';
 import type {
+  LlamaAdaptiveCalibrationBestKnown,
+  LlamaAdaptiveCalibrationBudgetReport,
+  LlamaAdaptiveCalibrationConfig,
+  LlamaAdaptiveCalibrationPreparationTimeLimit,
   LlamaAdaptiveCalibrationReport,
-  LlamaCalibrationDiagnosticCandidate,
+  LlamaAdaptiveCalibrationSelectionEvidence,
+  LlamaAdaptiveProgressBudget,
   LlamaCalibrationPartialReport,
   LlamaCalibrationProbe,
   LlamaCalibrationProbeResourceBoundaries,
   LlamaCalibrationProbeResourceValidity,
+  LlamaCalibrationRecommendation,
   LlamaCalibrationReport,
   LlamaCalibrationResourceBoundaryDiagnostic,
   LlamaCalibrationResourceFailure,
@@ -75,12 +85,35 @@ import type {
   LlamaCalibrationResourceStabilityDetails,
   LlamaCalibrationResourceStabilityDetailsCommon,
   LlamaCalibrationResourceStabilityMethodology,
+  LlamaExactCalibrationBestKnown,
+  LlamaExactCalibrationConfig,
   MemoryTelemetryRefreshStatus,
   TelemetryCommandOptions,
   UIErrorFormat,
 } from 'genai-electron';
 
-// --- schema-v3 report and partial shapes ------------------------------------------------------
+// --- schema-v4 report, progress, and partial shapes -------------------------------------------
+
+const hostAdaptiveConfig: LlamaAdaptiveCalibrationConfig = {
+  modelId: 'model',
+  profiles: [{ contextSize: 12_288, parallelRequests: 1 }],
+  workloads: [{ id: 'cold', kind: 'cold-prefill', prompt: 'prompt', nPredict: 8 }],
+  maxWallTimeMs: 60 * 60_000,
+};
+const unboundedProgressBudget: LlamaAdaptiveProgressBudget = {
+  maxWallTimeMs: LLAMA_CALIBRATION_DEFAULTS.adaptiveMaxWallTimeMs,
+  remainingMs: LLAMA_CALIBRATION_DEFAULTS.adaptiveMaxWallTimeMs - 1_000,
+};
+const boundedProgressBudget: LlamaAdaptiveProgressBudget = {
+  ...unboundedProgressBudget,
+  maxProbes: 7,
+  remainingProbes: 6,
+};
+const reportBudget: LlamaAdaptiveCalibrationBudgetReport = {
+  maxWallTimeMs: LLAMA_CALIBRATION_DEFAULTS.adaptiveMaxWallTimeMs,
+  elapsedMs: LLAMA_CALIBRATION_DEFAULTS.adaptiveMaxWallTimeMs + 250,
+  overrunMs: 250,
+};
 
 const hostMonitoring: LlamaCalibrationResourceMetricMonitoring = {
   metric: 'hostMemory',
@@ -150,13 +183,24 @@ const failure: LlamaCalibrationResourceFailure = {
   probeIndex: 1,
   diagnostics: boundary,
 };
-const candidate: LlamaCalibrationDiagnosticCandidate = {
+const recommendation: LlamaCalibrationRecommendation = {
+  profileIndex: 0,
+  cellId: 'p0:c12288:swa-window:kv-q8_0',
+  startConfig: { contextSize: 12_288, parallelRequests: 1, gpuLayers: 20 },
+  scoreMs: 1_234,
+};
+const bestKnown: LlamaAdaptiveCalibrationBestKnown = {
+  recommendation,
+  evidence: 'independent-reproduction',
   sourceProbeIndexes: [0],
-  evidenceLevel: 'independent-reproduction',
-  usability: 'diagnostic-only',
+};
+const exactBestKnown: LlamaExactCalibrationBestKnown = {
+  recommendation,
+  evidence: 'single-launch-measurement',
+  sourceProbeIndexes: [0],
 };
 const partialReport: LlamaCalibrationResourceFailurePartialReport = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
   strategy: 'adaptive',
   status: 'failed',
@@ -166,19 +210,47 @@ const partialReport: LlamaCalibrationResourceFailurePartialReport = {
   warnings: [],
   cleanupConfirmed: true,
   resourceFailure: failure,
-  diagnosticCandidate: candidate,
+  searchCompleteness: 'partial',
+  budget: reportBudget,
+  bestKnown,
 };
 // The resource-failure partial is usable wherever the general partial is expected.
 const generalPartial: LlamaCalibrationPartialReport = partialReport;
+const preparationLimit: LlamaAdaptiveCalibrationPreparationTimeLimit = {
+  resultKind: 'preparation-time-limit',
+  schemaVersion: 4,
+  policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+  createdAt: new Date().toISOString(),
+  strategy: 'adaptive',
+  phase: 'preparing',
+  status: 'time-limited',
+  searchCompleteness: 'partial',
+  terminalReason: 'deadline reached while provisioning',
+  budget: reportBudget,
+  probes: [],
+  warnings: [],
+  cleanupConfirmed: true,
+};
+const exactConfig: LlamaExactCalibrationConfig = {
+  modelId: 'model',
+  profile: { contextSize: 12_288, parallelRequests: 1 },
+  workloads: [{ id: 'cold', kind: 'cold-prefill', prompt: 'prompt', nPredict: 8 }],
+  combos: [{ overrides: { gpuLayers: 20 } }],
+};
 
 export function readReport(report: LlamaCalibrationReport): {
-  schemaVersion: 3;
+  kind: 'report';
+  schemaVersion: 4;
   coverage: LlamaCalibrationResourceMonitoringCoverage;
   methodology: LlamaCalibrationResourceStabilityMethodology;
   metrics: readonly LlamaCalibrationResourceMetric[];
-} {
-  const schemaVersion: 3 = report.schemaVersion;
+} | { kind: 'preparation-time-limit'; reason: string } {
+  if (report.resultKind === 'preparation-time-limit') {
+    return { kind: report.resultKind, reason: report.terminalReason };
+  }
+  const schemaVersion: 4 = report.schemaVersion;
   return {
+    kind: report.resultKind,
     schemaVersion,
     coverage: report.resourceMonitoring.coverage,
     methodology: report.methodology.resourceStability,
@@ -194,9 +266,14 @@ export function readProbe(probe: LlamaCalibrationProbe): {
 }
 
 export function readAdaptiveSelection(report: LlamaAdaptiveCalibrationReport) {
-  return report.selectionEvidence === 'independent-reproduction'
-    ? report.selected?.startConfig
-    : report.provisional?.startConfig;
+  const evidence: LlamaAdaptiveCalibrationSelectionEvidence | undefined =
+    report.selectionEvidence;
+  return {
+    selected: report.selected?.startConfig,
+    evidence,
+    completeness: report.searchCompleteness,
+    timeBudgetMs: report.budget.maxWallTimeMs,
+  };
 }
 
 // --- typed rejection --------------------------------------------------------------------------
@@ -252,6 +329,50 @@ export function removedSurface(report: LlamaCalibrationReport) {
   }));
 }
 
+export function removedAdaptiveSurface(report: LlamaAdaptiveCalibrationReport) {
+  return {
+    // @ts-expect-error schema v4 removed provisional; selected carries explicit evidence instead
+    provisional: report.provisional,
+    // @ts-expect-error adaptive confidence was replaced by selectionEvidence
+    confidence: report.confidence,
+  };
+}
+
+export const removedAdaptiveConfig: LlamaAdaptiveCalibrationConfig = {
+  ...hostAdaptiveConfig,
+  // @ts-expect-error targetProbes was removed; time is the primary adaptive budget
+  targetProbes: 10,
+};
+
+export const exactWithAdaptiveTime: LlamaExactCalibrationConfig = {
+  ...exactConfig,
+  // @ts-expect-error exact mode does not accept adaptive time budgets
+  maxWallTimeMs: 60_000,
+};
+
+// @ts-expect-error bounded progress must expose maxProbes and remainingProbes together
+export const invalidBoundedProgressBudget: LlamaAdaptiveProgressBudget = {
+  maxWallTimeMs: 60_000,
+  remainingMs: 30_000,
+  maxProbes: 7,
+};
+
+export const emptyBestKnown: LlamaAdaptiveCalibrationBestKnown = {
+  recommendation,
+  evidence: 'single-full-launch',
+  // @ts-expect-error bestKnown must cite at least one accepted source probe
+  sourceProbeIndexes: [],
+};
+
+export const removedBudgetSurface = {
+  // @ts-expect-error report budgets no longer expose speculative finalization state
+  finalization: reportBudget.enteredFinalization,
+  // @ts-expect-error progress budgets expose remainingMs, not duplicate elapsed fields
+  elapsed: unboundedProgressBudget.budgetElapsedMs,
+  // @ts-expect-error progress budgets no longer expose an estimate
+  estimate: unboundedProgressBudget.estimatedNextProbeCycleMs,
+};
+
 export const removedDefaults = {
   // @ts-expect-error resourceDriftThresholdPct was replaced by independent per-metric bands
   drift: LLAMA_CALIBRATION_DEFAULTS.resourceDriftThresholdPct,
@@ -259,15 +380,26 @@ export const removedDefaults = {
   settled: LLAMA_CALIBRATION_DEFAULTS.resourceSettledTolerancePct,
   // @ts-expect-error resourceDriftRetries belonged to the removed re-measurement loop
   retries: LLAMA_CALIBRATION_DEFAULTS.resourceDriftRetries,
+  // @ts-expect-error the speculative admission margin was removed
+  margin: LLAMA_CALIBRATION_DEFAULTS.adaptiveAdmissionMarginMultiplier,
+  // @ts-expect-error the released estimator fallback is no longer part of calibration defaults
+  unobserved: LLAMA_CALIBRATION_DEFAULTS.unobservedProbeDurationPolicy,
 };
 
 export const consumed = {
   boundaries,
+  boundedProgressBudget,
+  exactBestKnown,
+  exactConfig,
   generalPartial,
+  hostAdaptiveConfig,
   monitoring,
+  preparationLimit,
+  reportBudget,
   sampleRejection,
   telemetryOptions,
   refreshStatuses,
+  unboundedProgressBudget,
 };
 `;
 

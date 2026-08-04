@@ -1,7 +1,7 @@
 import {
   BINARY_VERSIONS,
   LLAMA_CALIBRATION_DEFAULTS,
-  resolveLlamaCalibrationBudgetDefaults,
+  resolveLlamaCalibrationTimeBudget,
   type BinaryVariantConfig,
 } from '../../src/config/defaults.js';
 
@@ -65,37 +65,19 @@ describe('LLM calibration defaults', () => {
       resourceDriftConfirmationReads: 1,
       resourceTelemetryTimeoutMs: 10_000,
       resourceCooldownMs: 750,
-      unobservedProbeDurationPolicy: 'configured-conservative-estimate',
-      policyVersion: 'llama-runtime-v3',
+      policyVersion: 'llama-runtime-v4',
+      adaptiveMaxWallTimeMs: 3_600_000,
       maxRunnerStartAttempts: 2,
       capacityCheckTimeoutCapMs: 5_000,
       processExitConfirmationMs: 2_000,
       processExitSettleGraceMs: 250,
-      adaptiveBudgetFormula: {
-        version: 'cell-count-v1',
-        minCellCount: 1,
-        maxCellCount: 8,
-        targetProbesCap: 24,
-        targetProbesBase: 6,
-        targetProbesPerCell: 2,
-        maxProbesCap: 36,
-        maxProbesBase: 7,
-        maxProbesPerCell: 4,
-        finalistReserveCap: 6,
-        finalistReserveFloor: 2,
-        maxWallTimeCapMs: 4_500_000,
-        maxWallTimeBaseMs: 900_000,
-        maxWallTimePerCellMs: 450_000,
-        finalistTimeReserveCapMs: 900_000,
-        finalistTimeReservePerCellMs: 150_000,
-      },
       maxCandidates: 10,
     });
   });
 
   it('pins the frozen resource-stability protocol values approved on 2026-08-02', () => {
     // These are exported policy constants, not caller-configurable calibration fields: a report
-    // that claims policy `llama-runtime-v3` must have been produced by exactly this protocol.
+    // that claims policy `llama-runtime-v4` must have been produced by exactly this protocol.
     expect(LLAMA_CALIBRATION_DEFAULTS.hostMemoryDecreaseThresholdPct).toBe(10);
     expect(LLAMA_CALIBRATION_DEFAULTS.hostMemoryIncreaseThresholdPct).toBe(20);
     expect(LLAMA_CALIBRATION_DEFAULTS.vramDecreaseThresholdPct).toBe(10);
@@ -105,7 +87,7 @@ describe('LLM calibration defaults', () => {
     expect(LLAMA_CALIBRATION_DEFAULTS.resourceTelemetryTimeoutMs).toBe(10_000);
     expect(LLAMA_CALIBRATION_DEFAULTS.resourceBaselineSamples).toBe(3);
     expect(LLAMA_CALIBRATION_DEFAULTS.resourceDriftConfirmationReads).toBe(1);
-    expect(LLAMA_CALIBRATION_DEFAULTS.policyVersion).toBe('llama-runtime-v3');
+    expect(LLAMA_CALIBRATION_DEFAULTS.policyVersion).toBe('llama-runtime-v4');
   });
 
   it('exposes no field that would let a caller weaken or disable the guard', () => {
@@ -125,6 +107,8 @@ describe('LLM calibration defaults', () => {
       'resourceDriftThresholdPct',
       'resourceSettledTolerancePct',
       'resourceDriftRetries',
+      'unobservedProbeDurationPolicy',
+      'adaptiveAdmissionMarginMultiplier',
     ]) {
       expect(LLAMA_CALIBRATION_DEFAULTS).not.toHaveProperty(removed);
     }
@@ -157,29 +141,30 @@ describe('LLM calibration defaults', () => {
     }
   });
 
-  it.each([
-    [1, 8, 11, 2, 1_350_000, 150_000],
-    [2, 10, 15, 2, 1_800_000, 300_000],
-    [4, 14, 23, 4, 2_700_000, 600_000],
-    [8, 22, 36, 6, 4_500_000, 900_000],
-  ])(
-    'resolves cell-count budgets for %i cells',
-    (cellCount, targetProbes, maxProbes, finalistReserve, maxWallTimeMs, finalistTimeReserveMs) => {
-      expect(resolveLlamaCalibrationBudgetDefaults(cellCount)).toEqual({
-        formulaVersion: 'cell-count-v1',
-        cellCount,
-        targetProbes,
-        maxProbes,
-        finalistReserve,
-        maxWallTimeMs,
-        finalistTimeReserveMs,
-      });
-    }
-  );
+  it('resolves a fixed time budget with no default probe cap', () => {
+    expect(resolveLlamaCalibrationTimeBudget()).toEqual({
+      maxWallTimeMs: 3_600_000,
+    });
+    expect(resolveLlamaCalibrationTimeBudget({ maxWallTimeMs: 5_400_000, maxProbes: 7 })).toEqual({
+      maxWallTimeMs: 5_400_000,
+      maxProbes: 7,
+    });
+    expect(resolveLlamaCalibrationTimeBudget({ maxWallTimeMs: Number.MAX_SAFE_INTEGER })).toEqual({
+      maxWallTimeMs: Number.MAX_SAFE_INTEGER,
+    });
+    expect(JSON.stringify(resolveLlamaCalibrationTimeBudget())).not.toMatch(
+      /Infinity|9007199254740991/
+    );
+  });
 
-  it.each([0, 9, 1.5, Number.NaN])('rejects an invalid adaptive cell count %p', (cellCount) => {
-    expect(() => resolveLlamaCalibrationBudgetDefaults(cellCount)).toThrow(
-      /cellCount must be a safe integer from 1 through 8/
+  it.each([
+    ['maxWallTimeMs', 0],
+    ['maxWallTimeMs', 1.5],
+    ['maxProbes', 0],
+    ['maxProbes', Number.POSITIVE_INFINITY],
+  ] as const)('rejects invalid time-budget override %s=%p', (field, value) => {
+    expect(() => resolveLlamaCalibrationTimeBudget({ [field]: value })).toThrow(
+      new RegExp(`${field} must be a positive safe integer`)
     );
   });
 });

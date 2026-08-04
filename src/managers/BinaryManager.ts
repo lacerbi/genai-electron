@@ -65,7 +65,18 @@ interface DependencyManifest {
 
 interface PreparedDependencies {
   entries: DependencyManifestEntry[];
-  manifest: DependencyManifest;
+}
+
+const VALIDATION_CHILD_TERMINATION_GRACE_MS = 1_000;
+
+function isValidationTerminationFailure(error: unknown): boolean {
+  return (
+    error instanceof BinaryError &&
+    typeof error.details === 'object' &&
+    error.details !== null &&
+    'code' in error.details &&
+    error.details.code === 'BINARY_VALIDATION_TERMINATION_UNCONFIRMED'
+  );
 }
 
 /**
@@ -308,7 +319,8 @@ export class BinaryManager {
    * @returns Path to the working binary
    * @throws {BinaryError} If all variants fail
    */
-  async ensureBinary(forceValidation = false): Promise<string> {
+  async ensureBinary(forceValidation = false, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const { type, binaryName, platformKey } = this.config;
     let { variants } = this.config;
 
@@ -321,6 +333,7 @@ export class BinaryManager {
 
     // Filter variants based on CUDA availability
     variants = await this.filterVariantsByCudaAvailability(variants);
+    signal?.throwIfAborted();
 
     if (variants.length === 0) {
       throw new BinaryError(
@@ -334,10 +347,11 @@ export class BinaryManager {
 
     // Ensure binary directory exists
     await ensureDirectory(PATHS.binaries[type]);
+    signal?.throwIfAborted();
     await this.pruneDependencyManifest();
+    signal?.throwIfAborted();
 
     const binaryPath = getBinaryPath(type, binaryName);
-    const variantCachePath = path.join(PATHS.binaries[type], '.variant.json');
 
     // Check if binary already exists and handle version changes
     if (await fileExists(binaryPath)) {
@@ -355,13 +369,16 @@ export class BinaryManager {
           `Binary version changed (${validationCache.version || 'unknown'} → ${this.config.version}), re-downloading...`,
           'info'
         );
-        await deleteFile(binaryPath).catch(() => void 0);
-        // Skip validation — fall through to download section below
+        // Keep the live installation in place until a replacement has downloaded, extracted, and
+        // passed validation. The candidate commit below is an owned settle-to-completion section,
+        // so deadline cancellation cannot strand the host without its prior binary.
       } else {
         if (validationCache && !forceValidation) {
           // Calculate current checksum to verify binary hasn't been modified
           this.log('Verifying binary integrity...', 'info');
+          signal?.throwIfAborted();
           const currentChecksum = await calculateChecksum(binaryPath);
+          signal?.throwIfAborted();
 
           if (currentChecksum === validationCache.checksum) {
             // Cache is valid - skip validation tests
@@ -381,10 +398,13 @@ export class BinaryManager {
         }
 
         // Run validation tests (cache invalid, missing, or forced)
-        const works = await this.testBinary(binaryPath);
+        const works = await this.testBinary(binaryPath, signal);
+        signal?.throwIfAborted();
         if (works) {
           // Save validation cache
+          signal?.throwIfAborted();
           const checksum = await calculateChecksum(binaryPath);
+          signal?.throwIfAborted();
           const variantType = validationCache?.variant || 'unknown';
           await this.saveValidationCache({
             variant: variantType,
@@ -400,7 +420,8 @@ export class BinaryManager {
           return binaryPath;
         } else {
           this.log('Existing binary not working, re-downloading...', 'warn');
-          await deleteFile(binaryPath).catch(() => void 0);
+          // Preserve the prior installation until a fully validated candidate is ready to replace
+          // it. This is especially important when provisioning is cancelled by calibration time.
         }
       }
     }
@@ -414,30 +435,15 @@ export class BinaryManager {
       this.log(`Trying ${variant.type} variant for ${platformKey}...`, 'info');
 
       try {
-        const success = await this.downloadAndTestVariant(variant, binaryPath);
+        signal?.throwIfAborted();
+        const success = await this.downloadAndTestVariant(variant, binaryPath, signal);
         if (success) {
-          // Cache this variant for next time (legacy variant cache)
-          await fs.writeFile(
-            variantCachePath,
-            JSON.stringify({ variant: variant.type, platform: platformKey }),
-            'utf-8'
-          );
-
-          // Save validation cache
-          const checksum = await calculateChecksum(binaryPath);
-          await this.saveValidationCache({
-            variant: variant.type,
-            checksum,
-            validatedAt: new Date().toISOString(),
-            phase1Passed: true,
-            phase2Passed: this.config.testModelPath ? true : undefined,
-            version: this.config.version,
-          });
-
           this.log(`Successfully installed ${variant.type} variant`, 'info');
           return binaryPath;
         }
       } catch (error) {
+        if (isValidationTerminationFailure(error)) throw error;
+        if (signal?.aborted) throw signal.reason ?? error;
         const errorMsg = error instanceof Error ? error.message : String(error);
         errors.push(`${variant.type}: ${errorMsg}`);
         this.log(`Failed to use ${variant.type} variant: ${errorMsg}`, 'warn');
@@ -463,12 +469,16 @@ export class BinaryManager {
     fileLabel: string;
     downloadLabel: string;
     dependency?: boolean;
+    signal?: AbortSignal;
   }): Promise<void> {
-    const { url, destination, checksum, fileLabel, downloadLabel, dependency } = options;
+    const { url, destination, checksum, fileLabel, downloadLabel, dependency, signal } = options;
 
     if (await fileExists(destination)) {
+      signal?.throwIfAborted();
       this.progress({ phase: 'verifying', file: fileLabel });
+      signal?.throwIfAborted();
       const existingChecksum = await calculateChecksum(destination);
+      signal?.throwIfAborted();
       if (existingChecksum === checksum) {
         this.log(`Reusing verified ${downloadLabel} archive`, 'info');
         return;
@@ -478,12 +488,14 @@ export class BinaryManager {
       await deleteFile(destination).catch(() => void 0);
     }
 
+    signal?.throwIfAborted();
     this.log(`Downloading ${downloadLabel}...`, 'info');
     const downloader = new Downloader();
     let lastWholePercent = -1;
     await downloader.download({
       url,
       destination,
+      signal,
       onProgress: (downloaded, total) => {
         const ratio = total > 0 ? downloaded / total : 0;
         const wholePercent = Math.floor(ratio * 100);
@@ -501,8 +513,11 @@ export class BinaryManager {
       },
     });
 
+    signal?.throwIfAborted();
     this.progress({ phase: 'verifying', file: fileLabel });
+    signal?.throwIfAborted();
     const actualChecksum = await calculateChecksum(destination);
+    signal?.throwIfAborted();
     if (actualChecksum !== checksum) {
       await deleteFile(destination).catch(() => void 0);
       throw new BinaryError(
@@ -616,12 +631,14 @@ export class BinaryManager {
    */
   private async downloadDependencies(
     dependencies: readonly BinaryDependency[],
-    extractDir: string
+    extractDir: string,
+    signal?: AbortSignal
   ): Promise<PreparedDependencies> {
     const manifest = await this.loadDependencyManifest();
     const entries: DependencyManifestEntry[] = [];
 
     for (const [index, dependency] of dependencies.entries()) {
+      signal?.throwIfAborted();
       const dependencyName = dependency.description || `Dependency ${index + 1}`;
       const cachedEntry = manifest.dependencies.find(
         (entry) => entry.checksum === dependency.checksum
@@ -648,6 +665,7 @@ export class BinaryManager {
         fileLabel: dependencyName,
         downloadLabel: dependencyName,
         dependency: true,
+        ...(signal ? { signal } : {}),
       });
 
       this.progress({ phase: 'extracting', file: dependencyName });
@@ -676,7 +694,7 @@ export class BinaryManager {
       this.log(`${dependencyName} extracted successfully`, 'info');
     }
 
-    return { entries, manifest };
+    return { entries };
   }
 
   /**
@@ -684,10 +702,9 @@ export class BinaryManager {
    */
   private async installDependencyFiles(
     entries: readonly DependencyManifestEntry[],
-    extractDir: string
+    extractDir: string,
+    installedDir: string
   ): Promise<void> {
-    const installedDir = PATHS.binaries[this.config.type];
-
     for (const entry of entries) {
       for (const relativeFile of entry.files) {
         const source = this.resolveDependencyFile(extractDir, relativeFile);
@@ -731,34 +748,24 @@ export class BinaryManager {
   }
 
   /**
-   * Merge successfully installed dependencies and persist the result.
+   * Persist the dependencies present in a complete candidate installation.
    */
-  private async commitDependencyManifest(prepared: PreparedDependencies): Promise<void> {
-    if (prepared.entries.length === 0) {
-      return;
-    }
-
-    const installedFiles = new Set(
-      prepared.entries.flatMap((entry) =>
-        entry.files.map((file) => file.replaceAll('\\', '/').toLowerCase())
-      )
+  private async commitDependencyManifest(
+    prepared: PreparedDependencies,
+    installedDir: string
+  ): Promise<void> {
+    await fs.writeFile(
+      path.join(installedDir, '.deps.json'),
+      JSON.stringify(
+        {
+          version: 1,
+          dependencies: prepared.entries,
+        } satisfies DependencyManifest,
+        null,
+        2
+      ),
+      'utf-8'
     );
-    const configuredChecksums = new Set(
-      this.config.variants.flatMap((variant) =>
-        (variant.dependencies ?? []).map((dependency) => dependency.checksum)
-      )
-    );
-    const retained = prepared.manifest.dependencies.filter(
-      (entry) =>
-        configuredChecksums.has(entry.checksum) &&
-        !prepared.entries.some((installed) => installed.checksum === entry.checksum) &&
-        !entry.files.some((file) => installedFiles.has(file.replaceAll('\\', '/').toLowerCase()))
-    );
-
-    await this.saveDependencyManifest({
-      version: 1,
-      dependencies: [...retained, ...prepared.entries],
-    });
   }
 
   private async cleanupVariantArtifacts(
@@ -836,7 +843,8 @@ export class BinaryManager {
    */
   private async downloadAndTestVariant(
     variant: BinaryVariantConfig,
-    finalBinaryPath: string
+    finalBinaryPath: string,
+    signal?: AbortSignal
   ): Promise<boolean> {
     const { type } = this.config;
     const archiveExt = getArchiveExtension(variant.url);
@@ -844,16 +852,21 @@ export class BinaryManager {
     const extractDir = `${finalBinaryPath}.${variant.type}.extract`;
     const dependencies = variant.dependencies ?? [];
     const dependencyArchivePaths = this.getDependencyArchivePaths(dependencies);
+    const installedDir = PATHS.binaries[type];
+    const transactionId = `${process.pid}-${Date.now()}-${variant.type}`;
+    const candidateInstallDir = `${installedDir}.candidate-${transactionId}`;
+    const priorInstallBackupDir = `${installedDir}.backup-${transactionId}`;
 
     await cleanupExtraction(extractDir);
+    await fs.rm(candidateInstallDir, { recursive: true, force: true });
+    await fs.rm(priorInstallBackupDir, { recursive: true, force: true });
 
     try {
       const preparedDependencies =
         dependencies.length > 0
-          ? await this.downloadDependencies(dependencies, extractDir)
+          ? await this.downloadDependencies(dependencies, extractDir, signal)
           : {
               entries: [],
-              manifest: await this.loadDependencyManifest(),
             };
 
       await this.ensureVerifiedArchive({
@@ -862,6 +875,7 @@ export class BinaryManager {
         checksum: variant.checksum,
         fileLabel: 'binary',
         downloadLabel: `${variant.type} binary`,
+        ...(signal ? { signal } : {}),
       });
 
       // Determine which binary names to search for based on type
@@ -882,20 +896,26 @@ export class BinaryManager {
           mainArchiveFiles = files;
         }
       );
+      signal?.throwIfAborted();
       this.assertNoDependencyFileCollisions(preparedDependencies.entries, mainArchiveFiles);
 
       // Test if binary works (has required drivers, etc.)
       this.progress({ phase: 'testing', file: 'binary' });
-      const works = await this.testBinary(extractedBinaryPath);
+      const works = await this.testBinary(extractedBinaryPath, signal);
+      signal?.throwIfAborted();
 
       if (works) {
+        // Build the full replacement beside the live directory. The live installation remains
+        // untouched until every copy, permission, manifest, and cache write has succeeded.
+        await fs.mkdir(candidateInstallDir, { recursive: true });
+
         // Copy ALL files that sit next to the binary to the binaries directory
         // (the .exe/.so AND all required shared libraries). Unix tar.gz releases
         // nest everything under a top-level llama-<tag>/ directory, so copying
         // the extract root verbatim would strand the binary in a subdirectory
         // that finalBinaryPath/chmod/spawn never look at — flatten instead.
         const extractedBinaryDir = path.dirname(extractedBinaryPath);
-        await copyDirectory(extractedBinaryDir, PATHS.binaries[type]);
+        await copyDirectory(extractedBinaryDir, candidateInstallDir);
 
         // Dependencies (e.g. CUDA runtime DLLs) are extracted at the extract
         // root; when the main archive was nested they are not in the binary's
@@ -906,21 +926,77 @@ export class BinaryManager {
             if (entry.isFile()) {
               await fs.copyFile(
                 path.join(extractDir, entry.name),
-                path.join(PATHS.binaries[type], entry.name),
+                path.join(candidateInstallDir, entry.name),
                 fsConstants.COPYFILE_FICLONE
               );
             }
           }
         }
-        await this.installDependencyFiles(preparedDependencies.entries, extractDir);
+        await this.installDependencyFiles(
+          preparedDependencies.entries,
+          extractDir,
+          candidateInstallDir
+        );
+        const candidateBinaryPath = path.join(candidateInstallDir, path.basename(finalBinaryPath));
 
         // Make executable (Unix-like systems)
         if (process.platform !== 'win32') {
-          await fs.chmod(finalBinaryPath, 0o755);
+          await fs.chmod(candidateBinaryPath, 0o755);
         }
 
-        await this.commitDependencyManifest(preparedDependencies);
-        await this.cleanupVariantArtifacts(archivePath, extractDir, dependencyArchivePaths);
+        await this.commitDependencyManifest(preparedDependencies, candidateInstallDir);
+        const checksum = await calculateChecksum(candidateBinaryPath);
+        await fs.writeFile(
+          path.join(candidateInstallDir, '.variant.json'),
+          JSON.stringify({ variant: variant.type, platform: this.config.platformKey }),
+          'utf-8'
+        );
+        await fs.writeFile(
+          path.join(candidateInstallDir, '.validation.json'),
+          JSON.stringify(
+            {
+              variant: variant.type,
+              checksum,
+              validatedAt: new Date().toISOString(),
+              phase1Passed: true,
+              phase2Passed: this.config.testModelPath ? true : undefined,
+              version: this.config.version,
+            } satisfies ValidationCache,
+            null,
+            2
+          ),
+          'utf-8'
+        );
+
+        // Publish the candidate with a recoverable directory swap. If the second rename fails,
+        // restore the prior live directory before surfacing the variant failure.
+        signal?.throwIfAborted();
+        await fs.rename(installedDir, priorInstallBackupDir);
+        try {
+          await fs.rename(candidateInstallDir, installedDir);
+        } catch (commitError) {
+          try {
+            await fs.rename(priorInstallBackupDir, installedDir);
+          } catch (renameRestoreError) {
+            try {
+              await copyDirectory(priorInstallBackupDir, installedDir);
+            } catch (copyRestoreError) {
+              throw new BinaryError(
+                'Binary installation failed and prior install restoration failed',
+                {
+                  commitError: String(commitError),
+                  renameRestoreError: String(renameRestoreError),
+                  copyRestoreError: String(copyRestoreError),
+                  priorInstallBackupDir,
+                }
+              );
+            }
+          }
+          throw commitError;
+        }
+        await fs.rm(priorInstallBackupDir, { recursive: true, force: true }).catch((error) => {
+          this.log(`Could not remove prior binary backup: ${error}`, 'warn');
+        });
 
         return true;
       } else {
@@ -928,9 +1004,56 @@ export class BinaryManager {
         return false;
       }
     } catch (error) {
+      await fs.rm(candidateInstallDir, { recursive: true, force: true }).catch(() => void 0);
       await this.cleanupVariantArtifacts(archivePath, extractDir, dependencyArchivePaths);
       throw error;
     }
+  }
+
+  private async waitForValidationChildExit(
+    child: ReturnType<typeof spawn>,
+    timeoutMs: number
+  ): Promise<boolean> {
+    if (child.exitCode != null || child.signalCode != null) return true;
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (exited: boolean) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        child.removeListener?.('exit', onSettled);
+        child.removeListener?.('close', onSettled);
+        resolve(exited);
+      };
+      const onSettled = () => finish(true);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      child.on('exit', onSettled);
+      child.on('close', onSettled);
+      if (child.exitCode != null || child.signalCode != null) finish(true);
+    });
+  }
+
+  private async terminateValidationChild(child: ReturnType<typeof spawn>): Promise<void> {
+    if (child.exitCode != null || child.signalCode != null) return;
+
+    const gracefulExit = this.waitForValidationChildExit(
+      child,
+      VALIDATION_CHILD_TERMINATION_GRACE_MS
+    );
+    child.kill('SIGTERM');
+    if (await gracefulExit) return;
+
+    const forcedExit = this.waitForValidationChildExit(
+      child,
+      VALIDATION_CHILD_TERMINATION_GRACE_MS
+    );
+    child.kill('SIGKILL');
+    if (await forcedExit) return;
+
+    throw new BinaryError('Binary validation child did not exit after forced termination', {
+      code: 'BINARY_VALIDATION_TERMINATION_UNCONFIRMED',
+      pid: child.pid,
+    });
   }
 
   /**
@@ -948,8 +1071,10 @@ export class BinaryManager {
   private spawnWithTimeout(
     command: string,
     args: string[],
-    timeoutMs: number
+    timeoutMs: number,
+    signal?: AbortSignal
   ): Promise<{ stdout: string; stderr: string }> {
+    signal?.throwIfAborted();
     return new Promise((resolve, reject) => {
       const child = spawn(command, args, {
         stdio: ['ignore', 'pipe', 'pipe'], // stdin ignored, stdout/stderr piped
@@ -957,14 +1082,36 @@ export class BinaryManager {
 
       let stdout = '';
       let stderr = '';
-      let timedOut = false;
+      let settling = false;
+      let settled = false;
+      const rejectAfterTermination = (reason: unknown): void => {
+        if (settling || settled) return;
+        settling = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        void this.terminateValidationChild(child).then(
+          () => {
+            settled = true;
+            reject(reason);
+          },
+          (terminationError) => {
+            settled = true;
+            reject(terminationError);
+          }
+        );
+      };
+      const abort = () =>
+        rejectAfterTermination(
+          signal?.reason ?? new DOMException('Binary validation aborted', 'AbortError')
+        );
+      signal?.addEventListener('abort', abort, { once: true });
+      const finish = () => signal?.removeEventListener('abort', abort);
 
       // Timeout handler
-      const timer = setTimeout(() => {
-        timedOut = true;
-        child.kill('SIGTERM');
-        reject(new Error(`Process timed out after ${timeoutMs}ms`));
-      }, timeoutMs);
+      const timer = setTimeout(
+        () => rejectAfterTermination(new Error(`Process timed out after ${timeoutMs}ms`)),
+        timeoutMs
+      );
 
       // Collect stdout
       child.stdout?.on('data', (data: Buffer) => {
@@ -977,16 +1124,20 @@ export class BinaryManager {
       });
 
       // Handle process exit
-      child.on('exit', (code, signal) => {
+      child.on('exit', (code, exitSignal) => {
+        if (settling || settled) return;
+        settled = true;
         clearTimeout(timer);
-        if (timedOut) return; // Already rejected
+        finish();
 
         if (code === 0) {
           resolve({ stdout, stderr });
         } else {
           const error = Object.assign(
-            new Error(`Process exited with code ${code}${signal ? ` (signal: ${signal})` : ''}`),
-            { code, signal, stdout, stderr }
+            new Error(
+              `Process exited with code ${code}${exitSignal ? ` (signal: ${exitSignal})` : ''}`
+            ),
+            { code, signal: exitSignal, stdout, stderr }
           );
           reject(error);
         }
@@ -994,10 +1145,11 @@ export class BinaryManager {
 
       // Handle spawn errors (e.g., ENOENT)
       child.on('error', (error) => {
+        if (settling || settled) return;
+        settled = true;
         clearTimeout(timer);
-        if (!timedOut) {
-          reject(error);
-        }
+        finish();
+        reject(error);
       });
     });
   }
@@ -1013,7 +1165,7 @@ export class BinaryManager {
    * @returns True if basic validation succeeds
    * @private
    */
-  private async runBasicValidationTest(binaryPath: string): Promise<boolean> {
+  private async runBasicValidationTest(binaryPath: string, signal?: AbortSignal): Promise<boolean> {
     const { type } = this.config;
 
     try {
@@ -1022,11 +1174,13 @@ export class BinaryManager {
       // Use different test flags based on binary type
       const testArgs = type === 'llama' ? ['--version'] : ['--help'];
 
-      await this.spawnWithTimeout(binaryPath, testArgs, 5000);
+      await this.spawnWithTimeout(binaryPath, testArgs, 5000, signal);
 
       this.log(`Phase 1: ✓ Binary validation passed (${testArgs[0]})`, 'info');
       return true;
     } catch (error) {
+      if (isValidationTerminationFailure(error)) throw error;
+      if (signal?.aborted) throw signal.reason ?? error;
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.log(`Phase 1: ✗ Basic validation failed: ${errorMsg}`, 'error');
       return false;
@@ -1097,13 +1251,17 @@ export class BinaryManager {
    * @returns True if real inference test succeeds
    * @private
    */
-  private async runRealFunctionalityTest(binaryPath: string, modelPath: string): Promise<boolean> {
+  private async runRealFunctionalityTest(
+    binaryPath: string,
+    modelPath: string,
+    signal?: AbortSignal
+  ): Promise<boolean> {
     const { type } = this.config;
 
     if (type === 'llama') {
-      return this.runLlamaServerTest(binaryPath, modelPath);
+      return this.runLlamaServerTest(binaryPath, modelPath, signal);
     }
-    return this.runDiffusionTest(binaryPath, modelPath);
+    return this.runDiffusionTest(binaryPath, modelPath, signal);
   }
 
   /**
@@ -1118,11 +1276,21 @@ export class BinaryManager {
    * @returns True if GPU inference test succeeds
    * @private
    */
-  private async runLlamaServerTest(binaryPath: string, modelPath: string): Promise<boolean> {
+  private async runLlamaServerTest(
+    binaryPath: string,
+    modelPath: string,
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    signal?.throwIfAborted();
     const testPort = 49152 + Math.floor(Math.random() * 16000);
     const timeout = 15000;
     let child: ReturnType<typeof spawn> | null = null;
     let stderr = '';
+    let spawnFailure: Error | undefined;
+    const abort = () => child?.kill('SIGTERM');
+    const recordChildError = (error: Error) => {
+      spawnFailure = error;
+    };
 
     try {
       this.log('Phase 2: Testing GPU functionality with llama-server...', 'info');
@@ -1142,6 +1310,15 @@ export class BinaryManager {
       child = spawn(binaryPath, testArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      child.on('error', recordChildError);
+      if (signal) {
+        signal.addEventListener('abort', abort, { once: true });
+      }
+
+      // A failed spawn is reported asynchronously. Give that event a turn before
+      // polling HTTP, and keep checking in case the process fails during startup.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (spawnFailure) throw spawnFailure;
 
       // Collect stderr for GPU error detection
       child.stderr?.on('data', (data: Buffer) => {
@@ -1153,6 +1330,8 @@ export class BinaryManager {
       let healthy = false;
 
       while (Date.now() - startTime < timeout) {
+        signal?.throwIfAborted();
+        if (spawnFailure) throw spawnFailure;
         // Check stderr for GPU errors while waiting
         const gpuError = this.checkForGpuErrors(stderr);
         if (gpuError) {
@@ -1163,17 +1342,20 @@ export class BinaryManager {
         try {
           const controller = new AbortController();
           const fetchTimer = setTimeout(() => controller.abort(), 2000);
-          const response = await fetch(`http://127.0.0.1:${testPort}/health`, {
-            signal: controller.signal,
-          });
-          clearTimeout(fetchTimer);
+          try {
+            const response = await fetch(`http://127.0.0.1:${testPort}/health`, {
+              signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+            });
 
-          if (response.ok) {
-            const data = (await response.json()) as { status?: string };
-            if (data.status === 'ok') {
-              healthy = true;
-              break;
+            if (response.ok) {
+              const data = (await response.json()) as { status?: string };
+              if (data.status === 'ok') {
+                healthy = true;
+                break;
+              }
             }
+          } finally {
+            clearTimeout(fetchTimer);
           }
         } catch {
           // Server not ready yet
@@ -1190,16 +1372,24 @@ export class BinaryManager {
         return false;
       }
 
+      if (spawnFailure) throw spawnFailure;
+
       // Send a test completion request to exercise GPU inference
       const controller = new AbortController();
       const fetchTimer = setTimeout(() => controller.abort(), 5000);
-      const completionResponse = await fetch(`http://127.0.0.1:${testPort}/completion`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: '2+2=', n_predict: 4 }),
-        signal: controller.signal,
-      });
-      clearTimeout(fetchTimer);
+      let completionResponse: Response;
+      try {
+        completionResponse = await fetch(`http://127.0.0.1:${testPort}/completion`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt: '2+2=', n_predict: 4 }),
+          signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+        });
+      } finally {
+        clearTimeout(fetchTimer);
+      }
+
+      if (spawnFailure) throw spawnFailure;
 
       if (!completionResponse.ok) {
         this.log(
@@ -1219,6 +1409,8 @@ export class BinaryManager {
       this.log('Phase 2: ✓ GPU functionality test passed (llama-server)', 'info');
       return true;
     } catch (error) {
+      if (isValidationTerminationFailure(error)) throw error;
+      if (signal?.aborted) throw signal.reason ?? error;
       const errorMsg = error instanceof Error ? error.message : String(error);
 
       if (stderr) {
@@ -1234,9 +1426,15 @@ export class BinaryManager {
       this.log(`Phase 2: ✗ Real functionality test failed: ${errorMsg}`, 'warn');
       return false;
     } finally {
-      // Always kill the test server
-      if (child && !child.killed) {
-        child.kill('SIGTERM');
+      signal?.removeEventListener('abort', abort);
+      try {
+        // A child with no pid never started. Otherwise, confirm it is gone and
+        // escalate if it ignores graceful termination.
+        if (child && !(spawnFailure && child.pid === undefined)) {
+          await this.terminateValidationChild(child);
+        }
+      } finally {
+        child?.removeListener('error', recordChildError);
       }
     }
   }
@@ -1249,7 +1447,11 @@ export class BinaryManager {
    * @returns True if test succeeds
    * @private
    */
-  private async runDiffusionTest(binaryPath: string, modelPath: string): Promise<boolean> {
+  private async runDiffusionTest(
+    binaryPath: string,
+    modelPath: string,
+    signal?: AbortSignal
+  ): Promise<boolean> {
     try {
       this.log('Phase 2: Testing GPU functionality with real inference...', 'info');
 
@@ -1275,7 +1477,7 @@ export class BinaryManager {
 
       // Multi-component models (7GB+) need more time to load all components
       const timeout = this.config.testModelArgs ? 120000 : 15000;
-      const { stdout, stderr } = await this.spawnWithTimeout(binaryPath, testArgs, timeout);
+      const { stdout, stderr } = await this.spawnWithTimeout(binaryPath, testArgs, timeout, signal);
 
       const gpuError = this.checkForGpuErrors(`${stdout}\n${stderr}`);
       if (gpuError) {
@@ -1286,6 +1488,8 @@ export class BinaryManager {
       this.log('Phase 2: ✓ GPU functionality test passed (sd)', 'info');
       return true;
     } catch (error) {
+      if (isValidationTerminationFailure(error)) throw error;
+      if (signal?.aborted) throw signal.reason ?? error;
       const errorMsg = error instanceof Error ? error.message : String(error);
       const errorObj = error as { stdout?: string; stderr?: string };
       const stdout = errorObj.stdout || '';
@@ -1321,11 +1525,11 @@ export class BinaryManager {
    * @returns True if all required tests pass
    * @private
    */
-  private async testBinary(binaryPath: string): Promise<boolean> {
+  private async testBinary(binaryPath: string, signal?: AbortSignal): Promise<boolean> {
     const { testModelPath } = this.config;
 
     // Phase 1: Basic validation (always required)
-    const phase1Passed = await this.runBasicValidationTest(binaryPath);
+    const phase1Passed = await this.runBasicValidationTest(binaryPath, signal);
     if (!phase1Passed) {
       this.log('Binary validation failed, variant will be skipped', 'warn');
       return false;
@@ -1333,7 +1537,7 @@ export class BinaryManager {
 
     // Phase 2: Real functionality test (if model available)
     if (testModelPath && (await fileExists(testModelPath))) {
-      const phase2Passed = await this.runRealFunctionalityTest(binaryPath, testModelPath);
+      const phase2Passed = await this.runRealFunctionalityTest(binaryPath, testModelPath, signal);
       if (!phase2Passed) {
         this.log('GPU functionality test failed, variant will be skipped', 'warn');
         return false;

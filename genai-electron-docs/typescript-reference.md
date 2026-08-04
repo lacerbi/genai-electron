@@ -666,9 +666,8 @@ interface LlamaAdaptiveCalibrationConfig extends LlamaCalibrationConfigCommon {
   includeKvCacheComparison?: boolean; // default false
   kvPrecisionPreferencePct?: number;  // default 10
   contextPreferencePct?: number;      // default 10
-  targetProbes?: number;
-  maxProbes?: number;
-  maxWallTimeMs?: number;
+  maxProbes?: number;                 // optional expert/test cap; omitted = unbounded
+  maxWallTimeMs?: number;             // default 60 minutes
 }
 
 interface LlamaExactCalibrationConfig extends LlamaCalibrationConfigCommon {
@@ -678,7 +677,6 @@ interface LlamaExactCalibrationConfig extends LlamaCalibrationConfigCommon {
   kvPrecisionPreferencePct?: number; // default 10
   includeKvCacheComparison?: never;
   contextPreferencePct?: never;
-  targetProbes?: never;
   maxProbes?: never;
   maxWallTimeMs?: never;
 }
@@ -727,31 +725,33 @@ type LlamaCalibrationPhase =
   | LlamaExactCalibrationPhase
   | 'done';
 
-type LlamaCalibrationTerminalStatus =
+type LlamaAdaptiveCalibrationTerminalStatus =
   | 'complete'
-  | 'budget-exhausted'
-  | 'no-viable-candidate'
+  | 'time-limited'
+  | 'probe-limited'
+  | 'inconclusive'
+  | 'no-viable-candidate';
+
+type LlamaCalibrationTerminalStatus =
+  | LlamaAdaptiveCalibrationTerminalStatus
   | 'aborted'
   | 'failed';
 
-type LlamaExactCalibrationTerminalStatus = Exclude<
-  LlamaCalibrationTerminalStatus,
-  'budget-exhausted'
->;
+type LlamaExactCalibrationTerminalStatus =
+  | 'complete' | 'no-viable-candidate' | 'aborted' | 'failed';
 
-type LlamaAdaptiveProgressBudget =
-  | { resolved: false }
-  | {
-      resolved: true;
-      targetProbes: number;
-      maxProbes: number;
-      finalistReserve: number;
-      maxWallTimeMs: number;
-      finalistTimeReserveMs: number;
-      remainingWallTimeMs: number;
-      probeReserveActive: boolean;
-      timeReserveActive: boolean;
-    };
+type LlamaAdaptiveCalibrationSelectionEvidence =
+  | 'independent-reproduction'
+  | 'single-full-launch'
+  | 'single-search-launch';
+
+type LlamaAdaptiveProgressBudget = {
+  maxWallTimeMs: number;
+  remainingMs: number;
+} & (
+  | { maxProbes?: never; remainingProbes?: never }
+  | { maxProbes: number; remainingProbes: number }
+);
 
 interface LlamaAdaptiveActiveProbe {
   profileIndex: number;   // stable caller-order identity
@@ -823,10 +823,11 @@ type LlamaCalibrationProgress =
     };
 ```
 
-The initial adaptive `preparing` event has `budget: { resolved: false }`; `policy-ready` supplies the
-resolved dynamic budget. The callback and `'calibration-progress'` event carry equivalent payloads.
-`overallPercent` is monotonic, but adaptive progress is an estimate against `maxProbes` rather than
-a fixed schedule.
+Adaptive elapsed/remaining time starts at method entry, including `preparing`; `policy-ready` marks
+that the fixed baseline exists but does not reset the clock. The callback and
+`'calibration-progress'` event carry equivalent payloads. `overallPercent` is monotonic time
+consumption. `completedProbes` counts settled trail records; bounded `remainingProbes` is consumed
+when an executor invocation starts.
 
 ### Probe and report
 
@@ -917,7 +918,7 @@ interface LlamaCalibrationCleanupRecord {
   error?: string;
 }
 
-// --- Fixed-baseline resource stability (schema v3) ---
+// --- Fixed-baseline resource stability (schema v4) ---
 
 // The two independently guarded resources. No weighting, no combined score.
 type LlamaCalibrationResourceMetric = 'hostMemory' | 'vram';
@@ -1007,16 +1008,18 @@ interface LlamaCalibrationResourceFailure {
   diagnostics: LlamaCalibrationResourceBoundaryDiagnostic;
 }
 
-type LlamaCalibrationDiagnosticEvidenceLevel =
-  | 'independent-reproduction'
-  | 'single-launch-measurement';
+type NonEmptyProbeIndexes = readonly [number, ...number[]];
 
-// Pointers into the probe trail only — never an application-ready payload,
-// and never copied into selected/provisional/fallback.
-interface LlamaCalibrationDiagnosticCandidate {
-  sourceProbeIndexes: readonly number[]; // non-empty, unique, ascending
-  evidenceLevel: LlamaCalibrationDiagnosticEvidenceLevel;
-  usability: 'diagnostic-only';
+interface LlamaAdaptiveCalibrationBestKnown {
+  recommendation: LlamaCalibrationRecommendation;
+  evidence: LlamaAdaptiveCalibrationSelectionEvidence;
+  sourceProbeIndexes: NonEmptyProbeIndexes;
+}
+
+interface LlamaExactCalibrationBestKnown {
+  recommendation: LlamaCalibrationRecommendation;
+  evidence: 'single-launch-measurement';
+  sourceProbeIndexes: NonEmptyProbeIndexes;
 }
 
 type LlamaCalibrationProbeResourceValidity =
@@ -1052,7 +1055,7 @@ interface LlamaCalibrationProbe {
   // Whether this observation may be used for any decision. An
   // `invalidated-by-resource-stability` probe stays in the chronological
   // trail for auditing but never reaches classification, ranking, selection,
-  // fallback, or the diagnostic candidate. `accepted` only means the resource
+  // fallback, or resource-failure bestKnown. `accepted` only means the resource
   // guard did not invalidate it — including a record the guard never evaluated
   // at all, and it may still carry an operational failure.
   resourceValidity: LlamaCalibrationProbeResourceValidity;
@@ -1097,6 +1100,16 @@ interface LlamaCalibrationRecommendation {
   scoreMs: number;
 }
 
+type LlamaCalibrationFallback =
+  | (LlamaCalibrationRecommendation & { evidence: 'direct-measurement' })
+  | {
+      profileIndex: number;
+      cellId: string;
+      startConfig: ResolvedLlamaCalibrationConfig;
+      evidence: 'unvalidated-option';
+      scoreMs?: never;
+    };
+
 interface LlamaCalibrationVerifiedProfile {
   effectiveContextSize: number;
   effectiveParallelRequests: number;
@@ -1138,29 +1151,11 @@ interface LlamaAdaptiveCalibrationCellReport {
   warnings: readonly string[];
 }
 
-interface LlamaCalibrationBudgetReport {
-  formulaVersion: string;
-  cellCount: number;
-  targetProbes: number;
-  maxProbes: number;
-  finalistReserve: number;
+interface LlamaAdaptiveCalibrationBudgetReport {
   maxWallTimeMs: number;
-  finalistTimeReserveMs: number;
-  effectiveFinalistTimeReserveMs: number;
-  completedProbes: number;
-  elapsedMs: number;
-  cleanupOverrunMs: number;
-  overrides: readonly ('targetProbes' | 'maxProbes' | 'maxWallTimeMs')[];
-  timeAdmission: {
-    policy: 'configured-conservative-estimate' | 'observed-comparable-launches';
-    estimatedNextProbeDurationMs?: number;
-    plannedPostStartupRequestCount?: number;
-    maxRunnerStartAttempts: number;
-    startupTimeoutMs: number;
-    resolvedCapacityCheckTimeoutMs: number;
-    configuredAttemptTeardownMs: number;
-    caveat: string;
-  };
+  elapsedMs: number; // method entry through library-owned settlement/restoration
+  overrunMs: number; // max(0, elapsedMs - maxWallTimeMs)
+  maxProbes?: number;
 }
 
 // Protocol facts only. Baselines and band values live in
@@ -1200,7 +1195,8 @@ interface LlamaCalibrationMethodology {
 }
 
 interface LlamaCalibrationReportBase {
-  schemaVersion: 3;
+  resultKind: 'report';
+  schemaVersion: 4;
   policyVersion: string;
   createdAt: string;
   status: LlamaCalibrationTerminalStatus;
@@ -1219,15 +1215,16 @@ interface LlamaCalibrationReportBase {
   warnings: readonly string[];
 }
 
-interface LlamaAdaptiveCalibrationReport extends LlamaCalibrationReportBase {
+interface LlamaAdaptiveCalibrationReportFields extends LlamaCalibrationReportBase {
   strategy: 'adaptive';
-  status: 'complete' | 'budget-exhausted' | 'no-viable-candidate';
+  status: LlamaAdaptiveCalibrationTerminalStatus;
+  searchCompleteness: 'resolved' | 'partial';
   terminalReason: string;
   profiles: readonly LlamaAdaptiveCalibrationProfileReport[];
   schedulingProfileIndexes: readonly number[];
   workloadComparability: 'verified' | 'unverified';
   cells: readonly LlamaAdaptiveCalibrationCellReport[];
-  budget: LlamaCalibrationBudgetReport;
+  budget: LlamaAdaptiveCalibrationBudgetReport;
   globalFastestScoreMs?: number;
   contextBandMaxScoreMs?: number;
   kvBandMaxScoreMs?: number;
@@ -1238,22 +1235,21 @@ interface LlamaAdaptiveCalibrationReport extends LlamaCalibrationReportBase {
     | 'largest-in-joint-band'
     | 'fallback-no-joint-eligible'
     | 'unresolved';
-  selected?: LlamaCalibrationRecommendation;
-  provisional?: LlamaCalibrationRecommendation;
-  fallback?:
-    | (LlamaCalibrationRecommendation & { evidence: 'direct-measurement' })
-    | {
-        profileIndex: number;
-        cellId: string;
-        startConfig: ResolvedLlamaCalibrationConfig;
-        evidence: 'unvalidated-option';
-      };
-  selectionEvidence?: 'independent-reproduction';
-  confidence: 'empirical-reproducibility';
+  fallback?: LlamaCalibrationFallback;
   pinnedMoePlacement: true;
 }
 
-interface LlamaExactCalibrationReport extends LlamaCalibrationReportBase {
+type LlamaAdaptiveSelection =
+  | {
+      selected: LlamaCalibrationRecommendation;
+      selectionEvidence: LlamaAdaptiveCalibrationSelectionEvidence;
+    }
+  | { selected?: never; selectionEvidence?: never };
+
+type LlamaAdaptiveCalibrationReport = LlamaAdaptiveCalibrationReportFields &
+  LlamaAdaptiveSelection;
+
+interface LlamaExactCalibrationReportFields extends LlamaCalibrationReportBase {
   strategy: 'exact';
   status: 'complete' | 'no-viable-candidate';
   profile: LlamaCalibrationProfile;
@@ -1261,17 +1257,43 @@ interface LlamaExactCalibrationReport extends LlamaCalibrationReportBase {
   combos: readonly LlamaCalibrationCombo[];
   skippedCombos: readonly { combo: LlamaCalibrationCombo; reason: string }[];
   runs: readonly LlamaCalibrationRun[];
-  selected?: LlamaCalibrationRecommendation;
-  selectionEvidence?: 'single-launch-measurement';
   confidence: 'single-launch-measurement';
+}
+
+type LlamaExactSelection =
+  | {
+      selected: LlamaCalibrationRecommendation;
+      selectionEvidence: 'single-launch-measurement';
+    }
+  | { selected?: never; selectionEvidence?: never };
+
+type LlamaExactCalibrationReport = LlamaExactCalibrationReportFields & LlamaExactSelection;
+
+interface LlamaAdaptiveCalibrationPreparationTimeLimit {
+  resultKind: 'preparation-time-limit';
+  schemaVersion: 4;
+  policyVersion: 'llama-runtime-v4';
+  createdAt: string;
+  strategy: 'adaptive';
+  phase: 'preparing';
+  status: 'time-limited';
+  searchCompleteness: 'partial';
+  terminalReason: string;
+  budget: LlamaAdaptiveCalibrationBudgetReport;
+  probes: readonly [];
+  warnings: readonly string[];
+  cleanupConfirmed: true;
+  selected?: never;
+  selectionEvidence?: never;
 }
 
 type LlamaCalibrationReport =
   | LlamaAdaptiveCalibrationReport
-  | LlamaExactCalibrationReport;
+  | LlamaExactCalibrationReport
+  | LlamaAdaptiveCalibrationPreparationTimeLimit;
 
 interface LlamaCalibrationPartialReport {
-  schemaVersion: 3;
+  schemaVersion: 4;
   policyVersion: string;
   strategy: 'adaptive' | 'exact';
   status: 'aborted' | 'failed';
@@ -1283,21 +1305,31 @@ interface LlamaCalibrationPartialReport {
   cleanupConfirmed: boolean;
 }
 
-// Attached to a resource-stability rejection only. Abort and unrelated
-// failure partials keep the surface above.
-interface LlamaCalibrationResourceFailurePartialReport
-  extends LlamaCalibrationPartialReport {
-  status: 'failed';
-  resourceMonitoring: LlamaCalibrationResourceMonitoring; // always present
-  resourceFailure: LlamaCalibrationResourceFailure;
-  // Only when clean pre-failure evidence already met the normal
-  // per-strategy rule. Diagnostic-only; never applicable as a start config.
-  diagnosticCandidate?: LlamaCalibrationDiagnosticCandidate;
-}
+type LlamaCalibrationResourceFailurePartialReport =
+  | (Omit<LlamaCalibrationPartialReport, 'strategy' | 'status' | 'cleanupConfirmed'> & {
+      strategy: 'adaptive';
+      status: 'failed';
+      cleanupConfirmed: true;
+      resourceMonitoring: LlamaCalibrationResourceMonitoring;
+      resourceFailure: LlamaCalibrationResourceFailure;
+      searchCompleteness: 'partial';
+      budget: LlamaAdaptiveCalibrationBudgetReport;
+      bestKnown?: LlamaAdaptiveCalibrationBestKnown;
+    })
+  | (Omit<LlamaCalibrationPartialReport, 'strategy' | 'status' | 'cleanupConfirmed'> & {
+      strategy: 'exact';
+      status: 'failed';
+      cleanupConfirmed: true;
+      resourceMonitoring: LlamaCalibrationResourceMonitoring;
+      resourceFailure: LlamaCalibrationResourceFailure;
+      searchCompleteness?: never;
+      bestKnown?: LlamaExactCalibrationBestKnown;
+    });
 ```
 
 `LlamaAdaptiveCalibrationProfileReport`, `LlamaAdaptiveCalibrationCellReport`,
-`LlamaCalibrationBudgetReport`, `LlamaCalibrationMethodology`,
+`LlamaAdaptiveCalibrationBudgetReport`, `LlamaAdaptiveCalibrationPreparationTimeLimit`, both
+strategy-specific `BestKnown` types, `LlamaCalibrationMethodology`,
 `LlamaCalibrationResourceStabilityMethodology`, `LlamaCalibrationRequestTiming`,
 `LlamaCalibrationSample`, `LlamaCalibrationWorkloadResult`, every resource-diagnostic type above,
 the workload signature, and model/binary/machine identity types are also exported from the package
@@ -1307,10 +1339,19 @@ root. Aborted and failed calls reject with the typed partial report at
 [LLM Runtime Calibration](llm-server.md#runtime-calibration) for search semantics, budgets,
 application, and invalidation.
 
+Narrow `LlamaCalibrationReport` on `resultKind` first. Only `resultKind: 'report'` carries ordinary
+model/machine identity and can then be narrowed by `strategy`; `preparation-time-limit` is the
+minimal adaptive branch produced before that identity and the fixed baseline exist.
+
 **Removed in schema v3** (present in schema-v2 reports, which should be discarded rather than
 migrated): `LlamaCalibrationProbe.resourceRegime`, `LlamaCalibrationResourceMetricDiagnostic`, and
 the `hostAvailableMemory` / `gpuAvailableMemory` fields of
 `LlamaCalibrationPassiveDiagnostics`.
+
+**Removed in schema v4:** adaptive `provisional` and `confidence`, `targetProbes`, cell-count budget
+formulas/reserves, duration estimates, admission/finalization fields, diagnostic-only candidates,
+and the public budget resolvers. Adaptive `selected` and `selectionEvidence` are one atomic union;
+`searchCompleteness` remains an independent fact.
 
 ---
 
@@ -1838,8 +1879,8 @@ type CleanupFunction = () => void | Promise<void>;
 ### LLAMA_CALIBRATION_DEFAULTS
 
 Protocol and policy defaults for [LLM runtime calibration](llm-server.md#runtime-calibration).
-Adaptive probe and time budgets are resolved from the enumerated cell count by
-`resolveLlamaCalibrationBudgetDefaults()`.
+Adaptive's fixed 60-minute default is independent of cell count; callers may provide any positive
+safe-integer `maxWallTimeMs`.
 
 ```typescript
 const LLAMA_CALIBRATION_DEFAULTS = {
@@ -1869,8 +1910,8 @@ const LLAMA_CALIBRATION_DEFAULTS = {
   resourceBaselineSettleMs: 5_000,   // fixed settle before the first attempt
   resourceDriftConfirmationReads: 1, // whole-boundary confirmations
   resourceTelemetryTimeoutMs: 10_000,// per host/GPU telemetry capture
-  unobservedProbeDurationPolicy: 'configured-conservative-estimate',
-  policyVersion: 'llama-runtime-v3',
+  policyVersion: 'llama-runtime-v4',
+  adaptiveMaxWallTimeMs: 60 * 60 * 1_000,
   startupTimeoutMs: 120_000,
   requestTimeoutMs: 120_000,
   resourceCooldownMs: 750,           // also the confirmation spacing
@@ -1879,54 +1920,20 @@ const LLAMA_CALIBRATION_DEFAULTS = {
   capacityCheckTimeoutCapMs: 5_000,
   processExitConfirmationMs: 2_000,
   processExitSettleGraceMs: 250,
-  adaptiveBudgetFormula: {
-    version: 'cell-count-v1',
-    minCellCount: 1,
-    maxCellCount: 8,
-    targetProbesCap: 24,
-    targetProbesBase: 6,
-    targetProbesPerCell: 2,
-    maxProbesCap: 36,
-    maxProbesBase: 7,
-    maxProbesPerCell: 4,
-    finalistReserveCap: 6,
-    finalistReserveFloor: 2,
-    maxWallTimeCapMs: 4_500_000,
-    maxWallTimeBaseMs: 900_000,
-    maxWallTimePerCellMs: 450_000,
-    finalistTimeReserveCapMs: 900_000,
-    finalistTimeReservePerCellMs: 150_000
-  },
   // Internal v0.18 rollback-path setting; not a public adaptive mode.
   maxCandidates: 10,
   oomPatterns: [/* versioned diagnostic patterns */] as readonly RegExp[]
 } as const;
-
-interface ResolvedLlamaCalibrationBudgetDefaults {
-  formulaVersion: string;
-  cellCount: number;
-  targetProbes: number;
-  maxProbes: number;
-  finalistReserve: number;
-  maxWallTimeMs: number;
-  finalistTimeReserveMs: number;
-}
-
-function resolveLlamaCalibrationBudgetDefaults(
-  cellCount: number
-): ResolvedLlamaCalibrationBudgetDefaults;
 ```
 
-The resolver accepts `cellCount` from 1 through 8. Its formulas are
-`min(24, 6 + 2c)`, `min(36, 7 + 4c)`, `min(6, max(2, c))`,
-`min(4_500_000, 900_000 + 450_000c)`, and
-`min(900_000, 150_000c)` respectively.
+Omitted `maxProbes` is represented by absent fields, never a non-finite or large numeric sentinel.
 
 The resource-stability values are exported policy constants, not caller-configurable calibration
 fields, and there is no override that disables confirmation. They are heuristic, provisional, and
 screened on a Windows/NVIDIA reference machine. **Removed in this policy version:**
-`resourceDriftThresholdPct`, `resourceSettledTolerancePct`, and `resourceDriftRetries`;
-`policyVersion` changed from `llama-runtime-v2` to `llama-runtime-v3`.
+`resourceDriftThresholdPct`, `resourceSettledTolerancePct`, and `resourceDriftRetries`.
+Schema 4 also removed `adaptiveBudgetFormula`, duration-estimation/admission defaults, and the public
+budget resolvers; `policyVersion` is now `llama-runtime-v4`.
 
 ### DIFFUSION_COMPONENT_FLAGS
 

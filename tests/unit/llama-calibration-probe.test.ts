@@ -32,7 +32,9 @@ jest.unstable_mockModule('../../src/process/llama-calibration-client.js', () => 
   LlamaCalibrationClient: MockCalibrationClient,
 }));
 
-const { runCalibrationProbe } = await import('../../src/process/llama-calibration-probe.js');
+const { redactCalibrationError, runCalibrationProbe } = await import(
+  '../../src/process/llama-calibration-probe.js'
+);
 
 const model: ModelInfo = {
   id: 'gemma',
@@ -104,6 +106,22 @@ describe('runCalibrationProbe', () => {
     mockTokenize.mockResolvedValue(10);
     mockEraseSlot.mockResolvedValue(undefined);
     mockComplete.mockResolvedValue(timing());
+  });
+
+  it('redacts repeated references without misclassifying them as circular', () => {
+    const shared = { value: 'PRIVATE-PROMPT' };
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    const sanitized = redactCalibrationError(
+      new ServerError('PRIVATE-PROMPT failed', { first: shared, second: shared, cycle }),
+      (value) => value.replaceAll('PRIVATE-PROMPT', '[REDACTED]')
+    ) as ServerError;
+
+    expect(sanitized.details).toEqual({
+      first: { value: '[REDACTED]' },
+      second: { value: '[REDACTED]' },
+      cycle: { self: '[Circular]' },
+    });
   });
 
   it('uses one fresh process, waits for confirmed cleanup, and scopes completion fidelity', async () => {
@@ -341,6 +359,27 @@ describe('runCalibrationProbe', () => {
         code: 'CALIBRATION_INVALID_CONFIG',
         probeObservation: expect.objectContaining({
           run: expect.objectContaining({ status: 'error' }),
+          cleanup: expect.objectContaining({ confirmed: true, pid: 101 }),
+        }),
+      }),
+    });
+    expect(stop).toHaveBeenCalledTimes(1);
+  });
+
+  it('attaches the cleaned-up observation when the active probe signal aborts', async () => {
+    const controller = new AbortController();
+    const reason = new DOMException('internal deadline', 'TimeoutError');
+    mockComplete.mockImplementationOnce(async () => {
+      controller.abort(reason);
+      throw reason;
+    });
+
+    await expect(
+      runCalibrationProbe(options({ signal: controller.signal, sampleCount: 1 }))
+    ).rejects.toMatchObject({
+      details: expect.objectContaining({
+        code: 'CALIBRATION_ABORTED',
+        probeObservation: expect.objectContaining({
           cleanup: expect.objectContaining({ confirmed: true, pid: 101 }),
         }),
       }),

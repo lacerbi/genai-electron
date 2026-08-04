@@ -6,18 +6,16 @@ import {
   classifyAdaptiveObservation,
   competitiveObservedRatio,
   createAdaptivePolicyState,
+  deriveAdaptiveLimitTerminal,
+  deriveAdaptiveIncumbent,
   deriveCeilingHints,
   enumerateAdaptiveCells,
-  estimateConfiguredProbeDuration,
-  evaluateProbeAdmission,
   evaluateReferenceGuard,
   findStableCliffReference,
   isAdaptiveCellCompetitive,
   nextAdaptivePolicyAction,
-  resolveAdaptiveBudgets,
   resolveAdaptiveRecommendation,
   summarizeAdaptiveCellStates,
-  summarizeAdaptiveTimingAdmission,
   type AdaptiveCandidate,
   type AdaptiveCellEnumerationInput,
   type AdaptiveEvidence,
@@ -51,8 +49,6 @@ const baseEnumeration: AdaptiveCellEnumerationInput = {
 
 const basePolicyConfig: AdaptivePolicyConfig = {
   ...baseEnumeration,
-  unobservedProbeDurationEstimateMs: 1,
-  budgetOverrides: { maxProbes: 36, maxWallTimeMs: 4_500_000 },
 };
 
 function evidence(
@@ -130,128 +126,34 @@ describe('pure adaptive LLM calibration policy', () => {
     expect(cell).toMatchObject({ physicalCeiling: 0, initialGpuLayers: 0 });
   });
 
-  it('resolves capped cell-count budgets and deterministic time admission', () => {
-    expect(resolveAdaptiveBudgets(2)).toMatchObject({
-      targetProbes: 10,
-      maxProbes: 15,
-      finalistReserve: 2,
-      maxWallTimeMs: 1_800_000,
-      finalistTimeReserveMs: 300_000,
-    });
-    expect(resolveAdaptiveBudgets(8)).toMatchObject({
-      targetProbes: 22,
-      maxProbes: 36,
-      finalistReserve: 6,
-      maxWallTimeMs: 4_500_000,
-      finalistTimeReserveMs: 900_000,
-    });
-
-    const duration = estimateConfiguredProbeDuration({
-      startupTimeoutMs: 120_000,
-      requestTimeoutMs: 120_000,
-      serverStopTimeoutMs: 10_000,
-      plannedPostStartupRequestCount: 3,
-    });
-    expect(duration).toEqual({
-      policy: 'configured-conservative-estimate',
-      estimateMs: 634_500,
-      resolvedCapacityCheckTimeoutMs: 5_000,
-      configuredAttemptTeardownMs: 12_250,
-      plannedPostStartupRequestCount: 3,
-      maxRunnerStartAttempts: 2,
-      isFormalUpperBound: false,
-    });
-
-    const budgets = resolveAdaptiveBudgets(2);
-    expect(
-      evaluateProbeAdmission({
-        probesUsed: 13,
-        elapsedMs: 1_000_000,
-        budgets,
-        finalistPurpose: false,
-        estimatedNextProbeDurationMs: 100_000,
-        effectiveFinalistTimeReserveMs: 300_000,
-      })
-    ).toEqual({ allowed: false, reason: 'launch-reserve' });
-    expect(
-      evaluateProbeAdmission({
-        probesUsed: 13,
-        elapsedMs: 1_000_000,
-        budgets,
-        finalistPurpose: true,
-        estimatedNextProbeDurationMs: 100_000,
-        effectiveFinalistTimeReserveMs: 300_000,
-      })
-    ).toEqual({ allowed: true, reason: 'allowed' });
-    expect(
-      evaluateProbeAdmission({
-        probesUsed: 13,
-        elapsedMs: 1_750_000,
-        budgets,
-        finalistPurpose: true,
-        estimatedNextProbeDurationMs: 100_000,
-        effectiveFinalistTimeReserveMs: 300_000,
-      })
-    ).toEqual({ allowed: false, reason: 'wall-time' });
-    // Probe zero bypasses the reserve checks: reserves protect later validation
-    // launches, and the configured conservative estimate can exceed an ordinary
-    // budget on its own, which would otherwise return a zero-probe report.
-    expect(
-      evaluateProbeAdmission({
-        probesUsed: 0,
-        elapsedMs: 0,
-        budgets,
-        finalistPurpose: false,
-        estimatedNextProbeDurationMs: 2_194_500,
-        effectiveFinalistTimeReserveMs: 300_000,
-      })
-    ).toEqual({ allowed: true, reason: 'allowed' });
-    expect(
-      evaluateProbeAdmission({
-        probesUsed: 1,
-        elapsedMs: 0,
-        budgets,
-        finalistPurpose: false,
-        estimatedNextProbeDurationMs: 2_194_500,
-        effectiveFinalistTimeReserveMs: 300_000,
-      })
-    ).toEqual({ allowed: false, reason: 'time-reserve' });
-    // An already-expired deadline still refuses probe zero.
-    expect(
-      evaluateProbeAdmission({
-        probesUsed: 0,
-        elapsedMs: budgets.maxWallTimeMs,
-        budgets,
-        finalistPurpose: false,
-        estimatedNextProbeDurationMs: 1_000,
-        effectiveFinalistTimeReserveMs: 300_000,
-      })
-    ).toEqual({ allowed: false, reason: 'wall-time' });
-
-    const emptyState = createAdaptivePolicyState(basePolicyConfig);
-    expect(summarizeAdaptiveTimingAdmission(emptyState)).toMatchObject({
-      policy: 'configured-conservative-estimate',
-      estimatedNextProbeDurationMs: 1,
-    });
-    const cellId = emptyState.cells[0]!.id;
-    const observedState = {
-      ...emptyState,
-      evidence: [
-        evidence(0, { cellId, gpuLayers: 4, durationMs: 10 }),
-        evidence(1, { cellId, gpuLayers: 4, durationMs: 30 }),
-        evidence(2, {
-          cellId,
-          gpuLayers: 8,
-          durationMs: 100,
-          operationalStatus: 'request-timeout',
-          terminatedAtAdaptiveCap: true,
-        }),
-      ],
+  it('keeps structural actions independent of clocks and derives limit terminals externally', () => {
+    const created = createAdaptivePolicyState({ ...basePolicyConfig, fixedGpuLayers: 4 });
+    const cell = created.cells[0]!;
+    const withIncumbent = {
+      ...created,
+      evidence: [evidence(0, { cellId: cell.id, gpuLayers: 4, scoreMs: 100 })],
     };
-    expect(summarizeAdaptiveTimingAdmission(observedState)).toMatchObject({
-      policy: 'observed-comparable-launches',
-      estimatedNextProbeDurationMs: 20,
+
+    expect(nextAdaptivePolicyAction(withIncumbent)).toMatchObject({
+      kind: 'probe',
+      purpose: 'finalist',
+      fidelity: 'full',
     });
+    expect(deriveAdaptiveLimitTerminal(withIncumbent, 'time', 'deadline reached')).toMatchObject({
+      kind: 'terminal',
+      status: 'time-limited',
+      reason: 'deadline reached',
+      selected: { gpuLayers: 4, scoreMs: 100 },
+      selectionEvidence: 'single-search-launch',
+    });
+    expect(deriveAdaptiveLimitTerminal(withIncumbent, 'probe', 'cap reached')).toMatchObject({
+      kind: 'terminal',
+      status: 'probe-limited',
+      selected: { gpuLayers: 4 },
+    });
+    expect(created).not.toHaveProperty('budgets');
+    expect(created).not.toHaveProperty('elapsedMs');
+    expect(created).not.toHaveProperty('mode');
   });
 
   it('keeps cells competitive until direct boundaries and uses the symmetric active window', () => {
@@ -283,48 +185,299 @@ describe('pure adaptive LLM calibration policy', () => {
     ).toBe(false);
   });
 
-  it('reserves only the largest mutually exclusive winner-validation tail across resolved cells', () => {
+  it('uses the 20% search-noise band only when a single-search winner faces stronger evidence', () => {
     const created = createAdaptivePolicyState({
+      profiles: [{ profileIndex: 0, contextSize: 12_288, parallelRequests: 2, autoGpuLayers: 4 }],
+      totalLayers: 8,
+      gpuAvailable: true,
+      fixedGpuLayers: 4,
+      slidingWindow: 4096,
+      hasSharedPrefixWorkload: true,
+      includeKvCacheComparison: false,
+      baselineKvPrecision: 'q8_0',
+    });
+    const [reproducedCell, weakCell] = created.cells;
+    const reproduced = [
+      evidence(0, { cellId: reproducedCell!.id, gpuLayers: 4, scoreMs: 4_200 }),
+      evidence(1, {
+        cellId: reproducedCell!.id,
+        gpuLayers: 4,
+        fidelity: 'full',
+        scoreMs: 4_200,
+      }),
+    ];
+    const materiallyFaster = {
+      ...created,
+      evidence: [
+        ...reproduced,
+        evidence(2, { cellId: weakCell!.id, gpuLayers: 4, scoreMs: 3_400 }),
+      ],
+    };
+    expect(deriveAdaptiveIncumbent(materiallyFaster)).toMatchObject({
+      evidenceLevel: 'single-search-launch',
+      candidate: { cellId: weakCell!.id, scoreMs: 3_400 },
+    });
+
+    const nearTie = {
+      ...created,
+      evidence: [
+        ...reproduced,
+        evidence(2, { cellId: weakCell!.id, gpuLayers: 4, scoreMs: 3_900 }),
+      ],
+    };
+    expect(deriveAdaptiveIncumbent(nearTie)).toMatchObject({
+      evidenceLevel: 'independent-reproduction',
+      candidate: { cellId: reproducedCell!.id, scoreMs: 4_200 },
+    });
+  });
+
+  it('keeps the ordinary 5% final band for same-strength candidates', () => {
+    const created = createAdaptivePolicyState({
+      ...basePolicyConfig,
+      profiles: [{ profileIndex: 0, contextSize: 8192, parallelRequests: 2, autoGpuLayers: 4 }],
+      totalLayers: 8,
+    });
+    const cell = created.cells[0]!;
+    const withinBand = {
+      ...created,
+      evidence: [
+        evidence(0, { cellId: cell.id, gpuLayers: 4, scoreMs: 100 }),
+        evidence(1, { cellId: cell.id, gpuLayers: 3, scoreMs: 104 }),
+      ],
+    };
+    expect(deriveAdaptiveIncumbent(withinBand)).toMatchObject({
+      evidenceLevel: 'single-search-launch',
+      candidate: { gpuLayers: 3, scoreMs: 104 },
+    });
+    expect(
+      deriveAdaptiveIncumbent({
+        ...withinBand,
+        evidence: [
+          evidence(0, { cellId: cell.id, gpuLayers: 4, scoreMs: 100 }),
+          evidence(1, { cellId: cell.id, gpuLayers: 3, scoreMs: 106 }),
+        ],
+      })
+    ).toMatchObject({ candidate: { gpuLayers: 4, scoreMs: 100 } });
+  });
+
+  it('labels single-full evidence and excludes capped or conflicting point evidence', () => {
+    const created = createAdaptivePolicyState({
+      ...basePolicyConfig,
+    });
+    const cell = created.cells[0]!;
+    const singleFull = {
+      ...created,
+      evidence: [evidence(0, { cellId: cell.id, gpuLayers: 4, fidelity: 'full', scoreMs: 100 })],
+    };
+    expect(deriveAdaptiveIncumbent(singleFull)?.evidenceLevel).toBe('single-full-launch');
+    expect(
+      deriveAdaptiveIncumbent({
+        ...singleFull,
+        evidence: [
+          ...singleFull.evidence,
+          evidence(1, {
+            cellId: cell.id,
+            gpuLayers: 4,
+            operationalStatus: 'request-timeout',
+            terminatedAtAdaptiveCap: true,
+            scoreMs: undefined,
+            boundaryDecision: 'ambiguous',
+          }),
+        ],
+      })
+    ).toBeUndefined();
+    expect(
+      deriveAdaptiveIncumbent({
+        ...created,
+        evidence: [
+          evidence(0, { cellId: cell.id, gpuLayers: 4, scoreMs: 100 }),
+          evidence(1, { cellId: cell.id, gpuLayers: 4, scoreMs: 140 }),
+        ],
+      })
+    ).toBeUndefined();
+  });
+
+  it('lets stable full reproduction supersede an earlier ambiguous search observation', () => {
+    const created = createAdaptivePolicyState({ ...basePolicyConfig });
+    const cell = created.cells[0]!;
+    const incumbent = deriveAdaptiveIncumbent({
+      ...created,
+      evidence: [
+        evidence(0, {
+          cellId: cell.id,
+          gpuLayers: 4,
+          scoreMs: undefined,
+          boundaryDecision: 'ambiguous',
+          decisionReason: 'missing-or-invalid-score',
+        }),
+        evidence(1, {
+          cellId: cell.id,
+          gpuLayers: 4,
+          fidelity: 'full',
+          scoreMs: 100,
+        }),
+        evidence(2, {
+          cellId: cell.id,
+          gpuLayers: 4,
+          fidelity: 'full',
+          scoreMs: 101,
+        }),
+      ],
+    });
+
+    expect(incumbent).toMatchObject({
+      evidenceLevel: 'independent-reproduction',
+      candidate: { gpuLayers: 4, scoreMs: 100.5, evidenceIndices: [1, 2] },
+    });
+  });
+
+  it('returns time-limited incumbents at every evidence tier and none for conflicting or absent evidence', () => {
+    const created = createAdaptivePolicyState({
+      ...basePolicyConfig,
       profiles: [
         { profileIndex: 0, contextSize: 8192, parallelRequests: 2, autoGpuLayers: 4 },
         { profileIndex: 1, contextSize: 12_288, parallelRequests: 2, autoGpuLayers: 4 },
       ],
-      totalLayers: 8,
-      gpuAvailable: true,
-      hasSharedPrefixWorkload: false,
-      includeKvCacheComparison: true,
-      baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 100_000,
-      budgetOverrides: { maxProbes: 30, maxWallTimeMs: 3_000_000 },
+      fixedGpuLayers: 4,
     });
-    const trace = created.cells.flatMap((cell, cellIndex) => [
-      evidence(cellIndex * 3, {
-        cellId: cell.id,
-        gpuLayers: 4,
-        scoreMs: 100 + cellIndex,
-        durationMs: 100_000,
-      }),
-      evidence(cellIndex * 3 + 1, {
-        cellId: cell.id,
-        gpuLayers: 4,
-        fidelity: 'full',
-        scoreMs: 100 + cellIndex,
-        durationMs: 100_000,
-      }),
-      evidence(cellIndex * 3 + 2, {
-        cellId: cell.id,
-        gpuLayers: 5,
+    const cell = created.cells[0]!;
+    const cases = [
+      {
+        evidence: [evidence(0, { cellId: cell.id, gpuLayers: 4, scoreMs: 100 })],
+        selectionEvidence: 'single-search-launch',
+      },
+      {
+        evidence: [
+          evidence(0, {
+            cellId: cell.id,
+            gpuLayers: 4,
+            fidelity: 'full',
+            scoreMs: 100,
+          }),
+        ],
+        selectionEvidence: 'single-full-launch',
+      },
+      {
+        evidence: [
+          evidence(0, { cellId: cell.id, gpuLayers: 4, scoreMs: 100 }),
+          evidence(1, {
+            cellId: cell.id,
+            gpuLayers: 4,
+            fidelity: 'full',
+            scoreMs: 101,
+          }),
+        ],
+        selectionEvidence: 'independent-reproduction',
+      },
+      {
+        evidence: [
+          evidence(0, { cellId: cell.id, gpuLayers: 4, scoreMs: 100 }),
+          evidence(1, { cellId: cell.id, gpuLayers: 4, scoreMs: 140 }),
+        ],
+      },
+      { evidence: [] },
+    ] as const;
+
+    for (const entry of cases) {
+      const selectionEvidence = 'selectionEvidence' in entry ? entry.selectionEvidence : undefined;
+      const action = deriveAdaptiveLimitTerminal(
+        { ...created, evidence: entry.evidence },
+        'time',
+        'deadline reached'
+      );
+      expect(action).toMatchObject({
+        kind: 'terminal',
+        status: 'time-limited',
+        ...(selectionEvidence ? { selected: { gpuLayers: 4 }, selectionEvidence } : {}),
+      });
+      if (!selectionEvidence) {
+        expect(action).not.toHaveProperty('selected');
+        expect(action).not.toHaveProperty('selectionEvidence');
+      }
+    }
+  });
+
+  it('terminates a legal unbounded trace without a hidden attempt ceiling', () => {
+    let unbounded = createAdaptivePolicyState({
+      ...basePolicyConfig,
+      profiles: [{ profileIndex: 0, contextSize: 8192, parallelRequests: 2, autoGpuLayers: 4 }],
+      totalLayers: 8,
+    });
+    let launches = 0;
+    while (true) {
+      const action = nextAdaptivePolicyAction(unbounded);
+      if (action.kind === 'terminal') {
+        expect(action.status).toBe('no-viable-candidate');
+        break;
+      }
+      launches += 1;
+      expect(launches).toBeLessThanOrEqual(8);
+      unbounded = applyAdaptivePolicyObservation(unbounded, {
+        cellId: action.cellId,
+        gpuLayers: action.gpuLayers,
+        purpose: action.purpose,
+        fidelity: action.fidelity,
         operationalStatus: 'oom',
         memoryEvidence: 'confirmed',
-        scoreMs: undefined,
-        boundaryDecision: 'unsuitable',
-        durationMs: 100_000,
-      }),
-    ]);
+        durationMs: 1,
+      });
+    }
+    expect(unbounded).not.toHaveProperty('budgets');
+  });
 
-    expect(
-      summarizeAdaptiveTimingAdmission({ ...created, evidence: trace, elapsedMs: 1_200_000 })
-    ).toMatchObject({ effectiveFinalistTimeReserveMs: 600_000 });
+  it('applies natural completion before the manager derives a limit terminal', () => {
+    let state = createAdaptivePolicyState({
+      ...basePolicyConfig,
+      fixedGpuLayers: 4,
+      hasSharedPrefixWorkload: false,
+    });
+    for (const scoreMs of [100, 101]) {
+      const action = nextAdaptivePolicyAction(state);
+      expect(action.kind).toBe('probe');
+      if (action.kind !== 'probe') return;
+      state = applyAdaptivePolicyObservation(state, {
+        cellId: action.cellId,
+        gpuLayers: action.gpuLayers,
+        purpose: action.purpose,
+        fidelity: action.fidelity,
+        operationalStatus: 'ok',
+        memoryEvidence: 'none',
+        scoreMs,
+        durationMs: 1,
+      });
+    }
+    expect(nextAdaptivePolicyAction(state)).toMatchObject({
+      kind: 'terminal',
+      status: 'complete',
+      selectionEvidence: 'independent-reproduction',
+    });
+  });
+
+  it('returns a clean first launch at an external cap and never counts legal evidence as a stall', () => {
+    const created = createAdaptivePolicyState({
+      ...basePolicyConfig,
+      fixedGpuLayers: 4,
+    });
+    const cell = created.cells[0]!;
+    const limited = {
+      ...created,
+      evidence: [evidence(0, { cellId: cell.id, gpuLayers: 4, scoreMs: 100 })],
+    };
+    expect(deriveAdaptiveLimitTerminal(limited, 'probe', 'cap reached')).toMatchObject({
+      kind: 'terminal',
+      status: 'probe-limited',
+      selected: { scoreMs: 100 },
+      selectionEvidence: 'single-search-launch',
+    });
+
+    const impossible = {
+      ...created,
+      evidence: Array.from(
+        { length: created.cells.length * (created.config.totalLayers + 1) * 8 + 1 },
+        (_, index) => evidence(index, { cellId: cell.id, gpuLayers: 4, scoreMs: 100 })
+      ),
+    };
+    expect(() => nextAdaptivePolicyAction(impossible)).not.toThrow();
   });
 
   it('requires a stable slower lower denominator before two caps can close high', () => {
@@ -405,8 +558,6 @@ describe('pure adaptive LLM calibration policy', () => {
       hasSharedPrefixWorkload: false,
       includeKvCacheComparison: false,
       baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { maxProbes: 20, maxWallTimeMs: 2_000_000 },
     });
     const append = (overrides: Partial<AdaptiveProbeObservation>): void => {
       const action = nextAdaptivePolicyAction(state);
@@ -457,8 +608,6 @@ describe('pure adaptive LLM calibration policy', () => {
       hasSharedPrefixWorkload: false,
       includeKvCacheComparison: false,
       baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { maxProbes: 20, maxWallTimeMs: 2_000_000 },
     });
     const append = (overrides: Partial<AdaptiveProbeObservation>): void => {
       const action = nextAdaptivePolicyAction(state);
@@ -518,8 +667,6 @@ describe('pure adaptive LLM calibration policy', () => {
         hasSharedPrefixWorkload: false,
         includeKvCacheComparison: false,
         baselineKvPrecision: 'q8_0',
-        unobservedProbeDurationEstimateMs: 1,
-        budgetOverrides: { maxProbes: 30, maxWallTimeMs: 3_000_000 },
       });
       const [resolvedCell, unresolvedCell] = created.cells;
       const trace = [
@@ -566,19 +713,19 @@ describe('pure adaptive LLM calibration policy', () => {
           decisionReason: 'missing-or-invalid-score',
         }),
       ];
-      return { ...created, evidence: trace, elapsedMs: trace.length };
+      return { ...created, evidence: trace };
     };
 
     expect(nextAdaptivePolicyAction(makeState(200))).toMatchObject({
-      kind: 'terminal',
-      status: 'complete',
-      selected: { scoreMs: 90 },
+      kind: 'probe',
+      purpose: 'reference-guard',
     });
     expect(nextAdaptivePolicyAction(makeState(120))).toMatchObject({
       kind: 'terminal',
-      status: 'budget-exhausted',
+      status: 'inconclusive',
       reason: expect.stringContaining('adjacent higher layer remains ambiguous'),
-      provisional: { scoreMs: 90 },
+      selected: { scoreMs: 92 },
+      selectionEvidence: 'single-search-launch',
     });
   });
 
@@ -653,8 +800,6 @@ describe('pure adaptive LLM calibration policy', () => {
       hasSharedPrefixWorkload: false,
       includeKvCacheComparison: false,
       baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { maxProbes: 20, maxWallTimeMs: 2_000_000 },
     });
     const cellId = created.cells[0]!.id;
     const trace = [
@@ -686,9 +831,11 @@ describe('pure adaptive LLM calibration policy', () => {
       }),
     ];
 
-    expect(
-      summarizeAdaptiveCellStates({ ...created, evidence: trace, elapsedMs: 5 })[0]
-    ).toMatchObject({ phase: 'resolved', boundaryGpuLayers: 6, highGpuLayers: 7 });
+    expect(summarizeAdaptiveCellStates({ ...created, evidence: trace })[0]).toMatchObject({
+      phase: 'resolved',
+      boundaryGpuLayers: 6,
+      highGpuLayers: 7,
+    });
   });
 
   it('skips finalist work for a clearly uncompetitive direct boundary', () => {
@@ -703,8 +850,6 @@ describe('pure adaptive LLM calibration policy', () => {
       hasSharedPrefixWorkload: false,
       includeKvCacheComparison: false,
       baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { maxProbes: 20, maxWallTimeMs: 2_000_000 },
     });
     const [fast, slow] = created.cells;
     const trace = [
@@ -713,7 +858,7 @@ describe('pure adaptive LLM calibration policy', () => {
       evidence(2, { cellId: slow!.id, gpuLayers: 4, scoreMs: 200 }),
     ];
 
-    expect(nextAdaptivePolicyAction({ ...created, evidence: trace, elapsedMs: 3 })).toMatchObject({
+    expect(nextAdaptivePolicyAction({ ...created, evidence: trace })).toMatchObject({
       kind: 'terminal',
       status: 'complete',
       selected: { cellId: fast!.id },
@@ -851,8 +996,6 @@ describe('pure adaptive LLM calibration policy', () => {
       hasSharedPrefixWorkload: false,
       includeKvCacheComparison: false,
       baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { maxProbes: 10, maxWallTimeMs: 2_000_000 },
     });
     for (const [fidelity, score] of [
       ['search', 100],
@@ -881,7 +1024,7 @@ describe('pure adaptive LLM calibration policy', () => {
     expect(state.evidence.every((item) => item.gpuLayers === 4)).toBe(true);
   });
 
-  it('runs a deterministic ordinary bisection trace through finalist, guard, and fallback', () => {
+  it('runs a deterministic ordinary bisection trace through finalist and guard', () => {
     const cell = traceCell(8192, 'window', 'q8_0');
     const rows: readonly AdaptiveTraceRow[] = [
       [cell, 4, 'reference', 'search', 'ok', 100, 'admissible'],
@@ -889,7 +1032,6 @@ describe('pure adaptive LLM calibration policy', () => {
       [cell, 6, 'boundary', 'search', 'ok', 90, 'admissible'],
       [cell, 7, 'boundary', 'search', 'confirmed-oom', undefined, 'unsuitable'],
       [cell, 6, 'finalist', 'full', 'ok', 91, 'admissible'],
-      [cell, 5, 'fallback-validation', 'search', 'ok', 95, 'admissible'],
     ];
     const fixture = defineAdaptiveTrace(
       'ordinary boundary',
@@ -900,8 +1042,6 @@ describe('pure adaptive LLM calibration policy', () => {
         hasSharedPrefixWorkload: false,
         includeKvCacheComparison: false,
         baselineKvPrecision: 'q8_0',
-        unobservedProbeDurationEstimateMs: 1,
-        budgetOverrides: { maxProbes: 20, maxWallTimeMs: 2_000_000 },
       },
       rows
     );
@@ -910,10 +1050,9 @@ describe('pure adaptive LLM calibration policy', () => {
     expect(result.terminal).toMatchObject({
       status: 'complete',
       selected: { gpuLayers: 6 },
-      fallback: { gpuLayers: 5, validated: true },
+      fallback: { gpuLayers: 5, validated: false },
     });
     expect(result.actions.map((action) => action.kind)).toEqual([
-      'probe',
       'probe',
       'probe',
       'probe',
@@ -1009,7 +1148,6 @@ describe('pure adaptive LLM calibration policy', () => {
       [full, 46, 'ceiling', 'search', 'confirmed-oom', undefined, 'unsuitable'],
       [full, 45, 'finalist', 'full', 'ok', 3.32, 'admissible'],
       [full, 40, 'reference-guard', 'search', 'ok', 3.6, 'admissible'],
-      [full, 44, 'fallback-validation', 'search', 'ok', 3.7, 'admissible'],
     ];
     const result = executeAdaptiveTrace(
       defineAdaptiveTrace('supplemented q8 trace', basePolicyConfig, rows)
@@ -1039,7 +1177,7 @@ describe('pure adaptive LLM calibration policy', () => {
       [cell, 8, 'boundary', 'search', 'confirmed-oom', undefined, 'unsuitable'],
       [cell, 7, 'finalist', 'full', 'ok', 100, 'admissible'],
       [cell, 4, 'winner-validation', 'full', 'ok', 82, 'admissible'],
-      [cell, 2, 'reference-guard', 'search', 'ok', 85, 'admissible'],
+      [cell, 2, 'reference-guard', 'search', 'ok', 90, 'admissible'],
     ];
     const result = executeAdaptiveTrace(
       defineAdaptiveTrace(
@@ -1051,8 +1189,6 @@ describe('pure adaptive LLM calibration policy', () => {
           hasSharedPrefixWorkload: false,
           includeKvCacheComparison: false,
           baselineKvPrecision: 'q8_0',
-          unobservedProbeDurationEstimateMs: 1,
-          budgetOverrides: { maxProbes: 20, maxWallTimeMs: 2_000_000 },
         },
         rows
       )
@@ -1073,8 +1209,6 @@ describe('pure adaptive LLM calibration policy', () => {
       hasSharedPrefixWorkload: false,
       includeKvCacheComparison: false,
       baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { maxProbes: 20, maxWallTimeMs: 2_000_000 },
     });
     const append = (overrides: Partial<AdaptiveProbeObservation>): void => {
       const action = nextAdaptivePolicyAction(state);
@@ -1134,8 +1268,6 @@ describe('pure adaptive LLM calibration policy', () => {
       hasSharedPrefixWorkload: false,
       includeKvCacheComparison: false,
       baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { maxProbes: 24, maxWallTimeMs: 3_000_000 },
     });
     const append = (
       operationalStatus: AdaptiveProbeObservation['operationalStatus'],
@@ -1200,8 +1332,6 @@ describe('pure adaptive LLM calibration policy', () => {
       hasSharedPrefixWorkload: false,
       includeKvCacheComparison: false,
       baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { maxProbes: 20, maxWallTimeMs: 2_000_000 },
     });
     const attempted: number[] = [];
     while (true) {
@@ -1224,7 +1354,7 @@ describe('pure adaptive LLM calibration policy', () => {
     expect(attempted).toEqual([4, 2, 1, 0]);
   });
 
-  it('returns budget exhausted instead of weakening unresolved boundary evidence', () => {
+  it('strengthens an incumbent through ordinary work before an external probe limit', () => {
     let state = createAdaptivePolicyState({
       profiles: [{ profileIndex: 0, contextSize: 8192, parallelRequests: 2, autoGpuLayers: 4 }],
       totalLayers: 8,
@@ -1232,10 +1362,8 @@ describe('pure adaptive LLM calibration policy', () => {
       hasSharedPrefixWorkload: false,
       includeKvCacheComparison: false,
       baselineKvPrecision: 'q8_0',
-      unobservedProbeDurationEstimateMs: 1,
-      budgetOverrides: { targetProbes: 5, maxProbes: 5, maxWallTimeMs: 2_000_000 },
     });
-    for (const result of ['ok', 'oom', 'oom'] as const) {
+    for (const result of ['ok', 'oom', 'oom', 'oom'] as const) {
       const action = nextAdaptivePolicyAction(state);
       expect(action.kind).toBe('probe');
       if (action.kind !== 'probe') return;
@@ -1250,10 +1378,28 @@ describe('pure adaptive LLM calibration policy', () => {
         durationMs: 1,
       });
     }
-    expect(nextAdaptivePolicyAction(state)).toMatchObject({
+    const finalistProbe = nextAdaptivePolicyAction(state);
+    expect(finalistProbe).toMatchObject({
+      kind: 'probe',
+      purpose: 'finalist',
+      fidelity: 'full',
+    });
+    if (finalistProbe.kind !== 'probe') return;
+    state = applyAdaptivePolicyObservation(state, {
+      cellId: finalistProbe.cellId,
+      gpuLayers: finalistProbe.gpuLayers,
+      purpose: finalistProbe.purpose,
+      fidelity: finalistProbe.fidelity,
+      operationalStatus: 'ok',
+      memoryEvidence: 'none',
+      scoreMs: 101,
+      durationMs: 1,
+    });
+    expect(deriveAdaptiveLimitTerminal(state, 'probe', 'cap reached')).toMatchObject({
       kind: 'terminal',
-      status: 'budget-exhausted',
-      reason: expect.stringContaining('launch-reserve'),
+      status: 'probe-limited',
+      selected: { gpuLayers: 4 },
+      selectionEvidence: 'independent-reproduction',
     });
   });
 });

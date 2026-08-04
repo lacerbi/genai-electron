@@ -302,8 +302,10 @@ Restarts the LLM server from the saved state, retrying once after a short delay.
 
 ### Applied LLM calibration configs
 
-An LLM calibration report is not applied automatically. If the caller starts the normal server with
-`report.selected.startConfig`, `ResourceOrchestrator` saves and restores that resolved config
+The library leaves calibration report-only and the manager stopped. A host may apply,
+persist, present, or ignore `report.selected.startConfig`; `selectionEvidence` describes evidence
+strength while `searchCompleteness` says whether requested adaptive work was fully resolved. Once
+the caller starts the normal server with that config, `ResourceOrchestrator` saves and restores it
 through its existing offload/reload path just like any other normal start configuration. Run
 calibration only while both managed servers and other GPU work are idle; usage details belong in
 [LLM Runtime Calibration](llm-server.md#runtime-calibration).

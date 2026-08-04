@@ -12,16 +12,19 @@ import type {
   InsufficientResourcesDetails,
   LlamaServerReadyState,
   LlamaAdaptiveActiveProbe,
+  LlamaAdaptiveCalibrationBestKnown,
+  LlamaAdaptiveCalibrationBudgetReport,
   LlamaAdaptiveCalibrationConfig,
+  LlamaAdaptiveCalibrationPreparationTimeLimit,
   LlamaAdaptiveCalibrationReport,
+  LlamaAdaptiveProgressBudget,
   LlamaCalibrationConfig,
-  LlamaCalibrationDiagnosticCandidate,
-  LlamaCalibrationDiagnosticEvidenceLevel,
   LlamaCalibrationPartialReport,
   LlamaCalibrationProbeResourceBoundaries,
   LlamaCalibrationProbeResourceValidity,
   LlamaCalibrationProfile,
   LlamaCalibrationProgress,
+  LlamaCalibrationRecommendation,
   LlamaCalibrationReport,
   LlamaCalibrationResourceBoundaryDiagnostic,
   LlamaCalibrationResourceBoundaryKind,
@@ -35,6 +38,7 @@ import type {
   LlamaCalibrationResourceStabilityDetails,
   LlamaCalibrationResourceUntrustedReason,
   LlamaExactCalibrationConfig,
+  LlamaExactCalibrationBestKnown,
   LlamaExactCalibrationReport,
   MemoryTelemetryRefreshStatus,
   OptimalConfigHints,
@@ -100,13 +104,12 @@ describe('public context-capacity types', () => {
     };
     const calibration: readonly LlamaCalibrationConfig[] = [adaptiveCalibration, exactCalibration];
     const reportTypeCheck = (report: LlamaCalibrationReport) => {
+      if (report.resultKind === 'preparation-time-limit') return report.terminalReason;
       if (report.strategy === 'adaptive') {
-        return report.selectionEvidence === 'independent-reproduction'
-          ? report.selected?.startConfig
-          : report.provisional?.startConfig;
+        return report.selectionEvidence ? report.selected.startConfig : undefined;
       }
       return report.selectionEvidence === 'single-launch-measurement'
-        ? report.selected?.startConfig
+        ? report.selected.startConfig
         : undefined;
     };
     const probeTypeCheck = (report: LlamaCalibrationReport) =>
@@ -122,7 +125,7 @@ describe('public context-capacity types', () => {
       }));
     const progressTypeCheck = (progress: LlamaCalibrationProgress) => {
       if (progress.phase === 'done') return progress.terminalStatus;
-      if (progress.strategy === 'adaptive') return progress.budget.resolved;
+      if (progress.strategy === 'adaptive') return progress.budget.remainingMs;
       return progress.candidates.resolved;
     };
 
@@ -142,7 +145,7 @@ describe('public context-capacity types', () => {
   });
 });
 
-describe('public LLM calibration schema-v3 resource types', () => {
+describe('public LLM calibration schema-v4 resource types', () => {
   const monitoring: LlamaCalibrationResourceMonitoring = {
     coverage: 'complete',
     enabledMetrics: ['hostMemory', 'vram'],
@@ -214,14 +217,20 @@ describe('public LLM calibration schema-v3 resource types', () => {
       probeIndex: 2,
       diagnostics: boundary,
     };
-    const candidate: LlamaCalibrationDiagnosticCandidate = {
+    const recommendation: LlamaCalibrationRecommendation = {
+      profileIndex: 0,
+      cellId: 'p0:c12288:swa-window:kv-q8_0',
+      startConfig: { contextSize: 12_288, parallelRequests: 2, gpuLayers: 20 },
+      scoreMs: 1_234,
+    };
+    const bestKnown: LlamaAdaptiveCalibrationBestKnown = {
+      recommendation,
+      evidence: 'independent-reproduction',
       sourceProbeIndexes: [0, 1],
-      evidenceLevel: 'independent-reproduction',
-      usability: 'diagnostic-only',
     };
     const partial: LlamaCalibrationResourceFailurePartialReport = {
-      schemaVersion: 3,
-      policyVersion: 'llama-runtime-v3',
+      schemaVersion: 4,
+      policyVersion: 'llama-runtime-v4',
       strategy: 'adaptive',
       status: 'failed',
       createdAt: '2026-08-02T12:00:00.000Z',
@@ -230,7 +239,9 @@ describe('public LLM calibration schema-v3 resource types', () => {
       warnings: [],
       cleanupConfirmed: true,
       resourceFailure: failure,
-      diagnosticCandidate: candidate,
+      searchCompleteness: 'partial',
+      budget: { maxWallTimeMs: 3_600_000, elapsedMs: 10_000, overrunMs: 0 },
+      bestKnown,
     };
 
     // One `instanceof` branch, then a typed switch on the details discriminant.
@@ -281,10 +292,11 @@ describe('public LLM calibration schema-v3 resource types', () => {
       'reading-unavailable',
       'reading-invalid',
     ] as const satisfies readonly LlamaCalibrationResourceUntrustedReason[];
-    const evidenceLevels = [
-      'independent-reproduction',
-      'single-launch-measurement',
-    ] as const satisfies readonly LlamaCalibrationDiagnosticEvidenceLevel[];
+    const exactBestKnown: LlamaExactCalibrationBestKnown = {
+      recommendation,
+      evidence: 'single-launch-measurement',
+      sourceProbeIndexes: [0],
+    };
 
     expect(describeRejection(rootTyped)).toBe('drift:hostMemory');
     expect(codes).toHaveLength(2);
@@ -294,14 +306,15 @@ describe('public LLM calibration schema-v3 resource types', () => {
     expect(directions).toEqual([failure.affectedDirections.hostMemory, 'increase']);
     expect(boundaryKinds).toContain(failure.boundary);
     expect(untrustedReasons).toContain(untrustedReading.untrustedReason);
-    expect(evidenceLevels).toContain(candidate.evidenceLevel);
+    expect(bestKnown.evidence).toBe('independent-reproduction');
+    expect(exactBestKnown.evidence).toBe('single-launch-measurement');
   });
 
   it('rejects removed schema-v2 resource assumptions at compile time', () => {
     const reportSchema = (report: LlamaCalibrationReport) => {
-      const version: 3 = report.schemaVersion;
-      // @ts-expect-error schema v2 reports cannot satisfy the v3 literal
-      const staleVersion: 2 = report.schemaVersion;
+      const version: 4 = report.schemaVersion;
+      // @ts-expect-error schema v3 reports cannot satisfy the v4 literal
+      const staleVersion: 3 = report.schemaVersion;
       return { version, staleVersion };
     };
     const probeShape = (report: LlamaCalibrationReport) =>
@@ -331,22 +344,20 @@ describe('public LLM calibration schema-v3 resource types', () => {
     const metrics: readonly LlamaCalibrationResourceMetric[] = ['hostMemory', 'vram'];
     // @ts-expect-error there is no third guarded metric and no combined score
     const invalidMetric: LlamaCalibrationResourceMetric = 'disk';
-    // @ts-expect-error a diagnostic candidate is never application-ready
-    const invalidUsability: LlamaCalibrationDiagnosticCandidate['usability'] = 'applicable';
-    // A diagnostic candidate is offered only by the resource-failure partial report. Reading it off
+    // A best-known result is offered only by the resource-failure partial report. Reading it off
     // the general partial report (an abort, an unrelated failure) must not compile, or a host would
     // branch on a field that is never populated there.
     const generalPartialShape = (partial: LlamaCalibrationPartialReport) => ({
-      // @ts-expect-error only the resource-failure partial report carries a diagnostic candidate
-      candidate: partial.diagnosticCandidate,
+      // @ts-expect-error only the resource-failure partial report carries bestKnown
+      bestKnown: partial.bestKnown,
       monitoring: partial.resourceMonitoring,
     });
     // The resource-failure partial report is defined by its failure record, so omitting it must not
     // compile: that record is the entire reason the type is distinct from the general one.
     // @ts-expect-error resourceFailure is required on the resource-failure partial report
     const partialWithoutFailure: LlamaCalibrationResourceFailurePartialReport = {
-      schemaVersion: 3,
-      policyVersion: 'llama-runtime-v3',
+      schemaVersion: 4,
+      policyVersion: 'llama-runtime-v4',
       strategy: 'exact',
       status: 'failed',
       createdAt: '2026-08-02T12:00:00.000Z',
@@ -355,21 +366,39 @@ describe('public LLM calibration schema-v3 resource types', () => {
       warnings: [],
       cleanupConfirmed: true,
     };
-    // The candidate carries indexes and markers only - never a startable config or a score - so a
-    // host cannot mistake it for a recommendation.
-    const candidateWithStartConfig: LlamaCalibrationDiagnosticCandidate = {
-      sourceProbeIndexes: [0, 1],
-      evidenceLevel: 'independent-reproduction',
-      usability: 'diagnostic-only',
-      // @ts-expect-error a diagnostic candidate never carries an application-ready start config
-      startConfig: { contextSize: 12_288, parallelRequests: 2 },
+    const recommendation: LlamaCalibrationRecommendation = {
+      startConfig: { contextSize: 12_288, parallelRequests: 2, gpuLayers: 20 },
+      scoreMs: 1_234,
     };
-    const candidateWithScore: LlamaCalibrationDiagnosticCandidate = {
-      sourceProbeIndexes: [0, 1],
-      evidenceLevel: 'independent-reproduction',
-      usability: 'diagnostic-only',
-      // @ts-expect-error a diagnostic candidate never carries a score of its own
-      scoreMs: 1234,
+    const emptyBestKnown: LlamaAdaptiveCalibrationBestKnown = {
+      recommendation,
+      evidence: 'single-full-launch',
+      // @ts-expect-error bestKnown must cite at least one accepted source probe
+      sourceProbeIndexes: [],
+    };
+    const wrongAdaptiveEvidence: LlamaAdaptiveCalibrationBestKnown = {
+      recommendation,
+      // @ts-expect-error exact evidence cannot appear in adaptive bestKnown
+      evidence: 'single-launch-measurement',
+      sourceProbeIndexes: [0],
+    };
+    // @ts-expect-error adaptive resource partials always report the elapsed-time budget
+    const adaptivePartialWithoutBudget: LlamaCalibrationResourceFailurePartialReport = {
+      schemaVersion: 4,
+      policyVersion: 'llama-runtime-v4',
+      strategy: 'adaptive',
+      status: 'failed',
+      createdAt: '2026-08-02T12:00:00.000Z',
+      resourceMonitoring: monitoring,
+      probes: [],
+      warnings: [],
+      cleanupConfirmed: true,
+      resourceFailure: {
+        boundary: 'pre-launch',
+        affectedMetrics: ['hostMemory'],
+        affectedDirections: { hostMemory: 'decrease' },
+        diagnostics: boundary,
+      },
     };
 
     expect({
@@ -379,17 +408,17 @@ describe('public LLM calibration schema-v3 resource types', () => {
       exactWithConfirmationOverride,
       metrics,
       invalidMetric,
-      invalidUsability,
       generalPartialShape,
       partialWithoutFailure,
-      candidateWithStartConfig,
-      candidateWithScore,
+      emptyBestKnown,
+      wrongAdaptiveEvidence,
+      adaptivePartialWithoutBudget,
       monitoring,
     }).toBeDefined();
   });
 });
 
-describe('public LLM calibration schema-v3 types', () => {
+describe('public LLM calibration schema-v4 types', () => {
   const profile: LlamaCalibrationProfile = { contextSize: 12_288, parallelRequests: 2 };
   const workloads = [{ id: 'chat', kind: 'cold-prefill', prompt: 'hello', nPredict: 32 }] as const;
 
@@ -407,10 +436,10 @@ describe('public LLM calibration schema-v3 types', () => {
         if (progress.phase === 'done') {
           return progress.terminalStatus;
         }
-        const resolvedTarget = progress.budget.resolved ? progress.budget.targetProbes : undefined;
+        const remainingMs = progress.budget.remainingMs;
         // @ts-expect-error exact candidate state is unavailable in adaptive progress
         void progress.candidates;
-        return resolvedTarget;
+        return remainingMs;
       }
       if (progress.phase === 'done') {
         return progress.terminalStatus;
@@ -421,12 +450,22 @@ describe('public LLM calibration schema-v3 types', () => {
       return comboCount;
     };
     const reportTypeCheck = (report: LlamaCalibrationReport) => {
-      const schemaVersion: 3 = report.schemaVersion;
+      const schemaVersion: 4 = report.schemaVersion;
+      if (report.resultKind === 'preparation-time-limit') {
+        // @ts-expect-error preparation expiry cannot fabricate an ordinary machine identity
+        void report.machine;
+        return { schemaVersion, reason: report.terminalReason };
+      }
       if (report.strategy === 'adaptive') {
-        const confidence: 'empirical-reproducibility' = report.confidence;
         // @ts-expect-error exact combo runs are unavailable in adaptive reports
         void report.runs;
-        return { schemaVersion, confidence, selection: report.selectionEvidence };
+        // @ts-expect-error adaptive confidence was replaced by explicit selection evidence
+        void report.confidence;
+        return {
+          schemaVersion,
+          completeness: report.searchCompleteness,
+          selection: report.selectionEvidence,
+        };
       }
       const confidence: 'single-launch-measurement' = report.confidence;
       // @ts-expect-error adaptive cell state is unavailable in exact reports
@@ -440,7 +479,10 @@ describe('public LLM calibration schema-v3 types', () => {
       overallPercent: 0,
       elapsedMs: 0,
       completedProbes: 0,
-      budget: { resolved: false },
+      budget: {
+        maxWallTimeMs: 3_600_000,
+        remainingMs: 3_600_000,
+      },
     };
     const exactPreparing: LlamaCalibrationProgress = {
       strategy: 'exact',
@@ -456,15 +498,10 @@ describe('public LLM calibration schema-v3 types', () => {
       elapsedMs: 1,
       completedProbes: 0,
       budget: {
-        resolved: true,
-        targetProbes: 10,
-        maxProbes: 15,
-        finalistReserve: 2,
         maxWallTimeMs: 1_800_000,
-        finalistTimeReserveMs: 300_000,
-        remainingWallTimeMs: 1_799_999,
-        probeReserveActive: false,
-        timeReserveActive: false,
+        remainingMs: 1_799_999,
+        maxProbes: 15,
+        remainingProbes: 15,
       },
       activeProbe: {
         profileIndex: 0,
@@ -507,15 +544,10 @@ describe('public LLM calibration schema-v3 types', () => {
       elapsedMs: 1,
       completedProbes: 2,
       budget: {
-        resolved: true,
-        targetProbes: 10,
-        maxProbes: 15,
-        finalistReserve: 2,
         maxWallTimeMs: 1_800_000,
-        finalistTimeReserveMs: 300_000,
-        remainingWallTimeMs: 1_799_999,
-        probeReserveActive: false,
-        timeReserveActive: false,
+        remainingMs: 1_799_999,
+        maxProbes: 15,
+        remainingProbes: 13,
       },
     };
     const exactDone: LlamaCalibrationProgress = {
@@ -525,6 +557,36 @@ describe('public LLM calibration schema-v3 types', () => {
       overallPercent: 100,
       elapsedMs: 1,
       candidates: { resolved: true, comboCount: 1 },
+    };
+    const unboundedBudget: LlamaAdaptiveProgressBudget = {
+      maxWallTimeMs: 3_600_000,
+      remainingMs: 3_500_000,
+    };
+    const boundedBudget: LlamaAdaptiveProgressBudget = {
+      maxWallTimeMs: 3_600_000,
+      remainingMs: 3_500_000,
+      maxProbes: 10,
+      remainingProbes: 8,
+    };
+    const reportBudget: LlamaAdaptiveCalibrationBudgetReport = {
+      maxWallTimeMs: 3_600_000,
+      elapsedMs: 3_601_000,
+      overrunMs: 1_000,
+    };
+    const preparationLimit: LlamaAdaptiveCalibrationPreparationTimeLimit = {
+      resultKind: 'preparation-time-limit',
+      schemaVersion: 4,
+      policyVersion: 'llama-runtime-v4',
+      createdAt: '2026-08-04T12:00:00.000Z',
+      strategy: 'adaptive',
+      phase: 'preparing',
+      status: 'time-limited',
+      searchCompleteness: 'partial',
+      terminalReason: 'deadline reached while provisioning',
+      budget: reportBudget,
+      probes: [],
+      warnings: [],
+      cleanupConfirmed: true,
     };
 
     expect({
@@ -537,10 +599,14 @@ describe('public LLM calibration schema-v3 types', () => {
       exactActive,
       adaptiveDone,
       exactDone,
+      unboundedBudget,
+      boundedBudget,
+      reportBudget,
+      preparationLimit,
     }).toBeDefined();
   });
 
-  it('rejects invalid schema-v3 shapes at compile time', () => {
+  it('rejects invalid schema-v4 shapes at compile time', () => {
     // @ts-expect-error legacy profile-only input is neither adaptive nor exact
     const legacyProfileOnly: LlamaCalibrationConfig = {
       modelId: 'model',
@@ -594,6 +660,13 @@ describe('public LLM calibration schema-v3 types', () => {
       workloads,
       combos: [{ overrides: {} }],
       // @ts-expect-error exact mode cannot supply adaptive budgets
+      maxProbes: 10,
+    };
+    const adaptiveWithRemovedTarget: LlamaAdaptiveCalibrationConfig = {
+      modelId: 'model',
+      profiles: [profile],
+      workloads,
+      // @ts-expect-error targetProbes was removed in schema v4
       targetProbes: 10,
     };
     const adaptiveActiveProbe: LlamaAdaptiveActiveProbe = {
@@ -607,19 +680,19 @@ describe('public LLM calibration schema-v3 types', () => {
       resolvedConfig: { ...profile, gpuLayers: 20 },
       argvKey: 'argv',
     };
-    // @ts-expect-error exact progress cannot terminate as budget-exhausted
+    // @ts-expect-error exact progress cannot terminate as time-limited
     const exactBudgetTerminal: LlamaCalibrationProgress = {
       strategy: 'exact',
       phase: 'done',
-      terminalStatus: 'budget-exhausted',
+      terminalStatus: 'time-limited',
       overallPercent: 100,
       elapsedMs: 1,
       candidates: { resolved: true, comboCount: 1 },
     };
     // @ts-expect-error adaptive returned reports never carry rejected aborted/failed status
     const invalidAdaptiveReportStatus: LlamaAdaptiveCalibrationReport['status'] = 'aborted';
-    // @ts-expect-error exact mode has no adaptive budget-exhausted report outcome
-    const invalidExactReportStatus: LlamaExactCalibrationReport['status'] = 'budget-exhausted';
+    // @ts-expect-error exact mode has no adaptive time-limited report outcome
+    const invalidExactReportStatus: LlamaExactCalibrationReport['status'] = 'time-limited';
     // @ts-expect-error adaptive selection evidence cannot claim exact single-launch confidence
     const invalidAdaptiveEvidence: LlamaAdaptiveCalibrationReport['selectionEvidence'] =
       'single-launch-measurement';
@@ -636,6 +709,7 @@ describe('public LLM calibration schema-v3 types', () => {
       exactEmptyCombos,
       exactWithProfiles,
       exactWithAdaptiveBudget,
+      adaptiveWithRemovedTarget,
       adaptiveActiveProbe,
       exactBudgetTerminal,
       invalidAdaptiveReportStatus,

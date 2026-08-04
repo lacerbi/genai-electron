@@ -211,6 +211,36 @@ problems; `INSUFFICIENT_RESOURCES` means the policy itself is valid but no permi
 fits its minimum. `preferredContextSize` is advisory, so runtime capacity above it never produces
 a context error.
 
+### Choosing a host policy for calibration results
+
+Adaptive calibration returns its best clean `selected` config independently from
+`searchCompleteness` and `selectionEvidence`. The library leaves the manager stopped and neither
+applies nor persists the result. What happens next belongs to the host application.
+
+```typescript
+const report = await llamaServer.calibrate({
+  ...config,
+  maxWallTimeMs: selectedMinutes * 60_000
+});
+
+if (report.resultKind === 'preparation-time-limit') {
+  return { kind: 'no-selection', report };
+}
+
+return {
+  kind: 'ordinary-report',
+  report,
+  recommendation: report.selected?.startConfig,
+  evidence: report.selectionEvidence,
+  completeness: report.strategy === 'adaptive' ? report.searchCompleteness : 'resolved'
+};
+```
+
+Narrow on `resultKind` before `strategy`: the preparation-time branch intentionally has no model
+identity or selection. A host may expose any duration choices or custom input appropriate to its
+product and normally omits `maxProbes`; the library defaults to 60 minutes when the host supplies no
+time. Applying, persisting, presenting, or ignoring a recommendation is entirely host-owned.
+
 ### Handling a calibration resource-stability rejection
 
 `LlamaCalibrationResourceStabilityError` extends `ServerError` but is matched **before** it, so
@@ -220,7 +250,7 @@ logs". Both codes therefore reach a UI with an actionable retry message.
 
 `llamaServer.calibrate()` stops with this error — in adaptive **and** exact mode — when machine
 conditions changed materially around a launch boundary, or could not be verified stable. There is no
-resume: the correct host response is to explain, then offer a full retry.
+resume; any retry is a new full call.
 
 ```typescript
 import {
@@ -246,7 +276,8 @@ ipcMain.handle('llm:calibrate', async (_event, config) => {
         boundary: failure.boundary,           // 'pre-launch' | 'post-cleanup'
         metrics: failure.affectedMetrics,     // ['hostMemory'] | ['vram'] | both
         directions: failure.affectedDirections, // { hostMemory: 'decrease' }
-        probes: error.details.partialReport.probes.length
+        probes: error.details.partialReport.probes.length,
+        bestKnown: error.details.partialReport.bestKnown
       };
     }
     return { success: false, retryable: false, error: formatErrorForUI(error) };
@@ -272,9 +303,9 @@ switch (result.error.code) {
 }
 ```
 
-Do not auto-retry in a loop: the run costs minutes and the user has to quiet the machine first.
-`error.details.partialReport.diagnosticCandidate`, when present, is `usability: 'diagnostic-only'`
-and must never be applied as a start config. See
+`error.details.partialReport.bestKnown`, when present, is a start-ready recommendation supported
+only by earlier clean probes; the invalidated boundary probe is never cited. Whether to use that
+recommendation, retry, or ignore it belongs to the host. See
 [Machine conditions during a run](llm-server.md#machine-conditions-during-a-run).
 
 **Benefits:**

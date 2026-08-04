@@ -71,6 +71,7 @@ const mockMkdir = jest.fn();
 const mockReaddir = jest.fn();
 const mockCopyFile = jest.fn();
 const mockRename = jest.fn();
+const mockRm = jest.fn();
 
 jest.unstable_mockModule('fs', () => ({
   constants: {
@@ -84,6 +85,7 @@ jest.unstable_mockModule('fs', () => ({
     readdir: mockReaddir,
     copyFile: mockCopyFile,
     rename: mockRename,
+    rm: mockRm,
   },
 }));
 
@@ -97,6 +99,7 @@ type SpawnBehavior = {
   shouldError?: boolean;
   errorMessage?: string;
   shouldTimeout?: boolean;
+  ignoreTermination?: boolean;
 };
 
 let spawnBehavior: SpawnBehavior = {};
@@ -147,15 +150,29 @@ const createSpawnImplementation = () => {
       }),
     };
 
+    const exitHandlers: Function[] = [];
+    const errorHandlers: Function[] = [];
     // Create mock child process
     const mockChild: any = {
       stdout: mockStdout,
       stderr: mockStderr,
+      pid: currentBehavior.shouldError ? undefined : 1234,
       killed: false,
-      kill: jest.fn(() => {
+      exitCode: null,
+      signalCode: null,
+      kill: jest.fn((signal = 'SIGTERM') => {
         mockChild.killed = true;
+        if (currentBehavior.shouldTimeout && !currentBehavior.ignoreTermination) {
+          setImmediate(() => {
+            mockChild.signalCode = signal;
+            for (const handler of exitHandlers) handler(null, signal);
+          });
+        }
+        return true;
       }),
       on: jest.fn((event: string, handler: Function) => {
+        if (event === 'exit') exitHandlers.push(handler);
+        if (event === 'error') errorHandlers.push(handler);
         if (event === 'exit' && !currentBehavior.shouldError && !currentBehavior.shouldTimeout) {
           // Use setImmediate for more realistic async behavior
           setImmediate(() => {
@@ -168,6 +185,12 @@ const createSpawnImplementation = () => {
           setImmediate(() => handler(new Error(currentBehavior.errorMessage || 'Spawn error')));
         }
         // If shouldTimeout is true, don't emit any events (simulates hanging)
+        return mockChild;
+      }),
+      removeListener: jest.fn((event: string, handler: Function) => {
+        const handlers = event === 'exit' ? exitHandlers : errorHandlers;
+        const index = handlers.indexOf(handler);
+        if (index >= 0) handlers.splice(index, 1);
         return mockChild;
       }),
     };
@@ -228,6 +251,7 @@ describe('BinaryManager', () => {
     // Default mock implementations
     mockFileExists.mockResolvedValue(false);
     mockEnsureDirectory.mockResolvedValue(undefined);
+    mockRm.mockResolvedValue(undefined);
     // Return correct checksum based on which variant is being tested
     mockCalculateChecksum.mockImplementation(async (path: string) => {
       if (path.includes('.cuda.zip')) return 'abc123cuda';
@@ -293,6 +317,60 @@ describe('BinaryManager', () => {
       expect(mockEnsureDirectory).toHaveBeenCalledWith(MOCK_PATHS.binaries.llama);
     });
 
+    it('does not begin installed-binary work after setup cancellation', async () => {
+      const controller = new AbortController();
+      const reason = new DOMException('calibration deadline', 'TimeoutError');
+      mockEnsureDirectory.mockImplementationOnce(async () => {
+        controller.abort(reason);
+      });
+
+      await expect(binaryManager.ensureBinary(false, controller.signal)).rejects.toBe(reason);
+      expect(mockReadFile).not.toHaveBeenCalled();
+      expect(mockCalculateChecksum).not.toHaveBeenCalled();
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it('does not start a cached-archive checksum after cancellation', async () => {
+      const controller = new AbortController();
+      const reason = new DOMException('calibration deadline', 'TimeoutError');
+      mockFileExists.mockImplementation(async (filePath: string) => {
+        if (filePath.endsWith('.cuda.zip')) {
+          controller.abort(reason);
+          return true;
+        }
+        return false;
+      });
+
+      await expect(binaryManager.ensureBinary(false, controller.signal)).rejects.toBe(reason);
+      expect(mockCalculateChecksum).not.toHaveBeenCalled();
+      expect(mockDownload).not.toHaveBeenCalled();
+    });
+
+    it('does not write cache or residue after cancellation during installed checksum verification', async () => {
+      const controller = new AbortController();
+      const reason = new DOMException('calibration deadline', 'TimeoutError');
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'installed-checksum',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+      };
+      mockFileExists.mockResolvedValue(true);
+      mockReadFile.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.validation.json')) return JSON.stringify(validationCache);
+        throw new Error('No dependency manifest');
+      });
+      mockCalculateChecksum.mockImplementationOnce(async () => {
+        controller.abort(reason);
+        return 'installed-checksum';
+      });
+
+      await expect(binaryManager.ensureBinary(false, controller.signal)).rejects.toBe(reason);
+      expect(mockWriteFile).not.toHaveBeenCalled();
+      expect(mockDeleteFile).not.toHaveBeenCalled();
+      expect(mockCleanupExtraction).not.toHaveBeenCalled();
+    });
+
     it('should flatten archives whose binary is nested in a top-level directory', async () => {
       // Unix tar.gz releases nest everything under llama-<tag>/ — the copy
       // must target the directory that actually contains the binary, plus any
@@ -311,12 +389,12 @@ describe('BinaryManager', () => {
       // The nested directory (not the extract root) is copied to binaries/
       expect(mockCopyDirectory).toHaveBeenCalledWith(
         path.dirname(nestedBinaryPath),
-        MOCK_PATHS.binaries.llama
+        expect.stringContaining(`${MOCK_PATHS.binaries.llama}.candidate-`)
       );
       // Root-level dependency files are copied too; the nested dir is skipped
       expect(mockCopyFile).toHaveBeenCalledWith(
         path.join(extractDir, 'cudart64_12.dll'),
-        path.join(MOCK_PATHS.binaries.llama, 'cudart64_12.dll'),
+        expect.stringMatching(/llama\.candidate-.*[\\/]cudart64_12\.dll$/),
         2
       );
       expect(mockCopyFile).toHaveBeenCalledTimes(1);
@@ -328,7 +406,10 @@ describe('BinaryManager', () => {
 
       await binaryManager.ensureBinary();
 
-      expect(mockCopyDirectory).toHaveBeenCalledWith(extractDir, MOCK_PATHS.binaries.llama);
+      expect(mockCopyDirectory).toHaveBeenCalledWith(
+        extractDir,
+        expect.stringContaining(`${MOCK_PATHS.binaries.llama}.candidate-`)
+      );
       expect(mockCopyFile).not.toHaveBeenCalled();
     });
 
@@ -357,7 +438,7 @@ describe('BinaryManager', () => {
 
       const result = await binaryManager.ensureBinary();
 
-      expect(mockDeleteFile).toHaveBeenCalledWith('/mock/binaries/llama/llama-server.exe');
+      expect(mockDeleteFile).not.toHaveBeenCalledWith('/mock/binaries/llama/llama-server.exe');
       expect(mockDownload).toHaveBeenCalled();
       expect(mockLogger).toHaveBeenCalledWith(
         'Existing binary not working, re-downloading...',
@@ -467,7 +548,10 @@ describe('BinaryManager', () => {
 
       await binaryManager.ensureBinary();
 
-      expect(mockChmod).toHaveBeenCalledWith('/mock/binaries/llama/llama-server.exe', 0o755);
+      expect(mockChmod).toHaveBeenCalledWith(
+        expect.stringMatching(/llama\.candidate-.*[\\/]llama-server\.exe$/),
+        0o755
+      );
 
       // Restore platform
       Object.defineProperty(process, 'platform', {
@@ -669,9 +753,202 @@ describe('BinaryManager', () => {
       expect(mockDeleteFile).toHaveBeenCalled();
       expect(mockCleanupExtraction).toHaveBeenCalled();
     });
+
+    it('restores the prior installation when publishing a complete candidate fails', async () => {
+      const commitFailure = new Error('candidate rename failed');
+      mockRename
+        .mockResolvedValueOnce(undefined)
+        .mockRejectedValueOnce(commitFailure)
+        .mockResolvedValueOnce(undefined);
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+      });
+
+      await expect(manager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      const [movePrior, publishCandidate, restorePrior] = mockRename.mock.calls;
+      expect(movePrior?.[0]).toBe('/mock/binaries/llama');
+      expect(String(movePrior?.[1])).toContain('/mock/binaries/llama.backup-');
+      expect(String(publishCandidate?.[0])).toContain('/mock/binaries/llama.candidate-');
+      expect(publishCandidate?.[1]).toBe('/mock/binaries/llama');
+      expect(restorePrior).toEqual([movePrior?.[1], '/mock/binaries/llama']);
+      expect(mockCopyDirectory.mock.calls.some((call) => call[1] === '/mock/binaries/llama')).toBe(
+        false
+      );
+    });
+
+    it('leaves the live installation untouched when candidate metadata cannot be written', async () => {
+      mockWriteFile.mockRejectedValueOnce(new Error('manifest write failed'));
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+      });
+
+      await expect(manager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      expect(mockRename).not.toHaveBeenCalled();
+      expect(
+        mockCopyDirectory.mock.calls.every((call) =>
+          String(call[1]).includes('/mock/binaries/llama.candidate-')
+        )
+      ).toBe(true);
+    });
+
+    it('does not publish a staged candidate after its deadline expires', async () => {
+      const controller = new AbortController();
+      const reason = new DOMException('calibration deadline', 'TimeoutError');
+      mockCalculateChecksum.mockImplementation(async (filePath: string) => {
+        if (filePath.includes('.cuda.zip')) return 'abc123cuda';
+        if (filePath.includes('.candidate-')) controller.abort(reason);
+        return 'candidate-checksum';
+      });
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+      });
+
+      await expect(manager.ensureBinary(false, controller.signal)).rejects.toBe(reason);
+
+      expect(mockRename).not.toHaveBeenCalled();
+      expect(
+        mockRm.mock.calls.some((call) =>
+          String(call[0]).includes('/mock/binaries/llama.candidate-')
+        )
+      ).toBe(true);
+    });
   });
 
   describe('testBinary()', () => {
+    it('kills and awaits a validation child before rejecting cancellation', async () => {
+      const handlers: Record<string, Function> = {};
+      const child = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        kill: jest.fn(() => true),
+        on: jest.fn((event: string, handler: Function) => {
+          handlers[event] = handler;
+          return child;
+        }),
+      };
+      (mockSpawn as jest.Mock).mockReturnValueOnce(child);
+      const controller = new AbortController();
+      const reason = new DOMException('calibration deadline', 'TimeoutError');
+      const spawnWithTimeout = (
+        binaryManager as unknown as {
+          spawnWithTimeout: (
+            command: string,
+            args: string[],
+            timeoutMs: number,
+            signal?: AbortSignal
+          ) => Promise<unknown>;
+        }
+      ).spawnWithTimeout.bind(binaryManager);
+      let settled = false;
+      const pending = spawnWithTimeout(
+        'llama-server',
+        ['--version'],
+        5_000,
+        controller.signal
+      ).finally(() => {
+        settled = true;
+      });
+      const rejection = expect(pending).rejects.toBe(reason);
+
+      controller.abort(reason);
+      await Promise.resolve();
+      expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(settled).toBe(false);
+      handlers.exit?.(null, 'SIGTERM');
+      await rejection;
+      expect(settled).toBe(true);
+    });
+
+    it('escalates validation-child cancellation to forced termination and confirms exit', async () => {
+      jest.useFakeTimers();
+      const handlers: Record<string, Function> = {};
+      const child = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        exitCode: null,
+        signalCode: null,
+        kill: jest.fn(() => true),
+        on: jest.fn((event: string, handler: Function) => {
+          handlers[event] = handler;
+          return child;
+        }),
+      };
+      (mockSpawn as jest.Mock).mockReturnValueOnce(child);
+      const controller = new AbortController();
+      const reason = new DOMException('calibration deadline', 'TimeoutError');
+      const spawnWithTimeout = (
+        binaryManager as unknown as {
+          spawnWithTimeout: (
+            command: string,
+            args: string[],
+            timeoutMs: number,
+            signal?: AbortSignal
+          ) => Promise<unknown>;
+        }
+      ).spawnWithTimeout.bind(binaryManager);
+      const pending = spawnWithTimeout('llama-server', ['--version'], 5_000, controller.signal);
+
+      controller.abort(reason);
+      // A kill-delivery/process error does not prove that the child disappeared.
+      handlers.error?.(new Error('kill delivery failed'));
+      await jest.advanceTimersByTimeAsync(1_001);
+      expect(child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+      expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+      handlers.exit?.(null, 'SIGKILL');
+      await expect(pending).rejects.toBe(reason);
+      jest.useRealTimers();
+    });
+
+    it('reports unconfirmed validation-child termination instead of hiding it behind cancellation', async () => {
+      jest.useFakeTimers();
+      const child = {
+        stdout: { on: jest.fn() },
+        stderr: { on: jest.fn() },
+        exitCode: null,
+        signalCode: null,
+        pid: 4321,
+        kill: jest.fn(() => true),
+        on: jest.fn(() => child),
+      };
+      (mockSpawn as jest.Mock).mockReturnValueOnce(child);
+      const controller = new AbortController();
+      const spawnWithTimeout = (
+        binaryManager as unknown as {
+          spawnWithTimeout: (
+            command: string,
+            args: string[],
+            timeoutMs: number,
+            signal?: AbortSignal
+          ) => Promise<unknown>;
+        }
+      ).spawnWithTimeout.bind(binaryManager);
+      const pending = spawnWithTimeout('llama-server', ['--version'], 5_000, controller.signal);
+      const rejection = expect(pending).rejects.toMatchObject({
+        details: {
+          code: 'BINARY_VALIDATION_TERMINATION_UNCONFIRMED',
+          pid: 4321,
+        },
+      });
+
+      controller.abort(new DOMException('calibration deadline', 'TimeoutError'));
+      await jest.advanceTimersByTimeAsync(2_001);
+      await rejection;
+      expect(child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+      expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+      jest.useRealTimers();
+    });
+
     it('should return true when binary executes successfully', async () => {
       // Mock existing binary with no validation cache (will run tests)
       mockFileExists.mockResolvedValue(true);
@@ -697,7 +974,6 @@ describe('BinaryManager', () => {
       // Should re-download and succeed
       const result = await binaryManager.ensureBinary();
 
-      expect(mockDeleteFile).toHaveBeenCalled();
       expect(mockDownload).toHaveBeenCalled();
       expect(result).toBe('/mock/binaries/llama/llama-server.exe');
     });
@@ -1265,7 +1541,7 @@ describe('BinaryManager', () => {
           },
         ],
       });
-      expect(mockRename).toHaveBeenCalledTimes(2);
+      expect(mockRename).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -1388,6 +1664,30 @@ describe('BinaryManager', () => {
       expect(mockFetch).toHaveBeenCalled();
 
       mockFetch.mockRestore();
+    });
+
+    it('handles an asynchronous Phase 2 spawn failure without treating it as process exit', async () => {
+      const testModelPath = '/mock/models/test-model.gguf';
+      mockFileExists.mockResolvedValue(true);
+      setSpawnResponses([
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 },
+        { shouldError: true, errorMessage: 'spawn ENOENT' },
+      ]);
+
+      const managerWithModel = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        testModelPath,
+        log: mockLogger,
+      });
+
+      await expect(managerWithModel.ensureBinary()).rejects.toThrow(BinaryError);
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Real functionality test failed: spawn ENOENT'),
+        'warn'
+      );
     });
 
     it('should fail variant if Phase 1 (basic validation) fails', async () => {
@@ -2048,8 +2348,8 @@ describe('BinaryManager', () => {
         expect.stringContaining('Binary version changed (b6784 → b7956)'),
         'info'
       );
-      // Should delete old binary
-      expect(mockDeleteFile).toHaveBeenCalledWith(binaryPath);
+      // The prior installation remains available until the validated replacement commits.
+      expect(mockDeleteFile).not.toHaveBeenCalledWith(binaryPath);
       // Should download new binary
       expect(mockDownload).toHaveBeenCalled();
       expect(result).toBe(binaryPath);
@@ -2099,10 +2399,59 @@ describe('BinaryManager', () => {
         expect.stringContaining('Binary version changed (unknown → b7956)'),
         'info'
       );
-      // Should delete old binary and re-download
-      expect(mockDeleteFile).toHaveBeenCalledWith(binaryPath);
+      // The prior installation remains available until the validated replacement commits.
+      expect(mockDeleteFile).not.toHaveBeenCalledWith(binaryPath);
       expect(mockDownload).toHaveBeenCalled();
       expect(result).toBe(binaryPath);
+    });
+
+    it('cancels provisioning without deleting the prior install or trying a fallback variant', async () => {
+      const binaryPath = '/mock/binaries/llama/llama-server.exe';
+      const validationCache = {
+        variant: 'cuda',
+        checksum: 'abc123',
+        validatedAt: new Date().toISOString(),
+        phase1Passed: true,
+        version: 'old',
+      };
+      mockFileExists.mockImplementation(async (filePath: string) => filePath === binaryPath);
+      mockGetBinaryPath.mockReturnValue(binaryPath);
+      mockReadFile
+        .mockRejectedValueOnce(new Error('No dependency manifest'))
+        .mockResolvedValueOnce(JSON.stringify(validationCache))
+        .mockRejectedValue(new Error('No cache'));
+
+      let downloadStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        downloadStarted = resolve;
+      });
+      mockDownload.mockImplementationOnce(
+        async ({ signal }: { signal?: AbortSignal }) =>
+          new Promise<void>((_resolve, reject) => {
+            downloadStarted();
+            signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+          })
+      );
+      const controller = new AbortController();
+      const reason = new DOMException('calibration deadline', 'TimeoutError');
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant, cpuVariant],
+        version: 'new',
+        log: mockLogger,
+      });
+
+      const pending = manager.ensureBinary(false, controller.signal);
+      const rejection = expect(pending).rejects.toBe(reason);
+      await started;
+      controller.abort(reason);
+      await rejection;
+
+      expect(mockDownload).toHaveBeenCalledTimes(1);
+      expect(mockDeleteFile).not.toHaveBeenCalledWith(binaryPath);
+      expect(mockCleanupExtraction).toHaveBeenCalledWith(`${binaryPath}.cuda.extract`);
     });
 
     it('should use cached validation when version matches', async () => {

@@ -34,9 +34,11 @@ jest.unstable_mockModule('../../src/utils/binary-identity.js', () => ({
  */
 const actualAdaptivePolicy = await import('../../src/utils/llama-adaptive-calibration-policy.js');
 const applyAdaptivePolicyObservation = jest.fn(actualAdaptivePolicy.applyAdaptivePolicyObservation);
+const nextAdaptivePolicyAction = jest.fn(actualAdaptivePolicy.nextAdaptivePolicyAction);
 jest.unstable_mockModule('../../src/utils/llama-adaptive-calibration-policy.js', () => ({
   ...actualAdaptivePolicy,
   applyAdaptivePolicyObservation,
+  nextAdaptivePolicyAction,
 }));
 
 const { LlamaServerManager } = await import('../../src/managers/LlamaServerManager.js');
@@ -98,7 +100,7 @@ const baseConfig: LlamaAdaptiveCalibrationConfig = {
   workloads: [workload],
   samples: 2,
   maxProbes: 20,
-  maxWallTimeMs: 2_000_000,
+  maxWallTimeMs: 3_600_000,
 };
 
 function timing(wallTimeMs: number): LlamaCalibrationRequestTiming {
@@ -192,7 +194,11 @@ function observation(
   };
 }
 
-async function settleCalibration<T>(promise: Promise<T>): Promise<T> {
+async function settleCalibration<T>(
+  promise: Promise<T>,
+  stepMs = 1_000,
+  maxTurns = 100
+): Promise<T> {
   let settled = false;
   void promise.then(
     () => {
@@ -202,8 +208,8 @@ async function settleCalibration<T>(promise: Promise<T>): Promise<T> {
       settled = true;
     }
   );
-  for (let turn = 0; turn < 100 && !settled; turn++) {
-    await jest.advanceTimersByTimeAsync(1_000);
+  for (let turn = 0; turn < maxTurns && !settled; turn++) {
+    await jest.advanceTimersByTimeAsync(stepMs);
   }
   if (!settled) throw new Error('scripted calibration did not settle');
   return promise;
@@ -289,6 +295,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
     applyAdaptivePolicyObservation.mockImplementation(
       actualAdaptivePolicy.applyAdaptivePolicyObservation
     );
+    nextAdaptivePolicyAction.mockImplementation(actualAdaptivePolicy.nextAdaptivePolicyAction);
     mockBinaryIdentity.mockResolvedValue({
       version: 'b9860',
       variant: 'cuda',
@@ -338,7 +345,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       const gpuLayers = options.resolvedConfig.gpuLayers ?? 0;
       return gpuLayers >= 7
         ? observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
-        : observation(options, { scoreMs: 100 - gpuLayers });
+        : observation(options, { scoreMs: 200 - gpuLayers * 10 });
     });
 
     const report = await settleCalibration(manager.calibrate(baseConfig));
@@ -356,22 +363,20 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       ['boundary', 'search', 6],
       ['boundary', 'search', 7],
       ['finalist', 'full', 6],
-      ['fallback-validation', 'search', 5],
     ]);
     expect(report).toMatchObject({
       status: 'complete',
       selectionEvidence: 'independent-reproduction',
       selected: { profileIndex: 0, startConfig: { gpuLayers: 6 } },
-      fallback: { startConfig: { gpuLayers: 5 }, evidence: 'direct-measurement' },
+      fallback: { startConfig: { gpuLayers: 5 }, evidence: 'unvalidated-option' },
     });
     expect(report.terminalReason).toEqual(expect.any(String));
-    // Scripted probes complete in the same mocked clock tick, so no positive observed duration is
-    // available to replace the configured estimate in this fixture.
-    expect(report.budget.timeAdmission.policy).toBe('configured-conservative-estimate');
-    expect(report.budget.effectiveFinalistTimeReserveMs).toBeGreaterThanOrEqual(
-      report.budget.finalistTimeReserveMs
-    );
-    expect(report.probes.map((probe) => probe.independentLaunchIndex)).toEqual([1, 1, 1, 1, 2, 1]);
+    expect(report.budget).toMatchObject({
+      maxWallTimeMs: 3_600_000,
+      overrunMs: 0,
+      maxProbes: 20,
+    });
+    expect(report.probes.map((probe) => probe.independentLaunchIndex)).toEqual([1, 1, 1, 1, 2]);
   });
 
   it('keeps caller profile indexes separate from smaller-first scheduling ordinals', async () => {
@@ -381,7 +386,8 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
     ] as const;
     executor.mockImplementation(async (options) => {
       const gpuLayers = options.resolvedConfig.gpuLayers ?? 0;
-      const score = options.resolvedConfig.contextSize === 16_384 ? 105 : 100;
+      const score =
+        (options.resolvedConfig.contextSize === 16_384 ? 105 : 100) + (8 - gpuLayers) * 20;
       return gpuLayers >= 7
         ? observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
         : observation(options, { scoreMs: score });
@@ -415,7 +421,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       const gpuLayers = options.resolvedConfig.gpuLayers ?? 0;
       return gpuLayers >= 7
         ? observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
-        : observation(options, { scoreMs: 100 - gpuLayers });
+        : observation(options, { scoreMs: 200 - gpuLayers * 10 });
     });
     const callbackProgress: LlamaCalibrationProgress[] = [];
     const eventProgress: LlamaCalibrationProgress[] = [];
@@ -436,10 +442,17 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       strategy: 'adaptive',
       phase: 'preparing',
       completedProbes: 0,
-      budget: { resolved: false },
+      budget: {
+        maxWallTimeMs: 3_600_000,
+        maxProbes: 20,
+        remainingProbes: 20,
+      },
     });
     expect(callbackProgress.find((value) => value.phase === 'policy-ready')).toMatchObject({
-      budget: { resolved: true, maxProbes: 20 },
+      budget: {
+        maxWallTimeMs: 3_600_000,
+        maxProbes: 20,
+      },
     });
     expect(
       callbackProgress.find(
@@ -473,7 +486,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       phase: 'done',
       terminalStatus: 'complete',
       overallPercent: 100,
-      completedProbes: 6,
+      completedProbes: 5,
     });
   });
 
@@ -507,7 +520,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
     );
   });
 
-  it('protects the finalist launch reserve without starting the next search probe', async () => {
+  it('uses the optional final probe slot to strengthen the incumbent', async () => {
     executor.mockImplementation(async (options) => {
       const gpuLayers = options.resolvedConfig.gpuLayers ?? 0;
       return gpuLayers >= 5
@@ -523,13 +536,13 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
     );
 
     if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-    expect(report.status).toBe('budget-exhausted');
-    expect(report.terminalReason).toContain('launch-reserve');
-    expect(executor).toHaveBeenCalledTimes(3);
-    expect(report.budget.completedProbes).toBe(3);
-    expect(report.budget.completedProbes).toBeLessThanOrEqual(report.budget.maxProbes);
-    expect(report.budget.targetProbes).toBe(5);
-    expect(executor.mock.calls.at(-1)![0].purpose).toBe('boundary');
+    expect(report.status).toBe('probe-limited');
+    expect(report.searchCompleteness).toBe('partial');
+    expect(report.selectionEvidence).toBe('independent-reproduction');
+    expect(executor).toHaveBeenCalledTimes(5);
+    expect(report.probes).toHaveLength(5);
+    expect(report.budget.maxProbes).toBe(5);
+    expect(executor.mock.calls.at(-1)![0].purpose).toBe('finalist');
   });
 
   it('reports no viable candidate only after confirmed failures descend through g=0', async () => {
@@ -542,7 +555,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
     if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
     expect(report.status).toBe('no-viable-candidate');
     expect(report.selected).toBeUndefined();
-    expect(report.provisional).toBeUndefined();
+    expect(report.selectionEvidence).toBeUndefined();
     expect(executor.mock.calls.map(([options]) => options.resolvedConfig.gpuLayers)).toEqual([
       4, 2, 1, 0,
     ]);
@@ -596,57 +609,74 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
   });
 
   describe('Phase 4 operational hardening', () => {
-    it('rejects resolved 4-cell and 8-cell reserve conflicts before binary provisioning', async () => {
+    it('accepts maxProbes: 1 without a cell-count reserve conflict', async () => {
       const ensureBinary = (
         manager as unknown as { ensureBinary: jest.Mock<() => Promise<string>> }
       ).ensureBinary;
-      const profiles = [
-        { contextSize: 8192, parallelRequests: 2 },
-        { contextSize: 12_288, parallelRequests: 2 },
-      ] as const;
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
-      const fourCellError = await captureRejection(
+      const report = await settleCalibration(
         manager.calibrate({
           ...baseConfig,
-          profiles,
-          includeKvCacheComparison: true,
-          maxProbes: 4,
-        })
-      );
-      expect(fourCellError.details).toMatchObject({
-        code: 'CALIBRATION_INVALID_CONFIG',
-        finalistReserve: 4,
-        cellCount: 4,
-      });
-      expect(ensureBinary).not.toHaveBeenCalled();
-
-      model.ggufMetadata!.attention_sliding_window = 2048;
-      const eightCellError = await captureRejection(
-        manager.calibrate({
-          ...baseConfig,
-          profiles,
-          includeKvCacheComparison: true,
-          workloads: [
-            {
-              id: 'shared',
-              kind: 'shared-prefix',
-              sharedPrefix: 'prefix',
-              suffixes: ['prime', 'measured'],
-              nPredict: 1,
-            },
+          profiles: [
+            { contextSize: 8192, parallelRequests: 2 },
+            { contextSize: 12_288, parallelRequests: 2 },
           ],
-          maxProbes: 6,
+          includeKvCacheComparison: true,
+          maxProbes: 1,
         })
       );
-      expect(eightCellError.details).toMatchObject({
-        code: 'CALIBRATION_INVALID_CONFIG',
-        finalistReserve: 6,
-        cellCount: 8,
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report).toMatchObject({
+        status: 'probe-limited',
+        searchCompleteness: 'partial',
+        selectionEvidence: 'single-search-launch',
+        budget: {
+          maxProbes: 1,
+        },
       });
-      expect(ensureBinary).not.toHaveBeenCalled();
+      expect(report.selected).toBeDefined();
+      expect(executor).toHaveBeenCalledTimes(1);
+      expect(ensureBinary).toHaveBeenCalledTimes(1);
     });
 
-    it('counts SWA relevance per profile during pre-provisioning budget validation', async () => {
+    it('consumes the cap at invocation while completedProbes still counts settled trail records', async () => {
+      const progress: LlamaCalibrationProgress[] = [];
+      let release!: (value: RunCalibrationProbeObservation) => void;
+      executor.mockImplementationOnce(
+        async (options) =>
+          new Promise<RunCalibrationProbeObservation>((resolve) => {
+            release = resolve;
+            options.onProgress?.({ phase: 'starting' });
+          })
+      );
+
+      const pending = manager.calibrate({
+        ...baseConfig,
+        maxProbes: 1,
+        onProgress: (value) => progress.push(value),
+      });
+      await waitForExecutorCall(executor);
+
+      expect(
+        progress.find(
+          (value) => value.strategy === 'adaptive' && value.activeProbe?.probePhase === 'starting'
+        )
+      ).toMatchObject({
+        completedProbes: 0,
+        budget: { maxProbes: 1, remainingProbes: 0 },
+      });
+      release(observation(executor.mock.calls[0]![0], { scoreMs: 100 }));
+      const report = await settleCalibration(pending);
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.probes).toHaveLength(1);
+      expect(progress.at(-1)).toMatchObject({
+        completedProbes: 1,
+        budget: { maxProbes: 1, remainingProbes: 0 },
+      });
+    });
+
+    it('keeps the probe limit unbounded across profile-local SWA cells when omitted', async () => {
       const ensureBinary = (
         manager as unknown as { ensureBinary: jest.Mock<() => Promise<string>> }
       ).ensureBinary;
@@ -662,35 +692,153 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         nPredict: 1,
       };
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
-
-      model.ggufMetadata!.attention_sliding_window = 8192;
-      const belowWindowReport = await settleCalibration(
-        manager.calibrate({
-          ...baseConfig,
-          profiles,
-          workloads: [sharedWorkload],
-          maxProbes: 3,
-        })
-      );
-      expect(belowWindowReport.status).toBe('budget-exhausted');
-      expect(ensureBinary).toHaveBeenCalledTimes(1);
-
-      ensureBinary.mockClear();
       model.ggufMetadata!.attention_sliding_window = 5000;
-      const mixedError = await captureRejection(
+      const { maxProbes: _omitted, ...withoutProbeLimit } = baseConfig;
+      const report = await settleCalibration(
         manager.calibrate({
-          ...baseConfig,
+          ...withoutProbeLimit,
           profiles,
           workloads: [sharedWorkload],
-          maxProbes: 3,
         })
       );
-      expect(mixedError.details).toMatchObject({
-        code: 'CALIBRATION_INVALID_CONFIG',
-        finalistReserve: 3,
-        cellCount: 3,
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.budget.maxProbes).toBeUndefined();
+      expect(report.status).not.toBe('probe-limited');
+      expect(report.cells).toHaveLength(3);
+      expect(report.probes.length).toBeGreaterThan(0);
+      expect(ensureBinary).toHaveBeenCalledTimes(1);
+    });
+
+    it('continues an unbounded eight-cell run beyond the old 19-of-23 reserve stop', async () => {
+      model.ggufMetadata!.attention_sliding_window = 2048;
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
+      const { maxProbes: _omitted, ...withoutProbeLimit } = baseConfig;
+
+      const report = await settleCalibration(
+        manager.calibrate({
+          ...withoutProbeLimit,
+          profiles: [
+            { contextSize: 8192, parallelRequests: 2 },
+            { contextSize: 12_288, parallelRequests: 2 },
+          ],
+          workloads: [
+            {
+              id: 'shared',
+              kind: 'shared-prefix',
+              sharedPrefix: 'prefix',
+              suffixes: ['prime', 'measured'],
+              nPredict: 1,
+            },
+          ],
+          includeKvCacheComparison: true,
+          maxWallTimeMs: 100_000_000,
+        })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.budget.maxProbes).toBeUndefined();
+      expect(report.probes.length).toBeGreaterThan(19);
+      expect(report.status).not.toBe('probe-limited');
+    });
+
+    it('uses the real deadline without reserving a validation cycle', async () => {
+      const progress: LlamaCalibrationProgress[] = [];
+      executor.mockImplementation(async (options) => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5 * 60_000));
+        const gpuLayers = options.resolvedConfig.gpuLayers ?? 0;
+        return gpuLayers >= 7
+          ? observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
+          : observation(options, { scoreMs: 100 - gpuLayers });
       });
-      expect(ensureBinary).not.toHaveBeenCalled();
+      const { maxProbes: _omitted, ...withoutProbeLimit } = baseConfig;
+
+      const report = await settleCalibration(
+        manager.calibrate({
+          ...withoutProbeLimit,
+          maxWallTimeMs: 30 * 60_000,
+          onProgress: (value) => progress.push(value),
+        }),
+        5 * 60_000,
+        12
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report).toMatchObject({
+        status: 'time-limited',
+        searchCompleteness: 'partial',
+        selectionEvidence: 'single-search-launch',
+        budget: {
+          maxWallTimeMs: 30 * 60_000,
+        },
+      });
+      expect(report.selected?.startConfig.gpuLayers).toBeGreaterThanOrEqual(0);
+      expect(executor).toHaveBeenCalled();
+      expect(progress.at(-1)).toMatchObject({
+        strategy: 'adaptive',
+        phase: 'done',
+        terminalStatus: 'time-limited',
+      });
+    });
+
+    it('re-arms wall times above the Node timer range instead of expiring early', async () => {
+      const maxWallTimeMs = 2_147_483_647 + 1_000_000;
+      let workSignal: AbortSignal | undefined;
+      executor.mockImplementation(
+        async (options) =>
+          new Promise<RunCalibrationProbeObservation>((resolve) => {
+            workSignal = options.signal;
+            options.signal?.addEventListener(
+              'abort',
+              () => resolve(observation(options, { scoreMs: 100 })),
+              { once: true }
+            );
+          })
+      );
+
+      const pending = manager.calibrate({ ...baseConfig, maxWallTimeMs });
+      await waitForExecutorCall(executor);
+      await jest.advanceTimersByTimeAsync(2_147_483_647);
+      expect(workSignal?.aborted).toBe(false);
+
+      await jest.advanceTimersByTimeAsync(1_000_000);
+      const report = await settleCalibration(pending);
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report.status).toBe('time-limited');
+      expect(report.budget.maxWallTimeMs).toBe(maxWallTimeMs);
+    });
+
+    it('returns an inconclusive manager report when multi-profile preflight remains incomplete', async () => {
+      const progress: LlamaCalibrationProgress[] = [];
+      executor.mockImplementation(async (options) =>
+        observation(options, { scoreMs: 100, preflight: false })
+      );
+
+      const report = await settleCalibration(
+        manager.calibrate({
+          ...baseConfig,
+          profiles: [
+            { contextSize: 8192, parallelRequests: 2 },
+            { contextSize: 12_288, parallelRequests: 2 },
+          ],
+          fixedConfig: { gpuLayers: 0 },
+          onProgress: (value) => progress.push(value),
+        })
+      );
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report).toMatchObject({
+        status: 'inconclusive',
+        searchCompleteness: 'partial',
+        selectionEvidence: 'independent-reproduction',
+        terminalReason: expect.stringContaining('preflight'),
+      });
+      expect(report.selected).toBeDefined();
+      expect(executor).toHaveBeenCalledTimes(2);
+      expect(progress.at(-1)).toMatchObject({
+        strategy: 'adaptive',
+        phase: 'done',
+        terminalStatus: 'inconclusive',
+      });
     });
 
     it('floors the derived adaptive completion cap to an integer', async () => {
@@ -716,7 +864,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       }
     });
 
-    it('still attempts the first probe when the configured estimate exceeds the budget', async () => {
+    it('does not deny probes using configured-duration estimates', async () => {
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
       const report = await settleCalibration(
@@ -727,41 +875,27 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       );
 
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      // The configured conservative estimate prices every planned request at the
-      // full request timeout, so it exceeds this budget. Reserves protect later
-      // validation launches only: with no evidence yet there is nothing to
-      // protect, and refusing here would return a zero-probe report. The warning
-      // is retained, the first probe runs, and admission then uses observed
-      // launch durations.
-      expect(report.warnings).toEqual([
-        expect.stringContaining('configured conservative first-probe estimate'),
-      ]);
+      expect(report.warnings).toEqual([]);
       expect(executor).toHaveBeenCalled();
-      expect(report.probes).toHaveLength(1);
+      expect(report.probes.length).toBeGreaterThan(1);
       expect(report.probes[0]).toMatchObject({ purpose: 'reference', probeIndex: 0 });
-      // The budget really is too small for this workload, so it still exhausts
-      // honestly - but now after one probe of real evidence instead of zero.
-      // The scripted executor is instantaneous under fake timers, so no launch
-      // has a positive duration and the estimate stays at the configured
-      // conservative value - which is exactly why one probe is all it affords.
-      expect(report.status).toBe('budget-exhausted');
       expect(report.budget).toMatchObject({
-        completedProbes: 1,
         maxWallTimeMs: 400_000,
-        timeAdmission: {
-          policy: 'configured-conservative-estimate',
-          estimatedNextProbeDurationMs: expect.any(Number),
-        },
+        overrunMs: 0,
       });
-      expect(report.budget.timeAdmission.estimatedNextProbeDurationMs).toBeGreaterThan(400_000);
+      expect(report.budget).not.toHaveProperty('durationEstimation');
     });
 
-    it('warns against the maximum possible default cell budget before provisioning', async () => {
+    it('uses the fixed 60-minute default without a cell-count warning', async () => {
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
-      const { maxWallTimeMs: _omitted, ...withoutWallOverride } = baseConfig;
+      const {
+        maxWallTimeMs: _omittedWall,
+        maxProbes: _omittedProbes,
+        ...withoutBudgetOverrides
+      } = baseConfig;
       const report = await settleCalibration(
         manager.calibrate({
-          ...withoutWallOverride,
+          ...withoutBudgetOverrides,
           workloads: [
             { ...workload, weight: 1 },
             {
@@ -777,13 +911,9 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       );
 
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      // The warning resolves against the maximum possible cell-count default
-      // (1,800,000 ms) even though this run enumerates one cell (1,350,000 ms).
-      expect(report.status).toBe('budget-exhausted');
-      expect(report.budget.maxWallTimeMs).toBe(1_350_000);
-      expect(report.warnings).toEqual([
-        expect.stringContaining('pre-provisioning wall-time allowance (1800000 ms)'),
-      ]);
+      expect(report.budget.maxWallTimeMs).toBe(3_600_000);
+      expect(report.budget.maxProbes).toBeUndefined();
+      expect(report.warnings).toEqual([]);
     });
 
     it('disables both metrics after unusable baseline telemetry and still selects a winner', async () => {
@@ -953,7 +1083,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
         expect(error).toBeInstanceOf(ServerError);
         expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
-        expect(error.details.suggestion).toEqual(expect.stringContaining('close heavy'));
+        expect(error.details.suggestion).toEqual(expect.stringContaining('Close other'));
         // Confirmation is telemetry only: no server was ever launched for this boundary.
         expect(executor).not.toHaveBeenCalled();
         const partial = error.details.partialReport;
@@ -972,7 +1102,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         expect(partial.resourceFailure.probeIndex).toBeUndefined();
         expect(partial.resourceFailure.diagnostics.confirmationPerformed).toBe(true);
         expect(partial.resourceFailure.diagnostics.confirmation).toBeDefined();
-        expect(partial.diagnosticCandidate).toBeUndefined();
+        expect(partial.bestKnown).toBeUndefined();
         const terminals = progress.filter((value) => value.phase === 'done');
         expect(terminals).toHaveLength(1);
         expect(terminals[0]).toMatchObject({ terminalStatus: 'failed' });
@@ -1032,11 +1162,12 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
     });
 
     it('quarantines a final-probe post-cleanup drift and commits none of its staged state', async () => {
-      // The 6-probe boundary trace ends with a fallback-validation launch. Its post-cleanup
+      // The 5-probe boundary trace reaches an ordinary full-fidelity finalist launch. Its
+      // post-cleanup
       // boundary drifts, so that observation must reach neither the verified-profile cache, the
       // prompt token-count cache, nor the policy - only the chronological trail, marked invalid.
-      // Snapshot ordinals: 0-2 baseline, then pre/post per probe; probe 5's post read is 14.
-      scriptSnapshots({ 14: { host: 17_000 }, 15: { host: 17_000 } });
+      // Snapshot ordinals: 0-2 baseline, then pre/post per probe; probe 4's post read is 12.
+      scriptSnapshots({ 12: { host: 17_000 }, 13: { host: 17_000 } });
       // Two workload ids make the token cache discriminating: only the drifted final probe ever
       // reports a count for `late`, so that id can appear in the cache the manager hands its
       // executor only if the quarantined observation was committed after all. With a single id the
@@ -1060,7 +1191,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         return {
           ...scripted,
           promptTokenCounts:
-            options.purpose === 'fallback-validation'
+            options.purpose === 'finalist'
               ? new Map<string, readonly number[]>([
                   ['cold', [10]],
                   ['late', [11]],
@@ -1085,16 +1216,16 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         boundary: 'post-cleanup',
         affectedMetrics: ['hostMemory'],
         affectedDirections: { hostMemory: 'decrease' },
-        probeIndex: 5,
+        probeIndex: 4,
       });
-      expect(partial.probes).toHaveLength(6);
+      expect(partial.probes).toHaveLength(5);
       // Exactly one invalidated probe is appended, and it keeps its original operational outcome.
       const invalidated = partial.probes.filter(
         (probe) => probe.resourceValidity === 'invalidated-by-resource-stability'
       );
       expect(invalidated).toHaveLength(1);
       expect(invalidated[0]).toMatchObject({
-        probeIndex: 5,
+        probeIndex: 4,
         operationalStatus: 'ok',
         boundaryDecision: {
           classification: 'ambiguous',
@@ -1102,25 +1233,25 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         },
       });
       expect(
-        partial.probes.slice(0, 5).every((probe) => probe.resourceValidity === 'accepted')
+        partial.probes.slice(0, 4).every((probe) => probe.resourceValidity === 'accepted')
       ).toBe(true);
       // The search stopped at the invalidated launch: no further probe was scheduled from it.
-      expect(executor).toHaveBeenCalledTimes(6);
-      expect(executor.mock.calls.at(-1)![0].purpose).toBe('fallback-validation');
+      expect(executor).toHaveBeenCalledTimes(5);
+      expect(executor.mock.calls.at(-1)![0].purpose).toBe('finalist');
       expect(progress.filter((value) => value.phase === 'done')).toEqual([
         expect.objectContaining({ terminalStatus: 'failed' }),
       ]);
       expect(JSON.stringify(partial)).not.toContain(workload.prompt);
       // Token-count cache: `late` was offered exclusively by the quarantined probe, so its absence
       // after the rejection is direct evidence that nothing from that observation was committed.
-      expect(tokenCacheKeys).toEqual([[], ['cold'], ['cold'], ['cold'], ['cold'], ['cold']]);
+      expect(tokenCacheKeys).toEqual([[], ['cold'], ['cold'], ['cold'], ['cold']]);
       expect(liveTokenCache).toBeDefined();
       expect([...liveTokenCache!.keys()]).toEqual(['cold']);
-      // Policy: the invalidated observation was never handed to it. Five accepted probes were.
-      expect(applyAdaptivePolicyObservation).toHaveBeenCalledTimes(5);
+      // Policy: the invalidated observation was never handed to it. Four accepted probes were.
+      expect(applyAdaptivePolicyObservation).toHaveBeenCalledTimes(4);
       expect(
         applyAdaptivePolicyObservation.mock.calls.map(([, applied]) => applied.purpose)
-      ).toEqual(['reference', 'ceiling', 'boundary', 'boundary', 'finalist']);
+      ).toEqual(['reference', 'ceiling', 'boundary', 'boundary']);
       // Verified profiles: this map is read only while the final report is built, so a rejected run
       // exposes no public observable for it - the residual gap here. What is observable is that the
       // quarantined probe did carry the capacity readings that would have been staged, and that the
@@ -1133,25 +1264,34 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       });
     });
 
-    it('reports a diagnostic-only candidate built solely from reproduced clean probes', async () => {
-      scriptSnapshots({ 14: { host: 17_000 }, 15: { host: 17_000 } });
-      executor.mockImplementation(async (options) => {
-        const gpuLayers = options.resolvedConfig.gpuLayers ?? 0;
-        return gpuLayers >= 7
-          ? observation(options, { status: 'oom', memory: 'confirmed', preflight: false })
-          : observation(options, { scoreMs: 100 - gpuLayers });
-      });
+    it('reports a start-ready bestKnown result built solely from reproduced clean probes', async () => {
+      // The first fixed-placement profile is cleanly reproduced by probes 0-1. Probe 2 starts the
+      // second profile and is invalidated after cleanup, leaving the earlier candidate diagnostic.
+      scriptSnapshots({ 8: { host: 17_000 }, 9: { host: 17_000 } });
+      executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
       const error = (await captureRejection(
-        manager.calibrate(baseConfig)
+        manager.calibrate({
+          ...baseConfig,
+          profiles: [
+            { contextSize: 8192, parallelRequests: 2 },
+            { contextSize: 12_288, parallelRequests: 2 },
+          ],
+          fixedConfig: { gpuLayers: 0 },
+        })
       )) as unknown as InstanceType<typeof LlamaCalibrationResourceStabilityError>;
 
       const partial = error.details.partialReport;
-      const candidate = partial.diagnosticCandidate;
-      expect(candidate).toBeDefined();
-      expect(candidate!.usability).toBe('diagnostic-only');
-      expect(candidate!.evidenceLevel).toBe('independent-reproduction');
-      const indexes = candidate!.sourceProbeIndexes;
+      if (partial.strategy !== 'adaptive') throw new Error('expected adaptive partial');
+      const bestKnown = partial.bestKnown;
+      expect(bestKnown).toBeDefined();
+      expect(bestKnown!.evidence).toBe('independent-reproduction');
+      expect(bestKnown!.recommendation.startConfig).toMatchObject({
+        contextSize: 8192,
+        parallelRequests: 2,
+        gpuLayers: 0,
+      });
+      const indexes = bestKnown!.sourceProbeIndexes;
       // `independent-reproduction` is a claim about more than one launch, so a single cited probe
       // would contradict the evidence level the candidate advertises.
       expect(indexes.length).toBeGreaterThanOrEqual(2);
@@ -1163,15 +1303,14 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         // Only accepted clean probes may be cited.
         expect(partial.probes[index]!.resourceValidity).toBe('accepted');
       }
-      // The candidate carries no application-ready payload a host could paste into start().
-      expect(Object.keys(candidate!).sort()).toEqual([
-        'evidenceLevel',
+      expect(Object.keys(bestKnown!).sort()).toEqual([
+        'evidence',
+        'recommendation',
         'sourceProbeIndexes',
-        'usability',
       ]);
     });
 
-    it('omits the diagnostic candidate when no point was independently reproduced yet', async () => {
+    it('omits bestKnown when no clean point exists yet', async () => {
       // The very first probe's post-cleanup boundary drifts, so no clean evidence was ever
       // committed. A single launch is never promoted merely because the run ended.
       scriptSnapshots({ 4: { vram: 6_000 }, 5: { vram: 6_000 } });
@@ -1184,7 +1323,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       const partial = error.details.partialReport;
       expect(partial.resourceFailure).toMatchObject({ boundary: 'post-cleanup', probeIndex: 0 });
       expect(partial.probes).toHaveLength(1);
-      expect(partial.diagnosticCandidate).toBeUndefined();
+      expect(partial.bestKnown).toBeUndefined();
       expect(executor).toHaveBeenCalledTimes(1);
     });
 
@@ -1393,8 +1532,8 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
           : `unverified:${error.details.partialReport.resourceFailure.boundary}`;
       expect(narrowed).toBe('drift:post-cleanup');
       const partial = error.details.partialReport;
-      expect(partial.schemaVersion).toBe(3);
-      expect(partial.policyVersion).toBe('llama-runtime-v3');
+      expect(partial.schemaVersion).toBe(4);
+      expect(partial.policyVersion).toBe('llama-runtime-v4');
       expect(partial.resourceMonitoring).toMatchObject({
         coverage: 'complete',
         enabledMetrics: ['hostMemory', 'vram'],
@@ -1491,6 +1630,145 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(executor).not.toHaveBeenCalled();
     });
 
+    it('returns preparation-time-limit after owned preparation settles and publishes after unlock', async () => {
+      const initializeLogManager = (
+        manager as unknown as { initializeLogManager: jest.Mock<() => Promise<void>> }
+      ).initializeLogManager;
+      const ensureBinary = (
+        manager as unknown as { ensureBinary: jest.Mock<() => Promise<string>> }
+      ).ensureBinary;
+      let unlockedAtTerminal = false;
+      let terminalElapsedMs: number | undefined;
+      initializeLogManager.mockImplementationOnce(
+        async () => new Promise<void>((resolve) => setTimeout(resolve, 100))
+      );
+
+      const pending = manager.calibrate({
+        ...baseConfig,
+        maxWallTimeMs: 50,
+        onProgress: (value) => {
+          if (value.phase === 'done') {
+            unlockedAtTerminal = !manager.isCalibrating();
+            terminalElapsedMs = value.elapsedMs;
+          }
+        },
+      });
+      await jest.advanceTimersByTimeAsync(100);
+      const report = await settleCalibration(pending);
+
+      expect(report).toMatchObject({
+        resultKind: 'preparation-time-limit',
+        strategy: 'adaptive',
+        phase: 'preparing',
+        status: 'time-limited',
+        probes: [],
+        cleanupConfirmed: true,
+        budget: { maxWallTimeMs: 50 },
+      });
+      if (report.resultKind !== 'preparation-time-limit') {
+        throw new Error('expected preparation-time-limit');
+      }
+      expect(report.budget.elapsedMs).toBeGreaterThanOrEqual(100);
+      expect(report.budget.overrunMs).toBe(report.budget.elapsedMs - 50);
+      expect(terminalElapsedMs).toBe(report.budget.elapsedMs);
+      expect(ensureBinary).not.toHaveBeenCalled();
+      expect(unlockedAtTerminal).toBe(true);
+    });
+
+    it('counts the orphan precondition wait against the method-entry deadline', async () => {
+      const assertNoCalibrationOrphan = jest.fn(
+        async () => new Promise<void>((resolve) => setTimeout(resolve, 100))
+      );
+      (
+        manager as unknown as { assertNoCalibrationOrphan: jest.Mock<() => Promise<void>> }
+      ).assertNoCalibrationOrphan = assertNoCalibrationOrphan;
+      const ensureBinary = (
+        manager as unknown as { ensureBinary: jest.Mock<() => Promise<string>> }
+      ).ensureBinary;
+      const pending = manager.calibrate({ ...baseConfig, maxWallTimeMs: 50 });
+      await jest.advanceTimersByTimeAsync(100);
+      const report = await settleCalibration(pending);
+
+      expect(report).toMatchObject({
+        resultKind: 'preparation-time-limit',
+        status: 'time-limited',
+        budget: { maxWallTimeMs: 50 },
+      });
+      if (report.resultKind !== 'preparation-time-limit') {
+        throw new Error('expected preparation-time-limit');
+      }
+      expect(report.budget.elapsedMs).toBeGreaterThanOrEqual(100);
+      expect(ensureBinary).not.toHaveBeenCalled();
+    });
+
+    it('signals binary provisioning at the deadline and returns preparation-time-limit', async () => {
+      const ensureBinary = (
+        manager as unknown as {
+          ensureBinary: jest.Mock<
+            (modelPath?: string, forceValidation?: boolean, signal?: AbortSignal) => Promise<string>
+          >;
+        }
+      ).ensureBinary;
+      let provisioningSignal: AbortSignal | undefined;
+      ensureBinary.mockImplementationOnce(async (_modelPath, _forceValidation, signal) => {
+        provisioningSignal = signal;
+        return new Promise<string>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      });
+
+      const pending = manager.calibrate({ ...baseConfig, maxWallTimeMs: 1_000 });
+      for (let turn = 0; turn < 20 && ensureBinary.mock.calls.length === 0; turn++) {
+        await jest.advanceTimersByTimeAsync(10);
+      }
+      expect(ensureBinary).toHaveBeenCalledTimes(1);
+      await jest.advanceTimersByTimeAsync(1_000);
+      const report = await settleCalibration(pending);
+
+      expect(provisioningSignal?.aborted).toBe(true);
+      expect(report).toMatchObject({
+        resultKind: 'preparation-time-limit',
+        status: 'time-limited',
+        probes: [],
+      });
+      expect(executor).not.toHaveBeenCalled();
+    });
+
+    it('keeps caller abort exceptional when it coincides with the preparation deadline', async () => {
+      const controller = new AbortController();
+      const ensureBinary = (
+        manager as unknown as {
+          ensureBinary: jest.Mock<
+            (modelPath?: string, forceValidation?: boolean, signal?: AbortSignal) => Promise<string>
+          >;
+        }
+      ).ensureBinary;
+      ensureBinary.mockImplementationOnce(async (_modelPath, _forceValidation, signal) => {
+        return new Promise<string>((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              controller.abort('caller stop at deadline');
+              reject(signal.reason);
+            },
+            { once: true }
+          );
+        });
+      });
+
+      const pending = manager.calibrate({
+        ...baseConfig,
+        maxWallTimeMs: 1_000,
+        signal: controller.signal,
+      });
+      await waitForExecutorCall(ensureBinary);
+      await jest.advanceTimersByTimeAsync(1_000);
+      const error = await captureRejection(pending);
+
+      expect(error.details?.code).toBe('CALIBRATION_ABORTED');
+      expect(executor).not.toHaveBeenCalled();
+    });
+
     it('checks caller abort immediately after adaptive log preparation', async () => {
       const controller = new AbortController();
       const initializeLogManager = (
@@ -1556,14 +1834,49 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
         terminalStatus: 'aborted',
         completedProbes: 1,
       });
-      expect(progress.at(-1)!.overallPercent).toBeGreaterThan(0);
+      expect(progress.at(-1)!.overallPercent).toBeGreaterThanOrEqual(0);
       expect(progress.at(-1)!.overallPercent).toBeLessThan(100);
       expect(JSON.stringify({ message: error.message, details: error.details })).not.toContain(
         workload.prompt
       );
     });
 
-    it('maps an active internal deadline to a trailed budget exhaustion, never caller abort', async () => {
+    it('never commits an executor result that resolves normally on caller abort', async () => {
+      const controller = new AbortController();
+      executor.mockImplementation(
+        async (options) =>
+          new Promise<RunCalibrationProbeObservation>((resolve) => {
+            options.onProgress?.({ phase: 'starting' });
+            options.signal?.addEventListener(
+              'abort',
+              () => resolve(observation(options, { scoreMs: 80 })),
+              { once: true }
+            );
+          })
+      );
+
+      const pending = manager.calibrate({ ...baseConfig, signal: controller.signal });
+      await waitForExecutorCall(executor);
+      controller.abort('caller stop');
+      const error = await captureRejection(pending);
+
+      expect(error.details).toMatchObject({
+        code: 'CALIBRATION_ABORTED',
+        partialReport: {
+          strategy: 'adaptive',
+          status: 'aborted',
+          probes: [
+            expect.objectContaining({
+              terminationReason: 'caller-abort',
+              boundaryDecision: { classification: 'ambiguous', reason: 'caller-abort' },
+            }),
+          ],
+        },
+      });
+      expect(applyAdaptivePolicyObservation).not.toHaveBeenCalled();
+    });
+
+    it('maps an active internal deadline to a trailed time-limited result, never caller abort', async () => {
       const progress: LlamaCalibrationProgress[] = [];
       executor.mockImplementation(
         async (options) =>
@@ -1589,7 +1902,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       const report = await settleCalibration(pending);
 
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      expect(report.status).toBe('budget-exhausted');
+      expect(report.status).toBe('time-limited');
       expect(report.probes).toEqual([
         expect.objectContaining({
           operationalStatus: 'request-timeout',
@@ -1601,12 +1914,53 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(progress.at(-1)).toMatchObject({
         strategy: 'adaptive',
         phase: 'done',
-        terminalStatus: 'budget-exhausted',
+        terminalStatus: 'time-limited',
       });
       expect(
         progress.some((value) => value.phase === 'done' && value.terminalStatus === 'aborted')
       ).toBe(false);
       expect(JSON.stringify(report)).not.toContain(workload.prompt);
+    });
+
+    it('quarantines a normally resolved deadline probe and preserves the prior clean incumbent', async () => {
+      executor.mockImplementation(async (options) => {
+        if (executor.mock.calls.length === 1) {
+          return observation(options, { scoreMs: 100 });
+        }
+        return new Promise<RunCalibrationProbeObservation>((resolve) => {
+          options.onProgress?.({ phase: 'starting' });
+          options.signal?.addEventListener(
+            'abort',
+            () => resolve(observation(options, { scoreMs: 80 })),
+            { once: true }
+          );
+        });
+      });
+
+      const pending = manager.calibrate({
+        ...baseConfig,
+        maxWallTimeMs: 2_000_000,
+      });
+      await waitForExecutorCall(executor, 2);
+      await jest.advanceTimersByTimeAsync(2_000_001);
+      const report = await settleCalibration(pending);
+
+      if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
+      expect(report).toMatchObject({
+        status: 'time-limited',
+        searchCompleteness: 'partial',
+        selectionEvidence: 'single-search-launch',
+        selected: { scoreMs: 100 },
+      });
+      expect(report.probes).toHaveLength(2);
+      expect(report.probes[1]).toMatchObject({
+        operationalStatus: 'ok',
+        scoreMs: 80,
+        terminationReason: 'internal-deadline',
+        boundaryDecision: { classification: 'ambiguous', reason: 'internal-deadline' },
+        resourceValidity: 'accepted',
+      });
+      expect(report.selected?.scoreMs).not.toBe(80);
     });
 
     it('keeps cleanup failure fatal when it coincides with caller abort', async () => {
@@ -1943,7 +2297,6 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(report.status).toBe('complete');
       expect(report.probes.length).toBeGreaterThanOrEqual(2);
       expect(executor).toHaveBeenCalledTimes(report.probes.length);
-      expect(report.budget.completedProbes).toBe(report.probes.length);
       const confirmedBoundaries = report.probes
         .flatMap((probe) => [
           probe.resourceBoundaries?.preLaunch,
@@ -1986,13 +2339,13 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       // `unsuitable` is the classification a confirmed OOM earns from the controller; the guard
       // must have prevented that verdict from ever being computed.
       expect(partial.probes[0]!.boundaryDecision.classification).not.toBe('unsuitable');
-      expect(partial.diagnosticCandidate).toBeUndefined();
+      expect(partial.bestKnown).toBeUndefined();
     });
 
     it('completes the post-cleanup guard on the caller signal after the internal deadline expired', async () => {
       // Plan decision 8: once a launch begins, the bounded post-check follows the caller's signal,
       // not an expired per-probe deadline. Without it this contaminated final probe would be
-      // published as an ordinary budget exhaustion.
+      // published as an ordinary time-limited result.
       const snapshots = scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
       executor.mockImplementation(
         async (options) =>
@@ -2022,8 +2375,90 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(error.details.partialReport.probes[0]!.resourceValidity).toBe(
         'invalidated-by-resource-stability'
       );
+      expect(error.details.partialReport.budget.elapsedMs).toBeGreaterThan(200_000);
+      expect(error.details.partialReport.budget.overrunMs).toBe(
+        error.details.partialReport.budget.elapsedMs - 200_000
+      );
       // Baseline, pre-launch, post-cleanup, and its confirmation all happened.
       expect(snapshots.snapshotCount()).toBe(6);
+    });
+
+    it('checks post-cleanup resources for a real deadline rejection carrying settled evidence', async () => {
+      scriptSnapshots({ 4: { host: 17_000 }, 5: { host: 17_000 } });
+      executor.mockImplementation(
+        async (options) =>
+          new Promise<RunCalibrationProbeObservation>((_resolve, reject) => {
+            options.onProgress?.({ phase: 'starting' });
+            options.signal?.addEventListener(
+              'abort',
+              () => {
+                reject(
+                  new ServerError('Internal calibration deadline', {
+                    code: 'CALIBRATION_ABORTED',
+                    probeObservation: observation(options, {
+                      status: 'request-timeout',
+                      preflight: false,
+                    }),
+                  })
+                );
+              },
+              { once: true }
+            );
+          })
+      );
+
+      const pending = manager.calibrate({ ...baseConfig, maxWallTimeMs: 200_000 });
+      await waitForExecutorCall(executor);
+      await jest.advanceTimersByTimeAsync(200_001);
+      const error = (await captureRejection(pending)) as unknown as InstanceType<
+        typeof LlamaCalibrationResourceStabilityError
+      >;
+
+      expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
+      expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
+      expect(error.details.partialReport.probes).toHaveLength(1);
+      expect(error.details.partialReport.probes[0]).toMatchObject({
+        probeIndex: 0,
+        operationalStatus: 'request-timeout',
+        resourceValidity: 'invalidated-by-resource-stability',
+        terminationReason: 'internal-deadline',
+        boundaryDecision: { reason: 'internal-deadline' },
+        resourceBoundaries: { postCleanup: { boundary: 'post-cleanup' } },
+      });
+    });
+
+    it('does not duplicate or time-limit a fatal probe when resource settlement crosses the deadline', async () => {
+      scriptSnapshots();
+      const refreshSnapshot = refreshMemoryTelemetry.getMockImplementation()!;
+      let snapshotCount = 0;
+      refreshMemoryTelemetry.mockImplementation(async () => {
+        const result = await refreshSnapshot();
+        snapshotCount += 1;
+        if (snapshotCount === 5) jest.advanceTimersByTime(200_001);
+        return result;
+      });
+      executor.mockImplementation(async (options) => {
+        throw new ServerError('Workload exceeds verified capacity', {
+          code: 'CALIBRATION_INVALID_CONFIG',
+          probeObservation: observation(options, { status: 'error', preflight: false }),
+        });
+      });
+
+      const error = await captureRejection(
+        manager.calibrate({ ...baseConfig, maxWallTimeMs: 200_000 })
+      );
+      const partial = error.details?.partialReport as
+        | { status?: string; probes?: Array<{ probeIndex?: number; terminationReason?: string }> }
+        | undefined;
+
+      expect(error.details?.code).toBe('CALIBRATION_INVALID_CONFIG');
+      expect(partial?.status).toBe('failed');
+      expect(partial?.probes).toEqual([
+        expect.objectContaining({
+          probeIndex: 0,
+          terminationReason: 'CALIBRATION_INVALID_CONFIG',
+        }),
+      ]);
     });
 
     it('rejects a caller abort raised during the bounded confirmation as an abort, not drift', async () => {
@@ -2134,7 +2569,7 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       expect(manager.isCalibrating()).toBe(false);
     });
 
-    it('reports schema-v3 boundaries, the fixed baseline, and protocol-only methodology', async () => {
+    it('reports schema-v4 boundaries, the fixed baseline, and protocol-only methodology', async () => {
       scriptSnapshots({});
       executor.mockImplementation(async (options) => observation(options, { scoreMs: 100 }));
 
@@ -2143,8 +2578,8 @@ describe('LlamaServerManager adaptive calibration orchestration', () => {
       );
 
       if (report.strategy !== 'adaptive') throw new Error('expected adaptive report');
-      expect(report.schemaVersion).toBe(3);
-      expect(report.policyVersion).toBe('llama-runtime-v3');
+      expect(report.schemaVersion).toBe(4);
+      expect(report.policyVersion).toBe('llama-runtime-v4');
       expect(report.resourceMonitoring.coverage).toBe('complete');
       const hostBaseline = report.resourceMonitoring.metrics.find(
         (metric) => metric.metric === 'hostMemory'
