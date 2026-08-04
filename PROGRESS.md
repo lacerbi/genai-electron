@@ -1,11 +1,11 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.20.0 — calibration resource-stability hard stop
-> (2026-08-03)
+> **Current Status**: v0.21.0 — good-result adaptive LLM calibration
+> (2026-08-04)
 
 ---
 
-## Unreleased: Good-Result Adaptive LLM Calibration
+## v0.21.0: Good-Result Adaptive LLM Calibration (2026-08-04)
 
 - Adaptive calibration now keeps the best clean incumbent and continues ordinary structural work
   until one total `maxWallTimeMs` deadline or an optional explicit probe cap is reached. The clock
@@ -26,13 +26,29 @@
 - The library remains lifecycle-neutral: the host decides whether to apply, persist, present, or
   ignore an application-ready result. Cross-call evidence resume remains deferred.
 
+**Migration:** persisted schema-v3 calibration reports must be discarded. Adaptive callers should
+narrow on `resultKind`, replace `targetProbes` and derived-budget assumptions with
+`maxWallTimeMs` plus an optional expert `maxProbes`, and use atomic `selected` /
+`selectionEvidence` with `searchCompleteness`. Resource-stability handlers may use the new
+start-ready `bestKnown` union according to host policy. See
+`genai-electron-docs/migration-0-20-to-0-21.md`.
+
+**Release validation:** `prepublishOnly` passes with a clean build and 1038/1038 tests across 37
+suites; the serial `--detectOpenHandles` run also passes. ESLint passes with 0 errors (118 existing
+warnings), formatting and `git diff --check` pass, the production dependency audit reports 0
+vulnerabilities, and the packed public-API consumer check passes against v0.21.0. The package dry
+run contains 211 files (241.7 kB packed).
+
+**Release status:** Preparing release PR from `release/v0.21.0`; merge, annotated tag, GitHub
+release, and maintainer-side `npm publish` follow.
+
 ---
 
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 1038/1038 passing (37 suites)
-- **Last Updated:** 2026-08-04 (unreleased good-result adaptive calibration)
+- **Last Updated:** 2026-08-04 (v0.21.0 release candidate)
 
 ---
 
