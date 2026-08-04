@@ -27,7 +27,16 @@ export type AdaptiveProbePurpose =
   | 'winner-validation'
   | 'fallback-validation'
   | 'reference-guard';
-export type AdaptiveTerminalStatus = 'complete' | 'budget-exhausted' | 'no-viable-candidate';
+export type AdaptiveTerminalStatus =
+  | 'complete'
+  | 'time-limited'
+  | 'probe-limited'
+  | 'inconclusive'
+  | 'no-viable-candidate';
+export type AdaptiveSelectionEvidence =
+  | 'independent-reproduction'
+  | 'single-full-launch'
+  | 'single-search-launch';
 export type AdaptiveCellPhase =
   | 'pending'
   | 'finding-reference'
@@ -152,56 +161,6 @@ export const ADAPTIVE_POLICY_DEFAULTS: Readonly<AdaptivePolicyDefaults> = Object
   processExitSettleGraceMs: 250,
 });
 
-export interface AdaptiveBudgetOverrides {
-  targetProbes?: number;
-  maxProbes?: number;
-  maxWallTimeMs?: number;
-}
-
-export interface AdaptiveBudgets {
-  cellCount: number;
-  targetProbes: number;
-  maxProbes: number;
-  finalistReserve: number;
-  maxWallTimeMs: number;
-  finalistTimeReserveMs: number;
-}
-
-export interface ConfiguredProbeDurationInput {
-  startupTimeoutMs: number;
-  requestTimeoutMs: number;
-  serverStopTimeoutMs: number;
-  plannedPostStartupRequestCount: number;
-  maxRunnerStartAttempts?: number;
-  capacityCheckTimeoutCapMs?: number;
-  processExitConfirmationMs?: number;
-  processExitSettleGraceMs?: number;
-}
-
-export interface ConfiguredProbeDurationEstimate {
-  policy: 'configured-conservative-estimate';
-  estimateMs: number;
-  resolvedCapacityCheckTimeoutMs: number;
-  configuredAttemptTeardownMs: number;
-  plannedPostStartupRequestCount: number;
-  maxRunnerStartAttempts: number;
-  isFormalUpperBound: false;
-}
-
-export interface AdaptiveProbeAdmissionInput {
-  probesUsed: number;
-  elapsedMs: number;
-  budgets: AdaptiveBudgets;
-  finalistPurpose: boolean;
-  estimatedNextProbeDurationMs: number;
-  effectiveFinalistTimeReserveMs: number;
-}
-
-export interface AdaptiveProbeAdmission {
-  allowed: boolean;
-  reason: 'allowed' | 'probe-limit' | 'launch-reserve' | 'wall-time' | 'time-reserve';
-}
-
 export interface AdaptiveCompetitivenessInput {
   hasDirectBoundary: boolean;
   cellBestDirectScoreMs?: number;
@@ -257,6 +216,11 @@ export interface AdaptiveCandidate {
   source: 'boundary' | 'step-down' | 'non-monotone';
 }
 
+export interface AdaptiveIncumbent {
+  candidate: AdaptiveCandidate;
+  evidenceLevel: AdaptiveSelectionEvidence;
+}
+
 export interface AdaptivePreferenceResolution {
   selected?: AdaptiveCandidate;
   eligible: readonly AdaptiveCandidate[];
@@ -284,9 +248,6 @@ export interface AdaptivePolicyConfig extends AdaptiveCellEnumerationInput {
   contextPreferencePct?: number;
   kvPrecisionPreferencePct?: number;
   tieTolerancePct?: number;
-  budgetOverrides?: AdaptiveBudgetOverrides;
-  /** Conservative duration used until observations provide a comparable duration estimate. */
-  unobservedProbeDurationEstimateMs: number;
   policy?: Partial<AdaptivePolicyDefaults>;
 }
 
@@ -294,9 +255,7 @@ export interface AdaptivePolicyState {
   config: AdaptivePolicyConfig;
   policy: Readonly<AdaptivePolicyDefaults>;
   cells: readonly AdaptiveCell[];
-  budgets: AdaptiveBudgets;
   evidence: readonly AdaptiveEvidence[];
-  elapsedMs: number;
 }
 
 export interface AdaptiveCellStateSummary {
@@ -332,7 +291,7 @@ export interface AdaptiveTerminalAction {
   status: AdaptiveTerminalStatus;
   reason: string;
   selected?: AdaptiveCandidate;
-  provisional?: AdaptiveCandidate;
+  selectionEvidence?: AdaptiveSelectionEvidence;
   fallback?: AdaptiveFallback;
   preferenceResolution?: AdaptivePreferenceResolution;
   referenceGuard?: AdaptiveReferenceGuardAssessment;
@@ -475,118 +434,6 @@ export function enumerateAdaptiveCells(
     }
   }
   return cells;
-}
-
-/** Resolve cell-count-scaled capped budgets. Caller overrides deliberately win. */
-export function resolveAdaptiveBudgets(
-  cellCount: number,
-  overrides: AdaptiveBudgetOverrides = {}
-): AdaptiveBudgets {
-  if (!Number.isSafeInteger(cellCount) || cellCount < 1 || cellCount > 8) {
-    throw new TypeError('cellCount must be an integer from 1 through 8');
-  }
-  const finalistReserve = Math.min(6, Math.max(2, cellCount));
-  const maxProbes = overrides.maxProbes ?? Math.min(36, 7 + 4 * cellCount);
-  const resolved: AdaptiveBudgets = {
-    cellCount,
-    targetProbes: overrides.targetProbes ?? Math.min(Math.min(24, 6 + 2 * cellCount), maxProbes),
-    maxProbes,
-    finalistReserve,
-    maxWallTimeMs: overrides.maxWallTimeMs ?? Math.min(4_500_000, 900_000 + 450_000 * cellCount),
-    finalistTimeReserveMs: Math.min(900_000, 150_000 * cellCount),
-  };
-  for (const [name, value] of Object.entries(resolved)) {
-    if (name === 'cellCount') continue;
-    finitePositive(value, name);
-    if (!Number.isSafeInteger(value)) throw new TypeError(`${name} must be a safe integer`);
-  }
-  if (resolved.targetProbes > resolved.maxProbes) {
-    throw new TypeError('targetProbes cannot exceed maxProbes');
-  }
-  if (resolved.maxProbes <= resolved.finalistReserve) {
-    throw new TypeError('maxProbes must exceed finalistReserve');
-  }
-  if (resolved.maxWallTimeMs <= resolved.finalistTimeReserveMs) {
-    throw new TypeError('maxWallTimeMs must exceed finalistTimeReserveMs');
-  }
-  return resolved;
-}
-
-/** Deterministic conservative duration estimate used before comparable timing exists. */
-export function estimateConfiguredProbeDuration(
-  input: ConfiguredProbeDurationInput
-): ConfiguredProbeDurationEstimate {
-  for (const [name, value] of Object.entries(input)) {
-    if (value === undefined) continue;
-    safeNonNegativeInteger(value, name);
-  }
-  finitePositive(input.startupTimeoutMs, 'startupTimeoutMs');
-  finitePositive(input.requestTimeoutMs, 'requestTimeoutMs');
-  finitePositive(input.serverStopTimeoutMs, 'serverStopTimeoutMs');
-  const maxRunnerStartAttempts =
-    input.maxRunnerStartAttempts ?? ADAPTIVE_POLICY_DEFAULTS.maxRunnerStartAttempts;
-  const capacityCheckTimeoutCapMs =
-    input.capacityCheckTimeoutCapMs ?? ADAPTIVE_POLICY_DEFAULTS.capacityCheckTimeoutCapMs;
-  const processExitConfirmationMs =
-    input.processExitConfirmationMs ?? ADAPTIVE_POLICY_DEFAULTS.processExitConfirmationMs;
-  const processExitSettleGraceMs =
-    input.processExitSettleGraceMs ?? ADAPTIVE_POLICY_DEFAULTS.processExitSettleGraceMs;
-  finitePositive(maxRunnerStartAttempts, 'maxRunnerStartAttempts');
-  finitePositive(capacityCheckTimeoutCapMs, 'capacityCheckTimeoutCapMs');
-  const resolvedCapacityCheckTimeoutMs = Math.min(
-    input.startupTimeoutMs,
-    capacityCheckTimeoutCapMs
-  );
-  const configuredAttemptTeardownMs =
-    input.serverStopTimeoutMs + processExitConfirmationMs + processExitSettleGraceMs;
-  return {
-    policy: 'configured-conservative-estimate',
-    estimateMs:
-      maxRunnerStartAttempts *
-        (input.startupTimeoutMs + resolvedCapacityCheckTimeoutMs + configuredAttemptTeardownMs) +
-      input.plannedPostStartupRequestCount * input.requestTimeoutMs,
-    resolvedCapacityCheckTimeoutMs,
-    configuredAttemptTeardownMs,
-    plannedPostStartupRequestCount: input.plannedPostStartupRequestCount,
-    maxRunnerStartAttempts,
-    isFormalUpperBound: false,
-  };
-}
-
-/** Decide whether a probe can start without consuming protected validation reserves. */
-export function evaluateProbeAdmission(input: AdaptiveProbeAdmissionInput): AdaptiveProbeAdmission {
-  if (input.probesUsed >= input.budgets.maxProbes) {
-    return { allowed: false, reason: 'probe-limit' };
-  }
-  // The first probe of a calibration is always attempted while wall time remains.
-  // Launch and time reserves protect later validation launches; before any
-  // evidence exists there is nothing to protect, and the frozen
-  // configured-conservative-estimate prices every planned request at the full
-  // request timeout, so it can exceed an ordinary budget and return a
-  // zero-probe report. The internal deadline still stops an overrunning probe
-  // and performs confirmed cleanup.
-  if (input.probesUsed === 0 && input.budgets.maxWallTimeMs - input.elapsedMs > 0) {
-    return { allowed: true, reason: 'allowed' };
-  }
-  const remainingProbeSlots = input.budgets.maxProbes - input.probesUsed;
-  if (!input.finalistPurpose && remainingProbeSlots <= input.budgets.finalistReserve) {
-    return { allowed: false, reason: 'launch-reserve' };
-  }
-  const remainingWallTimeMs = input.budgets.maxWallTimeMs - input.elapsedMs;
-  if (remainingWallTimeMs <= 0) return { allowed: false, reason: 'wall-time' };
-  if (input.finalistPurpose) {
-    if (remainingWallTimeMs <= input.estimatedNextProbeDurationMs) {
-      return { allowed: false, reason: 'wall-time' };
-    }
-  } else {
-    if (
-      remainingWallTimeMs <=
-      input.effectiveFinalistTimeReserveMs + input.estimatedNextProbeDurationMs
-    ) {
-      return { allowed: false, reason: 'time-reserve' };
-    }
-  }
-  return { allowed: true, reason: 'allowed' };
 }
 
 /** Widest active preference window with a symmetric search-noise allowance. */
@@ -1647,147 +1494,254 @@ function planCell(state: AdaptivePolicyState, cell: AdaptiveCell): CellPlan {
       };
 }
 
-function isFinalistPurpose(purpose: AdaptiveProbePurpose): boolean {
-  return ['finalist', 'winner-validation', 'fallback-validation', 'reference-guard'].includes(
-    purpose
-  );
-}
-
-function comparableDurationEstimate(state: AdaptivePolicyState): number {
-  const comparable = state.evidence
-    .filter(
-      (item) =>
-        item.operationalStatus === 'ok' && !item.terminatedAtAdaptiveCap && item.durationMs > 0
-    )
-    .map((item) => item.durationMs);
-  return comparable.length > 0
-    ? median(comparable)
-    : state.config.unobservedProbeDurationEstimateMs;
-}
-
-function effectiveFinalistTimeReserve(
-  state: AdaptivePolicyState,
-  plans: readonly { cell: AdaptiveCell; plan: CellPlan }[]
-): number {
-  const fullDurations = state.evidence
-    .filter(
-      (item) =>
-        item.fidelity === 'full' &&
-        item.operationalStatus === 'ok' &&
-        !item.terminatedAtAdaptiveCap &&
-        item.durationMs > 0
-    )
-    .map((item) => item.durationMs);
-  if (fullDurations.length === 0) return state.budgets.finalistTimeReserveMs;
-  let remainingRequiredLaunches = 0;
-  let resolvedWinnerValidationTail = 0;
-  for (const { cell, plan } of plans) {
-    if (plan.phase === 'resolved') {
-      for (const candidate of plan.candidates) {
-        let candidateValidationTail = 0;
-        const guard = evaluateReferenceGuard(
-          candidate,
-          state.evidence,
-          state.config.totalLayers,
-          state.policy,
-          cell.fixedGpuLayers
-        );
-        if (guard.status === 'probe-required') candidateValidationTail++;
-        const needsFallback =
-          !cell.fixedGpuLayers &&
-          candidate.gpuLayers > 0 &&
-          (candidate.source === 'step-down' ||
-            (plan.highGpuLayers !== undefined && plan.highGpuLayers - candidate.gpuLayers <= 1));
-        if (needsFallback && !validatedFallback(state, candidate)) {
-          const attempted = state.evidence.some(
-            (item) => item.cellId === candidate.cellId && item.purpose === 'fallback-validation'
-          );
-          if (!attempted) candidateValidationTail++;
-        }
-        resolvedWinnerValidationTail = Math.max(
-          resolvedWinnerValidationTail,
-          candidateValidationTail
-        );
-      }
-      continue;
-    }
-    if (['resolved', 'unresolved', 'no-viable-point'].includes(plan.phase)) continue;
-    remainingRequiredLaunches++;
-    if (plan.action?.fidelity === 'full') {
-      const hasIndependentSearch = exactPointEvidence(
-        state.evidence,
-        plan.action.cellId,
-        plan.action.gpuLayers
-      ).some(
-        (item) =>
-          item.fidelity === 'search' &&
-          item.operationalStatus === 'ok' &&
-          item.boundaryDecision === 'admissible'
-      );
-      if (!hasIndependentSearch) remainingRequiredLaunches++;
-    }
+function evidenceStrength(evidenceLevel: AdaptiveSelectionEvidence): number {
+  switch (evidenceLevel) {
+    case 'independent-reproduction':
+      return 0;
+    case 'single-full-launch':
+      return 1;
+    case 'single-search-launch':
+      return 2;
   }
-  remainingRequiredLaunches += resolvedWinnerValidationTail;
-  return Math.max(
-    state.budgets.finalistTimeReserveMs,
-    Math.max(1, remainingRequiredLaunches) * Math.max(...fullDurations)
-  );
 }
 
-/** Snapshot the timing-admission evidence used by the controller for reporting. */
-export function summarizeAdaptiveTimingAdmission(state: AdaptivePolicyState): {
-  policy: 'configured-conservative-estimate' | 'observed-comparable-launches';
-  estimatedNextProbeDurationMs: number;
-  effectiveFinalistTimeReserveMs: number;
-} {
-  const plans = state.cells.map((cell) => ({ cell, plan: planCell(state, cell) }));
-  const comparableDurations = state.evidence
-    .filter(
-      (item) =>
-        item.operationalStatus === 'ok' && !item.terminatedAtAdaptiveCap && item.durationMs > 0
-    )
-    .map((item) => item.durationMs);
+function incumbentAtPoint(
+  cell: AdaptiveCell,
+  gpuLayers: number,
+  point: readonly AdaptiveEvidence[],
+  source: AdaptiveCandidate['source'],
+  policy: Readonly<AdaptivePolicyDefaults>
+): AdaptiveIncumbent | undefined {
+  if (point.length === 0) return undefined;
+  const full = point.filter((item) => item.fidelity === 'full');
+  const search = point.filter((item) => item.fidelity === 'search');
+  let evidenceLevel: AdaptiveSelectionEvidence;
+  let scoreMs: number;
+  let evidenceIndices: readonly number[];
+  const reproduced = assessMixedFidelityStability(
+    point,
+    policy.searchNoiseAllowancePct,
+    policy.stabilityTolerancePct
+  );
+  if (reproduced.status === 'stable' && reproduced.recommendationScoreMs !== undefined) {
+    evidenceLevel = 'independent-reproduction';
+    scoreMs = reproduced.recommendationScoreMs;
+    evidenceIndices = [...reproduced.evidenceIndices].sort((left, right) => left - right);
+  } else if (full.length === 1) {
+    if (
+      search.length > 0 ||
+      point.some(
+        (item) =>
+          item.operationalStatus !== 'ok' ||
+          item.boundaryDecision !== 'admissible' ||
+          item.terminatedAtAdaptiveCap === true ||
+          item.scoreMs === undefined ||
+          !Number.isFinite(item.scoreMs) ||
+          item.scoreMs <= 0
+      )
+    ) {
+      return undefined;
+    }
+    evidenceLevel = 'single-full-launch';
+    scoreMs = full[0]!.scoreMs!;
+    evidenceIndices = [full[0]!.index];
+  } else if (full.length > 0) {
+    return undefined;
+  } else {
+    if (
+      search.length === 0 ||
+      point.some(
+        (item) =>
+          item.operationalStatus !== 'ok' ||
+          item.boundaryDecision !== 'admissible' ||
+          item.terminatedAtAdaptiveCap === true ||
+          item.scoreMs === undefined ||
+          !Number.isFinite(item.scoreMs) ||
+          item.scoreMs <= 0
+      ) ||
+      spreadPct(search.map((item) => item.scoreMs!)) > policy.searchNoiseAllowancePct
+    ) {
+      return undefined;
+    }
+    const latest = search.at(-1)!;
+    evidenceLevel = 'single-search-launch';
+    scoreMs = latest.scoreMs!;
+    evidenceIndices = [latest.index];
+  }
   return {
-    policy:
-      comparableDurations.length > 0
-        ? 'observed-comparable-launches'
-        : 'configured-conservative-estimate',
-    estimatedNextProbeDurationMs:
-      comparableDurations.length > 0
-        ? median(comparableDurations)
-        : state.config.unobservedProbeDurationEstimateMs,
-    effectiveFinalistTimeReserveMs: effectiveFinalistTimeReserve(state, plans),
+    evidenceLevel,
+    candidate: {
+      cellId: cell.id,
+      cellOrder: cell.order,
+      profileIndex: cell.profileIndex,
+      contextSize: cell.contextSize,
+      kvPrecision: cell.kvPrecision,
+      swaFull: cell.swaFull,
+      gpuLayers,
+      scoreMs,
+      evidenceIndices,
+      source,
+    },
   };
 }
 
-function admitOrBudgetTerminal(
+function reduceIncumbents(
+  incumbents: readonly AdaptiveIncumbent[],
   state: AdaptivePolicyState,
-  action: AdaptiveProbeAction,
-  plans: readonly { cell: AdaptiveCell; plan: CellPlan }[],
-  preference?: AdaptivePreferenceResolution
-): AdaptivePolicyAction {
-  const admission = evaluateProbeAdmission({
-    probesUsed: state.evidence.length,
-    elapsedMs: state.elapsedMs,
-    budgets: state.budgets,
-    finalistPurpose: isFinalistPurpose(action.purpose),
-    estimatedNextProbeDurationMs: comparableDurationEstimate(state),
-    effectiveFinalistTimeReserveMs: effectiveFinalistTimeReserve(state, plans),
+  preferencesActive: boolean
+): { selected?: AdaptiveIncumbent; preference: AdaptivePreferenceResolution } {
+  if (incumbents.length === 0) {
+    return {
+      preference: {
+        eligible: [],
+        kvPrecisionPreferenceResolution: 'not-active',
+        finalEquivalenceSet: [],
+      },
+    };
+  }
+  const fastest = Math.min(...incumbents.map((item) => item.candidate.scoreMs));
+  const ratio = competitiveObservedRatio({
+    contextPreferenceActive: preferencesActive && state.config.profiles.length > 1,
+    kvPreferenceActive: preferencesActive && state.config.includeKvCacheComparison,
+    contextPreferencePct: state.config.contextPreferencePct ?? state.policy.contextPreferencePct,
+    kvPrecisionPreferencePct:
+      state.config.kvPrecisionPreferencePct ?? state.policy.kvPrecisionPreferencePct,
+    tieTolerancePct: state.config.tieTolerancePct ?? state.policy.tieTolerancePct,
+    searchNoiseAllowancePct: state.policy.searchNoiseAllowancePct,
   });
-  return admission.allowed
-    ? action
-    : {
-        kind: 'terminal',
-        status: 'budget-exhausted',
-        reason: `required probe denied by ${admission.reason}`,
-        ...(preference?.selected ? { provisional: preference.selected } : {}),
-        ...(preference ? { preferenceResolution: preference } : {}),
-      };
+  const competitive = incumbents.filter((item) => item.candidate.scoreMs <= fastest * ratio);
+  const basePreference = resolveAdaptiveRecommendation(
+    competitive.map((item) => item.candidate),
+    {
+      contextPreferencePct: state.config.contextPreferencePct ?? state.policy.contextPreferencePct,
+      kvPrecisionPreferencePct:
+        state.config.kvPrecisionPreferencePct ?? state.policy.kvPrecisionPreferencePct,
+      tieTolerancePct: state.config.tieTolerancePct ?? state.policy.tieTolerancePct,
+      contextPreferenceActive: preferencesActive && state.config.profiles.length > 1,
+      kvPreferenceActive: preferencesActive && state.config.includeKvCacheComparison,
+    }
+  );
+  if (
+    basePreference.selectedContextSize === undefined ||
+    basePreference.selectedKvPrecision === undefined
+  ) {
+    return { preference: basePreference };
+  }
+  const selectedClass = competitive.filter(
+    (item) =>
+      item.candidate.contextSize === basePreference.selectedContextSize &&
+      item.candidate.kvPrecision === basePreference.selectedKvPrecision
+  );
+  const classFastest = [...selectedClass].sort(
+    (left, right) =>
+      left.candidate.scoreMs - right.candidate.scoreMs ||
+      left.candidate.cellOrder - right.candidate.cellOrder
+  )[0]!;
+  const ordinaryEquivalent = new Set(basePreference.finalEquivalenceSet);
+  const uncertaintyEquivalent =
+    classFastest.evidenceLevel === 'single-search-launch'
+      ? selectedClass.filter(
+          (item) =>
+            evidenceStrength(item.evidenceLevel) < evidenceStrength(classFastest.evidenceLevel) &&
+            ((item.candidate.scoreMs - classFastest.candidate.scoreMs) /
+              classFastest.candidate.scoreMs) *
+              100 <=
+              state.policy.searchNoiseAllowancePct
+        )
+      : [];
+  const finalIncumbents = selectedClass
+    .filter(
+      (item) => ordinaryEquivalent.has(item.candidate) || uncertaintyEquivalent.includes(item)
+    )
+    .sort(
+      (left, right) =>
+        left.candidate.gpuLayers - right.candidate.gpuLayers ||
+        Number(left.candidate.swaFull) - Number(right.candidate.swaFull) ||
+        evidenceStrength(left.evidenceLevel) - evidenceStrength(right.evidenceLevel) ||
+        left.candidate.scoreMs - right.candidate.scoreMs ||
+        left.candidate.cellOrder - right.candidate.cellOrder
+    );
+  const selected = finalIncumbents[0];
+  const preference: AdaptivePreferenceResolution = {
+    ...basePreference,
+    ...(selected ? { selected: selected.candidate } : {}),
+    finalEquivalenceSet: finalIncumbents.map((item) => item.candidate),
+  };
+  return { ...(selected ? { selected } : {}), preference };
+}
+
+function deriveAdaptiveIncumbentResolution(
+  state: AdaptivePolicyState,
+  plans: readonly { cell: AdaptiveCell; plan: CellPlan }[]
+): { selected?: AdaptiveIncumbent; preference: AdaptivePreferenceResolution } {
+  const reproducedSource = new Map<string, AdaptiveCandidate['source']>();
+  for (const { plan } of plans) {
+    for (const candidate of plan.candidates) {
+      reproducedSource.set(`${candidate.cellId}:${candidate.gpuLayers}`, candidate.source);
+    }
+  }
+  const perCell: AdaptiveIncumbent[] = [];
+  for (const { cell } of plans) {
+    const byLayer = new Map<number, AdaptiveEvidence[]>();
+    for (const item of cellEvidence(state.evidence, cell.id)) {
+      const atLayer = byLayer.get(item.gpuLayers) ?? [];
+      atLayer.push(item);
+      byLayer.set(item.gpuLayers, atLayer);
+    }
+    const observed = [...byLayer.entries()]
+      .map(([gpuLayers, point]) =>
+        incumbentAtPoint(
+          cell,
+          gpuLayers,
+          point,
+          reproducedSource.get(`${cell.id}:${gpuLayers}`) ?? 'boundary',
+          state.policy
+        )
+      )
+      .filter((item): item is AdaptiveIncumbent => item !== undefined);
+    const reduced = reduceIncumbents(observed, state, false);
+    if (reduced.selected) perCell.push(reduced.selected);
+  }
+  return reduceIncumbents(perCell, state, true);
+}
+
+/** Derive the best application-ready incumbent from clean manager-committed evidence. */
+export function deriveAdaptiveIncumbent(state: AdaptivePolicyState): AdaptiveIncumbent | undefined {
+  const plans = state.cells.map((cell) => ({ cell, plan: planCell(state, cell) }));
+  return deriveAdaptiveIncumbentResolution(state, plans).selected;
+}
+
+function terminalAtLimit(
+  cause: 'time' | 'probe',
+  reason: string,
+  resolution: { selected?: AdaptiveIncumbent; preference: AdaptivePreferenceResolution }
+): AdaptiveTerminalAction {
+  return {
+    kind: 'terminal',
+    status: cause === 'time' ? 'time-limited' : 'probe-limited',
+    reason,
+    ...(resolution.selected
+      ? {
+          selected: resolution.selected.candidate,
+          selectionEvidence: resolution.selected.evidenceLevel,
+        }
+      : {}),
+    preferenceResolution: resolution.preference,
+  };
+}
+
+/** Derive an ordinary manager-owned limit result from committed clean evidence. */
+export function deriveAdaptiveLimitTerminal(
+  state: AdaptivePolicyState,
+  cause: 'time' | 'probe',
+  reason: string
+): AdaptiveTerminalAction {
+  const plans = state.cells.map((cell) => ({ cell, plan: planCell(state, cell) }));
+  return terminalAtLimit(cause, reason, deriveAdaptiveIncumbentResolution(state, plans));
 }
 
 /** Create the immutable controller state without provisioning or performing I/O. */
 export function createAdaptivePolicyState(config: AdaptivePolicyConfig): AdaptivePolicyState {
-  finitePositive(config.unobservedProbeDurationEstimateMs, 'unobservedProbeDurationEstimateMs');
   for (const [name, value] of [
     ['contextPreferencePct', config.contextPreferencePct],
     ['kvPrecisionPreferencePct', config.kvPrecisionPreferencePct],
@@ -1830,9 +1784,7 @@ export function createAdaptivePolicyState(config: AdaptivePolicyConfig): Adaptiv
     config,
     policy,
     cells,
-    budgets: resolveAdaptiveBudgets(cells.length, config.budgetOverrides),
     evidence: [],
-    elapsedMs: 0,
   };
 }
 
@@ -1878,103 +1830,166 @@ function validatedFallback(
     : undefined;
 }
 
-/** Return the next deterministic probe or terminal action for the immutable trace. */
-export function nextAdaptivePolicyAction(state: AdaptivePolicyState): AdaptivePolicyAction {
-  const plans = state.cells.map((cell) => ({ cell, plan: planCell(state, cell) }));
-  const candidates = plans.flatMap(({ plan }) => plan.candidates);
-  const preference = resolveAdaptiveRecommendation(candidates, {
+function selectedTerminalFields(incumbent: AdaptiveIncumbent | undefined): {
+  selected?: AdaptiveCandidate;
+  selectionEvidence?: AdaptiveSelectionEvidence;
+} {
+  return incumbent
+    ? { selected: incumbent.candidate, selectionEvidence: incumbent.evidenceLevel }
+    : {};
+}
+
+function naturalResolvedTerminal(
+  state: AdaptivePolicyState,
+  plans: readonly { cell: AdaptiveCell; plan: CellPlan }[],
+  resolution: { selected?: AdaptiveIncumbent; preference: AdaptivePreferenceResolution }
+): AdaptiveTerminalAction | undefined {
+  if (plans.every(({ plan }) => plan.phase === 'no-viable-point')) {
+    return {
+      kind: 'terminal',
+      status: 'no-viable-candidate',
+      reason: 'every cell was directly resolved without an admissible point',
+      preferenceResolution: resolution.preference,
+    };
+  }
+  if (
+    !resolution.selected ||
+    resolution.selected.evidenceLevel !== 'independent-reproduction' ||
+    plans.some(
+      ({ cell, plan }) =>
+        !['resolved', 'no-viable-point'].includes(plan.phase) &&
+        isDecisionRelevantPlan(state, cell, plan, resolution)
+    )
+  ) {
+    return undefined;
+  }
+  const selected = resolution.selected.candidate;
+  const selectedCell = state.cells.find((item) => item.id === selected.cellId);
+  if (!selectedCell)
+    throw new TypeError(`selected candidate references unknown cell ${selected.cellId}`);
+  const guard = evaluateReferenceGuard(
+    selected,
+    state.evidence,
+    state.config.totalLayers,
+    state.policy,
+    selectedCell.fixedGpuLayers
+  );
+  if (guard.status === 'probe-required') return undefined;
+  if (guard.status === 'failed') {
+    return {
+      kind: 'terminal',
+      status: 'inconclusive',
+      reason: 'winning reference guard could not establish an admissible lower point',
+      ...selectedTerminalFields(resolution.selected),
+      preferenceResolution: resolution.preference,
+      referenceGuard: guard,
+    };
+  }
+  const selectedPlan = plans.find(({ cell }) => cell.id === selected.cellId)!.plan;
+  const needsFallback =
+    !selectedCell.fixedGpuLayers &&
+    selected.gpuLayers > 0 &&
+    (selected.source === 'step-down' ||
+      (selectedPlan.highGpuLayers !== undefined &&
+        selectedPlan.highGpuLayers - selected.gpuLayers <= 1));
+  const fallback = validatedFallback(state, selected);
+  const reportedFallback =
+    fallback ??
+    (needsFallback
+      ? { cellId: selected.cellId, gpuLayers: selected.gpuLayers - 1, validated: false }
+      : undefined);
+  return {
+    kind: 'terminal',
+    status: 'complete',
+    reason:
+      'all decision-relevant cells, preferences, reproduction, and reference guard are resolved',
+    ...selectedTerminalFields(resolution.selected),
+    ...(reportedFallback ? { fallback: reportedFallback } : {}),
+    preferenceResolution: resolution.preference,
+    referenceGuard: guard,
+  };
+}
+
+function isDecisionRelevantPlan(
+  state: AdaptivePolicyState,
+  cell: AdaptiveCell,
+  plan: CellPlan,
+  resolution: { selected?: AdaptiveIncumbent; preference: AdaptivePreferenceResolution }
+): boolean {
+  if (!resolution.selected || plan.boundaryGpuLayers === undefined) return true;
+  const directScores = exactPointEvidence(state.evidence, cell.id, plan.boundaryGpuLayers)
+    .filter(
+      (item) =>
+        item.boundaryDecision === 'admissible' &&
+        item.scoreMs !== undefined &&
+        Number.isFinite(item.scoreMs) &&
+        item.scoreMs > 0
+    )
+    .map((item) => item.scoreMs!);
+  const cellBestDirectScoreMs = directScores.length > 0 ? Math.min(...directScores) : undefined;
+  const triggeredNonMonotoneCandidate =
+    plan.candidates.some((candidate) => candidate.source === 'non-monotone') ||
+    (cellBestDirectScoreMs !== undefined &&
+      cellEvidence(state.evidence, cell.id).some(
+        (item) =>
+          item.gpuLayers < plan.boundaryGpuLayers! &&
+          item.boundaryDecision === 'admissible' &&
+          item.scoreMs !== undefined &&
+          ((cellBestDirectScoreMs - item.scoreMs) / cellBestDirectScoreMs) * 100 >=
+            state.policy.nonMonotoneTriggerPct
+      ));
+  return isAdaptiveCellCompetitive({
+    hasDirectBoundary: hasConvergedBoundary(plan.phase),
+    cellBestDirectScoreMs,
+    globalBestDirectScoreMs: resolution.preference.globalFastestScore,
+    triggeredNonMonotoneCandidate,
+    contextPreferenceActive: state.config.profiles.length > 1,
+    kvPreferenceActive: state.config.includeKvCacheComparison,
     contextPreferencePct: state.config.contextPreferencePct ?? state.policy.contextPreferencePct,
     kvPrecisionPreferencePct:
       state.config.kvPrecisionPreferencePct ?? state.policy.kvPrecisionPreferencePct,
     tieTolerancePct: state.config.tieTolerancePct ?? state.policy.tieTolerancePct,
-    contextPreferenceActive: state.config.profiles.length > 1,
-    kvPreferenceActive: state.config.includeKvCacheComparison,
+    searchNoiseAllowancePct: state.policy.searchNoiseAllowancePct,
   });
-  const actionable = plans.find(({ cell, plan }) => {
-    if (!plan.action) return false;
-    if (!preference.selected || plan.boundaryGpuLayers === undefined) return true;
-    const directScores = exactPointEvidence(state.evidence, cell.id, plan.boundaryGpuLayers)
-      .filter(
-        (item) =>
-          item.boundaryDecision === 'admissible' &&
-          item.scoreMs !== undefined &&
-          Number.isFinite(item.scoreMs) &&
-          item.scoreMs > 0
-      )
-      .map((item) => item.scoreMs!);
-    const cellBestDirectScoreMs = directScores.length > 0 ? Math.min(...directScores) : undefined;
-    const triggeredNonMonotoneCandidate =
-      plan.candidates.some((candidate) => candidate.source === 'non-monotone') ||
-      (cellBestDirectScoreMs !== undefined &&
-        cellEvidence(state.evidence, cell.id).some(
-          (item) =>
-            item.gpuLayers < plan.boundaryGpuLayers! &&
-            item.boundaryDecision === 'admissible' &&
-            item.scoreMs !== undefined &&
-            ((cellBestDirectScoreMs - item.scoreMs) / cellBestDirectScoreMs) * 100 >=
-              state.policy.nonMonotoneTriggerPct
-        ));
-    return isAdaptiveCellCompetitive({
-      hasDirectBoundary: hasConvergedBoundary(plan.phase),
-      cellBestDirectScoreMs,
-      globalBestDirectScoreMs: preference.globalFastestScore,
-      triggeredNonMonotoneCandidate,
-      contextPreferenceActive: state.config.profiles.length > 1,
-      kvPreferenceActive: state.config.includeKvCacheComparison,
-      contextPreferencePct: state.config.contextPreferencePct ?? state.policy.contextPreferencePct,
-      kvPrecisionPreferencePct:
-        state.config.kvPrecisionPreferencePct ?? state.policy.kvPrecisionPreferencePct,
-      tieTolerancePct: state.config.tieTolerancePct ?? state.policy.tieTolerancePct,
-      searchNoiseAllowancePct: state.policy.searchNoiseAllowancePct,
-    });
-  });
+}
+
+/** Return the next deterministic probe or terminal action for the immutable trace. */
+export function nextAdaptivePolicyAction(state: AdaptivePolicyState): AdaptivePolicyAction {
+  const plans = state.cells.map((cell) => ({ cell, plan: planCell(state, cell) }));
+  const resolution = deriveAdaptiveIncumbentResolution(state, plans);
+  const natural = naturalResolvedTerminal(state, plans, resolution);
+  if (natural) return natural;
+
+  const actionable = plans.find(
+    ({ cell, plan }) => plan.action && isDecisionRelevantPlan(state, cell, plan, resolution)
+  );
   if (actionable?.plan.action) {
-    return admitOrBudgetTerminal(state, actionable.plan.action, plans, preference);
+    return actionable.plan.action;
   }
-  const unresolved = plans.find(({ plan }) => {
-    if (plan.phase !== 'unresolved') return false;
-    if (plan.candidates.length === 0) return true;
-    const bestCellCandidate = [...plan.candidates].sort(
-      (left, right) => left.scoreMs - right.scoreMs
-    )[0]!;
-    return isAdaptiveCellCompetitive({
-      hasDirectBoundary: plan.boundaryGpuLayers !== undefined,
-      cellBestDirectScoreMs: bestCellCandidate.scoreMs,
-      globalBestDirectScoreMs: preference.globalFastestScore,
-      triggeredNonMonotoneCandidate: plan.candidates.some(
-        (candidate) => candidate.source === 'non-monotone'
-      ),
-      contextPreferenceActive: state.config.profiles.length > 1,
-      kvPreferenceActive: state.config.includeKvCacheComparison,
-      contextPreferencePct: state.config.contextPreferencePct ?? state.policy.contextPreferencePct,
-      kvPrecisionPreferencePct:
-        state.config.kvPrecisionPreferencePct ?? state.policy.kvPrecisionPreferencePct,
-      tieTolerancePct: state.config.tieTolerancePct ?? state.policy.tieTolerancePct,
-      searchNoiseAllowancePct: state.policy.searchNoiseAllowancePct,
-    });
-  });
+
+  const unresolved = plans.find(
+    ({ cell, plan }) =>
+      plan.phase === 'unresolved' && isDecisionRelevantPlan(state, cell, plan, resolution)
+  );
   if (unresolved) {
     return {
       kind: 'terminal',
-      status: 'budget-exhausted',
+      status: 'inconclusive',
       reason: unresolved.plan.unresolvedReason ?? 'decision-relevant cell is unresolved',
-      ...(preference.selected ? { provisional: preference.selected } : {}),
-      preferenceResolution: preference,
+      ...selectedTerminalFields(resolution.selected),
+      preferenceResolution: resolution.preference,
     };
   }
-  if (!preference.selected) {
-    const allNoViable = plans.every(({ plan }) => plan.phase === 'no-viable-point');
+  if (!resolution.selected) {
     return {
       kind: 'terminal',
-      status: allNoViable ? 'no-viable-candidate' : 'budget-exhausted',
-      reason: allNoViable
-        ? 'every cell was directly resolved without an admissible point'
-        : 'no eligible reproduced finalist exists',
-      preferenceResolution: preference,
+      status: 'inconclusive',
+      reason: 'legal search work ended without an eligible incumbent',
+      preferenceResolution: resolution.preference,
     };
   }
 
-  const selected = preference.selected;
+  const selected = resolution.selected.candidate;
   const selectedCell = state.cells.find((item) => item.id === selected.cellId);
   if (!selectedCell)
     throw new TypeError(`selected candidate references unknown cell ${selected.cellId}`);
@@ -1986,102 +2001,19 @@ export function nextAdaptivePolicyAction(state: AdaptivePolicyState): AdaptivePo
     selectedCell.fixedGpuLayers
   );
   if (guard.status === 'probe-required') {
-    return admitOrBudgetTerminal(
-      state,
-      probeAction(selectedCell, guard.targetGpuLayers, 'reference-guard', 'search', 'full'),
-      plans,
-      preference
-    );
+    return probeAction(selectedCell, guard.targetGpuLayers, 'reference-guard', 'search', 'full');
   }
-  if (guard.status === 'failed') {
-    return {
-      kind: 'terminal',
-      status: 'budget-exhausted',
-      reason: 'winning reference guard could not establish an admissible lower point',
-      provisional: selected,
-      preferenceResolution: preference,
-      referenceGuard: guard,
-    };
-  }
-
-  const selectedPlan = plans.find(({ cell }) => cell.id === selected.cellId)!.plan;
-  const needsFallback =
-    !selectedCell.fixedGpuLayers &&
-    selected.gpuLayers > 0 &&
-    (selected.source === 'step-down' ||
-      (selectedPlan.highGpuLayers !== undefined &&
-        selectedPlan.highGpuLayers - selected.gpuLayers <= 1));
-  const fallback = validatedFallback(state, selected);
-  const fallbackAttempted = state.evidence.some(
-    (item) => item.cellId === selected.cellId && item.purpose === 'fallback-validation'
-  );
-  if (needsFallback && !fallback && !fallbackAttempted) {
-    const action = probeAction(
-      selectedCell,
-      selected.gpuLayers - 1,
-      'fallback-validation',
-      'search',
-      'full'
-    );
-    const admitted = admitOrBudgetTerminal(state, action, plans, preference);
-    if (admitted.kind === 'probe') return admitted;
-  }
-  const reportedFallback =
-    fallback ??
-    (needsFallback
-      ? {
-          cellId: selected.cellId,
-          gpuLayers: selected.gpuLayers - 1,
-          validated: false,
-        }
-      : undefined);
-
   return {
     kind: 'terminal',
-    status: 'complete',
-    reason: 'all active preferences and empirical reproduction requirements are resolved',
-    selected,
-    ...(reportedFallback ? { fallback: reportedFallback } : {}),
-    preferenceResolution: preference,
+    status: 'inconclusive',
+    reason:
+      guard.status === 'failed'
+        ? 'winning reference guard could not establish an admissible lower point'
+        : 'legal search work ended before every decision-relevant cell was resolved',
+    ...selectedTerminalFields(resolution.selected),
+    preferenceResolution: resolution.preference,
     referenceGuard: guard,
   };
-}
-
-/** A candidate exposed for diagnosis only, never for application. */
-export interface AdaptiveDiagnosticCandidate {
-  candidate: AdaptiveCandidate;
-  /** Always the normal adaptive bar: at least two agreeing comparable full launches at the point. */
-  evidenceLevel: 'independent-reproduction';
-}
-
-/**
- * Derive a diagnostic-only candidate from the clean state a failed run leaves behind.
- *
- * This runs the ordinary planning and preference machinery over the committed evidence, so a
- * candidate exists here only when a point already satisfied the normal independent-reproduction
- * requirement (`assessMixedFidelityStability` returns `stable`, which one launch can never do). A
- * single adaptive launch is never promoted merely because a resource failure ended the search.
- *
- * The caller must map `candidate.evidenceIndices` (policy-evidence indexes) to public chronological
- * probe indexes; the two spaces diverge as soon as an invalidated probe is appended to the trail.
- */
-export function deriveAdaptiveDiagnosticCandidate(
-  state: AdaptivePolicyState
-): AdaptiveDiagnosticCandidate | undefined {
-  const plans = state.cells.map((cell) => planCell(state, cell));
-  const preference = resolveAdaptiveRecommendation(
-    plans.flatMap((plan) => plan.candidates),
-    {
-      contextPreferencePct: state.config.contextPreferencePct ?? state.policy.contextPreferencePct,
-      kvPrecisionPreferencePct:
-        state.config.kvPrecisionPreferencePct ?? state.policy.kvPrecisionPreferencePct,
-      tieTolerancePct: state.config.tieTolerancePct ?? state.policy.tieTolerancePct,
-      contextPreferenceActive: state.config.profiles.length > 1,
-      kvPreferenceActive: state.config.includeKvCacheComparison,
-    }
-  );
-  if (!preference.selected) return undefined;
-  return { candidate: preference.selected, evidenceLevel: 'independent-reproduction' };
 }
 
 /** Append one matching raw observation, classifying it from the prior immutable trace. */
@@ -2113,6 +2045,5 @@ export function applyAdaptivePolicyObservation(
   return {
     ...state,
     evidence: [...state.evidence, evidence],
-    elapsedMs: state.elapsedMs + observation.durationMs,
   };
 }

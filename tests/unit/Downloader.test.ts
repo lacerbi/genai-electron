@@ -143,6 +143,78 @@ describe('Downloader', () => {
       expect(mockDeleteFile).toHaveBeenCalled();
     });
 
+    it('should combine an external abort signal with downloader cancellation', async () => {
+      const controller = new AbortController();
+      mockFileExists.mockResolvedValue(true);
+      mockDeleteFile.mockResolvedValue(undefined);
+      mockFetch.mockImplementation(async (_url: string, options: { signal: AbortSignal }) => {
+        return new Promise((_resolve, reject) => {
+          options.signal.addEventListener(
+            'abort',
+            () => reject(new DOMException('deadline', 'AbortError')),
+            { once: true }
+          );
+        });
+      });
+
+      const pending = downloader.download({
+        url: 'https://example.com/large-file.bin',
+        destination: '/test/output.bin',
+        signal: controller.signal,
+      });
+      const rejection = expect(pending).rejects.toThrow('Download cancelled');
+      await Promise.resolve();
+      controller.abort(new DOMException('deadline', 'TimeoutError'));
+
+      await rejection;
+      expect(mockDeleteFile).toHaveBeenCalled();
+      expect(mockMoveFile).not.toHaveBeenCalled();
+    });
+
+    it('settles an active body pipeline before deleting its partial file on abort', async () => {
+      const controller = new AbortController();
+      let settleRead: ((result: { done: boolean; value?: Uint8Array }) => void) | undefined;
+      const cancelReader = jest.fn(async () => {
+        settleRead?.({ done: true });
+      });
+      mockFetch.mockResolvedValue({
+        ok: true,
+        headers: { get: () => '1000' },
+        body: {
+          getReader: () => ({
+            read: () =>
+              new Promise<{ done: boolean; value?: Uint8Array }>((resolve) => {
+                settleRead = resolve;
+              }),
+            cancel: cancelReader,
+            releaseLock: jest.fn(),
+          }),
+        },
+      });
+      mockFileExists.mockResolvedValue(true);
+      mockDeleteFile.mockResolvedValue(undefined);
+      let fileStream: MockWriteStream | undefined;
+      mockCreateWriteStream.mockImplementation((path: string) => {
+        fileStream = new MockWriteStream(path);
+        return fileStream;
+      });
+
+      const pending = downloader.download({
+        url: 'https://example.com/large-file.bin',
+        destination: '/test/output.bin',
+        signal: controller.signal,
+      });
+      const rejection = expect(pending).rejects.toThrow('Download cancelled');
+      await Promise.resolve();
+      controller.abort(new DOMException('deadline', 'TimeoutError'));
+
+      await rejection;
+      expect(cancelReader).toHaveBeenCalled();
+      expect(fileStream?.destroyed).toBe(true);
+      expect(mockDeleteFile).toHaveBeenCalledWith('/test/output.bin.partial');
+      expect(mockMoveFile).not.toHaveBeenCalled();
+    });
+
     it('should handle HTTP errors', async () => {
       mockFetch.mockResolvedValue({
         ok: false,
@@ -276,17 +348,18 @@ describe('Downloader', () => {
         url: 'https://example.com/large-file.bin',
         destination: '/test/output.bin',
       });
+      const rejection = expect(downloadPromise).rejects.toThrow();
 
       // Cancel after a tiny delay (advance fake timers)
       jest.advanceTimersByTime(10);
       await Promise.resolve(); // Allow microtasks to process
       downloader.cancel();
 
-      // Trigger abort by rejecting the read
-      rejectRead!(new Error('AbortError'));
+      // If reading already began, mirror native fetch by rejecting the pending read on abort.
+      rejectRead?.(new Error('AbortError'));
 
       // Download should reject
-      await expect(downloadPromise).rejects.toThrow();
+      await rejection;
 
       // Cleanup should be called
       expect(mockDeleteFile).toHaveBeenCalled();

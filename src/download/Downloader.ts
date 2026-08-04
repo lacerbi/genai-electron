@@ -28,6 +28,9 @@ export interface DownloadOptions {
 
   /** Custom headers */
   headers?: Record<string, string>;
+
+  /** Optional caller cancellation, combined with {@link cancel}. */
+  signal?: AbortSignal;
 }
 
 /**
@@ -65,7 +68,7 @@ export class Downloader {
    * ```
    */
   public async download(options: DownloadOptions): Promise<void> {
-    const { url, destination, onProgress, headers } = options;
+    const { url, destination, onProgress, headers, signal } = options;
     // Note: timeout handling deferred to Phase 3
 
     // Check if already downloading
@@ -75,13 +78,16 @@ export class Downloader {
 
     this.isDownloading = true;
     this.abortController = new AbortController();
+    const downloadSignal = signal
+      ? AbortSignal.any([signal, this.abortController.signal])
+      : this.abortController.signal;
 
     const partialPath = `${destination}.partial`;
 
     try {
       // Fetch the file
       const response = await fetch(url, {
-        signal: this.abortController.signal,
+        signal: downloadSignal,
         headers: headers || {},
       });
 
@@ -102,49 +108,48 @@ export class Downloader {
       // Create write stream for partial file
       const fileStream = createWriteStream(partialPath);
 
-      // Create a transform stream to track progress
-      const trackingStream = new Readable({
-        async read() {
-          // This will be handled by the pipeline
-        },
-      });
-
-      // Read from response body and track progress
       const reader = response.body.getReader();
       let lastProgressUpdate = Date.now();
       const progressInterval = 100; // Update progress every 100ms
-
-      const readChunk = async (): Promise<void> => {
-        const { done, value } = await reader.read();
-
-        if (done) {
-          trackingStream.push(null); // End the stream
-          return;
-        }
-
-        trackingStream.push(value);
-        downloadedSize += value.length;
-
-        // Call progress callback (wrap in try-catch to handle callback errors gracefully)
-        const now = Date.now();
-        if (onProgress && now - lastProgressUpdate >= progressInterval) {
-          try {
-            onProgress(downloadedSize, totalSize);
-          } catch {
-            // Ignore callback errors - don't let badly behaved callbacks crash the download
-          }
-          lastProgressUpdate = now;
-        }
-
-        // Continue reading
-        await readChunk();
+      const cancelReader = (): void => {
+        void reader.cancel?.(downloadSignal.reason).catch(() => void 0);
       };
+      downloadSignal.addEventListener('abort', cancelReader, { once: true });
 
-      // Start reading chunks
-      const readPromise = readChunk();
+      const source = Readable.from(
+        (async function* () {
+          while (true) {
+            downloadSignal.throwIfAborted();
+            const { done, value } = await reader.read();
+            if (done) return;
 
-      // Pipeline the streams
-      await Promise.all([readPromise, pipeline(trackingStream, fileStream)]);
+            downloadedSize += value.length;
+
+            // Call progress callback (wrap in try-catch to handle callback errors gracefully)
+            const now = Date.now();
+            if (onProgress && now - lastProgressUpdate >= progressInterval) {
+              try {
+                onProgress(downloadedSize, totalSize);
+              } catch {
+                // Ignore callback errors - don't let badly behaved callbacks crash the download
+              }
+              lastProgressUpdate = now;
+            }
+
+            yield value;
+          }
+        })()
+      );
+
+      try {
+        // The pipeline owns both Node streams. Cancellation also cancels the web reader above, and
+        // this await does not release the partial path until every stream has settled.
+        await pipeline(source, fileStream, { signal: downloadSignal });
+      } finally {
+        downloadSignal.removeEventListener('abort', cancelReader);
+        await reader.cancel?.().catch(() => void 0);
+        reader.releaseLock?.();
+      }
 
       // Final progress callback
       if (onProgress && totalSize > 0) {
@@ -169,7 +174,7 @@ export class Downloader {
       }
 
       // Check if download was cancelled
-      if (error instanceof Error && error.name === 'AbortError') {
+      if (downloadSignal.aborted || (error instanceof Error && error.name === 'AbortError')) {
         throw new DownloadError('Download cancelled', { url });
       }
 

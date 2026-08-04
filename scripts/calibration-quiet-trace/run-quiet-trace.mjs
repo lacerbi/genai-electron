@@ -36,15 +36,17 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
+import { summarizePartialReport, summarizeReport } from './summarize.mjs';
 
 /**
  * Bump together with the artifact shape; replay tooling switches on this.
  *
  * `1` was the shadow era: those artifacts carry `shadowSchedule`/`shadowTrace` and are what
  * `replay-thresholds.mjs` reads. `2` is the enforcing era: the guard's decisions are the run's own
- * decisions, so there is no separate trace to replay and threshold replay does not apply.
+ * decisions, so there is no separate trace to replay and threshold replay does not apply. `3`
+ * updates future schema-v4 summaries for the total elapsed clock and resource-error `bestKnown`.
  */
-const ARTIFACT_FORMAT_VERSION = 2;
+const ARTIFACT_FORMAT_VERSION = 3;
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..');
@@ -643,90 +645,6 @@ function sanitizeWorkloads(workloads, tokenCountsById) {
   });
 }
 
-function summarizeRecommendation(recommendation) {
-  if (!recommendation) return undefined;
-  return {
-    profileIndex: recommendation.profileIndex,
-    cellId: recommendation.cellId,
-    scoreMs: recommendation.scoreMs,
-    gpuLayers: recommendation.startConfig?.gpuLayers,
-    contextSize: recommendation.startConfig?.contextSize,
-    evidence: recommendation.evidence,
-  };
-}
-
-function summarizeReport(report) {
-  if (!report) return undefined;
-  return {
-    schemaVersion: report.schemaVersion,
-    policyVersion: report.policyVersion,
-    strategy: report.strategy,
-    status: report.status,
-    terminalReason: report.terminalReason,
-    createdAt: report.createdAt,
-    probeCount: report.probes.length,
-    warnings: report.warnings,
-    // Schema v3: the run's ONE fixed baseline per metric, which every probe boundary below is
-    // measured against. Retained verbatim - it is what makes a trace replayable.
-    resourceMonitoring: report.resourceMonitoring,
-    selected: summarizeRecommendation(report.selected),
-    provisional: summarizeRecommendation(report.provisional),
-    fallback: summarizeRecommendation(report.fallback),
-    selectionEvidence: report.selectionEvidence,
-    confidence: report.confidence,
-    probes: report.probes.map((probe) => ({
-      probeIndex: probe.probeIndex,
-      purpose: probe.purpose,
-      fidelity: probe.fidelity,
-      cellId: probe.cellId,
-      profileIndex: probe.profileIndex,
-      gpuLayers: probe.resolvedConfig?.gpuLayers,
-      contextSize: probe.resolvedConfig?.contextSize,
-      operationalStatus: probe.operationalStatus,
-      boundaryDecision: probe.boundaryDecision,
-      memoryEvidence: probe.memoryEvidence,
-      scoreMs: probe.scoreMs,
-      durationMs: probe.durationMs,
-      resourceValidity: probe.resourceValidity,
-      cleanupConfirmed: probe.cleanup?.confirmed,
-      // Schema v3 replaced the per-probe before/after reduction with both guarded boundaries.
-      resourceBoundaries: probe.resourceBoundaries,
-      diagnostics: probe.diagnostics
-        ? {
-            kvBytesEstimate: probe.diagnostics.kvBytesEstimate,
-            warnings: probe.diagnostics.warnings,
-          }
-        : undefined,
-    })),
-  };
-}
-
-function summarizePartialReport(partial) {
-  if (!partial || typeof partial !== 'object') return undefined;
-  return {
-    schemaVersion: partial.schemaVersion,
-    strategy: partial.strategy,
-    status: partial.status,
-    probeCount: Array.isArray(partial.probes) ? partial.probes.length : undefined,
-    warnings: partial.warnings,
-    cleanupConfirmed: partial.cleanupConfirmed,
-    resourceMonitoring: partial.resourceMonitoring,
-    // Retained verbatim: the boundary diagnostics are the whole point of an enforcement smoke.
-    resourceFailure: partial.resourceFailure,
-    diagnosticCandidate: partial.diagnosticCandidate,
-    probes: (partial.probes ?? []).map((probe) => ({
-      probeIndex: probe.probeIndex,
-      purpose: probe.purpose,
-      gpuLayers: probe.resolvedConfig?.gpuLayers,
-      operationalStatus: probe.operationalStatus,
-      boundaryDecision: probe.boundaryDecision,
-      resourceValidity: probe.resourceValidity,
-      terminationReason: probe.terminationReason,
-      cleanupConfirmed: probe.cleanup?.confirmed,
-    })),
-  };
-}
-
 async function fileIdentity(filePath) {
   try {
     const stats = await stat(filePath);
@@ -828,7 +746,6 @@ async function main() {
           ...(cell.includeKvCacheComparison !== undefined
             ? { includeKvCacheComparison: cell.includeKvCacheComparison }
             : {}),
-          ...(cell.targetProbes !== undefined ? { targetProbes: cell.targetProbes } : {}),
           ...(cell.maxProbes !== undefined ? { maxProbes: cell.maxProbes } : {}),
           ...(cell.maxWallTimeMs !== undefined ? { maxWallTimeMs: cell.maxWallTimeMs } : {}),
         }
@@ -1027,6 +944,7 @@ async function main() {
             phase: progress.phase,
             terminalStatus: progress.terminalStatus,
             elapsedMs: progress.elapsedMs,
+            budget: progress.budget,
           });
         }
         // A scenario must never be able to break the run it is instrumenting.
@@ -1076,7 +994,7 @@ async function main() {
     failureAffectedDirections: resourceFailure?.affectedDirections,
     failureProbeIndex: resourceFailure?.probeIndex,
     failureConfirmationPerformed: resourceFailure?.diagnostics?.confirmationPerformed,
-    diagnosticCandidatePresent: Boolean(failure?.partialReport?.diagnosticCandidate),
+    bestKnownPresent: Boolean(failure?.partialReport?.bestKnown),
   };
 
   let scenarioRecovery;
@@ -1162,7 +1080,7 @@ async function main() {
     kind: 'calibration-quiet-trace',
     cell: cellName,
     cellDescription: cell.description,
-    // Additive in formatVersion 2: `quiet` reproduces the pre-scenario artifacts exactly.
+    // Present since formatVersion 2: `quiet` reproduces the pre-scenario artifacts exactly.
     scenario: scenarioBlock,
     harness: {
       script: 'run-quiet-trace.mjs',

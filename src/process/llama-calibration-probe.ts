@@ -114,18 +114,27 @@ export function createCalibrationPromptRedactor(
 function redactUnknown(
   value: unknown,
   redact: (value: string) => string,
-  seen = new WeakSet<object>()
+  ancestors = new WeakSet<object>()
 ): unknown {
   if (typeof value === 'string') return redact(value);
-  if (Array.isArray(value)) return value.map((entry) => redactUnknown(entry, redact, seen));
   if (!value || typeof value !== 'object') return value;
-  if (seen.has(value)) return '[Circular]';
-  seen.add(value);
-  const result: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value)) {
-    result[key] = redactUnknown(entry, redact, seen);
+  if (ancestors.has(value)) return '[Circular]';
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((entry) => redactUnknown(entry, redact, ancestors));
+    }
+    const result: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      result[key] = redactUnknown(entry, redact, ancestors);
+    }
+    return result;
+  } finally {
+    // Track only the active recursion path. Repeated references are valid object graphs and
+    // must be copied independently; only an ancestor reference is a real cycle.
+    ancestors.delete(value);
   }
-  return result;
 }
 
 /** Return an error whose serializable text no longer contains configured prompts. */
@@ -348,7 +357,7 @@ function isFatalProbeError(
 /**
  * Run exactly one fresh llama-server process and return only after confirmed
  * teardown. It returns strategy-neutral operational evidence; the manager adds
- * exact or adaptive boundary semantics when it builds the schema-v2 report.
+ * exact or adaptive boundary semantics when it builds the public report.
  */
 export async function runCalibrationProbe(
   options: RunCalibrationProbeOptions
@@ -563,22 +572,19 @@ export async function runCalibrationProbe(
   };
   if (fatalError) {
     const fatalCode = calibrationErrorCode(fatalError);
-    if (
-      fatalCode === 'CALIBRATION_INVALID_CONFIG' ||
-      fatalCode === 'CALIBRATION_SLOTS_UNAVAILABLE'
-    ) {
-      const details =
-        fatalError instanceof ServerError &&
-        typeof fatalError.details === 'object' &&
-        fatalError.details
-          ? (fatalError.details as Record<string, unknown>)
-          : {};
-      throw new ServerError(calibrationErrorMessage(fatalError).replace(/^Server error: /, ''), {
-        ...details,
-        probeObservation: observation,
-      });
-    }
-    throw fatalError;
+    const details =
+      fatalError instanceof ServerError &&
+      typeof fatalError.details === 'object' &&
+      fatalError.details
+        ? (fatalError.details as Record<string, unknown>)
+        : {};
+    throw new ServerError(calibrationErrorMessage(fatalError).replace(/^Server error: /, ''), {
+      ...details,
+      code: fatalCode ?? (options.signal?.aborted ? 'CALIBRATION_ABORTED' : 'CALIBRATION_FAILED'),
+      // The manager needs the settled observation for the mandatory post-cleanup resource boundary,
+      // including when the deadline or caller abort caused the probe to stop.
+      probeObservation: observation,
+    });
   }
   return observation;
 }

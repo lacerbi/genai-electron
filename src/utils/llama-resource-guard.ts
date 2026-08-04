@@ -17,7 +17,7 @@
  * its snapshots here; everything below is a total function over data, so the whole decision surface
  * is unit-testable without a machine.
  *
- * Vocabulary intentionally tracks the schema-v3 plan (`availableBytes`,
+ * Vocabulary intentionally tracks the fixed-baseline resource-stability plan (`availableBytes`,
  * `decreasePctFromBaseline`) so the Phase 4 public mapping is mechanical, but nothing here is
  * exported from the package root.
  *

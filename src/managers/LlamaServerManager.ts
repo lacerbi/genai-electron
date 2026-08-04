@@ -38,11 +38,13 @@ import type {
   LlamaCalibrationCombo,
   LlamaCalibrationConfig,
   LlamaAdaptiveActiveProbe,
+  LlamaAdaptiveCalibrationBestKnown,
+  LlamaAdaptiveCalibrationBudgetReport,
+  LlamaAdaptiveCalibrationReport,
   LlamaAdaptiveProgressBudget,
-  LlamaCalibrationDiagnosticCandidate,
-  LlamaCalibrationDiagnosticEvidenceLevel,
   LlamaCalibrationProgress,
   LlamaCalibrationProbe,
+  LlamaCalibrationRecommendation,
   LlamaCalibrationReport,
   LlamaCalibrationProbeResourceBoundaries,
   LlamaCalibrationResourceBoundaryDiagnostic,
@@ -53,6 +55,9 @@ import type {
   LlamaCalibrationResourceSnapshotDiagnostic,
   LlamaCalibrationResourceStabilityMethodology,
   LlamaCalibrationRun,
+  LlamaCalibrationTerminalStatus,
+  LlamaExactCalibrationBestKnown,
+  LlamaExactCalibrationReport,
   ResolvedLlamaCalibrationConfig,
 } from '../types/index.js';
 import {
@@ -67,7 +72,7 @@ import {
   DEFAULT_PORTS,
   DEFAULT_TIMEOUTS,
   LLAMA_CALIBRATION_DEFAULTS,
-  resolveLlamaCalibrationBudgetDefaults,
+  resolveLlamaCalibrationTimeBudget,
 } from '../config/defaults.js';
 import { fileExists } from '../utils/file-utils.js';
 import { debugLog } from '../utils/debug-log.js';
@@ -84,12 +89,11 @@ import {
   applyAdaptivePolicyObservation,
   classifyAdaptiveObservation,
   createAdaptivePolicyState,
-  deriveAdaptiveDiagnosticCandidate,
+  deriveAdaptiveLimitTerminal,
+  deriveAdaptiveIncumbent,
   deriveCeilingHints,
-  estimateConfiguredProbeDuration,
   nextAdaptivePolicyAction,
   summarizeAdaptiveCellStates,
-  summarizeAdaptiveTimingAdmission,
   type AdaptiveCandidate,
   type AdaptiveCell,
   type AdaptivePolicyState,
@@ -153,6 +157,38 @@ function calibrationDelay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** Schedule a deadline without overflowing Node's signed 32-bit timer delay. */
+function scheduleCalibrationDeadline(controller: AbortController, deadlineAt: number): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const arm = () => {
+    const remainingMs = deadlineAt - performance.now();
+    if (remainingMs <= 0) {
+      controller.abort(new DOMException('Calibration deadline', 'TimeoutError'));
+      return;
+    }
+    timer = setTimeout(arm, Math.min(remainingMs, 2_147_483_647));
+  };
+  arm();
+  return () => {
+    if (timer !== undefined) clearTimeout(timer);
+  };
+}
+
+function adaptiveProgressBudget(
+  maxWallTimeMs: number,
+  remainingMs: number,
+  maxProbes: number | undefined,
+  launchedProbes: number
+): LlamaAdaptiveProgressBudget {
+  if (maxProbes === undefined) return { maxWallTimeMs, remainingMs };
+  return {
+    maxWallTimeMs,
+    remainingMs,
+    maxProbes,
+    remainingProbes: Math.max(0, maxProbes - launchedProbes),
+  };
+}
+
 /**
  * The shipped resource bands, in one place so adaptive and exact calibration cannot diverge.
  *
@@ -166,7 +202,7 @@ const CALIBRATION_RESOURCE_THRESHOLDS: ResourceStabilityThresholds = {
 };
 
 const CALIBRATION_RESOURCE_SUGGESTION =
-  'Ask the user to close heavy applications and other GPU work, then run calibration again from the beginning. Calibration never re-anchors its baseline, so a partially disturbed run cannot be resumed.';
+  'Close other memory- or GPU-intensive applications, then run calibration again from the beginning. Calibration uses one fixed baseline, so a disturbed run cannot be resumed safely.';
 
 /**
  * Protocol facts about how the guard was operated.
@@ -217,20 +253,6 @@ function resourceMonitoringRecord(baseline: ResourceBaseline): LlamaCalibrationR
       };
     }),
   };
-}
-
-/**
- * Stamp the diagnostic-only marker in ONE place.
- *
- * The evidence rule differs per strategy (adaptive requires independent reproduction, exact accepts
- * its single-clean-launch rule), but the usability literal and the "indexes only, no payload" shape
- * must not: a candidate that ever gained an application-ready field could be pasted into `start()`.
- */
-function diagnosticOnlyCandidate(
-  sourceProbeIndexes: readonly number[],
-  evidenceLevel: LlamaCalibrationDiagnosticEvidenceLevel
-): LlamaCalibrationDiagnosticCandidate {
-  return { sourceProbeIndexes, evidenceLevel, usability: 'diagnostic-only' };
 }
 
 /** Both guarded sides of one launch, omitting a side that was never evaluated. */
@@ -341,32 +363,53 @@ function mergeCalibrationWarnings(target: string[], incoming: readonly string[] 
  * Build the partial report attached to a resource-stability rejection.
  *
  * Shared by both strategies so the chronological trail, cleanup state, resource diagnostics, and
- * the candidate's usability marker cannot diverge between them. The candidate itself is
- * strategy-specific evidence (adaptive requires independent reproduction, exact accepts its
- * single-clean-launch rule), so the caller supplies the already-derived value or nothing.
+ * application-ready best-known evidence cannot diverge between them. Adaptive evidence may be a
+ * clean single search/full launch or an independent reproduction; exact uses its single-clean-launch
+ * rule. The caller supplies the already-derived strategy-specific value or nothing.
  */
-function resourceStabilityPartialReport(options: {
-  strategy: 'adaptive' | 'exact';
+type ResourceStabilityPartialReportOptions = {
   probes: readonly LlamaCalibrationProbe[];
   warnings: readonly string[];
   resourceMonitoring: LlamaCalibrationResourceMonitoring;
   resourceFailure: LlamaCalibrationResourceFailure;
-  diagnosticCandidate?: LlamaCalibrationDiagnosticCandidate;
-}): LlamaCalibrationResourceFailurePartialReport {
-  return {
-    schemaVersion: 3,
+} & (
+  | {
+      strategy: 'adaptive';
+      budget: LlamaAdaptiveCalibrationBudgetReport;
+      bestKnown?: LlamaAdaptiveCalibrationBestKnown;
+    }
+  | { strategy: 'exact'; bestKnown?: LlamaExactCalibrationBestKnown }
+);
+
+function resourceStabilityPartialReport(
+  options: ResourceStabilityPartialReportOptions
+): LlamaCalibrationResourceFailurePartialReport {
+  const common = {
+    schemaVersion: 4 as const,
     policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
-    strategy: options.strategy,
-    status: 'failed',
+    status: 'failed' as const,
     createdAt: new Date().toISOString(),
     resourceMonitoring: options.resourceMonitoring,
     probes: options.probes,
     warnings: options.warnings,
     // Cleanup precedence: an unconfirmed teardown rejects with its own code before any resource
     // classification happens, so a resource rejection always describes a confirmed-clean teardown.
-    cleanupConfirmed: true,
+    cleanupConfirmed: true as const,
     resourceFailure: options.resourceFailure,
-    ...(options.diagnosticCandidate ? { diagnosticCandidate: options.diagnosticCandidate } : {}),
+  };
+  if (options.strategy === 'adaptive') {
+    return {
+      ...common,
+      strategy: 'adaptive',
+      searchCompleteness: 'partial',
+      budget: options.budget,
+      ...(options.bestKnown ? { bestKnown: options.bestKnown } : {}),
+    };
+  }
+  return {
+    ...common,
+    strategy: 'exact',
+    ...(options.bestKnown ? { bestKnown: options.bestKnown } : {}),
   };
 }
 
@@ -376,16 +419,25 @@ function resourceStabilityPartialReport(options: {
  * `warnings` is the run's live warning list and is merged in place before the report is built, so
  * the attached partial report explains the boundary it rejects.
  */
-function buildResourceStabilityError(options: {
+type BuildResourceStabilityErrorOptions = {
   boundary: ResourceBoundaryKind;
   result: ResourceBoundaryResult;
   probeIndex?: number;
-  strategy: 'adaptive' | 'exact';
   probes: readonly LlamaCalibrationProbe[];
   warnings: string[];
   resourceMonitoring: LlamaCalibrationResourceMonitoring;
-  diagnosticCandidate?: LlamaCalibrationDiagnosticCandidate;
-}): LlamaCalibrationResourceStabilityError {
+} & (
+  | {
+      strategy: 'adaptive';
+      budget: LlamaAdaptiveCalibrationBudgetReport;
+      bestKnown?: LlamaAdaptiveCalibrationBestKnown;
+    }
+  | { strategy: 'exact'; bestKnown?: LlamaExactCalibrationBestKnown }
+);
+
+function buildResourceStabilityError(
+  options: BuildResourceStabilityErrorOptions
+): LlamaCalibrationResourceStabilityError {
   const { boundary, result } = options;
   const resourceFailure = resourceFailureRecord(boundary, result, options.probeIndex);
   mergeCalibrationWarnings(options.warnings, result.warnings);
@@ -393,40 +445,22 @@ function buildResourceStabilityError(options: {
     code: resourceStabilityCode(result),
     suggestion: CALIBRATION_RESOURCE_SUGGESTION,
     partialReport: resourceStabilityPartialReport({
-      strategy: options.strategy,
       probes: options.probes,
       warnings: options.warnings,
       resourceMonitoring: options.resourceMonitoring,
       resourceFailure,
-      ...(options.diagnosticCandidate ? { diagnosticCandidate: options.diagnosticCandidate } : {}),
+      ...(options.strategy === 'adaptive'
+        ? {
+            strategy: 'adaptive' as const,
+            budget: options.budget,
+            ...(options.bestKnown ? { bestKnown: options.bestKnown } : {}),
+          }
+        : {
+            strategy: 'exact' as const,
+            ...(options.bestKnown ? { bestKnown: options.bestKnown } : {}),
+          }),
     }),
   });
-}
-
-function calibrationScenarioRequestCount(
-  workload: ValidatedLlamaAdaptiveCalibrationConfig['workloads'][number]
-): number {
-  const completions = workload.kind === 'cold-prefill' ? 1 : workload.suffixes.length;
-  return 1 + completions; // slot erase plus completion request(s)
-}
-
-function plannedCalibrationRequestCount(
-  workloads: ValidatedLlamaAdaptiveCalibrationConfig['workloads'],
-  samples: number,
-  includeTokenization: boolean
-): number {
-  const tokenizations = includeTokenization
-    ? workloads.reduce(
-        (total, workload) =>
-          total + (workload.kind === 'cold-prefill' ? 1 : workload.suffixes.length),
-        0
-      )
-    : 0;
-  const perPass = workloads.reduce(
-    (total, workload) => total + calibrationScenarioRequestCount(workload),
-    0
-  );
-  return tokenizations + perPass * (1 + samples); // one warmup plus timed repetitions
 }
 
 function minimumAggregateLowerBoundAtCap(
@@ -1035,9 +1069,11 @@ export class LlamaServerManager extends ServerManager {
   /**
    * Calibrate llama-server with either the default adaptive boundary search or
    * an explicit exact combo list. Fresh launches run serially; the manager
-   * remains publicly stopped and the result is never auto-applied.
+   * remains publicly stopped and returns a start-ready result. The host decides
+   * whether to apply, persist, present, or ignore it.
    */
   async calibrate(config: LlamaCalibrationConfig): Promise<LlamaCalibrationReport> {
+    const calibrationStartedAt = performance.now();
     await this.assertNoCalibrationOrphan();
     if (this._status !== 'stopped') {
       throw new ServerError('Cannot calibrate while the server is not stopped', {
@@ -1086,12 +1122,50 @@ export class LlamaServerManager extends ServerManager {
     const adaptiveRunState: {
       warnings: string[];
       resourceMonitoring?: LlamaCalibrationResourceMonitoring;
+      terminalStatus?: LlamaCalibrationTerminalStatus;
+      publishTerminalProgress?: (
+        terminalStatus: LlamaCalibrationTerminalStatus,
+        elapsedMs: number,
+        budget: LlamaAdaptiveProgressBudget
+      ) => void;
+      resourceError?: LlamaCalibrationResourceStabilityError;
     } = { warnings: [] };
+    const initialAdaptiveBudget =
+      validated.strategy === 'adaptive'
+        ? resolveLlamaCalibrationTimeBudget({
+            maxWallTimeMs: validated.maxWallTimeMs,
+            maxProbes: validated.maxProbes,
+          })
+        : resolveLlamaCalibrationTimeBudget();
+    const adaptiveDeadlineController =
+      validated.strategy === 'adaptive' ? new AbortController() : undefined;
+    const cancelAdaptiveDeadline = adaptiveDeadlineController
+      ? scheduleCalibrationDeadline(
+          adaptiveDeadlineController,
+          calibrationStartedAt + initialAdaptiveBudget.maxWallTimeMs
+        )
+      : undefined;
+    const adaptiveWorkSignal = adaptiveDeadlineController
+      ? validated.signal
+        ? AbortSignal.any([validated.signal, adaptiveDeadlineController.signal])
+        : adaptiveDeadlineController.signal
+      : undefined;
+    let adaptiveOutcome: LlamaCalibrationReport | undefined;
     let adaptiveProgressSnapshot: {
       overallPercent: number;
       budget: LlamaAdaptiveProgressBudget;
-    } = { overallPercent: 0, budget: { resolved: false } };
-    const calibrationStartedAt = performance.now();
+    } = {
+      overallPercent: 0,
+      budget: adaptiveProgressBudget(
+        initialAdaptiveBudget.maxWallTimeMs,
+        Math.max(
+          0,
+          initialAdaptiveBudget.maxWallTimeMs - (performance.now() - calibrationStartedAt)
+        ),
+        initialAdaptiveBudget.maxProbes,
+        0
+      ),
+    };
     this.calibrating = true;
 
     const exactProgress = (
@@ -1182,15 +1256,18 @@ export class LlamaServerManager extends ServerManager {
 
     try {
       if (validated.strategy === 'adaptive') {
-        return await this.runAdaptiveCalibration(
+        adaptiveOutcome = await this.runAdaptiveCalibration(
           validated,
           calibrationStartedAt,
           probes,
           (snapshot) => {
             adaptiveProgressSnapshot = snapshot;
           },
-          adaptiveRunState
+          adaptiveRunState,
+          adaptiveDeadlineController!,
+          adaptiveWorkSignal!
         );
+        return adaptiveOutcome;
       }
 
       exactProgress('preparing', 0, 0);
@@ -1325,15 +1402,8 @@ export class LlamaServerManager extends ServerManager {
        * index spaces therefore diverge and can only be crossed through this map.
        */
       const cleanRunProbeIndexes: number[] = [];
-      /**
-       * Exact mode's diagnostic-only candidate.
-       *
-       * Exact ranking is a single-clean-launch rule, so ranking the clean runs collected before the
-       * failure already yields the defensible candidate; only the winner's public probe index is
-       * exposed. A first-run post-cleanup rejection yields nothing, because that contaminated run
-       * never entered the clean collection.
-       */
-      const exactDiagnosticCandidate = (): LlamaCalibrationDiagnosticCandidate | undefined => {
+      /** The best start-ready exact recommendation supported by clean pre-failure evidence. */
+      const exactBestKnown = (): LlamaExactCalibrationBestKnown | undefined => {
         const winner = recommendLlamaCalibrationRun(runs, validated.kvPrecisionPreferencePct);
         if (!winner) return undefined;
         const runIndex = runs.findIndex(
@@ -1341,7 +1411,11 @@ export class LlamaServerManager extends ServerManager {
         );
         const probeIndex = runIndex === -1 ? undefined : cleanRunProbeIndexes[runIndex];
         if (probeIndex === undefined) return undefined;
-        return diagnosticOnlyCandidate([probeIndex], 'single-launch-measurement');
+        return {
+          recommendation: winner,
+          evidence: 'single-launch-measurement',
+          sourceProbeIndexes: [probeIndex],
+        };
       };
       /**
        * Terminal resource rejection: build the typed error, then emit the single
@@ -1357,7 +1431,7 @@ export class LlamaServerManager extends ServerManager {
         result: ResourceBoundaryResult,
         probeIndex?: number
       ): LlamaCalibrationResourceStabilityError => {
-        const diagnosticCandidate = exactDiagnosticCandidate();
+        const bestKnown = exactBestKnown();
         const rejection = buildResourceStabilityError({
           boundary,
           result,
@@ -1366,7 +1440,7 @@ export class LlamaServerManager extends ServerManager {
           probes,
           warnings,
           resourceMonitoring,
-          ...(diagnosticCandidate ? { diagnosticCandidate } : {}),
+          ...(bestKnown ? { bestKnown } : {}),
         });
         exactProgress(
           'done',
@@ -1671,8 +1745,9 @@ export class LlamaServerManager extends ServerManager {
         cacheabilityReasons.push('GPU driver/runtime version is not discoverable');
       }
       const selected = recommendLlamaCalibrationRun(runs, validated.kvPrecisionPreferencePct);
-      const report: LlamaCalibrationReport = {
-        schemaVersion: 3,
+      const reportBase = {
+        resultKind: 'report',
+        schemaVersion: 4,
         policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
         createdAt: new Date().toISOString(),
         strategy: 'exact',
@@ -1749,10 +1824,15 @@ export class LlamaServerManager extends ServerManager {
         runs,
         probes,
         warnings,
-        selected,
-        ...(selected ? { selectionEvidence: 'single-launch-measurement' as const } : {}),
         confidence: 'single-launch-measurement',
-      };
+      } as const;
+      const report: LlamaExactCalibrationReport = selected
+        ? {
+            ...reportBase,
+            selected,
+            selectionEvidence: 'single-launch-measurement',
+          }
+        : reportBase;
       exactProgress(
         'done',
         combos.length,
@@ -1765,36 +1845,22 @@ export class LlamaServerManager extends ServerManager {
       );
       return report;
     } catch (error) {
+      const originalErrorCode = calibrationErrorCode(error);
       const sanitized = redactCalibrationError(error, redactCalibrationText);
       // A resource-stability rejection from either strategy is already the terminal decision, with
       // its typed details, its partial report, and its single terminal progress payload. Redaction
       // preserved the class; rebuilding it as a generic `ServerError` would destroy the contract
       // hosts branch on, and emitting another terminal payload would break the one-payload rule.
-      if (sanitized instanceof LlamaCalibrationResourceStabilityError) throw sanitized;
+      if (sanitized instanceof LlamaCalibrationResourceStabilityError) {
+        if (validated.strategy === 'adaptive') adaptiveRunState.resourceError = sanitized;
+        throw sanitized;
+      }
       if (validated.strategy === 'adaptive') {
         if (calibrationErrorDetail(sanitized, 'partialReport') !== undefined) {
           throw sanitized;
         }
         const terminalStatus = validated.signal?.aborted ? 'aborted' : 'failed';
-        const payload: LlamaCalibrationProgress = {
-          strategy: 'adaptive',
-          phase: 'done',
-          terminalStatus,
-          overallPercent: adaptiveProgressSnapshot.overallPercent,
-          elapsedMs: performance.now() - calibrationStartedAt,
-          completedProbes: probes.length,
-          budget: adaptiveProgressSnapshot.budget,
-        };
-        try {
-          validated.onProgress?.(payload);
-        } catch (progressError) {
-          debugLog('[LlamaCalibration] adaptive terminal callback threw:', progressError);
-        }
-        try {
-          this.emit('calibration-progress', { ...payload });
-        } catch (progressError) {
-          debugLog('[LlamaCalibration] adaptive terminal event listener threw:', progressError);
-        }
+        adaptiveRunState.terminalStatus = terminalStatus;
         throw new ServerError(
           terminalStatus === 'aborted'
             ? 'LLM calibration aborted'
@@ -1808,10 +1874,10 @@ export class LlamaServerManager extends ServerManager {
             code:
               terminalStatus === 'aborted'
                 ? 'CALIBRATION_ABORTED'
-                : (calibrationErrorCode(sanitized) ?? 'CALIBRATION_FAILED'),
+                : (calibrationErrorCode(sanitized) ?? originalErrorCode ?? 'CALIBRATION_FAILED'),
             cause: redactCalibrationText(calibrationErrorMessage(sanitized)),
             partialReport: {
-              schemaVersion: 3,
+              schemaVersion: 4,
               policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
               strategy: 'adaptive',
               status: terminalStatus,
@@ -1853,7 +1919,7 @@ export class LlamaServerManager extends ServerManager {
               : String(validated.signal.reason)
           ),
           partialReport: {
-            schemaVersion: 3,
+            schemaVersion: 4,
             policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
             strategy: 'exact',
             status: 'aborted',
@@ -1884,7 +1950,7 @@ export class LlamaServerManager extends ServerManager {
             ? (sanitized.details as Record<string, unknown>)
             : {}),
           partialReport: {
-            schemaVersion: 3,
+            schemaVersion: 4,
             policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
             strategy: 'exact',
             status: 'failed',
@@ -1903,7 +1969,7 @@ export class LlamaServerManager extends ServerManager {
         code: 'CALIBRATION_FAILED',
         cause: calibrationErrorMessage(sanitized),
         partialReport: {
-          schemaVersion: 3,
+          schemaVersion: 4,
           policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
           strategy: 'exact',
           status: 'failed',
@@ -1918,10 +1984,41 @@ export class LlamaServerManager extends ServerManager {
         },
       });
     } finally {
+      cancelAdaptiveDeadline?.();
       this.binaryPath = savedBinaryPath;
       this.logManager = savedLogManager;
       this.systemInfo.clearCache();
       this.calibrating = false;
+      if (validated.strategy === 'adaptive') {
+        const elapsedMs = Math.max(0, performance.now() - calibrationStartedAt);
+        const budget = {
+          maxWallTimeMs: initialAdaptiveBudget.maxWallTimeMs,
+          elapsedMs,
+          overrunMs: Math.max(0, elapsedMs - initialAdaptiveBudget.maxWallTimeMs),
+          ...(initialAdaptiveBudget.maxProbes !== undefined
+            ? { maxProbes: initialAdaptiveBudget.maxProbes }
+            : {}),
+        };
+        if (adaptiveOutcome?.strategy === 'adaptive') adaptiveOutcome.budget = budget;
+        const resourcePartial = adaptiveRunState.resourceError?.details.partialReport;
+        if (resourcePartial?.strategy === 'adaptive') resourcePartial.budget = budget;
+        const terminalStatus = adaptiveRunState.terminalStatus;
+        if (terminalStatus && adaptiveRunState.publishTerminalProgress) {
+          adaptiveRunState.publishTerminalProgress(
+            terminalStatus,
+            elapsedMs,
+            adaptiveProgressBudget(
+              initialAdaptiveBudget.maxWallTimeMs,
+              Math.max(0, initialAdaptiveBudget.maxWallTimeMs - elapsedMs),
+              initialAdaptiveBudget.maxProbes,
+              initialAdaptiveBudget.maxProbes === undefined
+                ? 0
+                : initialAdaptiveBudget.maxProbes -
+                    (adaptiveProgressSnapshot.budget.remainingProbes ?? 0)
+            )
+          );
+        }
+      }
     }
   }
 
@@ -1941,7 +2038,16 @@ export class LlamaServerManager extends ServerManager {
     runState: {
       warnings: string[];
       resourceMonitoring?: LlamaCalibrationResourceMonitoring;
-    }
+      terminalStatus?: LlamaCalibrationTerminalStatus;
+      publishTerminalProgress?: (
+        terminalStatus: LlamaCalibrationTerminalStatus,
+        elapsedMs: number,
+        budget: LlamaAdaptiveProgressBudget
+      ) => void;
+      resourceError?: LlamaCalibrationResourceStabilityError;
+    },
+    deadlineController: AbortController,
+    workSignal: AbortSignal
   ): Promise<LlamaCalibrationReport> {
     const redact = createCalibrationPromptRedactor(validated.workloads);
     const warnings = runState.warnings;
@@ -1951,28 +2057,65 @@ export class LlamaServerManager extends ServerManager {
       { effectiveContextSize: number; effectiveParallelRequests: number }
     >();
     let lastProgress = 0;
-    let progressBudget: LlamaAdaptiveProgressBudget = { resolved: false };
-    const policyTiming: { readyAt?: number } = {};
+    const configuredBudget = resolveLlamaCalibrationTimeBudget({
+      maxWallTimeMs: validated.maxWallTimeMs,
+      maxProbes: validated.maxProbes,
+    });
+    const deadlineAt = calibrationStartedAt + configuredBudget.maxWallTimeMs;
+    let launchedProbeCount = 0;
+    let progressBudget = adaptiveProgressBudget(
+      configuredBudget.maxWallTimeMs,
+      Math.max(0, deadlineAt - performance.now()),
+      configuredBudget.maxProbes,
+      launchedProbeCount
+    );
     let state: AdaptivePolicyState | undefined;
 
     const resolvedProgressBudget = (): LlamaAdaptiveProgressBudget => {
-      if (!state || policyTiming.readyAt === undefined) return progressBudget;
-      const remainingWallTimeMs = Math.max(
-        0,
-        state.budgets.maxWallTimeMs - (performance.now() - policyTiming.readyAt)
+      return adaptiveProgressBudget(
+        configuredBudget.maxWallTimeMs,
+        Math.max(0, deadlineAt - performance.now()),
+        configuredBudget.maxProbes,
+        launchedProbeCount
       );
+    };
+    const adaptiveBudgetReport = (): LlamaAdaptiveCalibrationBudgetReport => {
+      const elapsedMs = Math.max(0, performance.now() - calibrationStartedAt);
       return {
-        resolved: true,
-        targetProbes: state.budgets.targetProbes,
-        maxProbes: state.budgets.maxProbes,
-        finalistReserve: state.budgets.finalistReserve,
-        maxWallTimeMs: state.budgets.maxWallTimeMs,
-        finalistTimeReserveMs: state.budgets.finalistTimeReserveMs,
-        remainingWallTimeMs,
-        probeReserveActive:
-          state.budgets.maxProbes - publicProbes.length <= state.budgets.finalistReserve,
-        timeReserveActive: remainingWallTimeMs <= state.budgets.finalistTimeReserveMs,
+        maxWallTimeMs: configuredBudget.maxWallTimeMs,
+        elapsedMs,
+        overrunMs: Math.max(0, elapsedMs - configuredBudget.maxWallTimeMs),
+        ...(configuredBudget.maxProbes !== undefined
+          ? { maxProbes: configuredBudget.maxProbes }
+          : {}),
       };
+    };
+    const publishProgress = (payload: LlamaCalibrationProgress): void => {
+      try {
+        validated.onProgress?.(structuredClone(payload));
+      } catch (error) {
+        debugLog('[LlamaCalibration] adaptive progress callback threw:', error);
+      }
+      try {
+        this.emit('calibration-progress', structuredClone(payload));
+      } catch (error) {
+        debugLog('[LlamaCalibration] adaptive calibration-progress listener threw:', error);
+      }
+    };
+    runState.publishTerminalProgress = (terminalStatus, elapsedMs, budget) => {
+      const overallPercent =
+        terminalStatus === 'aborted' || terminalStatus === 'failed' ? lastProgress : 100;
+      lastProgress = Math.max(lastProgress, overallPercent);
+      onProgressSnapshot({ overallPercent: lastProgress, budget });
+      publishProgress({
+        strategy: 'adaptive',
+        phase: 'done',
+        terminalStatus,
+        overallPercent: lastProgress,
+        elapsedMs,
+        completedProbes: publicProbes.length,
+        budget,
+      });
     };
 
     const emitProgress = (
@@ -1990,7 +2133,9 @@ export class LlamaServerManager extends ServerManager {
       options: {
         terminalStatus?:
           | 'complete'
-          | 'budget-exhausted'
+          | 'time-limited'
+          | 'probe-limited'
+          | 'inconclusive'
           | 'no-viable-candidate'
           | 'aborted'
           | 'failed';
@@ -2001,100 +2146,59 @@ export class LlamaServerManager extends ServerManager {
       } = {}
     ): void => {
       progressBudget = resolvedProgressBudget();
-      const maxProbes = progressBudget.resolved ? progressBudget.maxProbes : 1;
-      const phaseFraction: Record<string, number> = {
-        starting: 0.05,
-        'capacity-check': 0.1,
-        warmup: 0.15,
-        sampling:
-          0.2 +
-          (0.7 *
-            ((options.workloadIndex ?? 0) * (options.sampleCount ?? validated.samples) +
-              (options.sampleIndex ?? 0))) /
-            Math.max(1, validated.workloads.length * (options.sampleCount ?? validated.samples)),
-        stopping: 0.95,
-      };
-      const activeFraction = options.activeProbe?.probePhase
-        ? (phaseFraction[options.activeProbe.probePhase] ?? 0)
-        : 0;
+      if (phase === 'done') {
+        runState.terminalStatus = options.terminalStatus ?? 'failed';
+        onProgressSnapshot({ overallPercent: lastProgress, budget: progressBudget });
+        return;
+      }
       const calculated =
-        phase === 'done'
-          ? options.terminalStatus === 'aborted' || options.terminalStatus === 'failed'
-            ? lastProgress
-            : 100
-          : progressBudget.resolved
-            ? ((publicProbes.length + activeFraction) / maxProbes) * 100
-            : 0;
+        ((progressBudget.maxWallTimeMs - progressBudget.remainingMs) /
+          progressBudget.maxWallTimeMs) *
+        100;
       lastProgress = Math.max(lastProgress, Math.min(100, calculated));
-      const payload: LlamaCalibrationProgress =
-        phase === 'done'
-          ? {
-              strategy: 'adaptive',
-              phase,
-              terminalStatus: options.terminalStatus ?? 'failed',
-              overallPercent: lastProgress,
-              elapsedMs: performance.now() - calibrationStartedAt,
-              completedProbes: publicProbes.length,
-              budget: progressBudget,
-            }
-          : {
-              strategy: 'adaptive',
-              phase,
-              overallPercent: lastProgress,
-              elapsedMs: performance.now() - calibrationStartedAt,
-              completedProbes: publicProbes.length,
-              budget: progressBudget,
-              activeProbe: options.activeProbe,
-              workloadIndex: options.workloadIndex,
-              workloadCount: validated.workloads.length,
-              sampleIndex: options.sampleIndex,
-              sampleCount: options.sampleCount ?? validated.samples,
-            };
+      const payload: LlamaCalibrationProgress = {
+        strategy: 'adaptive',
+        phase,
+        overallPercent: lastProgress,
+        elapsedMs: performance.now() - calibrationStartedAt,
+        completedProbes: publicProbes.length,
+        budget: progressBudget,
+        activeProbe: options.activeProbe,
+        workloadIndex: options.workloadIndex,
+        workloadCount: validated.workloads.length,
+        sampleIndex: options.sampleIndex,
+        sampleCount: options.sampleCount ?? validated.samples,
+      };
       onProgressSnapshot({ overallPercent: lastProgress, budget: progressBudget });
-      try {
-        validated.onProgress?.(structuredClone(payload));
-      } catch (error) {
-        debugLog('[LlamaCalibration] adaptive progress callback threw:', error);
-      }
-      try {
-        this.emit('calibration-progress', structuredClone(payload));
-      } catch (error) {
-        debugLog('[LlamaCalibration] adaptive calibration-progress listener threw:', error);
-      }
+      publishProgress(payload);
     };
 
     emitProgress('preparing');
     validated.signal?.throwIfAborted();
 
-    const firstProbeRequestCount = plannedCalibrationRequestCount(
-      validated.workloads,
-      LLAMA_CALIBRATION_DEFAULTS.searchSamples,
-      true
+    const preparationTimeLimit = (terminalReason: string): LlamaCalibrationReport | undefined => {
+      if (performance.now() < deadlineAt) return undefined;
+      emitProgress('done', { terminalStatus: 'time-limited' });
+      return {
+        resultKind: 'preparation-time-limit',
+        schemaVersion: 4,
+        policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+        createdAt: new Date().toISOString(),
+        strategy: 'adaptive',
+        phase: 'preparing',
+        status: 'time-limited',
+        searchCompleteness: 'partial',
+        terminalReason,
+        budget: adaptiveBudgetReport(),
+        probes: [],
+        warnings: [...warnings],
+        cleanupConfirmed: true,
+      };
+    };
+    const entryPreparationLimit = preparationTimeLimit(
+      'The calibration time limit was reached before adaptive preparation could start.'
     );
-    const configuredDurationEstimate = estimateConfiguredProbeDuration({
-      startupTimeoutMs: validated.startupTimeoutMs,
-      requestTimeoutMs: validated.requestTimeoutMs,
-      serverStopTimeoutMs: DEFAULT_TIMEOUTS.serverStop,
-      plannedPostStartupRequestCount: firstProbeRequestCount,
-      maxRunnerStartAttempts: LLAMA_CALIBRATION_DEFAULTS.maxRunnerStartAttempts,
-      capacityCheckTimeoutCapMs: LLAMA_CALIBRATION_DEFAULTS.capacityCheckTimeoutCapMs,
-      processExitConfirmationMs: LLAMA_CALIBRATION_DEFAULTS.processExitConfirmationMs,
-      processExitSettleGraceMs: LLAMA_CALIBRATION_DEFAULTS.processExitSettleGraceMs,
-    });
-    const maximumEnumeratedCellCount =
-      validated.profiles.length *
-      (validated.fixedConfig.swaFull === undefined ? 2 : 1) *
-      (validated.includeKvCacheComparison ? 2 : 1);
-    const preProvisioningWallTimeMs =
-      validated.maxWallTimeMs ??
-      resolveLlamaCalibrationBudgetDefaults(maximumEnumeratedCellCount).maxWallTimeMs;
-    if (configuredDurationEstimate.estimateMs > preProvisioningWallTimeMs) {
-      warnings.push(
-        `The configured conservative first-probe estimate (${Math.round(
-          configuredDurationEstimate.estimateMs
-        )} ms) exceeds the pre-provisioning wall-time allowance (${preProvisioningWallTimeMs} ms); calibration may end budget-exhausted before search evidence is available.`
-      );
-    }
+    if (entryPreparationLimit) return entryPreparationLimit;
 
     const model = await this.modelManager.getModelInfo(validated.modelId);
     validated.signal?.throwIfAborted();
@@ -2104,44 +2208,19 @@ export class LlamaServerManager extends ServerManager {
         modelId: model.id,
       });
     }
-    const preflightHasSharedPrefix = validated.workloads.some(
-      (workload) => workload.kind === 'shared-prefix'
+    const modelPreparationLimit = preparationTimeLimit(
+      'The calibration time limit was reached while loading model metadata.'
     );
-    const preflightSlidingWindow = getSlidingWindow(model);
-    const preflightStructuralCellCount = validated.profiles.reduce((count, profile) => {
-      const swaRelevant =
-        validated.fixedConfig.swaFull === undefined &&
-        preflightHasSharedPrefix &&
-        preflightSlidingWindow !== undefined &&
-        Math.floor(profile.contextSize / profile.parallelRequests) > preflightSlidingWindow;
-      return count + (swaRelevant ? 2 : 1);
-    }, 0);
-    const preflightCellCount =
-      preflightStructuralCellCount * (validated.includeKvCacheComparison ? 2 : 1);
-    const preflightBudgetDefaults = resolveLlamaCalibrationBudgetDefaults(preflightCellCount);
-    const preflightMaxProbes = validated.maxProbes ?? preflightBudgetDefaults.maxProbes;
-    const preflightMaxWallTimeMs = validated.maxWallTimeMs ?? preflightBudgetDefaults.maxWallTimeMs;
-    if (preflightMaxProbes <= preflightBudgetDefaults.finalistReserve) {
-      throw new ServerError('maxProbes must exceed the resolved finalist reserve', {
-        code: 'CALIBRATION_INVALID_CONFIG',
-        maxProbes: preflightMaxProbes,
-        finalistReserve: preflightBudgetDefaults.finalistReserve,
-        cellCount: preflightCellCount,
-      });
-    }
-    if (preflightMaxWallTimeMs <= preflightBudgetDefaults.finalistTimeReserveMs) {
-      throw new ServerError('maxWallTimeMs must exceed the resolved finalist time reserve', {
-        code: 'CALIBRATION_INVALID_CONFIG',
-        maxWallTimeMs: preflightMaxWallTimeMs,
-        finalistTimeReserveMs: preflightBudgetDefaults.finalistTimeReserveMs,
-        cellCount: preflightCellCount,
-      });
-    }
+    if (modelPreparationLimit) return modelPreparationLimit;
     await this.initializeLogManager(
       'llama-server.log',
       `Adaptive LLM runtime calibration starting for model ${model.id}`
     );
     validated.signal?.throwIfAborted();
+    const logPreparationLimit = preparationTimeLimit(
+      'The calibration time limit was reached while preparing calibration logging.'
+    );
+    if (logPreparationLimit) return logPreparationLimit;
     try {
       await this.runOccupancyCheck('strict', 0);
       validated.signal?.throwIfAborted();
@@ -2153,6 +2232,10 @@ export class LlamaServerManager extends ServerManager {
         suggestion: 'Stop other llama-server and GPU workloads before calibrating',
       });
     }
+    const occupancyPreparationLimit = preparationTimeLimit(
+      'The calibration time limit was reached while checking machine occupancy.'
+    );
+    if (occupancyPreparationLimit) return occupancyPreparationLimit;
 
     let capabilities: Awaited<ReturnType<SystemInfo['detect']>>;
     try {
@@ -2165,9 +2248,26 @@ export class LlamaServerManager extends ServerManager {
         cause: redact(calibrationErrorMessage(error)),
       });
     }
+    const capabilityPreparationLimit = preparationTimeLimit(
+      'The calibration time limit was reached while inspecting machine capabilities.'
+    );
+    if (capabilityPreparationLimit) return capabilityPreparationLimit;
 
-    this.binaryPath = await this.ensureBinary(model.path);
+    try {
+      this.binaryPath = await this.ensureBinary(model.path, false, workSignal);
+    } catch (error) {
+      if (validated.signal?.aborted) throw error;
+      const limit = preparationTimeLimit(
+        'The calibration time limit was reached while provisioning the calibration binary.'
+      );
+      if (limit) return limit;
+      throw error;
+    }
     validated.signal?.throwIfAborted();
+    const binaryPreparationLimit = preparationTimeLimit(
+      'The calibration time limit was reached while provisioning the calibration binary.'
+    );
+    if (binaryPreparationLimit) return binaryPreparationLimit;
     const calibrationBinaryPath = this.binaryPath;
     const binaryIdentity = await getInstalledBinaryIdentity(
       'llama',
@@ -2175,6 +2275,10 @@ export class LlamaServerManager extends ServerManager {
       BINARY_VERSIONS.llamaServer.version
     );
     validated.signal?.throwIfAborted();
+    const identityPreparationLimit = preparationTimeLimit(
+      'The calibration time limit was reached while reading the calibration binary identity.'
+    );
+    if (identityPreparationLimit) return identityPreparationLimit;
     const gpuAvailable = capabilities.gpu.available && binaryIdentity.variant !== 'cpu';
     const totalLayers = getLayerCountWithFallback(model);
     const schedulingProfiles = validated.profiles
@@ -2197,6 +2301,10 @@ export class LlamaServerManager extends ServerManager {
       await this.autoConfigureIfNeeded(canonicalStartConfig, model)
     );
     validated.signal?.throwIfAborted();
+    const canonicalPreparationLimit = preparationTimeLimit(
+      'The calibration time limit was reached while preparing the calibration search space.'
+    );
+    if (canonicalPreparationLimit) return canonicalPreparationLimit;
     const canonicalResolved = resolveLlamaCalibrationConfig(
       smallest.profile,
       validated.fixedConfig,
@@ -2235,6 +2343,10 @@ export class LlamaServerManager extends ServerManager {
           ? canonicalServer
           : normalizeLlamaVCacheConfig(await this.autoConfigureIfNeeded(profileStartConfig, model));
       validated.signal?.throwIfAborted();
+      const profilePreparationLimit = preparationTimeLimit(
+        'The calibration time limit was reached while preparing profile configurations.'
+      );
+      if (profilePreparationLimit) return profilePreparationLimit;
       profileInputs.push({
         profileIndex,
         contextSize: profile.contextSize,
@@ -2284,12 +2396,6 @@ export class LlamaServerManager extends ServerManager {
       contextPreferencePct: validated.contextPreferencePct,
       kvPrecisionPreferencePct: validated.kvPrecisionPreferencePct,
       tieTolerancePct: LLAMA_CALIBRATION_DEFAULTS.tieTolerancePct,
-      budgetOverrides: {
-        targetProbes: validated.targetProbes,
-        maxProbes: validated.maxProbes,
-        maxWallTimeMs: validated.maxWallTimeMs,
-      },
-      unobservedProbeDurationEstimateMs: configuredDurationEstimate.estimateMs,
       policy: {
         grossRegressionMultiplier: LLAMA_CALIBRATION_DEFAULTS.grossRegressionMultiplier,
         tieTolerancePct: LLAMA_CALIBRATION_DEFAULTS.tieTolerancePct,
@@ -2306,34 +2412,23 @@ export class LlamaServerManager extends ServerManager {
         processExitSettleGraceMs: LLAMA_CALIBRATION_DEFAULTS.processExitSettleGraceMs,
       },
     });
-    if (state.budgets.maxProbes <= state.budgets.finalistReserve) {
-      throw new ServerError('maxProbes must exceed the resolved finalist reserve', {
-        code: 'CALIBRATION_INVALID_CONFIG',
-        maxProbes: state.budgets.maxProbes,
-        finalistReserve: state.budgets.finalistReserve,
-      });
-    }
-    if (state.budgets.maxWallTimeMs <= state.budgets.finalistTimeReserveMs) {
-      throw new ServerError('maxWallTimeMs must exceed the resolved finalist time reserve', {
-        code: 'CALIBRATION_INVALID_CONFIG',
-        maxWallTimeMs: state.budgets.maxWallTimeMs,
-        finalistTimeReserveMs: state.budgets.finalistTimeReserveMs,
-      });
-    }
     const resourceGuard = this.createCalibrationResourceGuard();
-    // Provisioning, profile/cell preparation, and binary readiness are complete and the adaptive
-    // probe wall clock has not started yet: plan decision 2's baseline placement. The fixed settle
-    // delay and the bounded cooldown-spaced samples are therefore paid before `policyReadyAt` and
-    // never out of the probe budget.
+    const baselineAdmissionLimit = preparationTimeLimit(
+      'The calibration time limit was reached before fixed-baseline collection could start.'
+    );
+    if (baselineAdmissionLimit) return baselineAdmissionLimit;
+    // Establish the one fixed baseline before any launch. This preparation is part of the same
+    // method-entry wall-clock budget as the search itself.
     const resourceBaseline: ResourceBaseline = await this.collectCalibrationResourceBaseline(
       resourceGuard,
       validated.signal
     );
+    validated.signal?.throwIfAborted();
     mergeCalibrationWarnings(warnings, resourceBaseline.warnings);
     const resourceMonitoring = resourceMonitoringRecord(resourceBaseline);
     runState.resourceMonitoring = resourceMonitoring;
-    const policyReadyAt = performance.now();
-    policyTiming.readyAt = policyReadyAt;
+    // Identity and the fixed baseline now exist, so later limit exits use the ordinary adaptive
+    // report shape and can honestly return any clean incumbent already measured.
     progressBudget = resolvedProgressBudget();
     emitProgress('policy-ready');
 
@@ -2366,6 +2461,19 @@ export class LlamaServerManager extends ServerManager {
       return normalizeLlamaVCacheConfig(
         resolveLlamaCalibrationConfig(profile, validated.fixedConfig, overrides)
       );
+    };
+    const candidateToRecommendation = (
+      candidate: AdaptiveCandidate | undefined
+    ): LlamaCalibrationRecommendation | undefined => {
+      if (!candidate) return undefined;
+      const cell = cellById.get(candidate.cellId);
+      if (!cell) return undefined;
+      return {
+        profileIndex: candidate.profileIndex,
+        cellId: candidate.cellId,
+        startConfig: resolveCellConfig(cell, candidate.gpuLayers),
+        scoreMs: candidate.scoreMs,
+      };
     };
     const resolveCellInvariantConfig = (cell: AdaptiveCell) => {
       const resolved = { ...resolveCellConfig(cell, cell.initialGpuLayers) };
@@ -2424,25 +2532,34 @@ export class LlamaServerManager extends ServerManager {
     /**
      * Accepted policy-evidence index -> public chronological probe index.
      *
-     * The two spaces diverge the moment an invalidated probe joins the trail, so a diagnostic
-     * candidate can only be translated into public probe indexes through this map.
+     * The two spaces diverge the moment an invalidated probe joins the trail, so best-known source
+     * evidence can only be translated into public probe indexes through this map.
      */
     const probeIndexByEvidenceIndex = new Map<number, number>();
     /**
-     * Adaptive's diagnostic-only candidate: clean evidence that already met the normal independent
-     * reproduction rule, translated from policy-evidence indexes into public probe indexes.
+     * Best start-ready adaptive recommendation supported only by clean committed evidence.
      */
-    const adaptiveDiagnosticCandidate = (): LlamaCalibrationDiagnosticCandidate | undefined => {
-      const diagnostic = deriveAdaptiveDiagnosticCandidate(state!);
-      const sourceProbeIndexes = (diagnostic?.candidate.evidenceIndices ?? [])
+    const adaptiveBestKnown = (): LlamaAdaptiveCalibrationBestKnown | undefined => {
+      const incumbent = deriveAdaptiveIncumbent(state!);
+      const recommendation = candidateToRecommendation(incumbent?.candidate);
+      const sourceProbeIndexes = (incumbent?.candidate.evidenceIndices ?? [])
         .map((evidenceIndex) => probeIndexByEvidenceIndex.get(evidenceIndex))
         .filter((probeIndex): probeIndex is number => probeIndex !== undefined)
         .sort((left, right) => left - right);
-      // Only a candidate whose every supporting launch is still resolvable to an accepted public
-      // probe may be reported; a partially mapped candidate would understate its own evidence.
-      return diagnostic && sourceProbeIndexes.length === diagnostic.candidate.evidenceIndices.length
-        ? diagnosticOnlyCandidate(sourceProbeIndexes, diagnostic.evidenceLevel)
-        : undefined;
+      if (
+        !incumbent ||
+        !recommendation ||
+        sourceProbeIndexes.length === 0 ||
+        sourceProbeIndexes.length !== incumbent.candidate.evidenceIndices.length
+      ) {
+        return undefined;
+      }
+      const [firstProbeIndex, ...remainingProbeIndexes] = sourceProbeIndexes;
+      return {
+        recommendation,
+        evidence: incumbent.evidenceLevel,
+        sourceProbeIndexes: [firstProbeIndex!, ...remainingProbeIndexes],
+      };
     };
     /**
      * Build the typed rejection for a boundary the guard refused to admit, then emit the single
@@ -2458,7 +2575,7 @@ export class LlamaServerManager extends ServerManager {
       result: ResourceBoundaryResult,
       probeIndex?: number
     ): LlamaCalibrationResourceStabilityError => {
-      const diagnosticCandidate = adaptiveDiagnosticCandidate();
+      const bestKnown = adaptiveBestKnown();
       const rejection = buildResourceStabilityError({
         boundary,
         result,
@@ -2467,8 +2584,10 @@ export class LlamaServerManager extends ServerManager {
         probes: publicProbes,
         warnings,
         resourceMonitoring,
-        ...(diagnosticCandidate ? { diagnosticCandidate } : {}),
+        budget: adaptiveBudgetReport(),
+        ...(bestKnown ? { bestKnown } : {}),
       });
+      runState.resourceError = rejection;
       emitProgress('done', { terminalStatus: 'failed' });
       return rejection;
     };
@@ -2478,9 +2597,31 @@ export class LlamaServerManager extends ServerManager {
     >();
     let terminal: AdaptiveTerminalAction | undefined;
     while (!terminal) {
+      // Caller cancellation is exceptional and takes precedence over both natural and resource
+      // limit terminals whenever it is already active at the manager boundary.
+      validated.signal?.throwIfAborted();
       const action = nextAdaptivePolicyAction(state);
       if (action.kind === 'terminal') {
         terminal = action;
+        break;
+      }
+      if (performance.now() >= deadlineAt) {
+        terminal = deriveAdaptiveLimitTerminal(
+          state,
+          'time',
+          'the adaptive calibration wall-time limit was reached before the next launch'
+        );
+        break;
+      }
+      if (
+        configuredBudget.maxProbes !== undefined &&
+        launchedProbeCount >= configuredBudget.maxProbes
+      ) {
+        terminal = deriveAdaptiveLimitTerminal(
+          state,
+          'probe',
+          'the explicit adaptive calibration probe limit was reached'
+        );
         break;
       }
       const cell = cellById.get(action.cellId)!;
@@ -2492,10 +2633,17 @@ export class LlamaServerManager extends ServerManager {
         });
       }
       if (tokenCounts.size === 0 && cell.profileIndex !== smallest.profileIndex) {
+        const incumbent = deriveAdaptiveIncumbent(state);
         terminal = {
           kind: 'terminal',
-          status: 'budget-exhausted',
+          status: 'inconclusive',
           reason: 'smallest-profile workload-capacity preflight was not completed',
+          ...(incumbent
+            ? {
+                selected: incumbent.candidate,
+                selectionEvidence: incumbent.evidenceLevel,
+              }
+            : {}),
         };
         warnings.push(terminal.reason);
         break;
@@ -2564,6 +2712,7 @@ export class LlamaServerManager extends ServerManager {
         argvKey,
       };
       const outerPhase = adaptiveProgressPhase(action.purpose);
+      const probeCycleStartedAt = performance.now();
       // Pre-launch guard: a confirmed or unverifiable boundary rejects here, before the executor is
       // invoked and before any progress payload announces an active probe, so a disturbed machine
       // never costs a launch and no host UI is told about one that never happened. The confirmation
@@ -2573,33 +2722,24 @@ export class LlamaServerManager extends ServerManager {
         throw resourceStabilityError('pre-launch', preLaunchBoundary);
       }
       mergeCalibrationWarnings(warnings, preLaunchBoundary?.warnings);
-      // The guard consumes wall time but no launch budget. If that (or anything before it) used up
-      // the remaining budget - including a suspicion that recovered only after the deadline - the
-      // run ends through the ordinary budget-exhausted path rather than launching anyway.
-      if (performance.now() - policyReadyAt >= state.budgets.maxWallTimeMs) {
-        terminal = {
-          kind: 'terminal',
-          status: 'budget-exhausted',
-          reason: 'the adaptive calibration wall-time budget was exhausted',
-        };
+      validated.signal?.throwIfAborted();
+      // A pre-launch boundary can settle after the deadline. It never consumes the optional launch
+      // cap, and the manager returns the best clean incumbent without starting more work.
+      if (performance.now() >= deadlineAt) {
+        terminal = deriveAdaptiveLimitTerminal(
+          state,
+          'time',
+          'the adaptive calibration wall-time limit was reached during the pre-launch guard'
+        );
         break;
       }
-      emitProgress(outerPhase, { activeProbe, sampleCount });
       const probeStartedAt = performance.now();
-      const remainingWallTimeMs = Math.max(
-        1,
-        state.budgets.maxWallTimeMs - (performance.now() - policyReadyAt)
-      );
-      const deadlineController = new AbortController();
-      const deadlineTimer = setTimeout(
-        () => deadlineController.abort(new DOMException('Calibration deadline', 'TimeoutError')),
-        remainingWallTimeMs
-      );
-      const probeSignal = validated.signal
-        ? AbortSignal.any([validated.signal, deadlineController.signal])
-        : deadlineController.signal;
+      const reservedProbeIndex = publicProbes.length;
       try {
-        const observation = await this.calibrationProbeExecutor({
+        // The optional cap counts runner invocations, including startup/capacity/deadline failures;
+        // retries internal to the runner remain one invocation.
+        launchedProbeCount++;
+        const observationPromise = this.calibrationProbeExecutor({
           binaryPath: calibrationBinaryPath,
           model,
           combo,
@@ -2613,7 +2753,7 @@ export class LlamaServerManager extends ServerManager {
           requestTimeoutMs: validated.requestTimeoutMs,
           completionTimeoutMs,
           cachedPromptTokenCounts: tokenCounts,
-          signal: probeSignal,
+          signal: workSignal,
           onProgress: ({ phase, workloadIndex, sampleIndex }) => {
             emitProgress(outerPhase, {
               activeProbe: { ...activeProbe, probePhase: phase },
@@ -2623,6 +2763,16 @@ export class LlamaServerManager extends ServerManager {
             });
           },
         });
+        emitProgress(outerPhase, { activeProbe, sampleCount });
+        const observation = await observationPromise;
+        // Snapshot interruption at the exact executor boundary. Cleanup and the post-cleanup
+        // resource guard still run, but work that resolved only because its signal fired must
+        // never enter policy evidence. A deadline that fires later, during those mandatory checks,
+        // does not invalidate measured work that had already completed.
+        const interruptedWhenExecutorResolved = {
+          caller: validated.signal?.aborted === true,
+          deadline: deadlineController.signal.aborted,
+        };
         const durationMs = performance.now() - probeStartedAt;
         // Teardown is confirmed (the executor resolved) and `durationMs` is already fixed, so the
         // post-cleanup guard is measured from the real teardown instant without inflating the
@@ -2632,6 +2782,7 @@ export class LlamaServerManager extends ServerManager {
           resourceBaseline,
           validated.signal
         );
+        const cycleDurationMs = performance.now() - probeCycleStartedAt;
         const run = observation.run;
         const terminatedAtAdaptiveCap =
           run.status === 'request-timeout' && observation.aggregateScoreLowerBoundMs !== undefined;
@@ -2667,7 +2818,7 @@ export class LlamaServerManager extends ServerManager {
         } as const;
         /** Everything about the probe record that does not depend on its resource validity. */
         const probeRecord = {
-          probeIndex: publicProbes.length,
+          probeIndex: reservedProbeIndex,
           strategy: 'adaptive' as const,
           purpose: action.purpose,
           fidelity: action.fidelity,
@@ -2720,6 +2871,45 @@ export class LlamaServerManager extends ServerManager {
             publicProbes.length - 1
           );
         }
+        if (interruptedWhenExecutorResolved.caller || interruptedWhenExecutorResolved.deadline) {
+          const interruptionReason = interruptedWhenExecutorResolved.caller
+            ? 'caller-abort'
+            : 'internal-deadline';
+          publicProbes.push({
+            ...probeRecord,
+            boundaryDecision: {
+              classification: 'ambiguous',
+              reason: interruptionReason,
+            },
+            resourceValidity: 'accepted',
+            terminationReason: interruptionReason,
+          });
+          if (interruptedWhenExecutorResolved.caller) {
+            emitProgress('done', { terminalStatus: 'aborted' });
+            throw new ServerError('LLM calibration aborted', {
+              code: 'CALIBRATION_ABORTED',
+              cause: redact(String(validated.signal?.reason ?? 'caller-abort')),
+              partialReport: {
+                schemaVersion: 4,
+                policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
+                strategy: 'adaptive',
+                status: 'aborted',
+                createdAt: new Date().toISOString(),
+                resourceMonitoring,
+                probes: publicProbes,
+                warnings,
+                cleanupConfirmed: observation.cleanup.confirmed,
+              },
+            });
+          }
+          terminal = deriveAdaptiveLimitTerminal(
+            state,
+            'time',
+            'the internal calibration wall-time deadline interrupted the active probe'
+          );
+          warnings.push(terminal.reason);
+          break;
+        }
         if (run.effectiveContextSize !== undefined && run.effectiveParallelRequests !== undefined) {
           verifiedProfiles.set(cell.profileIndex, {
             effectiveContextSize: run.effectiveContextSize,
@@ -2731,7 +2921,7 @@ export class LlamaServerManager extends ServerManager {
             if (!tokenCounts.has(workloadId)) tokenCounts.set(workloadId, counts);
           }
         }
-        const nextState = applyAdaptivePolicyObservation(state, {
+        state = applyAdaptivePolicyObservation(state, {
           cellId: cell.id,
           gpuLayers: action.gpuLayers,
           purpose: action.purpose,
@@ -2741,15 +2931,9 @@ export class LlamaServerManager extends ServerManager {
           scoreMs: run.scoreMs,
           terminatedAtAdaptiveCap,
           aggregateLowerBoundMs,
-          durationMs,
+          durationMs: cycleDurationMs,
           diagnostics,
         });
-        // Admission is based on the whole adaptive search clock, including cooldown and resource
-        // snapshots, while the probe record's duration remains the launch/workload duration.
-        state = {
-          ...nextState,
-          elapsedMs: Math.max(nextState.elapsedMs, performance.now() - policyReadyAt),
-        };
         const evidence = state.evidence.at(-1)!;
         probeIndexByEvidenceIndex.set(evidence.index, probeRecord.probeIndex);
         publicProbes.push({
@@ -2761,19 +2945,31 @@ export class LlamaServerManager extends ServerManager {
           resourceValidity: 'accepted',
         });
       } catch (error) {
+        // Freeze interruption precedence at executor rejection. Mandatory post-cleanup resource
+        // settlement may cross the deadline, but it must not duplicate or reclassify a probe whose
+        // own fatal result had already settled.
+        const interruptedByCallerAtExecutorBoundary = validated.signal?.aborted === true;
+        const interruptedByDeadlineAtExecutorBoundary = deadlineController.signal.aborted;
         // A resource-stability rejection raised above is already the terminal decision, complete
         // with its partial report and its single terminal progress payload. Rebuilding it as a
         // generic adaptive failure would destroy the typed contract hosts branch on.
         if (error instanceof LlamaCalibrationResourceStabilityError) throw error;
         const sanitized = redactCalibrationError(error, redact);
         const sanitizedCode = calibrationErrorCode(sanitized);
+        if (calibrationErrorDetail(sanitized, 'partialReport') !== undefined) throw sanitized;
         const fatalObservation = calibrationErrorDetail(sanitized, 'probeObservation') as
           | RunCalibrationProbeObservation
           | undefined;
+        let recordedFatalObservation = false;
         if (fatalObservation?.run && fatalObservation.cleanup?.confirmed) {
           const { run } = fatalObservation;
+          const fatalTerminationReason = interruptedByCallerAtExecutorBoundary
+            ? 'caller-abort'
+            : interruptedByDeadlineAtExecutorBoundary
+              ? 'internal-deadline'
+              : (sanitizedCode ?? 'fatal-probe-validation');
           const fatalProbe = {
-            probeIndex: publicProbes.length,
+            probeIndex: reservedProbeIndex,
             strategy: 'adaptive' as const,
             purpose: action.purpose,
             fidelity: action.fidelity,
@@ -2789,7 +2985,7 @@ export class LlamaServerManager extends ServerManager {
             memoryEvidence: fatalObservation.memoryEvidence,
             boundaryDecision: {
               classification: 'ambiguous' as const,
-              reason: sanitizedCode ?? 'fatal-probe-validation',
+              reason: fatalTerminationReason,
             },
             loadTimeMs: run.loadTimeMs,
             effectiveContextSize: run.effectiveContextSize,
@@ -2797,7 +2993,7 @@ export class LlamaServerManager extends ServerManager {
             workloadResults: run.workloadResults,
             scoreMs: run.scoreMs,
             durationMs: performance.now() - probeStartedAt,
-            terminationReason: sanitizedCode ?? 'fatal-probe-validation',
+            terminationReason: fatalTerminationReason,
             error: run.error,
             stderrTail: run.stderrTail,
             cleanup: fatalObservation.cleanup,
@@ -2807,7 +3003,7 @@ export class LlamaServerManager extends ServerManager {
           // caller abort, which keeps its own higher-priority contract, and for an unconfirmed
           // cleanup, which is decided first below.
           const fatalBoundary =
-            sanitizedCode === 'CALIBRATION_CLEANUP_FAILED' || validated.signal?.aborted === true
+            sanitizedCode === 'CALIBRATION_CLEANUP_FAILED' || interruptedByCallerAtExecutorBoundary
               ? undefined
               : await this.settleAndCheckPostCleanupResourceBoundary(
                   resourceGuard,
@@ -2832,6 +3028,7 @@ export class LlamaServerManager extends ServerManager {
             ...(fatalBoundaries ? { resourceBoundaries: fatalBoundaries } : {}),
             resourceValidity: 'accepted',
           });
+          recordedFatalObservation = true;
         }
         if (sanitizedCode === 'CALIBRATION_CLEANUP_FAILED') {
           const orphanPid = calibrationErrorDetail(sanitized, 'pid');
@@ -2844,7 +3041,7 @@ export class LlamaServerManager extends ServerManager {
             };
           }
           publicProbes.push({
-            probeIndex: publicProbes.length,
+            probeIndex: reservedProbeIndex,
             strategy: 'adaptive',
             purpose: action.purpose,
             fidelity: action.fidelity,
@@ -2893,7 +3090,7 @@ export class LlamaServerManager extends ServerManager {
             code: 'CALIBRATION_CLEANUP_FAILED',
             cause: calibrationErrorMessage(sanitized),
             partialReport: {
-              schemaVersion: 3,
+              schemaVersion: 4,
               policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
               strategy: 'adaptive',
               status: 'failed',
@@ -2905,14 +3102,15 @@ export class LlamaServerManager extends ServerManager {
             },
           });
         }
-        const interruptedByCaller = validated.signal?.aborted === true;
-        const interruptedByDeadline = deadlineController.signal.aborted;
+        const interruptedByCaller = interruptedByCallerAtExecutorBoundary;
+        const interruptedByDeadline = interruptedByDeadlineAtExecutorBoundary;
         if (
           (interruptedByCaller || interruptedByDeadline) &&
-          sanitizedCode !== 'CALIBRATION_CLEANUP_FAILED'
+          sanitizedCode !== 'CALIBRATION_CLEANUP_FAILED' &&
+          !recordedFatalObservation
         ) {
           publicProbes.push({
-            probeIndex: publicProbes.length,
+            probeIndex: reservedProbeIndex,
             strategy: 'adaptive',
             purpose: action.purpose,
             fidelity: action.fidelity,
@@ -2924,17 +3122,17 @@ export class LlamaServerManager extends ServerManager {
             cellId: cell.id,
             resolvedConfig,
             argvKey,
-            operationalStatus: interruptedByDeadline ? 'request-timeout' : 'error',
+            operationalStatus: interruptedByCaller ? 'error' : 'request-timeout',
             memoryEvidence: {
               classification: 'unknown',
-              reason: interruptedByDeadline
-                ? 'The internal calibration deadline interrupted this launch.'
-                : 'The caller aborted this launch.',
+              reason: interruptedByCaller
+                ? 'The caller aborted this launch.'
+                : 'The internal calibration deadline interrupted this launch.',
               source: 'timeout',
             },
             boundaryDecision: {
               classification: 'ambiguous',
-              reason: interruptedByDeadline ? 'internal-deadline' : 'caller-abort',
+              reason: interruptedByCaller ? 'caller-abort' : 'internal-deadline',
             },
             // Interrupted before any post-cleanup classification: the guard did not invalidate it,
             // and the abort/deadline reason above already says why it carries no evidence.
@@ -2946,20 +3144,20 @@ export class LlamaServerManager extends ServerManager {
               workloadHash: workloadSignature(workload).hash,
               weight: workload.weight,
               samples: [],
-              error: interruptedByDeadline ? 'internal-deadline' : 'caller-abort',
+              error: interruptedByCaller ? 'caller-abort' : 'internal-deadline',
             })),
             durationMs: performance.now() - probeStartedAt,
-            terminationReason: interruptedByDeadline ? 'internal-deadline' : 'caller-abort',
+            terminationReason: interruptedByCaller ? 'caller-abort' : 'internal-deadline',
             cleanup: { confirmed: true, durationMs: 0 },
           });
         }
-        if (validated.signal?.aborted) {
+        if (interruptedByCaller) {
           emitProgress('done', { terminalStatus: 'aborted' });
           throw new ServerError('LLM calibration aborted', {
             code: 'CALIBRATION_ABORTED',
-            cause: redact(String(validated.signal.reason ?? calibrationErrorMessage(sanitized))),
+            cause: redact(String(validated.signal?.reason ?? calibrationErrorMessage(sanitized))),
             partialReport: {
-              schemaVersion: 3,
+              schemaVersion: 4,
               policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
               strategy: 'adaptive',
               status: 'aborted',
@@ -2971,12 +3169,12 @@ export class LlamaServerManager extends ServerManager {
             },
           });
         }
-        if (deadlineController.signal.aborted) {
-          terminal = {
-            kind: 'terminal',
-            status: 'budget-exhausted',
-            reason: 'the internal calibration wall-time deadline interrupted the active probe',
-          };
+        if (interruptedByDeadline) {
+          terminal = deriveAdaptiveLimitTerminal(
+            state,
+            'time',
+            'the internal calibration wall-time deadline interrupted the active probe'
+          );
           warnings.push(terminal.reason);
           break;
         }
@@ -2985,7 +3183,7 @@ export class LlamaServerManager extends ServerManager {
           code: calibrationErrorCode(sanitized) ?? 'CALIBRATION_FAILED',
           cause: calibrationErrorMessage(sanitized),
           partialReport: {
-            schemaVersion: 3,
+            schemaVersion: 4,
             policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
             strategy: 'adaptive',
             status: 'failed',
@@ -2996,45 +3194,58 @@ export class LlamaServerManager extends ServerManager {
             cleanupConfirmed: sanitizedCode !== 'CALIBRATION_CLEANUP_FAILED',
           },
         });
-      } finally {
-        clearTimeout(deadlineTimer);
       }
       this.systemInfo.clearCache();
       validated.signal?.throwIfAborted();
-      if (performance.now() - policyReadyAt >= state.budgets.maxWallTimeMs) {
-        terminal = {
-          kind: 'terminal',
-          status: 'budget-exhausted',
-          reason: 'the adaptive calibration wall-time budget was exhausted',
-        };
-        break;
-      }
     }
 
     terminal ??= nextAdaptivePolicyAction(state) as AdaptiveTerminalAction;
-    const candidateToRecommendation = (
-      candidate: AdaptiveCandidate | undefined
-    ): LlamaCalibrationReport extends infer _Report
-      ?
-          | {
-              profileIndex: number;
-              cellId: string;
-              startConfig: ResolvedLlamaCalibrationConfig;
-              scoreMs: number;
-            }
-          | undefined
-      : never => {
-      if (!candidate) return undefined;
-      const cell = cellById.get(candidate.cellId)!;
-      return {
-        profileIndex: candidate.profileIndex,
-        cellId: candidate.cellId,
-        startConfig: resolveCellConfig(cell, candidate.gpuLayers),
-        scoreMs: candidate.scoreMs,
-      };
+    const assertApplicationReadyCandidate = (candidate: AdaptiveCandidate | undefined): void => {
+      if (!candidate) return;
+      if (
+        !Number.isFinite(candidate.scoreMs) ||
+        candidate.scoreMs <= 0 ||
+        candidate.evidenceIndices.length === 0
+      ) {
+        throw new ServerError('Adaptive calibration selected invalid score evidence', {
+          code: 'CALIBRATION_INVARIANT_FAILED',
+          cellId: candidate.cellId,
+          gpuLayers: candidate.gpuLayers,
+        });
+      }
+      for (const evidenceIndex of candidate.evidenceIndices) {
+        const evidence = state.evidence[evidenceIndex];
+        const probeIndex = probeIndexByEvidenceIndex.get(evidenceIndex);
+        const probe = probeIndex === undefined ? undefined : publicProbes[probeIndex];
+        if (
+          !evidence ||
+          !probe ||
+          evidence.cellId !== candidate.cellId ||
+          evidence.gpuLayers !== candidate.gpuLayers ||
+          probe.cellId !== candidate.cellId ||
+          probe.resolvedConfig.gpuLayers !== candidate.gpuLayers ||
+          probe.resourceValidity !== 'accepted' ||
+          probe.cleanup.confirmed !== true ||
+          probe.operationalStatus !== 'ok' ||
+          probe.capped === true ||
+          probe.scoreMs === undefined ||
+          !Number.isFinite(probe.scoreMs) ||
+          probe.scoreMs <= 0 ||
+          probe.effectiveContextSize === undefined ||
+          probe.effectiveParallelRequests === undefined
+        ) {
+          throw new ServerError('Adaptive calibration selected unverified probe evidence', {
+            code: 'CALIBRATION_INVARIANT_FAILED',
+            cellId: candidate.cellId,
+            gpuLayers: candidate.gpuLayers,
+            evidenceIndex,
+            probeIndex,
+          });
+        }
+      }
     };
+    assertApplicationReadyCandidate(terminal.selected);
     const selected = candidateToRecommendation(terminal.selected);
-    const provisional = candidateToRecommendation(terminal.provisional);
     const fallback = terminal.fallback
       ? terminal.fallback.validated &&
         terminal.fallback.evidenceIndex !== undefined &&
@@ -3176,15 +3387,17 @@ export class LlamaServerManager extends ServerManager {
     if (capabilities.gpu.available) {
       cacheabilityReasons.push('GPU driver/runtime version is not discoverable');
     }
-    const budgetDefaults = resolveLlamaCalibrationBudgetDefaults(state.cells.length);
-    const timingAdmission = summarizeAdaptiveTimingAdmission(state);
-    const budgetElapsedMs = performance.now() - policyReadyAt;
-    const report: LlamaCalibrationReport = {
-      schemaVersion: 3,
+    const reportBase = {
+      resultKind: 'report',
+      schemaVersion: 4,
       policyVersion: LLAMA_CALIBRATION_DEFAULTS.policyVersion,
       createdAt: new Date().toISOString(),
       strategy: 'adaptive',
       status: terminal.status,
+      searchCompleteness:
+        terminal.status === 'complete' || terminal.status === 'no-viable-candidate'
+          ? 'resolved'
+          : 'partial',
       terminalReason: terminal.reason,
       model: {
         id: model.id,
@@ -3258,37 +3471,7 @@ export class LlamaServerManager extends ServerManager {
       schedulingProfileIndexes: schedulingProfiles.map((entry) => entry.profileIndex),
       workloadComparability: tokenCounts.size > 0 ? 'verified' : 'unverified',
       cells: cellReports,
-      budget: {
-        formulaVersion: budgetDefaults.formulaVersion,
-        cellCount: state.cells.length,
-        targetProbes: state.budgets.targetProbes,
-        maxProbes: state.budgets.maxProbes,
-        finalistReserve: state.budgets.finalistReserve,
-        maxWallTimeMs: state.budgets.maxWallTimeMs,
-        finalistTimeReserveMs: state.budgets.finalistTimeReserveMs,
-        effectiveFinalistTimeReserveMs: timingAdmission.effectiveFinalistTimeReserveMs,
-        completedProbes: publicProbes.length,
-        elapsedMs: budgetElapsedMs,
-        cleanupOverrunMs: Math.max(0, budgetElapsedMs - state.budgets.maxWallTimeMs),
-        overrides: [
-          ...(validated.targetProbes !== undefined ? (['targetProbes'] as const) : []),
-          ...(validated.maxProbes !== undefined ? (['maxProbes'] as const) : []),
-          ...(validated.maxWallTimeMs !== undefined ? (['maxWallTimeMs'] as const) : []),
-        ],
-        timeAdmission: {
-          policy: timingAdmission.policy,
-          estimatedNextProbeDurationMs: timingAdmission.estimatedNextProbeDurationMs,
-          plannedPostStartupRequestCount: configuredDurationEstimate.plannedPostStartupRequestCount,
-          maxRunnerStartAttempts: configuredDurationEstimate.maxRunnerStartAttempts,
-          startupTimeoutMs: validated.startupTimeoutMs,
-          resolvedCapacityCheckTimeoutMs: configuredDurationEstimate.resolvedCapacityCheckTimeoutMs,
-          configuredAttemptTeardownMs: configuredDurationEstimate.configuredAttemptTeardownMs,
-          caveat:
-            timingAdmission.policy === 'observed-comparable-launches'
-              ? 'Observed timing is the median of complete comparable fresh launches; future launch duration can still vary and remains bounded by the hard deadline.'
-              : 'This deterministic conservative estimate is not a formal wall-clock upper bound; filesystem and OS scheduling can add delay.',
-        },
-      },
+      budget: adaptiveBudgetReport(),
       globalFastestScoreMs: preference?.globalFastestScore,
       contextBandMaxScoreMs: preference?.contextBand,
       kvBandMaxScoreMs: preference?.kvBand,
@@ -3309,13 +3492,13 @@ export class LlamaServerManager extends ServerManager {
             : validated.includeKvCacheComparison
               ? 'unresolved'
               : 'disabled',
-      selected,
-      provisional,
-      fallback,
-      ...(selected ? { selectionEvidence: 'independent-reproduction' as const } : {}),
-      confidence: 'empirical-reproducibility',
+      ...(fallback ? { fallback } : {}),
       pinnedMoePlacement: true,
-    };
+    } as const;
+    const report: LlamaAdaptiveCalibrationReport =
+      selected && terminal.selectionEvidence
+        ? { ...reportBase, selected, selectionEvidence: terminal.selectionEvidence }
+        : reportBase;
     emitProgress('done', { terminalStatus: terminal.status });
     return report;
   }
@@ -3484,13 +3667,20 @@ export class LlamaServerManager extends ServerManager {
    * @throws {BinaryError} If download or verification fails for all variants
    * @private
    */
-  private async ensureBinary(modelPath?: string, forceValidation = false): Promise<string> {
+  private async ensureBinary(
+    modelPath?: string,
+    forceValidation = false,
+    signal?: AbortSignal
+  ): Promise<string> {
     return this.ensureBinaryHelper(
       'llama',
       'llama-server',
       BINARY_VERSIONS.llamaServer,
       modelPath,
-      forceValidation
+      forceValidation,
+      undefined,
+      undefined,
+      signal
     );
   }
 

@@ -486,7 +486,8 @@ export abstract class ServerManager extends EventEmitter {
     testModelPath?: string,
     forceValidation = false,
     testModelArgs?: string[],
-    testOptimizationArgs?: string[]
+    testOptimizationArgs?: string[],
+    signal?: AbortSignal
   ): Promise<string> {
     const platformKey = getPlatformKey();
     const variants = binaryConfig.variants[platformKey];
@@ -514,6 +515,6 @@ export abstract class ServerManager extends EventEmitter {
     });
 
     // Download and install binary (passing forceValidation flag)
-    return await binaryManager.ensureBinary(forceValidation);
+    return await binaryManager.ensureBinary(forceValidation, signal);
   }
 }

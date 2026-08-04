@@ -298,35 +298,33 @@ describe('LLM calibration policy', () => {
       expect(withIgnoredPreference.selected).toEqual(withoutPreference.selected);
     });
 
-    it('validates adaptive budget overrides and their ordering constraints', () => {
+    it('validates adaptive time and optional probe limits without reserves', () => {
       expect(
         validateLlamaCalibrationConfig({
           ...baseConfig,
-          targetProbes: 10,
           maxProbes: 15,
           maxWallTimeMs: 1_800_000,
         })
-      ).toMatchObject({ targetProbes: 10, maxProbes: 15, maxWallTimeMs: 1_800_000 });
+      ).toMatchObject({ maxProbes: 15, maxWallTimeMs: 1_800_000 });
 
-      for (const field of ['targetProbes', 'maxProbes', 'maxWallTimeMs'] as const) {
+      for (const field of ['maxProbes', 'maxWallTimeMs'] as const) {
         for (const value of [0, -1, 1.5, Number.POSITIVE_INFINITY]) {
           expect(() => validateRaw({ ...baseConfig, [field]: value })).toThrow(
             new RegExp(`${field} must be a positive safe integer`)
           );
         }
       }
-      expect(() =>
-        validateLlamaCalibrationConfig({ ...baseConfig, targetProbes: 16, maxProbes: 15 })
-      ).toThrow(/targetProbes cannot exceed maxProbes/);
-      expect(() => validateLlamaCalibrationConfig({ ...baseConfig, maxProbes: 2 })).toThrow(
-        /finalist reserve/
+      expect(validateLlamaCalibrationConfig({ ...baseConfig, maxProbes: 1 })).toMatchObject({
+        maxProbes: 1,
+      });
+      expect(() => validateRaw({ ...baseConfig, targetProbes: 10 })).toThrow(
+        /targetProbes is no longer supported/
       );
     });
 
     it.each([
       ['includeKvCacheComparison', true],
       ['contextPreferencePct', 10],
-      ['targetProbes', 10],
       ['maxProbes', 15],
       ['maxWallTimeMs', 1_800_000],
     ] as const)('rejects adaptive-only exact field %s', (field, value) => {

@@ -216,8 +216,8 @@ export type LlamaCalibrationResourceStabilityDetails =
  *
  * Extends {@link ServerError} so existing `instanceof ServerError` handling keeps working, while
  * hosts get one `instanceof` branch followed by a typed `switch (error.details.code)`. Calibration
- * never restarts or re-anchors: the host should ask the user to close heavy work and recalibrate
- * from the beginning.
+ * never restarts or re-anchors. The bundled suggestion is end-user-ready; a host may relay,
+ * replace, or localize it before offering a fresh calibration run.
  *
  * @example
  * ```typescript

@@ -293,7 +293,7 @@ describe('LlamaServerManager.calibrate', () => {
     for (const call of mockStartRunner.mock.calls) {
       expect(call[0]).toMatchObject({ contextSize: 12_288, parallelRequests: 2 });
     }
-    expect(report).toMatchObject({ schemaVersion: 3, strategy: 'exact', status: 'complete' });
+    expect(report).toMatchObject({ schemaVersion: 4, strategy: 'exact', status: 'complete' });
     if (report.strategy !== 'exact') throw new Error('expected exact report');
     expect(report.runs.map((run) => run.scoreMs)).toEqual([100, 90]);
     expect(report.selected?.combo?.label).toBe('b');
@@ -429,11 +429,13 @@ describe('LlamaServerManager.calibrate', () => {
       ['finalist', 'full'],
     ]);
     expect(report.workloadComparability).toBe('verified');
-    expect(report.budget.completedProbes).toBe(2);
+    expect(report.probes).toHaveLength(2);
     expect(callbackProgress[0]).toMatchObject({
       strategy: 'adaptive',
       phase: 'preparing',
-      budget: { resolved: false },
+      budget: {
+        maxWallTimeMs: 3_600_000,
+      },
     });
     expect(callbackProgress.some((progress) => progress.phase === 'policy-ready')).toBe(true);
     expect(callbackProgress.at(-1)).toMatchObject({
@@ -589,7 +591,14 @@ describe('LlamaServerManager.calibrate', () => {
     controller.abort('test');
 
     await expect(settleCalibration(pending)).rejects.toMatchObject({
-      details: expect.objectContaining({ code: 'CALIBRATION_ABORTED', runs: [] }),
+      details: expect.objectContaining({
+        code: 'CALIBRATION_ABORTED',
+        runs: [expect.objectContaining({ status: 'error' })],
+        partialReport: expect.objectContaining({
+          status: 'aborted',
+          probes: [expect.objectContaining({ terminationReason: 'CALIBRATION_ABORTED' })],
+        }),
+      }),
     });
     expect(manager.isCalibrating()).toBe(false);
   });
@@ -729,7 +738,7 @@ describe('LlamaServerManager.calibrate', () => {
         expect(error).toBeInstanceOf(LlamaCalibrationResourceStabilityError);
         expect(error).toBeInstanceOf(ServerError);
         expect(error.details.code).toBe('CALIBRATION_RESOURCE_DRIFT');
-        expect(error.details.suggestion).toEqual(expect.stringContaining('close heavy'));
+        expect(error.details.suggestion).toEqual(expect.stringContaining('Close other'));
         // Confirmation is telemetry only: the second candidate never launched.
         expect(mockStartRunner).toHaveBeenCalledTimes(1);
         expect(actions).toEqual(['start', 'stop']);
@@ -752,10 +761,13 @@ describe('LlamaServerManager.calibrate', () => {
         // evidence rule, and is reported by public probe index only.
         expect(partial.probes).toHaveLength(1);
         expect(partial.probes[0]!.resourceValidity).toBe('accepted');
-        expect(partial.diagnosticCandidate).toEqual({
+        expect(partial.bestKnown).toMatchObject({
           sourceProbeIndexes: [0],
-          evidenceLevel: 'single-launch-measurement',
-          usability: 'diagnostic-only',
+          evidence: 'single-launch-measurement',
+          recommendation: {
+            startConfig: expect.any(Object),
+            scoreMs: expect.any(Number),
+          },
         });
         const terminals = progress.filter((value) => value.phase === 'done');
         expect(terminals).toHaveLength(1);
@@ -786,7 +798,7 @@ describe('LlamaServerManager.calibrate', () => {
         resourceValidity: 'invalidated-by-resource-stability',
         terminationReason: 'invalidated-by-resource-stability',
       });
-      expect(partial.diagnosticCandidate).toBeUndefined();
+      expect(partial.bestKnown).toBeUndefined();
       // The sweep stopped at the invalidated launch: the second candidate never started.
       expect(mockStartRunner).toHaveBeenCalledTimes(1);
     });
@@ -866,7 +878,7 @@ describe('LlamaServerManager.calibrate', () => {
         resourceValidity: 'invalidated-by-resource-stability',
         terminationReason: 'CALIBRATION_INVALID_CONFIG',
       });
-      expect(partial.diagnosticCandidate).toBeUndefined();
+      expect(partial.bestKnown).toBeUndefined();
     });
 
     it('never reports a completed sweep after a final-combo post-cleanup drift', async () => {
@@ -887,10 +899,13 @@ describe('LlamaServerManager.calibrate', () => {
         'invalidated-by-resource-stability',
       ]);
       // The candidate may cite only the clean first launch, never the quarantined second one.
-      expect(partial.diagnosticCandidate).toEqual({
+      expect(partial.bestKnown).toMatchObject({
         sourceProbeIndexes: [0],
-        evidenceLevel: 'single-launch-measurement',
-        usability: 'diagnostic-only',
+        evidence: 'single-launch-measurement',
+        recommendation: {
+          startConfig: expect.any(Object),
+          scoreMs: expect.any(Number),
+        },
       });
       const terminals = progress.filter((value) => value.phase === 'done');
       expect(terminals).toHaveLength(1);
@@ -939,8 +954,8 @@ describe('LlamaServerManager.calibrate', () => {
           : `unverified:${error.details.partialReport.resourceFailure.boundary}`;
       expect(narrowed).toBe('drift:pre-launch');
       const partial = error.details.partialReport;
-      expect(partial.schemaVersion).toBe(3);
-      expect(partial.policyVersion).toBe('llama-runtime-v3');
+      expect(partial.schemaVersion).toBe(4);
+      expect(partial.policyVersion).toBe('llama-runtime-v4');
       expect(partial.resourceMonitoring).toMatchObject({
         coverage: 'complete',
         enabledMetrics: ['hostMemory', 'vram'],
@@ -950,13 +965,13 @@ describe('LlamaServerManager.calibrate', () => {
       );
     });
 
-    it('reports schema-v3 boundaries and the fixed baseline on a completed sweep', async () => {
+    it('reports schema-v4 boundaries and the fixed baseline on a completed sweep', async () => {
       scriptSnapshots({});
 
       const report = await settleCalibration(manager.calibrate(config));
 
       if (report.strategy !== 'exact') throw new Error('expected exact report');
-      expect(report.schemaVersion).toBe(3);
+      expect(report.schemaVersion).toBe(4);
       expect(report.resourceMonitoring.coverage).toBe('complete');
       // Report-level machine memory is the stabilized baseline, independently per metric, so the
       // numbers a reader compares probes against are the ones the guard actually used.
@@ -1123,10 +1138,13 @@ describe('LlamaServerManager.calibrate', () => {
       expect(reading?.availableBytes).toBe(17_900);
       expect(reading?.decreasePctFromBaseline).toBeCloseTo(10.5, 6);
       // The already-clean first launch stays defensible under exact mode's single-launch rule.
-      expect(partial.diagnosticCandidate).toEqual({
+      expect(partial.bestKnown).toMatchObject({
         sourceProbeIndexes: [0],
-        evidenceLevel: 'single-launch-measurement',
-        usability: 'diagnostic-only',
+        evidence: 'single-launch-measurement',
+        recommendation: {
+          startConfig: expect.any(Object),
+          scoreMs: expect.any(Number),
+        },
       });
     });
 
@@ -1166,7 +1184,7 @@ describe('LlamaServerManager.calibrate', () => {
         failure.diagnostics.initial.readings.find((entry) => entry.metric === 'hostMemory')
       ).toMatchObject({ trusted: true, suspicious: false });
       expect(mockStartRunner).not.toHaveBeenCalled();
-      expect(error.details.partialReport.diagnosticCandidate).toBeUndefined();
+      expect(error.details.partialReport.bestKnown).toBeUndefined();
     });
 
     it('fails stability verification when VRAM recovers but host memory becomes newly suspicious', async () => {
@@ -1310,7 +1328,7 @@ describe('LlamaServerManager.calibrate', () => {
       });
       // No clean run ever entered the ranking collection, so no candidate is defensible, and the
       // second combo never launched.
-      expect(partial.diagnosticCandidate).toBeUndefined();
+      expect(partial.bestKnown).toBeUndefined();
       expect(mockStartRunner).toHaveBeenCalledTimes(1);
     });
 
@@ -1322,11 +1340,11 @@ describe('LlamaServerManager.calibrate', () => {
       >;
 
       const partial = error.details.partialReport;
-      const candidate = partial.diagnosticCandidate;
-      expect(candidate).toBeDefined();
-      expect(candidate!.usability).toBe('diagnostic-only');
-      expect(candidate!.evidenceLevel).toBe('single-launch-measurement');
-      const indexes = candidate!.sourceProbeIndexes;
+      const bestKnown = partial.bestKnown;
+      expect(bestKnown).toBeDefined();
+      expect(bestKnown!.evidence).toBe('single-launch-measurement');
+      expect(bestKnown!.recommendation.startConfig).toEqual(expect.any(Object));
+      const indexes = bestKnown!.sourceProbeIndexes;
       expect(indexes.length).toBeGreaterThan(0);
       expect(new Set(indexes).size).toBe(indexes.length);
       expect([...indexes].sort((left, right) => left - right)).toEqual([...indexes]);
@@ -1337,11 +1355,10 @@ describe('LlamaServerManager.calibrate', () => {
         // Only accepted clean probes may be cited.
         expect(partial.probes[index]!.resourceValidity).toBe('accepted');
       }
-      // The candidate carries no application-ready payload a host could paste into start().
-      expect(Object.keys(candidate!).sort()).toEqual([
-        'evidenceLevel',
+      expect(Object.keys(bestKnown!).sort()).toEqual([
+        'evidence',
+        'recommendation',
         'sourceProbeIndexes',
-        'usability',
       ]);
     });
 

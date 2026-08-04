@@ -255,9 +255,7 @@ export {
   DIFFUSION_COMPONENT_ORDER,
   DIFFUSION_CALIBRATION_DEFAULTS,
   LLAMA_CALIBRATION_DEFAULTS,
-  resolveLlamaCalibrationBudgetDefaults,
 } from './config/defaults.js';
-export type { ResolvedLlamaCalibrationBudgetDefaults } from './config/defaults.js';
 
 // ============================================================================
 // Type Exports
@@ -334,7 +332,7 @@ export type {
   LlamaCalibrationMemoryEvidence,
   LlamaCalibrationBoundaryDecision,
   LlamaCalibrationCleanupRecord,
-  // Fixed-baseline resource-stability diagnostics (schema v3)
+  // Fixed-baseline resource-stability diagnostics (schema v4)
   LlamaCalibrationResourceMetric,
   LlamaCalibrationResourceChangeDirection,
   LlamaCalibrationResourceBoundaryKind,
@@ -347,8 +345,7 @@ export type {
   LlamaCalibrationResourceMetricMonitoring,
   LlamaCalibrationResourceMonitoring,
   LlamaCalibrationResourceFailure,
-  LlamaCalibrationDiagnosticEvidenceLevel,
-  LlamaCalibrationDiagnosticCandidate,
+  LlamaAdaptiveCalibrationSelectionEvidence,
   LlamaCalibrationProbeResourceValidity,
   LlamaCalibrationPassiveDiagnostics,
   LlamaCalibrationProbe,
@@ -363,13 +360,16 @@ export type {
   LlamaCalibrationVerifiedProfile,
   LlamaAdaptiveCalibrationProfileReport,
   LlamaAdaptiveCalibrationCellReport,
-  LlamaCalibrationBudgetReport,
+  LlamaAdaptiveCalibrationBudgetReport,
   LlamaCalibrationResourceStabilityMethodology,
   LlamaCalibrationMethodology,
   LlamaAdaptiveCalibrationReport,
   LlamaExactCalibrationReport,
+  LlamaAdaptiveCalibrationPreparationTimeLimit,
   LlamaCalibrationReport,
   LlamaCalibrationPartialReport,
+  LlamaAdaptiveCalibrationBestKnown,
+  LlamaExactCalibrationBestKnown,
   LlamaCalibrationResourceFailurePartialReport,
   // Image generation types (Phase 2)
   ImageSampler,

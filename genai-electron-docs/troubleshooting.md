@@ -494,7 +494,7 @@ without `combos`, `profiles` together with `combos`, and a request containing bo
 `profiles` are rejected before binary provisioning.
 
 Adaptive mode accepts one or two unique context sizes with the same `parallelRequests`. Its
-`targetProbes`, `maxProbes`, `maxWallTimeMs`, `contextPreferencePct`, and
+`maxProbes`, `maxWallTimeMs`, `contextPreferencePct`, and
 `includeKvCacheComparison` fields cannot be used with exact combos.
 
 ### Slots or context cannot be verified
@@ -513,17 +513,26 @@ calibration at a larger exact total `contextSize`. In a two-profile adaptive cal
 must fit the smallest verified profile; larger profiles cannot use different or longer workloads in
 the same call.
 
-### Adaptive calibration returns `budget-exhausted`
+### Adaptive calibration returns a partial result
 
-This is an honest result, not a crash. Decision-relevant uncertainty remained when the hard launch
-or wall-time budget ended, so `selected` is intentionally absent. Inspect `provisional`, `cells`,
-`profiles`, `probes`, `warnings`, and `budget.timeAdmission` to see what remained unresolved.
+`time-limited`, `probe-limited`, and `inconclusive` are ordinary results, not crashes. They use
+`searchCompleteness: 'partial'` and may still include the best clean `selected` configuration.
+Inspect `selectionEvidence` to distinguish independent reproduction from a single full or search
+launch, and inspect `cells`, `profiles`, `probes`, `warnings`, `terminalReason`, and `budget` to see
+what remained unresolved.
 
-The default budget scales with the actual profile × SWA × KV cell count. Adding a second context or
-enabling `includeKvCacheComparison` can approximately double the cells. Retry under a quieter
-machine state, increase `maxProbes` or `maxWallTimeMs`, remove a product comparison that you do not
-need, or use exact combos for a small targeted comparison. Do not automatically deploy
-`provisional` as if it had independent-reproduction evidence.
+First narrow on `resultKind`. A `preparation-time-limit` result means the one total deadline arrived
+before ordinary report identity and the fixed baseline existed, so it intentionally has no
+selection. Ordinary adaptive and exact results use `resultKind: 'report'` and then narrow by
+`strategy`.
+
+Time is the normal user-facing budget: the library defaults to 60 minutes, while a host may expose
+any duration choices or custom input appropriate to its product. Omitted `maxProbes` means
+unbounded by probe count; supply it only as an expert/test cap. A longer run may improve the
+selected config or finish more of the search, but a host may apply, persist, present, or ignore any
+returned selection according to its product policy. The evidence label should travel with that
+decision. An explicit cap counts executor attempts, including startup failure, capacity or OOM
+rejection, and deadline interruption; runner-internal start retries remain one attempt.
 
 ### The apparent boundary is unstable or steps down
 
@@ -542,7 +551,8 @@ lower-layer possibility remains diagnostic rather than a fallback guarantee.
 The controller descends from the auto-configured layer starting point and directly tests `g=0`
 before resolving a cell as `no-viable-point`. `no-viable-candidate` means all requested cells were
 resolved and none produced an admissible point. If a still-relevant cell could not be searched or
-resolved, the correct result is `budget-exhausted` instead.
+resolved, the result is `time-limited`, `probe-limited`, or `inconclusive` according to what
+actually stopped it.
 
 Inspect startup diagnostics and confirm that the model can run at `gpuLayers: 0` with the exact
 profile and pinned fixed/MoE placement. If not, reduce context/slots, use a smaller model, or change
@@ -562,10 +572,11 @@ timeout.
 
 Caller cancellation rejects with `details.code === 'CALIBRATION_ABORTED'`. Preparation, invariant,
 or cleanup failures reject as failed. In both cases, inspect `details.partialReport` for the typed
-schema-v3 chronological probes, warnings, terminal status, and `cleanupConfirmed` flag.
+schema-v4 chronological probes, warnings, terminal status, and `cleanupConfirmed` flag.
 
 An internal adaptive deadline is different from caller cancellation: after confirmed cleanup it
-returns a `budget-exhausted` report, and cleanup overrun is recorded separately. A
+returns a `time-limited` result. Its budget reports actual method-entry-to-settlement `elapsedMs` and
+`overrunMs = max(0, elapsedMs - maxWallTimeMs)`. A
 `CALIBRATION_CLEANUP_FAILED` rejection means the candidate PID could not be confirmed dead. Later
 start/restart/calibration calls remain blocked while that process is alive; terminate the reported
 PID, then retry. Do not discard the partial report when escalating a cleanup problem.
@@ -587,11 +598,12 @@ telemetry read one cooldown later. When the same trusted metric is still outside
 `details.code === 'CALIBRATION_RESOURCE_DRIFT'`. This applies to adaptive **and** exact mode; exact
 mode's reject path is new, so hosts that only handled the returned report must add a `catch`.
 
-There is no retry, resume, or re-anchor: the run produced no recommendation. Inspect
+There is no resume or re-anchor. Inspect
 `details.partialReport.resourceFailure` for the boundary (`pre-launch` or `post-cleanup`), the
-affected metrics, the direction per metric, and the raw readings; `details.suggestion` is the
-host-facing remediation text. Then ask the user to close heavy applications and other GPU work and
-run the whole calibration again from the beginning.
+affected metrics, the direction per metric, and the raw readings. `details.suggestion` is
+host-facing, but a host may replace or localize it. `details.partialReport.bestKnown` may also expose
+a start-ready recommendation supported only by earlier clean probes; the failed boundary probe is
+excluded. A retry starts a fresh calibration from the beginning.
 
 Two behaviors surprise callers upgrading from v0.19.1:
 
@@ -606,9 +618,9 @@ tighter conditions, and a large increase would silently desensitize the decrease
 upward settling (measured up to +10.5% host on the reference machine) stays well inside the band.
 
 The guard samples boundaries rather than observing continuously, so pressure that begins and fully
-clears inside one launch is not detectable. Prevention is the same as before: run calibration on an
-otherwise idle machine and have the host application ask the user not to start heavy work while it
-runs — see [Machine conditions during a run](llm-server.md#machine-conditions-during-a-run).
+clears inside one launch is not detectable. Run calibration on an otherwise idle machine; the host
+owns how it arranges those conditions. See
+[Machine conditions during a run](llm-server.md#machine-conditions-during-a-run).
 
 ### Calibration stopped with `CALIBRATION_RESOURCE_STABILITY_UNVERIFIED`
 
@@ -632,13 +644,14 @@ standby-aware refresh that fails only sometimes, or flaky `nvidia-smi`-style ava
 rather than at real resource pressure. Telemetry that is missing outright cannot cause this: a source
 that never produces trusted baseline samples disables its metric at baseline instead.
 
-### A partial report offers a `diagnosticCandidate` — can I start it?
+### A resource-error partial report offers `bestKnown`
 
-No. `diagnosticCandidate` carries only `sourceProbeIndexes`, an `evidenceLevel`, and the literal
-`usability: 'diagnostic-only'`. It has no config, score, or profile payload by design, and a probe
-index cannot be pasted into `start()`. It exists so a host can point a developer at the clean probes
-that were already collected before the failure. Using it for anything requires explicit host-side
-derivation from those referenced probes, with their own caveats intact.
+`bestKnown.recommendation.startConfig` is application-ready and comes with literal evidence plus
+non-empty `sourceProbeIndexes`. Every cited probe is earlier, clean, accepted, and cleanup-confirmed;
+the resource-invalidated probe is never included. Adaptive evidence may be single-search,
+single-full, or independently reproduced; exact evidence is one measured launch. The typed resource
+error still means the call lost comparability and did not complete. The library neither applies nor
+forbids the recommendation: the host may use, persist, present, or ignore it.
 
 ### When is a saved recommendation stale?
 

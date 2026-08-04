@@ -74,7 +74,6 @@ export interface ValidatedLlamaAdaptiveCalibrationConfig
   profiles: LlamaAdaptiveCalibrationConfig['profiles'];
   includeKvCacheComparison: boolean;
   contextPreferencePct: number;
-  targetProbes?: number;
   maxProbes?: number;
   maxWallTimeMs?: number;
 }
@@ -363,6 +362,12 @@ export function validateLlamaCalibrationConfig(
   const hasProfile = Object.hasOwn(raw, 'profile');
   const hasProfiles = Object.hasOwn(raw, 'profiles');
   const hasCombos = Object.hasOwn(raw, 'combos');
+  if (Object.hasOwn(raw, 'targetProbes')) {
+    throw invalid('targetProbes is no longer supported; use maxWallTimeMs instead', {
+      path: 'targetProbes',
+      suggestion: 'Choose the calibration time budget with maxWallTimeMs',
+    });
+  }
   if (hasProfile && hasProfiles) {
     throw invalid('Use either profile or profiles, not both', {
       path: 'profile',
@@ -438,7 +443,6 @@ export function validateLlamaCalibrationConfig(
     for (const field of [
       'includeKvCacheComparison',
       'contextPreferencePct',
-      'targetProbes',
       'maxProbes',
       'maxWallTimeMs',
     ]) {
@@ -488,18 +492,10 @@ export function validateLlamaCalibrationConfig(
     (LLAMA_CALIBRATION_DEFAULTS as { contextPreferencePct?: number }).contextPreferencePct ??
     10;
   requireFiniteNonNegative(contextPreferencePct, 'contextPreferencePct');
-  const targetProbes = raw.targetProbes as number | undefined;
   const maxProbes = raw.maxProbes as number | undefined;
   const maxWallTimeMs = raw.maxWallTimeMs as number | undefined;
-  if (targetProbes !== undefined) requirePositiveSafeInteger(targetProbes, 'targetProbes');
   if (maxProbes !== undefined) requirePositiveSafeInteger(maxProbes, 'maxProbes');
   if (maxWallTimeMs !== undefined) requirePositiveSafeInteger(maxWallTimeMs, 'maxWallTimeMs');
-  if (targetProbes !== undefined && maxProbes !== undefined && targetProbes > maxProbes) {
-    throw invalid('targetProbes cannot exceed maxProbes', { path: 'targetProbes' });
-  }
-  if (maxProbes !== undefined && maxProbes <= 2) {
-    throw invalid('maxProbes must leave room for the finalist reserve', { path: 'maxProbes' });
-  }
 
   return {
     strategy: 'adaptive',
@@ -507,7 +503,6 @@ export function validateLlamaCalibrationConfig(
     profiles: profiles as unknown as LlamaAdaptiveCalibrationConfig['profiles'],
     includeKvCacheComparison,
     contextPreferencePct,
-    targetProbes,
     maxProbes,
     maxWallTimeMs,
   };

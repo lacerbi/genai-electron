@@ -113,8 +113,8 @@ describe('error-helpers', () => {
       const partialReport = (
         boundary: 'pre-launch' | 'post-cleanup'
       ): LlamaCalibrationResourceFailurePartialReport => ({
-        schemaVersion: 3,
-        policyVersion: 'llama-runtime-v3',
+        schemaVersion: 4,
+        policyVersion: 'llama-runtime-v4',
         strategy: 'adaptive',
         status: 'failed',
         createdAt: '2026-08-02T12:00:00.000Z',

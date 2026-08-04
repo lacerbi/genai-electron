@@ -484,10 +484,11 @@ Rotation is configured at the `LogManager` level via `LogRotationOptions` (`maxF
 ## Runtime Calibration
 
 `llamaServer.calibrate()` measures real `llama-server` launches on the current machine. Its default
-strategy is a bounded adaptive search for the largest reproducible operational `gpuLayers` point in
-each relevant context/SWA/KV cell. It accepts one or two comparable context profiles and returns a
-schema-v3 report with the complete chronological probe trail. Supplying explicit `combos` selects a
-separate caller-ordered exact diagnostic strategy.
+strategy is a time-bounded adaptive search for a good, application-ready configuration across the
+relevant context/SWA/KV cells. It establishes a clean incumbent early, explores while useful work
+remains, and returns the best clean result when the selected time limit arrives. It accepts one or two
+comparable context profiles and returns a schema-v4 report with the complete chronological probe
+trail. Supplying explicit `combos` selects a separate caller-ordered exact diagnostic strategy.
 
 The normal server must be stopped. Every probe uses a fresh loopback-only process, requests run
 serially, and cleanup is confirmed before the next probe. Calibration leaves the normal manager
@@ -501,13 +502,12 @@ Calibration compares wall-clock timings across launches that are minutes apart, 
 reliable as the machine's stability during the run. A calibration can take tens of minutes; the
 machine should be otherwise idle for its duration.
 
-Because the library cannot control what else the user does, **a host application should tell the
-user that calibration is running and ask them not to start heavy work until it finishes** — other
-model servers, image generation, games, large builds, video encoding, or anything else competing for
-RAM, VRAM, or CPU. Ask the user to close heavy applications *before* starting rather than during:
-the run's reference conditions are captured once at the beginning and are never re-established.
+Because the library cannot control other workloads, the host is responsible for arranging suitable
+machine conditions while calibration runs. Other model servers, image generation, games, large
+builds, or video encoding can compete for RAM, VRAM, or CPU. Conditions should be quiet before the
+call starts because its reference baseline is captured once and never re-established.
 
-**One fixed baseline per call.** After preparation and before the probe budget starts, calibration
+**One fixed baseline per call.** During preparation, calibration
 waits a fixed settle delay (5,000 ms), takes three telemetry snapshots one cooldown apart (750 ms),
 and keeps each metric's median as the single baseline for the whole call. Available host RAM and
 available VRAM are guarded independently — no weighting, no combined score. A metric needs at least
@@ -550,7 +550,7 @@ budget. Three outcomes:
 
 Confirmation does consume wall time. Once triggered it runs to its conclusion against the caller's
 abort signal even if the adaptive wall budget expires meanwhile; if the boundary recovers after that
-deadline, adaptive calibration returns its ordinary `budget-exhausted` report without launching
+deadline, adaptive calibration returns its ordinary `time-limited` report without launching
 again. A post-cleanup check likewise runs after a launch whose internal probe deadline already
 expired but whose teardown was still confirmed, so the final probe is guarded too. The guard covers
 every launch whose teardown was confirmed with an uninterrupted observation; a launch that the
@@ -561,7 +561,7 @@ invalidated", not "checked".
 A pre-launch rejection happens before the executor is invoked, so it costs no launch. A post-cleanup
 rejection keeps the completed probe in the chronological trail marked
 `resourceValidity: 'invalidated-by-resource-stability'`; that observation never reaches adaptive
-classification, exact ranking, `selected`/`provisional`/`fallback`, or the diagnostic candidate.
+classification, exact ranking, `selected`/`fallback`, or resource-error `bestKnown` evidence.
 
 **This is a hard stop in both strategies.** Calibration never restarts, re-anchors, or repeats a
 probe to settle a resource question. Adaptive *and* exact mode reject with
@@ -582,7 +582,7 @@ import { LlamaCalibrationResourceStabilityError, llamaServer } from 'genai-elect
 
 try {
   const report = await llamaServer.calibrate(config);
-  // ... apply report.selected as usual
+  // Narrow resultKind first; ordinary result handling remains host-owned.
 } catch (error) {
   if (error instanceof LlamaCalibrationResourceStabilityError) {
     const { code, suggestion, partialReport } = error.details;
@@ -597,7 +597,7 @@ try {
       failure.probeIndex           // undefined for a pre-launch rejection
     );
 
-    askUserToRetryLater(suggestion);
+    recordCalibrationFailure({ code, suggestion, failure, bestKnown: partialReport.bestKnown });
     return;
   }
   throw error;
@@ -612,13 +612,13 @@ top-level `error.code` is still `'SERVER_ERROR'`, and the calibration-specific d
 Retrying means running the whole calibration again from the beginning on a quiet machine. There is
 no resume: a partially disturbed run has no comparable baseline left to continue from.
 
-**`diagnosticCandidate` is not a start config.** When earlier clean evidence already satisfied the
-normal per-strategy rule, `partialReport.diagnosticCandidate` may be present. It carries only
-`sourceProbeIndexes` (chronological indexes of accepted clean probes), an `evidenceLevel`, and the
-literal `usability: 'diagnostic-only'` — deliberately no config, score, cell, or profile payload.
-**Applying it as a start configuration is forbidden**, and a probe index cannot be pasted into
-`start()`. Any use requires explicit host-side derivation from the referenced probes, with their own
-caveats intact.
+**Earlier clean evidence remains usable.** A resource-stability rejection still rejects the call and
+excludes the invalid boundary probe, but `partialReport.bestKnown` may carry a start-ready
+`recommendation`, its literal evidence label, and the chronological indexes of the accepted clean
+probes that support it. Adaptive evidence can be `single-search-launch`, `single-full-launch`, or
+`independent-reproduction`; exact evidence is `single-launch-measurement`. The host owns whether to
+use or ignore this clean pre-failure recommendation. Its presence does not make the rejected run
+resource-stable or enable resume.
 
 #### Behavior changes from v0.19.1
 
@@ -670,7 +670,7 @@ const report = await llamaServer.calibrate({
   onProgress: progress => sendToRenderer('llm-calibration-progress', progress)
 });
 
-if (report.strategy === 'adaptive' && report.selected) {
+if (report.resultKind === 'report' && report.strategy === 'adaptive' && report.selected) {
   await llamaServer.start({
     modelId: report.model.id,
     ...report.selected.startConfig
@@ -704,13 +704,15 @@ Each adaptive cell fixes the exact profile and every normalized launch argument 
 - the resolved baseline KV precision, or separate `q8_0/q8_0` and `f16/f16` cells when
   `includeKvCacheComparison: true`.
 
-The search finds a directly observed admissible reference, establishes an upper endpoint, bisects
-the local layer interval, and spends its reserved launches on competitive finalists, winner
-reproduction, and a lower-layer fallback when needed. Search probes use one timed sample per
-workload. Finalists use `samples` (default `3`) and the full request timeout. Adaptive `complete`
-requires two successful fresh launches at the exact selected arguments, including at least one
-full-fidelity launch. The result is empirical reproducibility under the observed machine state, not
-a statistical failure-probability guarantee.
+The search finds directly observed admissible references, establishes upper endpoints, and bisects
+local layer intervals. Search probes use one timed sample per workload. Full-fidelity validation
+uses `samples` (default `3`) and the full request timeout. Reproduction, finalist validation, and
+reference guards remain ordinary structural work: they receive no reserved time or probe slots. A
+clean single-search or single-full launch can therefore be returned as the best-known result when
+time ends; its weaker evidence is explicit. Adaptive `complete` still
+requires independent reproduction and all decision-relevant requested work to be resolved. This is
+empirical evidence under the observed machine state, not a proof of global optimality or a
+statistical failure-probability guarantee.
 
 Operational status, memory evidence, and boundary decisions are separate. A generic CUDA error,
 timeout, crash, or slow result can make a probe operationally ambiguous without proving an
@@ -726,18 +728,21 @@ ladder. Use exact combos for MoE-placement experiments. Every adaptive report ma
 
 #### Context and KV preferences
 
-The global fastest independently reproduced finalist anchors both product preferences:
+The global fastest eligible observation anchors the competitive set. Existing context and KV
+product preferences are resolved from raw scores before evidence is considered:
 
 - with two profiles, `contextPreferencePct` (default `10`) permits the larger context when it is no
   more than that percentage slower;
 - with `includeKvCacheComparison: true`, `kvPrecisionPreferencePct` (default `10`) permits the larger
   f16 KV representation within its band.
 
-The bands do not compound. Inside the chosen product class, the ordinary 5% equivalence rule favors
-lower memory pressure (fewer GPU layers, then windowed SWA) before measured speed and deterministic
-cell order. These are explicit capacity/precision preferences, not claims that larger context or f16
-is faster. Adding a second profile approximately doubles the number of cells; enabling KV comparison
-approximately doubles it again, increasing both probe and wall-time budgets.
+The bands do not compound. Inside the chosen product class, same-strength candidates use the ordinary
+5% tie band. When the raw class-fastest candidate has only `single-search-launch` evidence,
+stronger-evidence candidates within the existing 20% search-noise allowance join that final
+equivalence set. The deterministic order is fewer GPU layers, windowed SWA, stronger evidence, lower
+raw score, then cell order. Evidence never overrides a score difference outside the applicable noise
+band. These are explicit capacity/precision preferences, not claims that larger context or f16 is
+faster.
 
 If `fixedConfig.gpuLayers` is supplied, each relevant cell directly measures only that value; the
 report does not claim that a boundary search occurred. `includeKvCacheComparison` cannot be combined
@@ -777,45 +782,61 @@ contexts, make separate serial calls.
 
 ### Budgets and terminal status
 
-Adaptive defaults scale with the number of enumerated cells:
+Time is the primary adaptive resource. `maxWallTimeMs` defaults to a fixed 60 minutes and starts
+synchronously at `calibrate()` method entry. It includes precondition checks, validation, model and
+binary preparation, fixed-baseline collection, resource boundaries, and probes. A host may override
+it with any positive safe-integer number of milliseconds. Longer runs may find a better result or
+resolve more of the requested search; shorter clean results remain usable with their actual evidence
+label.
 
-```text
-targetProbes = min(24, 6 + 2 * cellCount)       # soft target
-maxProbes = min(36, 7 + 4 * cellCount)          # hard launch limit
-finalistReserve = min(6, max(2, cellCount))
-maxWallTimeMs = min(4,500,000, 900,000 + 450,000 * cellCount)
-finalistTimeReserveMs = min(900,000, 150,000 * cellCount)
-```
-
-For example, two cells resolve to 10 target probes, 15 maximum probes, and a 30-minute wall-time
-budget; four cells resolve to 14/23 and 45 minutes; eight cells resolve to 22/36 and 75 minutes.
-These are global per-call budgets, not per-profile allowances. `targetProbes`, `maxProbes`, and
-`maxWallTimeMs` may be overridden with internally consistent positive values. A small valid budget
-is allowed to return unresolved rather than weakening evidence requirements.
+`maxProbes` is an optional expert/test hard cap. Omit it for the normal unbounded-by-probe policy.
+It counts attempted public executor launches, including startup failure, capacity or OOM rejection,
+and deadline interruption; runner-internal start retries remain part of that one launch. Probe count
+is useful progress and diagnostic data, but it does not drive the default schedule. `targetProbes`,
+duration estimates, admission margins, validation reserves, and hidden attempt ceilings are absent.
+If the structural policy has legal work and the real deadline and optional cap still permit a launch,
+the manager starts it without reserving resources for hypothetical later validation.
 
 Returned report statuses are:
 
-- `complete`: adaptive has a selected independently reproduced finalist, or exact has a selected
-  single-launch measurement;
-- `budget-exhausted`: adaptive uncertainty that could change the decision remains; `selected` is
-  absent and `provisional` may be present;
-- `no-viable-candidate`: all requested search space was resolved without an admissible point;
-- `aborted` and `failed`: rejection outcomes represented by a typed partial report after cleanup.
+- `complete`: adaptive resolved all decision-relevant work with an independently reproduced winner,
+  or exact selected its best successful single launch;
+- `time-limited`: the total adaptive deadline prevented more work;
+- `probe-limited`: the caller's optional expert probe cap prevented more work;
+- `inconclusive`: legal work ended with unresolved ambiguity, validation, guard, or preflight state;
+- `no-viable-candidate`: all requested search space was resolved without an admissible point.
 
-The hard adaptive deadline can interrupt a probe, but cleanup may run beyond it and is reported as
-`cleanupOverrunMs`. Cleanup failure takes precedence, rejects as failed, and activates the orphan
-guard.
-Every adaptive report includes `terminalReason`, explaining why the controller completed,
-exhausted its budget, or found no viable point.
+`time-limited`, `probe-limited`, and `inconclusive` may still contain `selected`. Read
+`selectionEvidence` (`independent-reproduction`, `single-full-launch`, or
+`single-search-launch`) independently from `searchCompleteness` (`resolved` or `partial`). A partial
+search means a better requested configuration might remain; it does not erase clean evidence already
+measured. Caller abort and internal failures reject with typed partial reports instead of returning
+ordinary adaptive reports.
+
+On especially slow hardware, `single-search-launch` can be the expected normal evidence at the time
+limit rather than a calibration failure. It is usable measured evidence with deliberately modest
+claims; the host should preserve the literal label when it uses the result.
+
+The hard adaptive deadline can interrupt downloads, binary-validation children, or an active probe,
+but owned cleanup and non-interruptible work settle before the call returns. Cleanup failure takes
+precedence, rejects as failed, and activates the orphan guard. Every adaptive result has a JSON-safe
+`budget` with `maxWallTimeMs`, actual `elapsedMs`, `overrunMs = max(0, elapsedMs - maxWallTimeMs)`,
+and optional `maxProbes`.
+
+Narrow `LlamaCalibrationReport` on `resultKind` first. `resultKind: 'preparation-time-limit'` is the
+minimal adaptive result used when the deadline arrives before ordinary report identity and the fixed
+baseline exist; it has no selection. `resultKind: 'report'` then narrows by `strategy` to the ordinary
+adaptive or exact report.
 
 ### Progress UI
 
 The callback and `'calibration-progress'` event receive equivalent strategy-discriminated payloads.
 Narrow on `strategy` and then `phase`; a `done` event has `terminalStatus` and no active candidate.
-Adaptive progress starts with an unresolved budget, then `policy-ready` exposes the resolved budget.
-Its percentage estimates work against `maxProbes`, so a long startup or request can leave it
-temporarily unchanged. Show phase/purpose text and an indeterminate activity cue rather than
-inventing intermediate percentage movement.
+Adaptive elapsed and remaining time run from the first `preparing` event; `policy-ready` marks that
+the fixed baseline exists but does not reset the clock. `completedProbes` counts settled chronological
+probe records. When an explicit cap exists, `maxProbes` and `remainingProbes` appear together; both
+are absent otherwise. An active invocation has already consumed a remaining slot even though
+`completedProbes` does not increment until it settles.
 
 ```typescript
 import type { LlamaCalibrationProgress } from 'genai-electron';
@@ -827,13 +848,17 @@ function updateCalibrationUI(progress: LlamaCalibrationProgress) {
   }
 
   if (progress.strategy === 'adaptive') {
-    const budgetText = progress.budget.resolved
-      ? `${progress.completedProbes}/${progress.budget.maxProbes} launches`
-      : 'resolving search budget';
+    const remainingMinutes = Math.ceil(progress.budget.remainingMs / 60_000);
+    const limitText = progress.budget.remainingProbes === undefined
+      ? ''
+      : ` · ${progress.budget.remainingProbes} probe slots`;
     const probeText = progress.activeProbe
       ? `${progress.activeProbe.purpose}: g=${progress.activeProbe.gpuLayers}`
       : progress.phase;
-    renderCalibrationProgress(progress.overallPercent, `${probeText} · ${budgetText}`);
+    renderCalibrationProgress(
+      progress.overallPercent,
+      `${probeText} · about ${remainingMinutes} min remain${limitText}`
+    );
   } else {
     const candidate = progress.activeCandidate;
     const count = progress.candidates.resolved ? progress.candidates.comboCount : undefined;
@@ -864,14 +889,16 @@ the probe trail as `oom`, `startup-timeout`, `request-timeout`, `crashed`, or `e
 
 ### Applying and invalidating results
 
-Apply only `selected.startConfig`; it contains the measured exact context, slot count, and every
-selected launch field. `provisional` is diagnostic and must not be auto-applied. Adaptive `fallback`
-is safe to present as a measured lower-layer option only when its `evidence` is
-`direct-measurement`; `unvalidated-option` is diagnostic only. Independent reproduction applies to
-the adaptive `selected` recommendation, not to the fallback evidence literal.
+`selected.startConfig` contains the measured exact context, slot count, and every selected launch
+field. The library returns it without starting or persisting anything. The host owns the product
+policy: it may apply, persist, present, or ignore the selection. `selectionEvidence` and
+`searchCompleteness` describe the result;
+for example, a partial single-search result is useful best-known evidence while making clear that a
+better configuration may remain. Adaptive `fallback` is extra diagnostic information and never a
+selection gate. `direct-measurement` and `unvalidated-option` describe only the fallback itself.
 
 ```typescript
-if (report.selected) {
+if (report.resultKind === 'report' && report.selected) {
   const startConfig = {
     modelId: report.model.id,
     ...report.selected.startConfig
@@ -881,11 +908,15 @@ if (report.selected) {
 }
 ```
 
+Application, persistence, presentation, and consent behavior belong entirely to the host. The
+library supplies the literal evidence and completeness fields and imposes no application gate.
+
 Invalidate a saved recommendation when the model files/revision, binary version/backend/checksum,
 hardware/OS/driver/runtime, requested profiles or slot count, fixed config (including pinned MoE
 placement), workload hashes/weights/order, sample or timeout method, adaptive budgets/preferences,
-report schema, or policy version changes. A run that ended in a resource-stability rejection
-produced no recommendation at all — recalibrate on a quiet machine instead. Reports marked
+report schema, or policy version changes. A resource-stability rejection may expose clean prior
+`bestKnown`, but the failed boundary and incomplete search still require the host to decide whether
+to use that recommendation or recalibrate. Reports marked
 `best-effort` lack part of the reproducibility identity; a report whose `resourceMonitoring.coverage`
 is not `complete` keeps its full identity but was measured with part of the resource guard inactive,
 so its resource-stability claim is weaker. Treat either more conservatively.

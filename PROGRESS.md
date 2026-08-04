@@ -5,11 +5,34 @@
 
 ---
 
+## Unreleased: Good-Result Adaptive LLM Calibration
+
+- Adaptive calibration now keeps the best clean incumbent and continues ordinary structural work
+  until one total `maxWallTimeMs` deadline or an optional explicit probe cap is reached. The clock
+  starts synchronously at `calibrate()` entry, includes preparation and fixed-baseline collection,
+  defaults to 60 minutes, and reports actual elapsed settlement plus `overrunMs`.
+- Omitted `maxProbes` is genuinely unbounded by count. Removed `targetProbes`, cell-count formulas,
+  duration estimates, admission margins, validation reserves, finalization mode, hidden attempt
+  ceilings, and the old public budget resolvers. An explicit cap counts executor launches, including
+  failed or interrupted attempts; runner-internal retries remain one launch.
+- Schema 4 / `llama-runtime-v4` uses a total `resultKind` discriminant, atomic
+  `selected`/`selectionEvidence`, `searchCompleteness`, and ordinary `time-limited`, `probe-limited`,
+  or `inconclusive` results that may retain single-search, single-full, or reproduced evidence.
+  Evidence breaks only uncertainty-equivalent ties; it never withholds an otherwise usable result.
+- Progress exposes elapsed/remaining time plus `completedProbes`; bounded probe fields are optional
+  and atomic. A preparation-time limit has its own minimal result shape. Resource-stability errors
+  retain their typed rejection while optionally exposing a start-ready `bestKnown` recommendation
+  supported solely by earlier clean probes.
+- The library remains lifecycle-neutral: the host decides whether to apply, persist, present, or
+  ignore an application-ready result. Cross-call evidence resume remains deferred.
+
+---
+
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 1007/1007 passing (37 suites)
-- **Last Updated:** 2026-08-03 (v0.20.0 release preparation)
+- **Tests:** ✅ 1038/1038 passing (37 suites)
+- **Last Updated:** 2026-08-04 (unreleased good-result adaptive calibration)
 
 ---
 
