@@ -1,11 +1,11 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.21.0 — good-result adaptive LLM calibration
+> **Current Status**: v0.22.0 — Electron-free LLM calibration policy metadata
 > (2026-08-04)
 
 ---
 
-## Unreleased: Electron-Free LLM Calibration Policy Entry (2026-08-04)
+## v0.22.0: Electron-Free LLM Calibration Policy Entry (2026-08-04)
 
 - Added `genai-electron/llm-calibration-policy`, a constant-only entry that exposes
   `LLAMA_CALIBRATION_DEFAULTS` to plain-Node consumers without loading Electron-backed managers.
@@ -28,11 +28,16 @@ resolution, and type-checks its generated declaration while rejecting both resol
 runtime smoke also confirms ESM deep imports and CommonJS deep-path resolution fail with
 `ERR_PACKAGE_PATH_NOT_EXPORTED`, while CommonJS root resolution selects `dist/index.js`. The
 example renderer build and an explicit SSR-mode Electron main build pass; the emitted CommonJS main
-retains `require("genai-electron")`.
+retains `require("genai-electron")`. The production dependency audit reports 0 vulnerabilities;
+the v0.22.0 npm dry run contains 215 files in a 242.2 kB tarball.
 
-**Release status:** Unreleased. Before release, migrate the known downstream policy pin from its
-`genai-electron/dist/...` import to the supported subpath and remove its internal-resolver
-assertion. No version bump, tag, package publication, or release preparation has been performed.
+**Migration:** Consumers must replace every `genai-electron/dist/...` import before adopting
+v0.22.0. The known downstream policy pin should use `genai-electron/llm-calibration-policy` and
+remove its internal-resolver assertion. This coordinated downstream edit is not a release blocker;
+see `genai-electron-docs/migration-0-21-to-0-22.md`.
+
+**Release status:** Preparing the release PR from `release/v0.22.0`; merge, annotated tag, GitHub
+release, and maintainer-run npm publication remain.
 
 ---
 
@@ -79,7 +84,7 @@ release, and maintainer-side `npm publish` follow.
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 1038/1038 passing (37 suites)
-- **Last Updated:** 2026-08-04 (v0.21.0 release candidate)
+- **Last Updated:** 2026-08-04 (v0.22.0 release candidate)
 
 ---
 

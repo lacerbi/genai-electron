@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.21.0 | **Status**: Production Ready - good-result adaptive calibration
+> **Version**: 0.22.0 | **Status**: Production Ready - Electron-free calibration policy metadata
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 

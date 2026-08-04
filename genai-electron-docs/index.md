@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.21.0 (good-result adaptive LLM calibration)
+> **Version**: 0.22.0 (Electron-free LLM calibration policy metadata)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
@@ -26,6 +26,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.21.x to v0.22.0](migration-0-21-to-0-22.md)** - Electron-free policy metadata entry and strict package exports; migrate all internal `dist/` imports
 - **[Migrating from v0.20.x to v0.21.0](migration-0-20-to-0-21.md)** - Schema-v4 time-first calibration: best clean result at the deadline, optional probe cap, total result discriminant, host-owned adoption
 - **[Migrating from v0.19.1 to v0.20.0](migration-0-19-1-to-0-20.md)** - Calibration resource-stability hard stop: fixed baseline, typed rejection in both modes, schema-v3 reports
 - **[Migrating from v0.19.0 to v0.19.1](migration-0-19-0-to-0-19-1.md)** - Adaptive calibration correctness patch: regime-consistent reproduction, stricter settle test, telemetry trust

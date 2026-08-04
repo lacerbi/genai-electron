@@ -1,7 +1,7 @@
 # ISSUE — No Electron-free entry point for LLM calibration policy
 
 - Created: 2026-08-04
-- Status: RESOLVED — implemented 2026-08-04; unreleased
+- Status: RESOLVED — implemented for v0.22.0; release preparation 2026-08-04
 - Package: genai-electron
 - Affected API: package entry points (`package.json` `main` / `exports`),
   `LLAMA_CALIBRATION_DEFAULTS`
@@ -27,8 +27,8 @@ Implemented as proposed after review, with the final CommonJS compatibility cons
 - documented the prospective `policyVersion` compatibility rule.
 
 The known downstream consumer must replace its policy deep import and remove its resolver assertion
-before this breaking package-encapsulation change is released. That coordinated downstream change
-is outside this repository and does not require keeping an internal package path open.
+when adopting v0.22.0. That coordinated downstream change is outside this repository, does not
+require keeping an internal package path open, and is not a release blocker by maintainer decision.
 
 ## Executive summary
 
@@ -229,8 +229,8 @@ across package upgrades without depending on a private implementation helper.
   policy subpath.
 - The package declares `.`, `./llm-calibration-policy`, and `./package.json`; undeclared `dist/`
   paths are sealed with no wildcard or exact exception.
-- Before release, the known downstream consumer migrates off every `genai-electron/dist/...`
-  import and removes its internal-resolver assertion.
+- Before adopting v0.22.0, the known downstream consumer migrates off every
+  `genai-electron/dist/...` import and removes its internal-resolver assertion.
 - Documentation defines when a calibration-policy compatibility change must bump `policyVersion`.
 - Release/migration notes identify strict `exports` encapsulation as breaking and state that deep
   imports stop resolving.
