@@ -911,6 +911,20 @@ if (report.resultKind === 'report' && report.selected) {
 Application, persistence, presentation, and consent behavior belong entirely to the host. The
 library supplies the literal evidence and completeness fields and imposes no application gate.
 
+Plain-Node tests and build scripts can read the current compatibility identifier without importing
+the Electron-backed package root:
+
+```typescript
+import { LLAMA_CALIBRATION_DEFAULTS } from 'genai-electron/llm-calibration-policy';
+
+const currentPolicyVersion = LLAMA_CALIBRATION_DEFAULTS.policyVersion;
+```
+
+`policyVersion` is the persisted-calibration compatibility identifier. It changes whenever altered
+admission, ranking, scheduling, evidence, or resource-validity semantics can make reports or
+recommendations produced under otherwise identical inputs no longer trustworthy. A correction may
+retain the identifier only when existing persisted artifacts remain semantically valid.
+
 Invalidate a saved recommendation when the model files/revision, binary version/backend/checksum,
 hardware/OS/driver/runtime, requested profiles or slot count, fixed config (including pinned MoE
 placement), workload hashes/weights/order, sample or timeout method, adaptive budgets/preferences,

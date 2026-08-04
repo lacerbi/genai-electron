@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.21.0 | **Status**: Production Ready - good-result adaptive calibration
+> **Version**: 0.22.0 | **Status**: Production Ready - Electron-free calibration policy metadata
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 
@@ -55,6 +55,20 @@ app.whenReady().then(async () => {
 ```
 
 Use with [genai-lite](https://github.com/lacerbi/genai-lite) for AI interactions (chat, image generation).
+
+### Electron-free calibration policy metadata
+
+Plain-Node tests and build scripts can inspect the current LLM calibration policy without loading
+the Electron-specific package root:
+
+```typescript
+import { LLAMA_CALIBRATION_DEFAULTS } from 'genai-electron/llm-calibration-policy';
+
+console.log(LLAMA_CALIBRATION_DEFAULTS.policyVersion);
+```
+
+Use this supported subpath when validating persisted calibration compatibility outside an Electron
+runtime. Other package functionality remains Electron-specific.
 
 ## Documentation
 

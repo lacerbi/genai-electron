@@ -46,6 +46,14 @@ export const LLAMA_CALIBRATION_DEFAULTS = {
   resourceDriftConfirmationReads: 1,
   /** Per-command bound for each host/GPU telemetry capture. */
   resourceTelemetryTimeoutMs: 10_000,
+  /**
+   * Persisted-calibration compatibility identifier.
+   *
+   * Bump this whenever changed admission, ranking, scheduling, evidence, or resource-validity
+   * semantics can make reports or recommendations produced under otherwise identical inputs no
+   * longer trustworthy. A correction may retain the identifier only when existing persisted
+   * artifacts remain semantically valid.
+   */
   policyVersion: 'llama-runtime-v4',
   /** Default adaptive total elapsed limit. Hosts may provide their own explicit value. */
   adaptiveMaxWallTimeMs: 60 * 60 * 1_000,

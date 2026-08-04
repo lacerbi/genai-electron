@@ -1,7 +1,43 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.21.0 — good-result adaptive LLM calibration
+> **Current Status**: v0.22.0 — Electron-free LLM calibration policy metadata
 > (2026-08-04)
+
+---
+
+## v0.22.0: Electron-Free LLM Calibration Policy Entry (2026-08-04)
+
+- Added `genai-electron/llm-calibration-policy`, a constant-only entry that exposes
+  `LLAMA_CALIBRATION_DEFAULTS` to plain-Node consumers without loading Electron-backed managers.
+- Declared strict package exports for the Electron root, the policy entry, and `package.json`, with
+  declaration, import, and default conditions. CommonJS-oriented resolution uses the default
+  without promising synchronous ESM execution. Undeclared `dist/` paths are now sealed; the
+  internal calibration time-budget resolver remains unexported.
+- Extended packed-package validation to import the policy entry before Electron is linked, verify
+  CommonJS resolution, and compile the subpath against its generated declaration while retaining
+  negative checks for the internal resolver.
+- Defined `policyVersion` prospectively as the persisted-calibration compatibility identifier:
+  policy-affecting changes must bump it whenever existing reports or recommendations are no longer
+  trustworthy.
+- Updated README, LLM persistence guidance, and the TypeScript constants reference.
+
+**Validation:** Clean TypeScript build; 1038/1038 tests pass across 37 suites; ESLint passes with
+0 errors and the existing 118 warnings; repository formatting and `git diff --check` pass. The
+packed public-API consumer imports the policy entry before Electron is linked, checks its CommonJS
+resolution, and type-checks its generated declaration while rejecting both resolver imports. Its
+runtime smoke also confirms ESM deep imports and CommonJS deep-path resolution fail with
+`ERR_PACKAGE_PATH_NOT_EXPORTED`, while CommonJS root resolution selects `dist/index.js`. The
+example renderer build and an explicit SSR-mode Electron main build pass; the emitted CommonJS main
+retains `require("genai-electron")`. The production dependency audit reports 0 vulnerabilities;
+the v0.22.0 npm dry run contains 215 files in a 242.2 kB tarball.
+
+**Migration:** Consumers must replace every `genai-electron/dist/...` import before adopting
+v0.22.0. The known downstream policy pin should use `genai-electron/llm-calibration-policy` and
+remove its internal-resolver assertion. This coordinated downstream edit is not a release blocker;
+see `genai-electron-docs/migration-0-21-to-0-22.md`.
+
+**Release status:** Preparing the release PR from `release/v0.22.0`; merge, annotated tag, GitHub
+release, and maintainer-run npm publication remain.
 
 ---
 
@@ -48,7 +84,7 @@ release, and maintainer-side `npm publish` follow.
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 1038/1038 passing (37 suites)
-- **Last Updated:** 2026-08-04 (v0.21.0 release candidate)
+- **Last Updated:** 2026-08-04 (v0.22.0 release candidate)
 
 ---
 

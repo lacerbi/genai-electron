@@ -1882,6 +1882,13 @@ Protocol and policy defaults for [LLM runtime calibration](llm-server.md#runtime
 Adaptive's fixed 60-minute default is independent of cell count; callers may provide any positive
 safe-integer `maxWallTimeMs`.
 
+Import the constant from the package root inside Electron, or from the dedicated Electron-free
+entry in plain-Node tests and build scripts:
+
+```typescript
+import { LLAMA_CALIBRATION_DEFAULTS } from 'genai-electron/llm-calibration-policy';
+```
+
 ```typescript
 const LLAMA_CALIBRATION_DEFAULTS = {
   samples: 3,
@@ -1927,6 +1934,11 @@ const LLAMA_CALIBRATION_DEFAULTS = {
 ```
 
 Omitted `maxProbes` is represented by absent fields, never a non-finite or large numeric sentinel.
+
+`policyVersion` is the persisted-calibration compatibility identifier. It must change whenever
+altered admission, ranking, scheduling, evidence, or resource-validity semantics can invalidate
+reports or recommendations produced under otherwise identical inputs. A correction may retain the
+identifier only when existing persisted artifacts remain semantically valid.
 
 The resource-stability values are exported policy constants, not caller-configurable calibration
 fields, and there is no override that disables confirmation. They are heuristic, provisional, and
