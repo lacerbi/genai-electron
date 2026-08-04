@@ -4,6 +4,19 @@
   "description": "Electron-specific library for managing local AI model servers and resources",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./llm-calibration-policy": {
+      "types": "./dist/llm-calibration-policy.d.ts",
+      "import": "./dist/llm-calibration-policy.js",
+      "default": "./dist/llm-calibration-policy.js"
+    },
+    "./package.json": "./package.json"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.0.0"

@@ -5,6 +5,37 @@
 
 ---
 
+## Unreleased: Electron-Free LLM Calibration Policy Entry (2026-08-04)
+
+- Added `genai-electron/llm-calibration-policy`, a constant-only entry that exposes
+  `LLAMA_CALIBRATION_DEFAULTS` to plain-Node consumers without loading Electron-backed managers.
+- Declared strict package exports for the Electron root, the policy entry, and `package.json`, with
+  declaration, import, and default conditions. CommonJS-oriented resolution uses the default
+  without promising synchronous ESM execution. Undeclared `dist/` paths are now sealed; the
+  internal calibration time-budget resolver remains unexported.
+- Extended packed-package validation to import the policy entry before Electron is linked, verify
+  CommonJS resolution, and compile the subpath against its generated declaration while retaining
+  negative checks for the internal resolver.
+- Defined `policyVersion` prospectively as the persisted-calibration compatibility identifier:
+  policy-affecting changes must bump it whenever existing reports or recommendations are no longer
+  trustworthy.
+- Updated README, LLM persistence guidance, and the TypeScript constants reference.
+
+**Validation:** Clean TypeScript build; 1038/1038 tests pass across 37 suites; ESLint passes with
+0 errors and the existing 118 warnings; repository formatting and `git diff --check` pass. The
+packed public-API consumer imports the policy entry before Electron is linked, checks its CommonJS
+resolution, and type-checks its generated declaration while rejecting both resolver imports. Its
+runtime smoke also confirms ESM deep imports and CommonJS deep-path resolution fail with
+`ERR_PACKAGE_PATH_NOT_EXPORTED`, while CommonJS root resolution selects `dist/index.js`. The
+example renderer build and an explicit SSR-mode Electron main build pass; the emitted CommonJS main
+retains `require("genai-electron")`.
+
+**Release status:** Unreleased. Before release, migrate the known downstream policy pin from its
+`genai-electron/dist/...` import to the supported subpath and remove its internal-resolver
+assertion. No version bump, tag, package publication, or release preparation has been performed.
+
+---
+
 ## v0.21.0: Good-Result Adaptive LLM Calibration (2026-08-04)
 
 - Adaptive calibration now keeps the best clean incumbent and continues ordinary structural work

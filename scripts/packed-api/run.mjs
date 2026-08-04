@@ -3,15 +3,16 @@
  * Packed public-API verification.
  *
  * Builds the library, packs it exactly as `npm publish` would, installs that tarball into a
- * throwaway consumer project, and type-checks a small TypeScript consumer against it. The consumer
- * imports ONLY the package name, so it exercises the generated declarations and the package's own
- * entry points - never a source-relative path that would hide a missing export or a type that never
- * made it into `dist/`.
+ * throwaway consumer project, runtime-checks its Electron-free policy entry under plain Node, and
+ * type-checks a small TypeScript consumer against its declared package entries. Nothing reaches
+ * into src/ or dist/, so missing exports and unpacked declarations cannot hide behind repository
+ * paths.
  *
- * Why compile-only: importing the package at runtime outside Electron fails on `electron`'s own
- * stub (`import { app } from 'electron'` has no named exports in a plain Node process). The contract
- * this harness protects - specialized error identity, details narrowing, schema-v4 shapes, and the
- * absence of removed fields - is entirely a declaration-level contract.
+ * The Electron-specific root remains compile-only here: importing it at runtime outside Electron
+ * fails on `electron`'s own stub (`import { app } from 'electron'` has no named exports in a plain
+ * Node process). The policy subpath is deliberately different and must import without Electron
+ * installed or linked. CommonJS resolution is checked separately without promising synchronous
+ * ESM execution across the whole supported Node/Electron range.
  *
  * Usage:
  *   node scripts/packed-api/run.mjs [--keep] [--skip-build]
@@ -37,6 +38,28 @@ const skipBuild = args.has('--skip-build');
 /** Dependencies whose types the generated declarations may reference. */
 const LINKED_DEPENDENCIES = ['@types', '@huggingface', 'electron', 'adm-zip', 'tar'];
 
+/** Plain-Node runtime consumer for the Electron-free policy entry. */
+const POLICY_RUNTIME_SOURCE = `import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import * as importedPolicy from 'genai-electron/llm-calibration-policy';
+
+const require = createRequire(import.meta.url);
+const isUnexportedPath = (error) => error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED';
+
+const { LLAMA_CALIBRATION_DEFAULTS: importedDefaults } = importedPolicy;
+assert.equal(importedDefaults.policyVersion, 'llama-runtime-v4');
+assert.equal('resolveLlamaCalibrationTimeBudget' in importedPolicy, false);
+const rootEntry = require.resolve('genai-electron');
+assert.equal(path.basename(rootEntry), 'index.js');
+assert.equal(path.basename(path.dirname(rootEntry)), 'dist');
+const policyEntry = require.resolve('genai-electron/llm-calibration-policy');
+assert.equal(path.basename(policyEntry), 'llm-calibration-policy.js');
+assert.equal(path.basename(path.dirname(policyEntry)), 'dist');
+await assert.rejects(import('genai-electron/dist/config/defaults.js'), isUnexportedPath);
+assert.throws(() => require.resolve('genai-electron/dist/config/defaults.js'), isUnexportedPath);
+`;
+
 /**
  * The external consumer.
  *
@@ -49,13 +72,15 @@ const CONSUMER_SOURCE = `/**
  * Every import below is from the package NAME. Nothing here may reach into src/ or dist/.
  */
 import {
-  LLAMA_CALIBRATION_DEFAULTS,
   LlamaCalibrationResourceStabilityError,
   ServerError,
   formatErrorForUI,
 } from 'genai-electron';
+import { LLAMA_CALIBRATION_DEFAULTS } from 'genai-electron/llm-calibration-policy';
 // @ts-expect-error the unreleased public budget resolver was removed from the package root
 import { resolveLlamaCalibrationTimeBudget } from 'genai-electron';
+// @ts-expect-error the Electron-free policy entry does not promote the internal budget resolver
+import { resolveLlamaCalibrationTimeBudget as policyBudgetResolver } from 'genai-electron/llm-calibration-policy';
 // @ts-expect-error the internal adaptive terminal-status helper is not a package-root export
 import type { LlamaAdaptiveCalibrationTerminalStatus } from 'genai-electron';
 import type {
@@ -496,6 +521,16 @@ async function main() {
 
     console.warn('[packed-api] installing the tarball into a throwaway consumer project');
     await tar.x({ file: tarball, cwd: packageDir, strip: 1 });
+
+    const electronLink = path.join(consumerModules, 'electron');
+    if (fs.existsSync(electronLink)) {
+      throw new Error('runtime policy smoke must run before Electron is linked');
+    }
+    const runtimeConsumer = path.join(consumerDir, 'policy-runtime.mjs');
+    fs.writeFileSync(runtimeConsumer, POLICY_RUNTIME_SOURCE);
+    console.warn('[packed-api] importing the policy entry and checking CommonJS resolution');
+    run(process.execPath, [runtimeConsumer], { cwd: consumerDir });
+
     for (const dependency of LINKED_DEPENDENCIES) linkDependency(dependency, consumerModules);
 
     fs.writeFileSync(
