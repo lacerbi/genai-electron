@@ -13,8 +13,37 @@ Starting with llama.cpp **b7956**, macOS and Linux binaries use **`.tar.gz`** fo
 - **ZIP inflation runs in a worker thread.** Keep both archive consumers routed
   through `extractZipInWorker`; its per-file callbacks drive
   `'binary-progress'` entry counters and keep Electron's main event loop free.
-  Tar extraction remains asynchronous through `tar.x`.
+  The worker is self-contained: a committed generated preamble embeds the pinned ZIP
+  implementation, so published applications do not resolve `adm-zip` at runtime. Tar extraction
+  remains asynchronous through `tar.x`.
 - **No Linux x64 CUDA prebuilt exists anymore** (as of b9860). The `linux-x64` variant chain is Vulkan → CPU; Linux NVIDIA users run the Vulkan build or compile from source.
+
+## Updating the Embedded ZIP Implementation
+
+`adm-zip` is embedded third-party code even though it no longer appears in production dependency
+audits. Treat updates as security-sensitive generated-code changes. The current build inputs are
+exact-pinned `adm-zip` 0.6.0 and esbuild 0.28.1 in `devDependencies`.
+
+1. Review the upstream release, license, and security impact. Update exact pins with
+   `npm install --save-dev --save-exact adm-zip@<version> esbuild@<version>` only when the selected
+   toolchain versions are intentional.
+2. Run `npm run generate:zip-worker` once. Inspect
+   `src/generated/adm-zip-worker-source.ts` for the expected version, SHA-256, full MIT banner, no
+   source map, and no machine-specific absolute path.
+3. Update and review `THIRD_PARTY_NOTICES.md` if the embedded version, upstream identity,
+   copyright, or license text changed. Do not rely on minifier comments as the license record.
+4. Run `npm run check:zip-worker`, focused archive/BinaryManager tests, the full test/build/lint/
+   formatting gates, and `npm run test:packed-api`. The packed smoke must still resolve neither
+   loose `adm-zip` nor a runtime module specifier while extracting a real ZIP in the worker.
+5. Run `npm audit --omit=dev` and a full `npm audit`; record development-only generator/fixture
+   findings separately from the production audit. Run `npm run audit:embedded`; this blocking gate
+   isolates high/critical advisories for code that is dev-classified but embedded at runtime.
+   Review the package dry run and packed-size delta.
+6. Keep the change under the normal unreleased workflow. Version bump, migration guide, tag,
+   GitHub release, and publication happen only when the maintainer explicitly starts a release.
+
+Normal `build`, `build:watch`, and `prepublishOnly` runs verify the committed bytes and fail with an
+actionable regeneration command; they never rewrite generated source implicitly.
 
 ## When to Update
 

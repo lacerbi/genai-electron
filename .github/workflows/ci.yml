@@ -77,6 +77,9 @@ jobs:
         run: npm audit --audit-level=high
         continue-on-error: true
 
+      - name: Enforce embedded runtime input audit
+        run: npm run audit:embedded
+
       - name: Enforce production dependency audit
         run: npm audit --omit=dev --audit-level=high
 

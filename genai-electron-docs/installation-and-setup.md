@@ -36,7 +36,9 @@ npm install electron@>=25.0.0
 - Architecture: x64
 - GPU: NVIDIA CUDA, AMD ROCm (experimental), Intel
 
-**Technology Stack**: Node.js >=22.0.0, TypeScript ^5.7.2, minimal runtime dependencies (adm-zip, @huggingface/gguf, tar).
+**Technology Stack**: Node.js >=22.0.0, TypeScript ^5.7.2, and two external runtime
+dependencies (`@huggingface/gguf`, `tar`). The exact-pinned adm-zip implementation is embedded in
+the generated ZIP worker; it is a development/update input rather than a runtime dependency.
 
 ---
 
@@ -70,8 +72,9 @@ On first call to `llamaServer.start()` or `diffusionServer.start()`, the library
 4. **Falls back automatically** if test fails (e.g., broken CUDA → Vulkan → CPU)
 5. **Caches working variant** for fast subsequent starts
 
-On Windows, ZIP inflation runs in a worker thread so Electron's main event loop
-remains responsive. The `'binary-progress'` event reports entry counters during
+On Windows, ZIP inflation runs in a self-contained worker thread so Electron's main event loop
+remains responsive and packaged applications do not need a loose/resolvable `adm-zip`. The
+`'binary-progress'` event reports entry counters during
 extraction. Successfully installed dependency archives are recorded by checksum
 in `userData/binaries/<type>/.deps.json`; byte-identical CUDA runtimes are reused
 across upstream release-URL changes. If provisioning is interrupted, the next

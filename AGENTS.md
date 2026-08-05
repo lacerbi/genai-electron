@@ -58,7 +58,8 @@ src/
 ### Key Architectural Decisions
 
 **1. Minimal Runtime Dependencies**
-- Three small packages: adm-zip (archive extraction), @huggingface/gguf (metadata parsing), tar (archive extraction)
+- Two external packages: @huggingface/gguf (metadata parsing) and tar (tar archive extraction)
+- ZIP extraction embeds the exact-pinned adm-zip implementation in the generated inline worker; adm-zip and esbuild are development/update inputs, not published runtime dependencies
 - Everything else uses Node.js built-ins (fs, crypto, child_process, os, native fetch)
 - Keeps package lightweight (~5-10MB code only, binaries downloaded on-demand)
 

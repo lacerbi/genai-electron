@@ -54,13 +54,6 @@ jest.unstable_mockModule('node:worker_threads', () => ({
   Worker: MockWorker,
 }));
 
-// Mock adm-zip (not used in these tests but required by module)
-jest.unstable_mockModule('adm-zip', () => ({
-  default: class MockAdmZip {
-    extractAllTo = jest.fn();
-  },
-}));
-
 // Mock tar (not used in these tests but required by module)
 jest.unstable_mockModule('tar', () => ({
   x: jest.fn(),
@@ -136,13 +129,17 @@ describe('ZIP worker routing', () => {
       { completedEntries: 1, totalEntries: 1, entry: 'nested/runtime.dll' },
     ]);
     expect(workerConstructorCalls).toHaveLength(1);
-    expect(workerConstructorCalls[0]!.options).toMatchObject({
+    const workerCall = workerConstructorCalls[0]!;
+    expect(workerCall.options).toEqual({
       eval: true,
       workerData: {
         archivePath: '/tmp/runtime.zip',
         extractTo: '/tmp/extract',
+        admZipGlobalKey: '__genai_electron_adm_zip_0_6_0__',
       },
     });
+    expect(workerCall.source).toContain('adm-zip 0.6.0 embedded by genai-electron');
+    expect(workerCall.source).not.toContain('admZipModuleUrl');
   });
 
   it('maps a worker failure through the archive error contract once', async () => {

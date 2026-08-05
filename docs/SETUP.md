@@ -137,7 +137,9 @@ npm install
 
 This installs:
 - Development dependencies (TypeScript, Jest, ESLint, Prettier)
-- Minimal runtime dependencies (adm-zip, @huggingface/gguf, tar)
+- Two external runtime dependencies (`@huggingface/gguf` and `tar`)
+- Exact-pinned `adm-zip` and esbuild development inputs used to regenerate the self-contained ZIP
+  worker payload; published applications do not resolve `adm-zip` at runtime
 
 ### 3. Build
 
@@ -146,11 +148,13 @@ npm run build
 ```
 
 This:
+- Verifies the committed embedded ZIP-worker source is current without rewriting it
 - Compiles TypeScript to JavaScript (`dist/`)
 - Generates type definitions (`.d.ts` files)
 - Creates source maps for debugging
+- Emits the internal embedded-worker module under `dist/generated/`
 
-**Output**:
+**Output (illustrative; selected entries)**:
 ```
 dist/
 ├── config/

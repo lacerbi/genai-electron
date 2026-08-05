@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.22.0 | **Status**: Production Ready - Electron-free calibration policy metadata
+> **Version**: 0.22.1 | **Status**: Production Ready - Self-contained bundled ZIP worker
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 
@@ -95,7 +95,8 @@ See **[electron-control-panel](examples/electron-control-panel/)** for a full-fe
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](LICENSE) for this project and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for embedded third-party code.
 
 ## Related Projects
 

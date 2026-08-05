@@ -1229,7 +1229,9 @@ The `BinaryManager` class provides generic functionality for:
 3. Selecting the first variant that works on the current system
 4. Copying all files (executable + DLLs) to the correct location
 5. Caching which variant worked for faster startup next time
-6. Inflating ZIP archives in a worker thread with entry-level progress
+6. Inflating ZIP archives in a self-contained worker thread with entry-level progress and no
+   runtime module resolution; a deterministic generated preamble embeds the exact-pinned adm-zip
+   implementation while the typed extraction function remains in `archive-utils.ts`
 7. Reusing installed dependencies by verified archive checksum through an
    atomic `.deps.json` manifest
 
@@ -1286,6 +1288,10 @@ diffusion-flash-attention flags as production generation. This verifies:
 ZIP extraction and dependency materialization occur in a clean per-variant
 staging directory. Complete archives left by an interrupted process are reused
 only after SHA-256 verification; `.partial` files are not treated as complete.
+The inline ZIP worker prepends committed generated source produced by
+`scripts/generate-zip-worker.mjs`; normal builds verify those bytes instead of regenerating them.
+`adm-zip` and esbuild are exact-pinned development inputs, and published consumers do not resolve
+or ship `adm-zip` as an external runtime dependency.
 If a process was killed after installing a candidate but before cleanup, a
 later validated-binary fast path removes main archives and extraction
 directories before returning. Dependency archives are deleted only when their
