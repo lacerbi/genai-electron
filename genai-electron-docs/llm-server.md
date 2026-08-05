@@ -1052,9 +1052,10 @@ llamaServer.on('binary-progress', (event: BinaryProgressEvent) => {
 });
 ```
 
-ZIP extraction runs in a worker thread and reports
-`completedEntries` / `totalEntries`, keeping Electron's main event loop
-responsive. Installed dependencies are cached by checksum in `.deps.json`; a
+ZIP extraction runs in a self-contained worker thread and reports
+`completedEntries` / `totalEntries`, keeping Electron's main event loop responsive without a
+loose/resolvable `adm-zip` runtime package. Installed dependencies are cached by checksum in
+`.deps.json`; a
 later binary release that references the same bytes reuses the installed files
 without downloading or inflating the archive again. After an interrupted run,
 complete checksum-valid archives are reused and stale extraction directories

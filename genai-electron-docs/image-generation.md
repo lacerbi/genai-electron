@@ -470,8 +470,9 @@ await diffusionServer.clearLogs();
 DiffusionServerManager extends `EventEmitter`:
 
 During ZIP extraction, `'binary-progress'` adds `completedEntries`,
-`totalEntries`, and an extraction `percent`. ZIP inflation runs in a worker
-thread, so these updates continue without blocking Electron's main event loop.
+`totalEntries`, and an extraction `percent`. ZIP inflation runs in a self-contained worker
+thread, so these updates continue without blocking Electron's main event loop or resolving a loose
+`adm-zip` package at runtime.
 
 - `'started'` - Server started successfully (receives `DiffusionServerInfo`)
 - `'stopped'` - Server stopped

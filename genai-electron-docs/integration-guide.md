@@ -5,6 +5,7 @@ Best practices and patterns for integrating genai-electron into Electron applica
 ## Navigation
 
 - [Initialization](#initialization)
+- [Bundling and Packaging](#bundling-and-packaging)
 - [Lifecycle Management](#lifecycle-management)
 - [Error Handling](#error-handling)
 - [Integration with genai-lite](#integration-with-genai-lite)
@@ -44,6 +45,20 @@ app.whenReady().then(() => {
   // ...
 });
 ```
+
+---
+
+## Bundling and Packaging
+
+The Electron-specific package root can be bundled into a single main-process file and stored in an
+ASAR. ZIP provisioning uses a self-contained inline worker with the pinned ZIP implementation
+already embedded, so neither root import nor first ZIP extraction requires a loose or otherwise
+resolvable `adm-zip` package beside the application bundle.
+
+Externalizing `genai-electron` and shipping its declared runtime dependencies remains supported,
+but it is an application packaging choice rather than a ZIP-worker requirement. A static root
+import is safe at module load; in either layout, defer manager operations that depend on Electron
+paths until `app.whenReady()` as shown above.
 
 ---
 

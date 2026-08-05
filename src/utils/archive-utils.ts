@@ -6,11 +6,13 @@
 import * as tar from 'tar';
 import path from 'path';
 import { promises as fs } from 'fs';
-import { createRequire } from 'node:module';
-import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { fileExists } from './file-utils.js';
 import { FileSystemError } from '../errors/index.js';
+import {
+  ADM_ZIP_WORKER_GLOBAL_KEY,
+  ADM_ZIP_WORKER_PREAMBLE,
+} from '../generated/adm-zip-worker-source.js';
 
 /**
  * Entry-level progress reported while an archive is being extracted.
@@ -29,7 +31,7 @@ export type ArchiveExtractionProgressCallback = (progress: ArchiveExtractionProg
 interface ZipWorkerData {
   archivePath: string;
   extractTo: string;
-  admZipModuleUrl: string;
+  admZipGlobalKey: string;
 }
 
 type ZipWorkerMessage =
@@ -74,10 +76,14 @@ async function zipExtractionWorkerMain(): Promise<void> {
       ): boolean;
     };
 
-    const admZipModule = (await import(data.admZipModuleUrl)) as {
-      default: AdmZipConstructor;
-    };
-    const zip = new admZipModule.default(data.archivePath);
+    const workerGlobal = globalThis as unknown as Record<string, unknown>;
+    const admZipCandidate = workerGlobal[data.admZipGlobalKey];
+    Reflect.deleteProperty(workerGlobal, data.admZipGlobalKey);
+    if (typeof admZipCandidate !== 'function') {
+      throw new Error('Embedded ZIP constructor is unavailable');
+    }
+    const AdmZip = admZipCandidate as AdmZipConstructor;
+    const zip = new AdmZip(data.archivePath);
     const entries = zip.getEntries().filter((entry) => !entry.isDirectory);
     const files: string[] = [];
 
@@ -118,8 +124,7 @@ async function zipExtractionWorkerMain(): Promise<void> {
   }
 }
 
-const ZIP_WORKER_SOURCE = `(${zipExtractionWorkerMain.toString()})()`;
-const admZipModuleUrl = pathToFileURL(createRequire(import.meta.url).resolve('adm-zip')).toString();
+const ZIP_WORKER_SOURCE = `${ADM_ZIP_WORKER_PREAMBLE}\n(${zipExtractionWorkerMain.toString()})()`;
 
 /**
  * Detect archive format from file path
@@ -322,7 +327,7 @@ async function extractZipInWorker(
       workerData: {
         archivePath,
         extractTo,
-        admZipModuleUrl,
+        admZipGlobalKey: ADM_ZIP_WORKER_GLOBAL_KEY,
       } satisfies ZipWorkerData,
     });
 

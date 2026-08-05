@@ -5,3 +5,4 @@ node_modules
 *.md
 package-lock.json
 scripts/calibration-quiet-trace/artifacts/
+src/generated/adm-zip-worker-source.ts

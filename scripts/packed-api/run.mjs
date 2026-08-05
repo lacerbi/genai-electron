@@ -3,16 +3,17 @@
  * Packed public-API verification.
  *
  * Builds the library, packs it exactly as `npm publish` would, installs that tarball into a
- * throwaway consumer project, runtime-checks its Electron-free policy entry under plain Node, and
- * type-checks a small TypeScript consumer against its declared package entries. Nothing reaches
- * into src/ or dist/, so missing exports and unpacked declarations cannot hide behind repository
- * paths.
+ * throwaway consumer project, runtime-checks its Electron-free policy entry under plain Node,
+ * type-checks a small TypeScript consumer against its declared package entries, and bundles the
+ * packed root for an isolated runtime smoke. Those public checks use package-name exports only.
+ * A separate packaging-only archive smoke addresses the verified packed archive utility by its
+ * absolute filesystem path; it is intentionally not a public subpath contract.
  *
- * The Electron-specific root remains compile-only here: importing it at runtime outside Electron
- * fails on `electron`'s own stub (`import { app } from 'electron'` has no named exports in a plain
- * Node process). The policy subpath is deliberately different and must import without Electron
- * installed or linked. CommonJS resolution is checked separately without promising synchronous
- * ESM execution across the whole supported Node/Electron range.
+ * The Electron-specific root cannot run directly under plain Node because Electron's npm stub has
+ * no named `app` export. Its isolated bundle therefore uses a tiny `app.getPath()` build-time stub
+ * so root evaluation can be exercised. The policy subpath is deliberately different and must
+ * import directly without Electron installed or linked. CommonJS resolution is checked separately
+ * without promising synchronous ESM execution across the whole supported Node/Electron range.
  *
  * Usage:
  *   node scripts/packed-api/run.mjs [--keep] [--skip-build]
@@ -28,6 +29,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import AdmZip from 'adm-zip';
+import { build as esbuildBuild } from 'esbuild';
 import * as tar from 'tar';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -35,8 +38,17 @@ const args = new Set(process.argv.slice(2));
 const keepTempProject = args.has('--keep');
 const skipBuild = args.has('--skip-build');
 
-/** Dependencies whose types the generated declarations may reference. */
-const LINKED_DEPENDENCIES = ['@types', '@huggingface', 'electron', 'adm-zip', 'tar'];
+/** Runtime packages esbuild may traverse while bundling the packed root. */
+const BUNDLE_LINKED_DEPENDENCIES = ['@huggingface', 'tar'];
+
+/** Additional packages needed only while type-checking the packed declarations. */
+const TYPE_LINKED_DEPENDENCIES = ['@types', 'electron'];
+
+const ZIP_FIXTURE_FILES = [
+  { entry: 'nested/alpha.txt', content: 'packed ZIP alpha\n' },
+  { entry: '../../nested/deeper/beta.bin', content: 'packed ZIP beta\n' },
+];
+const EXPECTED_ZIP_FILES = ['nested/alpha.txt', 'nested/deeper/beta.bin'];
 
 /** Plain-Node runtime consumer for the Electron-free policy entry. */
 const POLICY_RUNTIME_SOURCE = `import assert from 'node:assert/strict';
@@ -492,9 +504,220 @@ function linkDependency(name, consumerModules) {
   return true;
 }
 
+function assertPackedPackageContract(packageDir) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'));
+  const installTimeBuckets = ['dependencies', 'optionalDependencies', 'peerDependencies'];
+  for (const bucket of installTimeBuckets) {
+    if (manifest[bucket]?.['adm-zip'] !== undefined) {
+      throw new Error(`packed manifest must not declare adm-zip in ${bucket}`);
+    }
+  }
+  const bundledDependencies = manifest.bundledDependencies ?? manifest.bundleDependencies ?? [];
+  if (bundledDependencies.includes('adm-zip')) {
+    throw new Error('packed manifest must not bundle adm-zip as an install-time dependency');
+  }
+  const embeddedVersion = manifest.devDependencies?.['adm-zip'];
+  const esbuildVersion = manifest.devDependencies?.esbuild;
+  if (!/^\d+\.\d+\.\d+$/.test(embeddedVersion ?? '')) {
+    throw new Error('packed manifest must exact-pin the embedded adm-zip development input');
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(esbuildVersion ?? '')) {
+    throw new Error('packed manifest must exact-pin the esbuild development input');
+  }
+
+  const noticePath = path.join(packageDir, 'THIRD_PARTY_NOTICES.md');
+  if (!fs.existsSync(noticePath)) {
+    throw new Error('packed payload is missing THIRD_PARTY_NOTICES.md');
+  }
+  const notice = fs.readFileSync(noticePath, 'utf8');
+  if (
+    !notice.includes(`adm-zip ${embeddedVersion}`) ||
+    !notice.includes('Permission is hereby granted')
+  ) {
+    throw new Error('packed third-party notice is missing adm-zip version or MIT permission text');
+  }
+
+  const generatedSource = fs.readFileSync(
+    path.join(packageDir, 'dist', 'generated', 'adm-zip-worker-source.js'),
+    'utf8'
+  );
+  if (!generatedSource.includes(`ADM_ZIP_WORKER_VERSION = ${JSON.stringify(embeddedVersion)}`)) {
+    throw new Error('packed generated ZIP worker does not match its exact adm-zip input pin');
+  }
+  if (
+    !generatedSource.includes(
+      'Copyright (c) 2012 Another-D-Mention Software and other contributors'
+    ) ||
+    !generatedSource.includes('Permission is hereby granted')
+  ) {
+    throw new Error('packed generated ZIP worker is missing the embedded adm-zip MIT notice');
+  }
+}
+
+async function createZipFixture(zipPath) {
+  const zip = new AdmZip();
+  for (const fixture of ZIP_FIXTURE_FILES) {
+    zip.addFile(fixture.entry, Buffer.from(fixture.content));
+  }
+  await zip.writeZipPromise(zipPath);
+}
+
+function assertNoNodeModulesAncestor(startDirectory) {
+  let current = path.resolve(startDirectory);
+  while (true) {
+    if (fs.existsSync(path.join(current, 'node_modules'))) {
+      throw new Error(`isolated runtime has a node_modules ancestor at ${current}`);
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return;
+    current = parent;
+  }
+}
+
+function assertNoAdmZipRuntimeSpecifier(bundlePath) {
+  const source = fs.readFileSync(bundlePath, 'utf8');
+  const forbidden = [
+    /(?:require|import)\s*\(\s*['"]adm-zip(?:\/[^'"]*)?['"]\s*\)/,
+    /\.resolve\s*\(\s*['"]adm-zip(?:\/[^'"]*)?['"]\s*\)/,
+    /\b(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"]adm-zip(?:\/[^'"]*)?['"]/,
+  ];
+  if (forbidden.some((pattern) => pattern.test(source))) {
+    throw new Error(`${path.basename(bundlePath)} contains a runtime adm-zip module specifier`);
+  }
+}
+
+function makeIsolatedLauncherSource() {
+  const expectedContents = Object.fromEntries(
+    ZIP_FIXTURE_FILES.map((fixture, index) => [EXPECTED_ZIP_FILES[index], fixture.content])
+  );
+
+  return `import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
+
+const runtimeDir = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+assert.throws(
+  () => require.resolve('adm-zip'),
+  (error) => error?.code === 'MODULE_NOT_FOUND'
+);
+
+const rootBundle = await import('./root-bundle.mjs');
+assert.equal(rootBundle.rootExportNames.includes('systemInfo'), true);
+assert.equal(rootBundle.rootExportNames.includes('llamaServer'), true);
+
+const { extractArchive } = await import('./archive-bundle.mjs');
+const extractTo = path.join(runtimeDir, 'extracted');
+const progress = [];
+const files = await extractArchive(path.join(runtimeDir, 'fixture.zip'), extractTo, (event) => {
+  progress.push(event);
+});
+
+const expectedFiles = ${JSON.stringify(EXPECTED_ZIP_FILES)};
+const expectedContents = ${JSON.stringify(expectedContents)};
+assert.deepEqual(files, expectedFiles);
+assert.deepEqual(progress.map((event) => event.completedEntries), [0, 1, 2]);
+assert.equal(progress.every((event) => event.totalEntries === 2), true);
+assert.deepEqual(progress.slice(1).map((event) => event.entry), expectedFiles);
+for (const relativePath of expectedFiles) {
+  assert.equal(
+    fs.readFileSync(path.join(extractTo, ...relativePath.split('/')), 'utf8'),
+    expectedContents[relativePath]
+  );
+}
+
+assert.equal(fs.existsSync(path.join(runtimeDir, 'nested')), false);
+assert.equal(fs.existsSync(path.join(path.dirname(runtimeDir), 'nested')), false);
+console.warn('[packed-api] isolated root and ZIP worker smoke passed');
+`;
+}
+
+async function buildPackedRuntimeBundles({ consumerDir, packageDir, isolatedDir }) {
+  const rootBundle = path.join(isolatedDir, 'root-bundle.mjs');
+  const archiveBundle = path.join(isolatedDir, 'archive-bundle.mjs');
+  const userDataDir = path.join(isolatedDir, 'electron-user-data');
+  const packedArchiveModule = path.resolve(packageDir, 'dist', 'utils', 'archive-utils.js');
+  if (!fs.existsSync(packedArchiveModule) || !path.isAbsolute(packedArchiveModule)) {
+    throw new Error(`packed archive utility is missing at ${packedArchiveModule}`);
+  }
+
+  await esbuildBuild({
+    absWorkingDir: consumerDir,
+    bundle: true,
+    format: 'esm',
+    logLevel: 'silent',
+    outfile: rootBundle,
+    platform: 'node',
+    stdin: {
+      contents: `import assert from 'node:assert/strict';
+import * as packedApi from 'genai-electron';
+export const rootExportNames = Object.keys(packedApi);
+assert.equal(rootExportNames.includes('systemInfo'), true);
+`,
+      loader: 'js',
+      resolveDir: consumerDir,
+      sourcefile: 'packed-root-entry.mjs',
+    },
+    target: 'node22',
+    plugins: [
+      {
+        name: 'packed-electron-stub',
+        setup(build) {
+          build.onResolve({ filter: /^electron$/ }, () => ({
+            namespace: 'packed-electron-stub',
+            path: 'electron',
+          }));
+          build.onLoad({ filter: /.*/, namespace: 'packed-electron-stub' }, () => ({
+            contents: `export const app = {
+  getPath(name) {
+    if (name !== 'userData') throw new Error('unexpected Electron path request: ' + name);
+    return ${JSON.stringify(userDataDir)};
+  },
+};
+`,
+            loader: 'js',
+          }));
+        },
+      },
+    ],
+  });
+
+  await esbuildBuild({
+    absWorkingDir: consumerDir,
+    bundle: true,
+    format: 'esm',
+    logLevel: 'silent',
+    outfile: archiveBundle,
+    platform: 'node',
+    stdin: {
+      contents: "export { extractArchive } from 'packed-archive-utils';\n",
+      loader: 'js',
+      resolveDir: consumerDir,
+      sourcefile: 'packed-archive-entry.mjs',
+    },
+    target: 'node22',
+    plugins: [
+      {
+        name: 'packed-archive-seam',
+        setup(build) {
+          build.onResolve({ filter: /^packed-archive-utils$/ }, () => ({
+            path: packedArchiveModule,
+          }));
+        },
+      },
+    ],
+  });
+
+  assertNoAdmZipRuntimeSpecifier(rootBundle);
+  assertNoAdmZipRuntimeSpecifier(archiveBundle);
+}
+
 async function main() {
   if (!skipBuild) {
     console.warn('[packed-api] building the library');
+    run(process.execPath, [path.join(repoRoot, 'scripts', 'generate-zip-worker.mjs'), '--check']);
     run(process.execPath, [path.join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc')]);
   }
   if (!fs.existsSync(path.join(repoRoot, 'dist', 'index.d.ts'))) {
@@ -521,6 +744,7 @@ async function main() {
 
     console.warn('[packed-api] installing the tarball into a throwaway consumer project');
     await tar.x({ file: tarball, cwd: packageDir, strip: 1 });
+    assertPackedPackageContract(packageDir);
 
     const electronLink = path.join(consumerModules, 'electron');
     if (fs.existsSync(electronLink)) {
@@ -531,7 +755,29 @@ async function main() {
     console.warn('[packed-api] importing the policy entry and checking CommonJS resolution');
     run(process.execPath, [runtimeConsumer], { cwd: consumerDir });
 
-    for (const dependency of LINKED_DEPENDENCIES) linkDependency(dependency, consumerModules);
+    for (const dependency of BUNDLE_LINKED_DEPENDENCIES) {
+      if (!linkDependency(dependency, consumerModules)) {
+        throw new Error(`bundle dependency ${dependency} is not installed in the repository`);
+      }
+    }
+
+    const isolatedDir = path.join(tempRoot, 'isolated-runtime');
+    fs.mkdirSync(isolatedDir, { recursive: true });
+    const fixtureZip = path.join(isolatedDir, 'fixture.zip');
+    await createZipFixture(fixtureZip);
+    console.warn('[packed-api] bundling the packed root and archive seam for isolated execution');
+    await buildPackedRuntimeBundles({ consumerDir, packageDir, isolatedDir });
+    const isolatedLauncher = path.join(isolatedDir, 'run.mjs');
+    fs.writeFileSync(isolatedLauncher, makeIsolatedLauncherSource());
+    assertNoNodeModulesAncestor(isolatedDir);
+    console.warn('[packed-api] running bundles with adm-zip unavailable');
+    run(process.execPath, [isolatedLauncher], { cwd: isolatedDir });
+
+    for (const dependency of TYPE_LINKED_DEPENDENCIES) {
+      if (!linkDependency(dependency, consumerModules)) {
+        throw new Error(`type-check dependency ${dependency} is not installed in the repository`);
+      }
+    }
 
     fs.writeFileSync(
       path.join(consumerDir, 'package.json'),

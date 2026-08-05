@@ -1,7 +1,48 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.22.0 — Electron-free LLM calibration policy metadata
-> (2026-08-04)
+> **Current Status**: v0.22.1 — self-contained bundled ZIP worker
+> (2026-08-05)
+
+---
+
+## v0.22.1: Self-Contained Bundled ZIP Worker (2026-08-05)
+
+- Replaced the package-root eager `createRequire(...).resolve('adm-zip')` and worker dynamic import
+  with a deterministic generated preamble that embeds exact-pinned adm-zip 0.6.0 in the existing
+  inline worker. The typed extraction loop, worker lifecycle, containment behavior, responsiveness,
+  and entry-progress contract remain unchanged.
+- Moved `adm-zip` to exact-pinned development dependencies, added exact-pinned esbuild 0.28.1 for
+  controlled regeneration, and reduced published external runtime dependencies to
+  `@huggingface/gguf` and `tar`. The complete embedded MIT notice is preserved in both the worker
+  payload and `THIRD_PARTY_NOTICES.md`.
+- Added generated-source freshness enforcement to builds and expanded packed acceptance to bundle
+  the package root plus the packed archive utility, then run a real ZIP extraction where
+  `adm-zip` is demonstrably unresolvable and no `node_modules` directory is present in the runtime
+  ancestor chain.
+- Added a blocking embedded-input audit so high/critical adm-zip advisories remain CI-visible even
+  though production dependency audits correctly omit the development-classified source package.
+- Moved the repository release skill and its agent metadata from `.codex/skills/` to
+  `.agents/skills/`. This repository-maintenance change is not part of the published npm package.
+
+**Validation:** Clean build; 1038/1038 tests pass across 37 suites, including a full
+`--detectOpenHandles` run with no reported handles; focused archive/BinaryManager coverage passes
+86/86. ESLint passes with 0 errors and the existing 118 warnings, repository formatting and
+`git diff --check` pass, and the example build succeeds. The packed runtime smoke proves
+`adm-zip` is unresolvable before importing the bundled root and extracting a real ZIP. Production
+audit reports 0 vulnerabilities; the full audit reports one high-severity `brace-expansion`
+advisory confined to existing development tooling, while the embedded-input audit passes. The npm
+dry run contains 220 files in a 264,882-byte tarball (1,390,495 bytes unpacked): versus published
+v0.22.0, +5 files, +22,695 packed bytes (9.37%), and +110,970 unpacked bytes (8.67%). The single
+107,763-byte generated worker plus its small notice/declaration/map artifacts explains the delta.
+
+**Migration:** Public APIs, types, package exports, calibration policy, and server behavior are
+unchanged. Consumers with an exact dependency pin should update to v0.22.1; `^0.22.0` already
+admits it. After adopting v0.22.1, remove loose `adm-zip` installs/copies and bundler exclusions
+used only to work around the v0.22.0 eager resolve. See
+`genai-electron-docs/migration-0-22-0-to-0-22-1.md`.
+
+**Release status:** Preparing the single release PR from `release/v0.22.1`; merge, annotated tag,
+GitHub release, and maintainer-run npm publication remain.
 
 ---
 
@@ -84,7 +125,10 @@ release, and maintainer-side `npm publish` follow.
 
 - **Build:** ✅ 0 TypeScript errors
 - **Tests:** ✅ 1038/1038 passing (37 suites)
-- **Last Updated:** 2026-08-04 (v0.22.0 release candidate)
+- **Package:** ✅ isolated packed root/ZIP worker smoke passes with no resolvable `adm-zip`
+- **Audit:** ✅ 0 production vulnerabilities; embedded-input gate passes; 1 unrelated
+  development-only high-severity advisory recorded
+- **Last Updated:** 2026-08-05 (v0.22.1 release candidate)
 
 ---
 
@@ -877,7 +921,9 @@ Key design decisions that inform future development:
 
 ### Production Readiness
 - **Zero TypeScript errors**: Strict mode compilation, full type safety
-- **Minimal runtime dependencies**: Three small packages (adm-zip, @huggingface/gguf, tar); everything else uses Node.js built-ins
+- **Minimal runtime dependencies**: Two external packages (`@huggingface/gguf`, `tar`); the pinned
+  adm-zip implementation is embedded in the self-contained ZIP worker and everything else uses
+  Node.js built-ins
 - **Comprehensive documentation**: API reference, setup guide, architecture docs, examples
 - **Example application**: Full-featured electron-control-panel demonstrating all features
 

@@ -19,6 +19,7 @@ export default tseslint.config(
       'dist/',
       'coverage/',
       'node_modules/',
+      'src/generated/adm-zip-worker-source.ts',
       'examples/',
       'tests/',
       '**/*.js',
