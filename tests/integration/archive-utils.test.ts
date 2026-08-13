@@ -12,6 +12,7 @@ import { extractArchive, extractBinary } from '../../src/utils/archive-utils.js'
 const TEXT_CONTENT = 'archive compatibility fixture\n';
 const BINARY_CONTENT = 'nested executable fixture\n';
 const BINARY_NAME = 'fixture-binary';
+const LARGE_ENTRY_SIZE = 12 * 1024 * 1024;
 
 describe('archive-utils integration', () => {
   let tempRoot: string;
@@ -19,6 +20,7 @@ describe('archive-utils integration', () => {
   let tarPath: string;
   let secondTarPath: string;
   let traversalZipPath: string;
+  let largeZipPath: string;
 
   beforeAll(async () => {
     tempRoot = await mkdtemp(path.join(tmpdir(), 'genai-archive-test-'));
@@ -26,6 +28,7 @@ describe('archive-utils integration', () => {
     tarPath = path.join(tempRoot, 'fixture.tar.gz');
     secondTarPath = path.join(tempRoot, 'second-fixture.tar.gz');
     traversalZipPath = path.join(tempRoot, 'traversal.zip');
+    largeZipPath = path.join(tempRoot, 'large-fixture.zip');
 
     const sourceDir = path.join(tempRoot, 'source');
     const nestedDir = path.join(sourceDir, 'nested');
@@ -42,6 +45,10 @@ describe('archive-utils integration', () => {
     const traversalZip = new AdmZip();
     traversalZip.addFile('../escape.txt', Buffer.from('contained fixture\n'));
     await traversalZip.writeZipPromise(traversalZipPath);
+
+    const largeZip = new AdmZip();
+    largeZip.addFile('large/runtime.bin', Buffer.alloc(LARGE_ENTRY_SIZE, 0x5a));
+    await largeZip.writeZipPromise(largeZipPath);
 
     await tar.c({ file: tarPath, cwd: sourceDir, gzip: true }, ['nested']);
     await writeFile(path.join(sourceDir, 'second.txt'), 'second archive fixture\n');
@@ -127,9 +134,56 @@ describe('archive-utils integration', () => {
       progress.push(event);
     });
 
-    expect(progress.map((event) => event.completedEntries)).toEqual([0, 1, 2]);
+    const entryTransitions = progress
+      .map((event) => event.completedEntries)
+      .filter((count, index, counts) => index === 0 || count !== counts[index - 1]);
+    expect(entryTransitions).toEqual([0, 1, 2]);
     expect(progress.every((event) => event.totalEntries === 2)).toBe(true);
     expect(progress.at(-1)).toMatchObject({ completedEntries: 2, totalEntries: 2 });
+  });
+
+  it('reports byte progress while one large ZIP entry is still incomplete', async () => {
+    const extractTo = path.join(tempRoot, 'large-progress-zip');
+    const progress: Array<{
+      completedEntries: number;
+      totalEntries: number;
+      writtenBytes?: number;
+      totalUncompressedBytes?: number;
+    }> = [];
+
+    await extractArchive(largeZipPath, extractTo, (event) => progress.push(event));
+
+    const written = progress.map((event) => event.writtenBytes ?? 0);
+    expect(written.every((value, index) => index === 0 || value >= written[index - 1]!)).toBe(true);
+    expect(
+      progress.some(
+        (event) =>
+          event.completedEntries === 0 && event.writtenBytes !== undefined && event.writtenBytes > 0
+      )
+    ).toBe(true);
+    expect(progress.at(-1)).toMatchObject({
+      completedEntries: 1,
+      totalEntries: 1,
+      writtenBytes: LARGE_ENTRY_SIZE,
+      totalUncompressedBytes: LARGE_ENTRY_SIZE,
+    });
+    expect(progress.length).toBeLessThanOrEqual(103);
+    await expect(readFile(path.join(extractTo, 'large', 'runtime.bin'))).resolves.toHaveLength(
+      LARGE_ENTRY_SIZE
+    );
+  });
+
+  it('isolates throwing ZIP progress callbacks from extraction', async () => {
+    const extractTo = path.join(tempRoot, 'throwing-progress-callback');
+
+    await expect(
+      extractArchive(zipPath, extractTo, () => {
+        throw new Error('consumer callback failure');
+      })
+    ).resolves.toEqual(expect.arrayContaining(['nested/message.txt', `nested/bin/${BINARY_NAME}`]));
+    await expect(readFile(path.join(extractTo, 'nested', 'message.txt'), 'utf8')).resolves.toBe(
+      TEXT_CONTENT
+    );
   });
 
   it('rejects a corrupt ZIP and leaves the worker lifecycle settled', async () => {

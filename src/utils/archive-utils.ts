@@ -15,18 +15,26 @@ import {
 } from '../generated/adm-zip-worker-source.js';
 
 /**
- * Entry-level progress reported while an archive is being extracted.
+ * Entry- and byte-level progress reported while an archive is being extracted.
  *
- * ZIP extraction reports one update before extraction and after every file.
- * The tar path currently does not expose entry progress.
+ * ZIP extraction reports one update before extraction, throttled updates while
+ * file payloads are written, and one update after every file. Byte progress
+ * measures uncompressed payload bytes successfully written; adm-zip still
+ * inflates each complete entry before writing it. The tar path currently does
+ * not expose extraction progress.
  */
 export interface ArchiveExtractionProgress {
   completedEntries: number;
   totalEntries: number;
+  writtenBytes?: number;
+  totalUncompressedBytes?: number;
   entry?: string;
 }
 
 export type ArchiveExtractionProgressCallback = (progress: ArchiveExtractionProgress) => void;
+
+/** Called after ZIP writes finish while the extraction worker releases its resources. */
+export type ArchiveExtractionSettlingCallback = () => void;
 
 interface ZipWorkerData {
   archivePath: string;
@@ -39,6 +47,8 @@ type ZipWorkerMessage =
       type: 'progress';
       completedEntries: number;
       totalEntries: number;
+      writtenBytes?: number;
+      totalUncompressedBytes?: number;
       entry?: string;
     }
   | { type: 'done'; files: string[] }
@@ -54,6 +64,7 @@ type ZipWorkerMessage =
  */
 async function zipExtractionWorkerMain(): Promise<void> {
   const { parentPort, workerData } = await import('node:worker_threads');
+  const workerFs = await import('node:fs');
   const workerPath = await import('node:path');
   const data = workerData as ZipWorkerData;
 
@@ -65,8 +76,14 @@ async function zipExtractionWorkerMain(): Promise<void> {
     interface ZipEntry {
       isDirectory: boolean;
       entryName: string;
+      header: {
+        size: number;
+      };
     }
-    type AdmZipConstructor = new (archivePath: string) => {
+    type AdmZipConstructor = new (
+      archivePath: string,
+      options?: { fs?: unknown }
+    ) => {
       getEntries(): ZipEntry[];
       extractEntryTo(
         entry: ZipEntry,
@@ -83,33 +100,122 @@ async function zipExtractionWorkerMain(): Promise<void> {
       throw new Error('Embedded ZIP constructor is unavailable');
     }
     const AdmZip = admZipCandidate as AdmZipConstructor;
-    const zip = new AdmZip(data.archivePath);
+    const WRITE_PROGRESS_CHUNK_BYTES = 4 * 1024 * 1024;
+    const UNKNOWN_TOTAL_PROGRESS_INTERVAL_MS = 100;
+    let completedEntries = 0;
+    let totalEntries = 0;
+    let writtenBytes = 0;
+    let totalUncompressedBytes: number | undefined;
+    let activeEntry: string | undefined;
+    let lastReportedBytePercent: number | undefined;
+    let lastReportedWrittenBytes = 0;
+    let lastReportedAt = 0;
+
+    const postProgress = (force = false): void => {
+      const bytePercent =
+        totalUncompressedBytes !== undefined && totalUncompressedBytes > 0
+          ? Math.min(100, Math.floor((writtenBytes / totalUncompressedBytes) * 100))
+          : undefined;
+      const now = Date.now();
+      const firstUnknownTotalWrite =
+        bytePercent === undefined && writtenBytes > 0 && lastReportedWrittenBytes === 0;
+      const unknownTotalIntervalElapsed =
+        bytePercent === undefined && now - lastReportedAt >= UNKNOWN_TOTAL_PROGRESS_INTERVAL_MS;
+
+      if (
+        !force &&
+        bytePercent === lastReportedBytePercent &&
+        !firstUnknownTotalWrite &&
+        !unknownTotalIntervalElapsed
+      ) {
+        return;
+      }
+
+      parentPort.postMessage({
+        type: 'progress',
+        completedEntries,
+        totalEntries,
+        writtenBytes,
+        totalUncompressedBytes,
+        entry: activeEntry,
+      } satisfies ZipWorkerMessage);
+      lastReportedBytePercent = bytePercent;
+      lastReportedWrittenBytes = writtenBytes;
+      lastReportedAt = now;
+    };
+
+    const progressFs = new Proxy(workerFs, {
+      get(target, property, receiver) {
+        if (property !== 'writeSync') {
+          return Reflect.get(target, property, receiver);
+        }
+
+        return (
+          fd: number,
+          buffer: Uint8Array,
+          offset: number,
+          length: number,
+          position: number | null
+        ): number => {
+          let completedWriteBytes = 0;
+          while (completedWriteBytes < length) {
+            const chunkLength = Math.min(WRITE_PROGRESS_CHUNK_BYTES, length - completedWriteBytes);
+            const chunkPosition = position === null ? null : position + completedWriteBytes;
+            const bytesWritten = workerFs.writeSync(
+              fd,
+              buffer,
+              offset + completedWriteBytes,
+              chunkLength,
+              chunkPosition
+            );
+            if (bytesWritten <= 0) {
+              throw new Error('ZIP extraction write made no progress');
+            }
+            completedWriteBytes += bytesWritten;
+            writtenBytes += bytesWritten;
+            postProgress();
+          }
+          return completedWriteBytes;
+        };
+      },
+    });
+
+    const zip = new AdmZip(data.archivePath, { fs: progressFs });
     const entries = zip.getEntries().filter((entry) => !entry.isDirectory);
     const files: string[] = [];
+    totalEntries = entries.length;
 
-    parentPort.postMessage({
-      type: 'progress',
-      completedEntries: 0,
-      totalEntries: entries.length,
-    } satisfies ZipWorkerMessage);
+    let expectedBytes = 0;
+    for (const entry of entries) {
+      const entrySize = entry.header.size;
+      if (
+        !Number.isSafeInteger(entrySize) ||
+        entrySize < 0 ||
+        !Number.isSafeInteger(expectedBytes + entrySize)
+      ) {
+        expectedBytes = -1;
+        break;
+      }
+      expectedBytes += entrySize;
+    }
+    if (expectedBytes >= 0) {
+      totalUncompressedBytes = expectedBytes;
+    }
+
+    postProgress(true);
 
     for (const [index, entry] of entries.entries()) {
-      zip.extractEntryTo(entry, data.extractTo, true, true);
-
       // Mirror adm-zip's canonicalization: normalize as an absolute POSIX
       // path, then remove the synthetic root. This removes '..' traversal
       // while preserving the archive-relative nested path.
       const canonicalEntry = workerPath.posix
         .normalize(`/${entry.entryName.replaceAll('\\', '/')}`)
         .replace(/^\/+/, '');
+      activeEntry = canonicalEntry;
+      zip.extractEntryTo(entry, data.extractTo, true, true);
       files.push(canonicalEntry);
-
-      parentPort.postMessage({
-        type: 'progress',
-        completedEntries: index + 1,
-        totalEntries: entries.length,
-        entry: canonicalEntry,
-      } satisfies ZipWorkerMessage);
+      completedEntries = index + 1;
+      postProgress(true);
     }
 
     parentPort.postMessage({ type: 'done', files } satisfies ZipWorkerMessage);
@@ -169,8 +275,9 @@ export function getArchiveExtension(url: string): string {
  * @param archivePath - Path to the archive file (.zip or .tar.gz)
  * @param extractTo - Directory to extract to (will be created if it doesn't exist)
  * @param binaryNames - List of binary names to search for (e.g., ['sd.exe', 'sd'] or ['llama-server.exe', 'llama-server'])
- * @param onProgress - Optional ZIP file-entry progress callback
+ * @param onProgress - Optional ZIP write-byte and file-entry progress callback
  * @param onFilesExtracted - Optional callback receiving normalized archive-relative file paths
+ * @param onSettling - Optional callback when ZIP writes finish and worker cleanup begins
  * @returns Path to the extracted binary
  * @throws {FileSystemError} If extraction fails or binary not found
  *
@@ -188,7 +295,8 @@ export async function extractBinary(
   extractTo: string,
   binaryNames: string[],
   onProgress?: ArchiveExtractionProgressCallback,
-  onFilesExtracted?: (files: readonly string[]) => void
+  onFilesExtracted?: (files: readonly string[]) => void,
+  onSettling?: ArchiveExtractionSettlingCallback
 ): Promise<string> {
   try {
     // Verify archive file exists
@@ -222,7 +330,7 @@ export async function extractBinary(
         },
       });
     } else {
-      extractedFiles = await extractZipInWorker(archivePath, extractTo, onProgress);
+      extractedFiles = await extractZipInWorker(archivePath, extractTo, onProgress, onSettling);
     }
     onFilesExtracted?.(extractedFiles);
 
@@ -258,7 +366,8 @@ export async function extractBinary(
  *
  * @param archivePath - Path to the archive file (.zip or .tar.gz)
  * @param extractTo - Directory to extract to (will be created if it doesn't exist)
- * @param onProgress - Optional ZIP file-entry progress callback
+ * @param onProgress - Optional ZIP write-byte and file-entry progress callback
+ * @param onSettling - Optional callback when ZIP writes finish and worker cleanup begins
  * @returns Normalized archive-relative paths of extracted files
  * @throws {FileSystemError} If extraction fails
  *
@@ -270,7 +379,8 @@ export async function extractBinary(
 export async function extractArchive(
   archivePath: string,
   extractTo: string,
-  onProgress?: ArchiveExtractionProgressCallback
+  onProgress?: ArchiveExtractionProgressCallback,
+  onSettling?: ArchiveExtractionSettlingCallback
 ): Promise<string[]> {
   try {
     await fs.mkdir(extractTo, { recursive: true });
@@ -295,7 +405,7 @@ export async function extractArchive(
       });
       return files;
     } else {
-      return await extractZipInWorker(archivePath, extractTo, onProgress);
+      return await extractZipInWorker(archivePath, extractTo, onProgress, onSettling);
     }
   } catch (error) {
     if (error instanceof FileSystemError) {
@@ -317,7 +427,8 @@ export async function extractArchive(
 async function extractZipInWorker(
   archivePath: string,
   extractTo: string,
-  onProgress?: ArchiveExtractionProgressCallback
+  onProgress?: ArchiveExtractionProgressCallback,
+  onSettling?: ArchiveExtractionSettlingCallback
 ): Promise<string[]> {
   await fs.mkdir(extractTo, { recursive: true });
 
@@ -333,6 +444,7 @@ async function extractZipInWorker(
 
     let files: string[] | undefined;
     let workerFailure: Error | undefined;
+    let successfulTerminationRequested = false;
 
     worker.on('message', (message: ZipWorkerMessage) => {
       if (message.type === 'progress') {
@@ -340,6 +452,8 @@ async function extractZipInWorker(
           onProgress?.({
             completedEntries: message.completedEntries,
             totalEntries: message.totalEntries,
+            writtenBytes: message.writtenBytes,
+            totalUncompressedBytes: message.totalUncompressedBytes,
             entry: message.entry,
           });
         } catch {
@@ -347,6 +461,20 @@ async function extractZipInWorker(
         }
       } else if (message.type === 'done') {
         files = message.files;
+        successfulTerminationRequested = true;
+        try {
+          onSettling?.();
+        } catch {
+          // Consumer callbacks must never abort extraction.
+        }
+        // All extraction and synchronous file writes have completed before the
+        // worker sends this result. Request termination now instead of waiting
+        // for a large V8 isolate to tear itself down naturally, but continue to
+        // settle only from `exit` so no worker handle escapes the API call.
+        void worker.terminate().catch(() => {
+          // The exit event remains authoritative. If termination loses a race
+          // with natural shutdown, a clean exit can still return the result.
+        });
       } else {
         workerFailure = new Error(message.message);
         workerFailure.stack = message.stack;
@@ -360,7 +488,7 @@ async function extractZipInWorker(
     worker.once('exit', (code) => {
       if (workerFailure) {
         reject(workerFailure);
-      } else if (code !== 0) {
+      } else if (code !== 0 && !(successfulTerminationRequested && code === 1)) {
         reject(new Error(`ZIP extraction worker exited with code ${code}`));
       } else if (!files) {
         reject(new Error('ZIP extraction worker exited without a result'));

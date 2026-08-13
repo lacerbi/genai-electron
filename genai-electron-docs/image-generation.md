@@ -469,15 +469,19 @@ await diffusionServer.clearLogs();
 
 DiffusionServerManager extends `EventEmitter`:
 
-During ZIP extraction, `'binary-progress'` adds `completedEntries`,
-`totalEntries`, and an extraction `percent`. ZIP inflation runs in a self-contained worker
-thread, so these updates continue without blocking Electron's main event loop or resolving a loose
-`adm-zip` package at runtime.
+During ZIP extraction, `'binary-progress'` adds `writtenBytes` / `totalUncompressedBytes` alongside
+`completedEntries` / `totalEntries`. Extraction `percent` uses the byte ratio when available,
+falls back to entries, and is omitted without a positive denominator. ZIP work runs in a
+self-contained worker, so it does not block Electron's main event loop or resolve a loose
+`adm-zip` package at runtime. `adm-zip` inflates each complete entry before writing it, so byte
+updates measure writes rather than streaming decompression. After all writes, `phase: 'finalizing'`
+names worker/isolate resource release until exit; after validation, `phase: 'installing'` names the
+candidate-copy and publication tail. Neither phase claims a percentage.
 
 - `'started'` - Server started successfully (receives `DiffusionServerInfo`)
 - `'stopped'` - Server stopped
 - `'binary-log'` - Binary download/validation progress (receives `{ message, level }`); the same messages are persisted to `diffusion-server.log` from the beginning of `start()`
-- `'binary-progress'` - Structured provisioning progress (receives `BinaryProgressEvent`: phase + file + throttled whole-percent byte-download progress or ZIP entry-extraction progress) — build progress UIs from this instead of parsing log messages
+- `'binary-progress'` - Structured provisioning progress (receives `BinaryProgressEvent`: phase + file + throttled download/ZIP-write percentages, ZIP entry counters, and phase-only finalization/installation tails) — build progress UIs from this instead of parsing log messages
 - `'calibration-progress'` - Offload-calibration sweep progress (receives `DiffusionCalibrationProgress`; same payload as the `calibrate()` `onProgress` callback) — see [Offload Calibration](#offload-calibration)
 
 **Note:** DiffusionServerManager does not emit a `'crashed'` event because it does not maintain a persistent process — stable-diffusion.cpp is spawned on-demand for each generation. Generation failures are reported via the returned promise or HTTP error responses.

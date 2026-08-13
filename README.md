@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.22.1 | **Status**: Production Ready - Self-contained bundled ZIP worker
+> **Version**: 0.23.0 | **Status**: Production Ready - Granular binary provisioning progress
 
 Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 

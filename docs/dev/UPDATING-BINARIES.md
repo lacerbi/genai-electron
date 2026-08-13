@@ -11,8 +11,12 @@ Starting with llama.cpp **b7956**, macOS and Linux binaries use **`.tar.gz`** fo
 - **Unix tar.gz archives nest everything under a top-level `llama-<tag>/` directory** (true since at least b7956). `BinaryManager.downloadAndTestVariant` flattens this automatically by copying the directory that actually contains the binary — do not "fix" the copy back to the extract root.
 - **Windows zips are flat**, but since ~b9860 `llama-server.exe` is a small launcher with the real code in `llama-server-impl.dll` — the exe alone is not runnable, which is why ALL extracted files are copied next to it.
 - **ZIP inflation runs in a worker thread.** Keep both archive consumers routed
-  through `extractZipInWorker`; its per-file callbacks drive
-  `'binary-progress'` entry counters and keep Electron's main event loop free.
+  through `extractZipInWorker`; its throttled uncompressed write-byte callbacks and per-file
+  completions drive `'binary-progress'` while keeping Electron's main event loop free. The byte
+  fields measure writes after `adm-zip` has inflated a complete entry; preserve that limitation in
+  consumer documentation. After the worker reports a complete result, `phase: 'finalizing'` names
+  resource/isolate cleanup. Keep the success path waiting for worker exit, even when explicitly
+  requesting termination, so extraction cannot leak a live worker handle.
   The worker is self-contained: a committed generated preamble embeds the pinned ZIP
   implementation, so published applications do not resolve `adm-zip` at runtime. Tar extraction
   remains asynchronous through `tar.x`.

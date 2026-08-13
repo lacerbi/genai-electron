@@ -562,24 +562,36 @@ interface HealthCheckResponse {
 ### BinaryProgressEvent
 
 Structured provisioning progress (`'binary-progress'` event). Download events
-are throttled to whole-percent changes. ZIP extraction adds an initial entry
-count and one update after each extracted file.
+are throttled to whole-percent changes. ZIP extraction adds throttled
+uncompressed write-byte progress alongside its initial and per-file entry
+counters. `finalizing` identifies completed ZIP worker resource release until
+exit. After validation, `installing` identifies candidate assembly and
+publication. Neither tail claims percentage progress.
 
 ```typescript
 interface BinaryProgressEvent {
-  phase: 'downloading' | 'extracting' | 'verifying' | 'testing';
+  phase: 'downloading' | 'extracting' | 'finalizing' | 'verifying' | 'testing' | 'installing';
   file: string; // 'binary' or a dependency description (e.g. 'CUDA runtime')
   downloaded?: number; // bytes (downloading)
   total?: number; // bytes (downloading)
-  percent?: number; // whole number (downloading or extracting)
+  percent?: number; // whole number (download bytes or best extraction denominator)
   completedEntries?: number; // extracted file entries (ZIP extraction)
   totalEntries?: number; // total file entries (ZIP extraction)
+  writtenBytes?: number; // cumulative uncompressed payload bytes written (ZIP extraction)
+  totalUncompressedBytes?: number; // expected uncompressed payload bytes (ZIP extraction)
 }
 ```
 
 `downloaded`/`total` are byte counts and only apply to downloads.
 `completedEntries`/`totalEntries` count ZIP file entries. Extraction callbacks
 start at `0 / totalEntries` and finish at `totalEntries / totalEntries`.
+`writtenBytes` counts successful payload writes and `totalUncompressedBytes`
+comes from valid entry headers as progress metadata only. Extraction `percent`
+uses that byte ratio when available, falls back to entries, and is omitted when
+neither denominator is positive. Because `adm-zip` inflates each complete entry
+before writing it, byte progress does not measure streaming decompression. A
+phase-only `finalizing` event follows the last ZIP write immediately and remains
+the truthful UI state while the worker exits.
 
 ### Port & Health Utilities
 
