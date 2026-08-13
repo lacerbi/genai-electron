@@ -1,6 +1,6 @@
 # Extraction progress is entry-granular, and the tail of provisioning is unreported
 
-Status: RESOLVED (2026-08-13, unreleased)
+Status: RESOLVED (2026-08-13, targets v0.23.0)
 
 Observed on 0.22.1, Windows/NVIDIA, during a deliberate llama.cpp re-provision (the
 `binaries/llama` tree renamed aside, then a packaged Electron app started a local
@@ -65,7 +65,7 @@ path-containment checks, or the public error surface.
 
 ## Resolution
 
-Implemented unreleased on 2026-08-13:
+Implemented for v0.23.0 on 2026-08-13:
 
 - ZIP worker progress now includes cumulative `writtenBytes` and
   `totalUncompressedBytes` alongside the existing entry counters. A worker-local

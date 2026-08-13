@@ -1,6 +1,6 @@
 # Issue: ZIP Worker Settlement Gap
 
-Status: RESOLVED (2026-08-13, unreleased)
+Status: RESOLVED (2026-08-13, targets v0.23.0)
 
 ## Summary
 

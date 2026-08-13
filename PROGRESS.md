@@ -1,11 +1,11 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.22.1 — self-contained bundled ZIP worker
-> (2026-08-05)
+> **Current Status**: v0.23.0 — granular binary provisioning progress
+> (2026-08-13)
 
 ---
 
-## Unreleased
+## v0.23.0: Granular Binary Provisioning Progress (2026-08-13)
 
 - **Granular binary extraction progress**: ZIP worker events now report cumulative uncompressed
   `writtenBytes` / `totalUncompressedBytes` alongside the existing entry counters. Extraction
@@ -21,15 +21,19 @@
   cleanup. The parent requests prompt termination but still resolves only after `exit`, preserving
   the no-leaked-worker guarantee while keeping long Windows teardown out of completed extraction.
 - Updated focused archive/BinaryManager tests, the isolated packed-package contract, current API
-  guidance, troubleshooting, setup, and architectural documentation. Historical migration guides
-  remain unchanged; there is no version or release action.
+  guidance, troubleshooting, setup, and architectural documentation.
 
-**Validation:** Focused archive/BinaryManager coverage passes 99/99. The full Jest suite passes
-1051/1051 tests across 37 suites with `--detectOpenHandles` and no reported handles. The TypeScript
-build and generated-worker freshness gate pass; the isolated packed consumer extracts a real ZIP
-with no resolvable `adm-zip` and type-checks the additive public contract. Formatting passes, and
-ESLint reports 0 errors with the existing 118 warnings. A pre-seeded temporary-profile acceptance
-also provisioned the real pinned Windows/CUDA b9860 archives without network downloads: both
+**Validation:** The release `prepublishOnly` gate passes with a clean build and 1051/1051 tests
+across 37 suites. Its parallel Jest run reports the known force-exit warning; the serial
+`--detectOpenHandles` run also passes 1051/1051 with no reported handles. Focused
+archive/BinaryManager coverage passes 99/99. The generated-worker freshness gate passes; the
+isolated packed consumer extracts a real ZIP with no resolvable `adm-zip` and type-checks the
+additive public contract. Formatting passes, and ESLint reports 0 errors with the existing 118
+warnings. Production audit reports 0 vulnerabilities, the embedded adm-zip audit gate passes, and
+the informational full audit reports 2 high-severity vulnerabilities confined to development
+tooling (`brace-expansion` and `js-yaml`). The npm dry run contains 220 files in a 266,695-byte
+tarball (1,399,619 bytes unpacked). A pre-seeded temporary-profile acceptance also provisioned the
+real pinned Windows/CUDA b9860 archives without network downloads: both
 archives produced 100 within-entry byte advances, `installing` followed validation and covered the
 successful candidate publication, and the four monitored active Palimpsest markers remained
 byte-identical while the directory timestamp was unchanged. A focused
@@ -37,6 +41,15 @@ follow-up preserved exit-before-resolution and now reports worker cleanup as `fi
 same millisecond as the final extraction event. In the accepted repeat, that phase truthfully
 covered 34.258 seconds for the CUDA worker and 1.357 seconds for the main worker; cache hashes were
 unchanged, and the pre-existing server remained healthy and was not targeted.
+
+**Migration:** Existing event listeners remain valid. Consumers that render or exhaustively switch
+on `BinaryProgressEvent.phase` should handle `'finalizing'` and `'installing'`; byte fields remain
+optional and entry counters remain the fallback. Because this is a pre-1.0 minor, dependency ranges
+such as `^0.22.1` do not admit v0.23.0. See
+`genai-electron-docs/migration-0-22-1-to-0-23.md`.
+
+**Release status:** Preparing the single release PR from `release/v0.23.0`; merge, annotated tag,
+GitHub release, and maintainer-run npm publication remain.
 
 ---
 
@@ -159,11 +172,12 @@ release, and maintainer-side `npm publish` follow.
 ## Current Build Status
 
 - **Build:** ✅ 0 TypeScript errors
-- **Tests:** ✅ 1038/1038 passing (37 suites)
-- **Package:** ✅ isolated packed root/ZIP worker smoke passes with no resolvable `adm-zip`
-- **Audit:** ✅ 0 production vulnerabilities; embedded-input gate passes; 1 unrelated
-  development-only high-severity advisory recorded
-- **Last Updated:** 2026-08-05 (v0.22.1 release candidate)
+- **Tests:** ✅ 1051/1051 passing (37 suites)
+- **Package:** ✅ 220-file v0.23.0 dry run; isolated packed root/ZIP worker smoke passes with no
+  resolvable `adm-zip`
+- **Audit:** ✅ 0 production vulnerabilities; embedded-input gate passes; 2 high-severity
+  vulnerabilities remain confined to development tooling
+- **Last Updated:** 2026-08-13 (v0.23.0 release candidate)
 
 ---
 

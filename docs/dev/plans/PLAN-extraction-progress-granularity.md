@@ -1,7 +1,7 @@
 # Plan: Extraction Progress Granularity
 
 Created: 2026-08-13
-Status: COMPLETE (2026-08-13)
+Status: COMPLETE (2026-08-13; targets v0.23.0)
 
 ## Execution Tracker
 
