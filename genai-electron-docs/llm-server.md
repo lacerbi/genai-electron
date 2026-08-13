@@ -1036,15 +1036,24 @@ llamaServer.on('binary-log', (data: { message: string; level: 'info' | 'warn' | 
 
 ### 'binary-progress'
 
-Structured companion to `'binary-log'` for progress UIs — no log-string parsing needed. Download events are throttled to whole-percent changes at the source. ZIP extraction emits an initial entry count and one update after every file; `verifying` and `testing` retain their phase-transition events. Dependency work (e.g. the CUDA runtime) carries its description in `file`; the main binary uses `'binary'`.
+Structured companion to `'binary-log'` for progress UIs — no log-string parsing needed. Download
+events are throttled to whole-percent changes at the source. ZIP extraction reports throttled
+`writtenBytes` / `totalUncompressedBytes` updates alongside the existing entry counters; its
+`percent` uses bytes when that total is available and falls back to entry counts otherwise. A
+missing denominator omits `percent`. `verifying`, `testing`, and the post-validation `installing`
+tail retain phase-transition events. After all ZIP writes, `finalizing` identifies worker/isolate
+resource release until the worker has exited. Dependency work (e.g. the CUDA runtime) carries its
+description in `file`; the main binary uses `'binary'`.
 
 ```typescript
 llamaServer.on('binary-progress', (event: BinaryProgressEvent) => {
-  if (event.phase === 'downloading') {
-    progressBar.update(event.percent!, { label: event.file });
-  } else if (event.phase === 'extracting' && event.totalEntries !== undefined) {
-    progressBar.update(event.percent!, {
-      label: `Extracting ${event.file} (${event.completedEntries}/${event.totalEntries})`,
+  if (event.percent !== undefined) {
+    const entries =
+      event.completedEntries !== undefined && event.totalEntries !== undefined
+        ? ` (${event.completedEntries}/${event.totalEntries} files)`
+        : '';
+    progressBar.update(event.percent, {
+      label: `${event.phase} ${event.file}${entries}`,
     });
   } else {
     statusLine.set(`${event.phase} ${event.file}...`);
@@ -1053,9 +1062,14 @@ llamaServer.on('binary-progress', (event: BinaryProgressEvent) => {
 ```
 
 ZIP extraction runs in a self-contained worker thread and reports
-`completedEntries` / `totalEntries`, keeping Electron's main event loop responsive without a
-loose/resolvable `adm-zip` runtime package. Installed dependencies are cached by checksum in
-`.deps.json`; a
+`writtenBytes` / `totalUncompressedBytes` plus `completedEntries` / `totalEntries`, keeping
+Electron's main event loop responsive without a loose/resolvable `adm-zip` runtime package. Byte
+updates measure uncompressed payload writes: `adm-zip` still inflates a complete entry before it
+writes, so the byte counter can pause during that inflation. `finalizing` then covers completed
+worker resource release and intentionally has no percentage; large Windows ZIPs may remain in this
+phase for tens of seconds. The subsequent `installing` phase covers candidate copying,
+metadata/checksum work, and atomic publication; it also has no percentage. Installed dependencies
+are cached by checksum in `.deps.json`; a
 later binary release that references the same bytes reuses the installed files
 without downloading or inflating the archive again. After an interrupted run,
 complete checksum-valid archives are reused and stale extraction directories

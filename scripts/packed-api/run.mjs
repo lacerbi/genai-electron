@@ -96,6 +96,7 @@ import { resolveLlamaCalibrationTimeBudget as policyBudgetResolver } from 'genai
 // @ts-expect-error the internal adaptive terminal-status helper is not a package-root export
 import type { LlamaAdaptiveCalibrationTerminalStatus } from 'genai-electron';
 import type {
+  BinaryProgressEvent,
   LlamaAdaptiveCalibrationBestKnown,
   LlamaAdaptiveCalibrationBudgetReport,
   LlamaAdaptiveCalibrationConfig,
@@ -128,6 +129,27 @@ import type {
   TelemetryCommandOptions,
   UIErrorFormat,
 } from 'genai-electron';
+
+const extractionProgress: BinaryProgressEvent = {
+  phase: 'extracting',
+  file: 'binary',
+  completedEntries: 0,
+  totalEntries: 1,
+  writtenBytes: 4_194_304,
+  totalUncompressedBytes: 8_388_608,
+  percent: 50,
+};
+const installationProgress: BinaryProgressEvent = {
+  phase: 'installing',
+  file: 'binary',
+};
+const finalizationProgress: BinaryProgressEvent = {
+  phase: 'finalizing',
+  file: 'binary',
+};
+void extractionProgress;
+void installationProgress;
+void finalizationProgress;
 
 // --- schema-v4 report, progress, and partial shapes -------------------------------------------
 
@@ -618,9 +640,24 @@ const files = await extractArchive(path.join(runtimeDir, 'fixture.zip'), extract
 const expectedFiles = ${JSON.stringify(EXPECTED_ZIP_FILES)};
 const expectedContents = ${JSON.stringify(expectedContents)};
 assert.deepEqual(files, expectedFiles);
-assert.deepEqual(progress.map((event) => event.completedEntries), [0, 1, 2]);
+const entryTransitions = progress
+  .map((event) => event.completedEntries)
+  .filter((count, index, counts) => index === 0 || count !== counts[index - 1]);
+assert.deepEqual(entryTransitions, [0, 1, 2]);
 assert.equal(progress.every((event) => event.totalEntries === 2), true);
-assert.deepEqual(progress.slice(1).map((event) => event.entry), expectedFiles);
+const expectedUncompressedBytes = Object.values(expectedContents).reduce(
+  (total, content) => total + Buffer.byteLength(content),
+  0
+);
+const writtenBytes = progress.map((event) => event.writtenBytes);
+assert.equal(writtenBytes.every((value, index) => index === 0 || value >= writtenBytes[index - 1]), true);
+assert.equal(progress.some((event) => event.completedEntries === 0 && event.writtenBytes > 0), true);
+assert.equal(progress.at(-1).writtenBytes, expectedUncompressedBytes);
+assert.equal(progress.at(-1).totalUncompressedBytes, expectedUncompressedBytes);
+const completionEntries = progress
+  .filter((event, index) => index > 0 && event.completedEntries > progress[index - 1].completedEntries)
+  .map((event) => event.entry);
+assert.deepEqual(completionEntries, expectedFiles);
 for (const relativePath of expectedFiles) {
   assert.equal(
     fs.readFileSync(path.join(extractTo, ...relativePath.split('/')), 'utf8'),

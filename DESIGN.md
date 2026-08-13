@@ -1229,9 +1229,11 @@ The `BinaryManager` class provides generic functionality for:
 3. Selecting the first variant that works on the current system
 4. Copying all files (executable + DLLs) to the correct location
 5. Caching which variant worked for faster startup next time
-6. Inflating ZIP archives in a self-contained worker thread with entry-level progress and no
-   runtime module resolution; a deterministic generated preamble embeds the exact-pinned adm-zip
-   implementation while the typed extraction function remains in `archive-utils.ts`
+6. Inflating ZIP archives in a self-contained worker thread with entry counters plus throttled
+   uncompressed write-byte progress and no runtime module resolution; a deterministic generated
+   preamble embeds the exact-pinned adm-zip implementation while the typed extraction function
+   remains in `archive-utils.ts`. A phase-only `finalizing` event begins when all writes finish and
+   covers worker/isolate resource release; callers still resolve only after worker exit
 7. Reusing installed dependencies by verified archive checksum through an
    atomic `.deps.json` manifest
 
@@ -1292,6 +1294,12 @@ The inline ZIP worker prepends committed generated source produced by
 `scripts/generate-zip-worker.mjs`; normal builds verify those bytes instead of regenerating them.
 `adm-zip` and esbuild are exact-pinned development inputs, and published consumers do not resolve
 or ship `adm-zip` as an external runtime dependency.
+The public `binary-progress` stream derives ZIP percentages from bytes successfully written when a
+valid uncompressed total is available, retains entry counters for compatibility, switches to
+`finalizing` while the completed ZIP worker releases resources, and switches to `installing` after
+validation while the complete candidate is assembled and published.
+Because `adm-zip` inflates each complete entry before writing it, byte progress measures the write
+portion rather than streaming decompression.
 If a process was killed after installing a candidate but before cleanup, a
 later validated-binary fast path removes main archives and extraction
 directories before returning. Dependency archives are deleted only when their

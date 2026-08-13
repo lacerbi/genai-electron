@@ -5,6 +5,41 @@
 
 ---
 
+## Unreleased
+
+- **Granular binary extraction progress**: ZIP worker events now report cumulative uncompressed
+  `writtenBytes` / `totalUncompressedBytes` alongside the existing entry counters. Extraction
+  percentages prefer the byte ratio, fall back to entries, and are omitted without a positive
+  denominator. Bounded worker-local writes provide within-entry updates while retaining
+  `adm-zip`'s `extractEntryTo()` containment and the self-contained worker package; inflation still
+  completes per entry before write progress begins.
+- **Named installation tail**: `BinaryProgressEvent.phase` adds `'installing'`, emitted after
+  validation and before candidate assembly, metadata/checksum work, and atomic publication. The
+  unrelated duplicate-copy optimization remains deferred.
+- **Named ZIP worker finalization**: `BinaryProgressEvent.phase` adds `'finalizing'`, emitted from
+  the worker's successful `done` boundary after every payload write and before isolate/resource
+  cleanup. The parent requests prompt termination but still resolves only after `exit`, preserving
+  the no-leaked-worker guarantee while keeping long Windows teardown out of completed extraction.
+- Updated focused archive/BinaryManager tests, the isolated packed-package contract, current API
+  guidance, troubleshooting, setup, and architectural documentation. Historical migration guides
+  remain unchanged; there is no version or release action.
+
+**Validation:** Focused archive/BinaryManager coverage passes 99/99. The full Jest suite passes
+1051/1051 tests across 37 suites with `--detectOpenHandles` and no reported handles. The TypeScript
+build and generated-worker freshness gate pass; the isolated packed consumer extracts a real ZIP
+with no resolvable `adm-zip` and type-checks the additive public contract. Formatting passes, and
+ESLint reports 0 errors with the existing 118 warnings. A pre-seeded temporary-profile acceptance
+also provisioned the real pinned Windows/CUDA b9860 archives without network downloads: both
+archives produced 100 within-entry byte advances, `installing` followed validation and covered the
+successful candidate publication, and the four monitored active Palimpsest markers remained
+byte-identical while the directory timestamp was unchanged. A focused
+follow-up preserved exit-before-resolution and now reports worker cleanup as `finalizing` in the
+same millisecond as the final extraction event. In the accepted repeat, that phase truthfully
+covered 34.258 seconds for the CUDA worker and 1.357 seconds for the main worker; cache hashes were
+unchanged, and the pre-existing server remained healthy and was not targeted.
+
+---
+
 ## v0.22.1: Self-Contained Bundled ZIP Worker (2026-08-05)
 
 - Replaced the package-root eager `createRequire(...).resolve('adm-zip')` and worker dynamic import

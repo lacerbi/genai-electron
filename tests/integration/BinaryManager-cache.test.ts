@@ -184,6 +184,9 @@ describe('BinaryManager dependency cache integration', () => {
     expect(firstProgress).toContainEqual(
       expect.objectContaining({ phase: 'extracting', file: dependencyDescription })
     );
+    expect(firstProgress).toContainEqual({ phase: 'finalizing', file: dependencyDescription });
+    expect(firstProgress).toContainEqual({ phase: 'finalizing', file: 'binary' });
+    expect(firstProgress).toContainEqual({ phase: 'installing', file: 'binary' });
     await expect(readFile(runtimePath, 'utf8')).resolves.toBe('runtime fixture\n');
 
     const firstManifest = JSON.parse(await readFile(manifestPath, 'utf8')) as {
@@ -232,6 +235,9 @@ describe('BinaryManager dependency cache integration', () => {
     expect(secondProgress).not.toContainEqual(
       expect.objectContaining({ phase: 'extracting', file: dependencyDescription })
     );
+    expect(secondProgress).not.toContainEqual({ phase: 'finalizing', file: dependencyDescription });
+    expect(secondProgress).toContainEqual({ phase: 'finalizing', file: 'binary' });
+    expect(secondProgress).toContainEqual({ phase: 'installing', file: 'binary' });
     expect(mockSpawn).toHaveBeenCalledTimes(1);
     await expect(readFile(runtimePath, 'utf8')).resolves.toBe('runtime fixture\n');
 

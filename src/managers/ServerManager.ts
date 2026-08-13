@@ -28,7 +28,7 @@ import { getPlatformKey } from '../utils/platform-utils.js';
  * - 'crashed': When server crashes unexpectedly
  * - 'restarted': When server restarts after a crash
  * - 'binary-log': When binary download/testing emits log messages (message: string, level: 'info' | 'warn' | 'error')
- * - 'binary-progress': Structured provisioning progress (BinaryProgressEvent; download events throttled to whole percents)
+ * - 'binary-progress': Structured provisioning progress (BinaryProgressEvent; byte-aware ZIP extraction and phase transitions)
  *
  * @example
  * ```typescript

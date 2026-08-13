@@ -74,8 +74,15 @@ On first call to `llamaServer.start()` or `diffusionServer.start()`, the library
 
 On Windows, ZIP inflation runs in a self-contained worker thread so Electron's main event loop
 remains responsive and packaged applications do not need a loose/resolvable `adm-zip`. The
-`'binary-progress'` event reports entry counters during
-extraction. Successfully installed dependency archives are recorded by checksum
+`'binary-progress'` event reports throttled uncompressed bytes written plus the existing entry
+counters during extraction. Its extraction percentage prefers bytes, falls back to entries, and is
+omitted without a positive denominator. Because `adm-zip` inflates a complete member before
+writing it, byte updates do not represent streaming decompression. Once all writes finish, a
+phase-only `finalizing` event covers worker/isolate resource release; this can take tens of seconds
+for very large Windows archives even though extraction is complete and the main event loop remains
+responsive. After validation, a phase-only `installing` event covers candidate copying,
+metadata/checksum work, and atomic publication.
+Successfully installed dependency archives are recorded by checksum
 in `userData/binaries/<type>/.deps.json`; byte-identical CUDA runtimes are reused
 across upstream release-URL changes. If provisioning is interrupted, the next
 run clears stale extraction staging and reuses any complete archive whose
@@ -86,7 +93,8 @@ until a later provisioning run can verify, extract, and record it. Partial
 downloads are not range-resumed.
 
 **Timing**:
-- First start: 2-10 seconds for variant testing (plus download time, which depends on connection speed)
+- First start: 2-10 seconds for variant testing, plus download, extraction, and installation time;
+  large Windows CUDA trees can take minutes on slow or heavily scanned storage
 - Subsequent starts: ~0.5 seconds (checksum verification only)
 
 **Server-start (health-check) timeout**: After the binary is ready, `start()` waits for the server to become healthy before resolving. The default timeout is **120 seconds** (`DEFAULT_TIMEOUTS.serverStart`), raised to accommodate cold loads of large GGUFs on slow disks. Override it per start with the `startupTimeout` option (milliseconds):

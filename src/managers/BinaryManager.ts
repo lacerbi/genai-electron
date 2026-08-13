@@ -96,7 +96,8 @@ export interface BinaryManagerConfig {
   /**
    * Optional structured progress callback ('binary-progress' event source).
    * Download progress is throttled to whole-percent changes. ZIP extraction
-   * emits per-entry counters; verification and testing emit phase transitions.
+   * emits throttled uncompressed write-byte telemetry plus entry counters;
+   * worker finalization, verification, testing, and installation emit phase transitions.
    */
   onProgress?: (event: BinaryProgressEvent) => void;
   /**
@@ -606,16 +607,45 @@ export class BinaryManager {
 
   private extractionProgress(
     file: string
-  ): (progress: { completedEntries: number; totalEntries: number }) => void {
-    return ({ completedEntries, totalEntries }) => {
+  ): (progress: {
+    completedEntries: number;
+    totalEntries: number;
+    writtenBytes?: number;
+    totalUncompressedBytes?: number;
+  }) => void {
+    return ({ completedEntries, totalEntries, writtenBytes, totalUncompressedBytes }) => {
+      let percent: number | undefined;
+      if (
+        writtenBytes !== undefined &&
+        Number.isSafeInteger(writtenBytes) &&
+        writtenBytes >= 0 &&
+        totalUncompressedBytes !== undefined &&
+        Number.isSafeInteger(totalUncompressedBytes) &&
+        totalUncompressedBytes > 0
+      ) {
+        percent = Math.min(
+          100,
+          Math.max(0, Math.floor((writtenBytes / totalUncompressedBytes) * 100))
+        );
+      } else if (totalEntries > 0) {
+        percent = Math.min(100, Math.max(0, Math.floor((completedEntries / totalEntries) * 100)));
+      }
+
       this.progress({
         phase: 'extracting',
         file,
         completedEntries,
         totalEntries,
-        percent: totalEntries > 0 ? Math.floor((completedEntries / totalEntries) * 100) : 100,
+        ...(writtenBytes !== undefined ? { writtenBytes } : {}),
+        ...(totalUncompressedBytes !== undefined ? { totalUncompressedBytes } : {}),
+        ...(percent !== undefined ? { percent } : {}),
       });
     };
+  }
+
+  /** Report the ZIP worker resource-release tail after all payload writes complete. */
+  private extractionSettling(file: string): () => void {
+    return () => this.progress({ phase: 'finalizing', file });
   }
 
   /**
@@ -672,7 +702,8 @@ export class BinaryManager {
       const extractedFiles = await extractArchive(
         archivePath,
         extractDir,
-        this.extractionProgress(dependencyName)
+        this.extractionProgress(dependencyName),
+        this.extractionSettling(dependencyName)
       );
       const files = [...new Set(extractedFiles)];
 
@@ -894,7 +925,8 @@ export class BinaryManager {
         this.extractionProgress('binary'),
         (files) => {
           mainArchiveFiles = files;
-        }
+        },
+        this.extractionSettling('binary')
       );
       signal?.throwIfAborted();
       this.assertNoDependencyFileCollisions(preparedDependencies.entries, mainArchiveFiles);
@@ -905,6 +937,7 @@ export class BinaryManager {
       signal?.throwIfAborted();
 
       if (works) {
+        this.progress({ phase: 'installing', file: 'binary' });
         // Build the full replacement beside the live directory. The live installation remains
         // untouched until every copy, permission, manifest, and cache write has succeeded.
         await fs.mkdir(candidateInstallDir, { recursive: true });

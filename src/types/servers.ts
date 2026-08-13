@@ -394,13 +394,15 @@ export interface BinaryLogEvent {
  * Structured progress for binary provisioning ('binary-progress' event)
  *
  * Machine-readable companion to 'binary-log': download progress is throttled
- * to whole-percent changes at the source, ZIP extraction reports entry-level
- * progress, and each remaining phase transition emits one event. Build
- * progress UIs from this instead of parsing log strings.
+ * to whole-percent changes at the source, ZIP extraction reports throttled
+ * uncompressed write-byte progress alongside entry counters, `finalizing`
+ * names ZIP worker resource release after all writes complete, and each
+ * remaining phase transition emits one event. Build progress UIs from this
+ * instead of parsing log strings.
  */
 export interface BinaryProgressEvent {
   /** Provisioning phase */
-  phase: 'downloading' | 'extracting' | 'verifying' | 'testing';
+  phase: 'downloading' | 'extracting' | 'finalizing' | 'verifying' | 'testing' | 'installing';
 
   /** What is being provisioned: 'binary' or a dependency description */
   file: string;
@@ -411,7 +413,7 @@ export interface BinaryProgressEvent {
   /** Total bytes, when known (phase === 'downloading') */
   total?: number;
 
-  /** Whole-number percentage convenience (downloading or ZIP extracting) */
+  /** Whole-number percentage convenience (download bytes or best ZIP extraction denominator) */
   percent?: number;
 
   /** ZIP entries extracted so far (phase === 'extracting') */
@@ -419,4 +421,10 @@ export interface BinaryProgressEvent {
 
   /** Total ZIP file entries (phase === 'extracting') */
   totalEntries?: number;
+
+  /** Cumulative uncompressed ZIP payload bytes successfully written (phase === 'extracting') */
+  writtenBytes?: number;
+
+  /** Expected uncompressed ZIP payload bytes from valid entry headers (phase === 'extracting') */
+  totalUncompressedBytes?: number;
 }

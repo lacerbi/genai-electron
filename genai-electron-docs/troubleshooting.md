@@ -84,9 +84,15 @@ Provisioning output is persisted automatically in `llama-server.log` or
 ### Interrupted or Long Windows Provisioning
 
 Windows CUDA ZIPs can inflate to hundreds of megabytes. Extraction runs in a
-worker thread; a responsive window plus changing
-`completedEntries` / `totalEntries` on `'binary-progress'` means provisioning is
-still active.
+worker thread. During payload writes, `writtenBytes` / `totalUncompressedBytes` drives extraction
+`percent`, while `completedEntries` / `totalEntries` remains available for file-level status. The
+percentage falls back to entry counts if byte totals are unavailable and is omitted when neither
+denominator is positive. `adm-zip` inflates each complete member before writing it, so byte progress
+can pause during inflation even though Electron's main event loop remains responsive. Once all
+writes complete, `phase: 'finalizing'` identifies worker/isolate resource release until exit. This
+phase may last tens of seconds for very large archives and does not mean extraction restarted or
+stalled. After validation, `phase: 'installing'` identifies candidate copying, metadata/checksum
+work, and atomic publication; neither phase carries a percentage.
 
 If the process is killed, restart normally. The next attempt removes the stale
 variant extraction directory and reuses any complete archive whose SHA-256

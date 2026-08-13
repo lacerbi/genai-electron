@@ -606,7 +606,8 @@ describe('BinaryManager', () => {
       expect(phases).toContain('verifying:binary');
       expect(phases).toContain('extracting:binary');
       expect(phases).toContain('testing:binary');
-      // Order: all downloading events precede verifying -> extracting -> testing
+      expect(phases).toContain('installing:binary');
+      // Order: all downloading events precede verifying -> extracting -> testing -> installing
       expect(phases.indexOf('verifying:binary')).toBeGreaterThan(
         phases.lastIndexOf('downloading:binary')
       );
@@ -614,6 +615,7 @@ describe('BinaryManager', () => {
         phases.indexOf('verifying:binary')
       );
       expect(phases.indexOf('testing:binary')).toBeGreaterThan(phases.indexOf('extracting:binary'));
+      expect(phases.indexOf('installing:binary')).toBeGreaterThan(phases.indexOf('testing:binary'));
     });
 
     it('labels dependency downloads with the dependency description', async () => {
@@ -702,6 +704,204 @@ describe('BinaryManager', () => {
       expect(entryEvents.map((event) => event.completedEntries)).toEqual([0, 1, 2]);
       expect(entryEvents.map((event) => event.percent)).toEqual([0, 50, 100]);
       expect(entryEvents.every((event) => event.totalEntries === 2)).toBe(true);
+    });
+
+    it('prefers ZIP write bytes for extraction percentages and forwards both counter families', async () => {
+      const progressEvents: Array<Record<string, unknown>> = [];
+      mockExtractBinary.mockImplementation(
+        async (_archive, _destination, _binaryNames, onProgress, onFilesExtracted) => {
+          onProgress?.({
+            completedEntries: 0,
+            totalEntries: 2,
+            writtenBytes: 0,
+            totalUncompressedBytes: 1000,
+          });
+          onProgress?.({
+            completedEntries: 0,
+            totalEntries: 2,
+            writtenBytes: 250,
+            totalUncompressedBytes: 1000,
+          });
+          onProgress?.({
+            completedEntries: 1,
+            totalEntries: 2,
+            writtenBytes: 900,
+            totalUncompressedBytes: 1000,
+          });
+          onProgress?.({
+            completedEntries: 2,
+            totalEntries: 2,
+            writtenBytes: 1000,
+            totalUncompressedBytes: 1000,
+          });
+          onFilesExtracted?.(['llama-server.exe']);
+          return '/mock/extract/llama-server.exe';
+        }
+      );
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        onProgress: (event) => progressEvents.push(event as unknown as Record<string, unknown>),
+      });
+
+      await manager.ensureBinary();
+
+      const byteEvents = progressEvents.filter((event) => event.writtenBytes !== undefined);
+      expect(byteEvents.map((event) => event.percent)).toEqual([0, 25, 90, 100]);
+      expect(byteEvents.map((event) => event.completedEntries)).toEqual([0, 0, 1, 2]);
+      expect(byteEvents.every((event) => event.totalEntries === 2)).toBe(true);
+      expect(byteEvents.every((event) => event.totalUncompressedBytes === 1000)).toBe(true);
+    });
+
+    it('emits finalizing when ZIP writes finish and before worker settlement returns', async () => {
+      const timeline: string[] = [];
+      mockExtractBinary.mockImplementation(
+        async (_archive, _destination, _binaryNames, _onProgress, onFilesExtracted, onSettling) => {
+          onSettling?.();
+          timeline.push('archive:settled');
+          onFilesExtracted?.(['llama-server.exe']);
+          return '/mock/extract/llama-server.exe';
+        }
+      );
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        onProgress: (event) => timeline.push(`progress:${event.phase}`),
+      });
+
+      await manager.ensureBinary();
+
+      expect(timeline.indexOf('progress:finalizing')).toBeLessThan(
+        timeline.indexOf('archive:settled')
+      );
+      expect(timeline.indexOf('archive:settled')).toBeLessThan(
+        timeline.indexOf('progress:testing')
+      );
+    });
+
+    it('omits extraction percent when neither byte nor entry progress has a denominator', async () => {
+      const progressEvents: Array<Record<string, unknown>> = [];
+      mockExtractBinary.mockImplementation(
+        async (_archive, _destination, _binaryNames, onProgress, onFilesExtracted) => {
+          onProgress?.({ completedEntries: 0, totalEntries: 0 });
+          onFilesExtracted?.(['llama-server.exe']);
+          return '/mock/extract/llama-server.exe';
+        }
+      );
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        onProgress: (event) => progressEvents.push(event as unknown as Record<string, unknown>),
+      });
+
+      await manager.ensureBinary();
+
+      const unknownTotalEvent = progressEvents.find(
+        (event) => event.completedEntries === 0 && event.totalEntries === 0
+      );
+      expect(unknownTotalEvent).toBeDefined();
+      expect(Object.hasOwn(unknownTotalEvent!, 'percent')).toBe(false);
+    });
+
+    it('clamps extraction percentages for out-of-range progress input', async () => {
+      const progressEvents: Array<Record<string, unknown>> = [];
+      mockExtractBinary.mockImplementation(
+        async (_archive, _destination, _binaryNames, onProgress, onFilesExtracted) => {
+          onProgress?.({ completedEntries: -1, totalEntries: 2 });
+          onProgress?.({ completedEntries: 3, totalEntries: 2 });
+          onProgress?.({
+            completedEntries: 0,
+            totalEntries: 2,
+            writtenBytes: 150,
+            totalUncompressedBytes: 100,
+          });
+          onFilesExtracted?.(['llama-server.exe']);
+          return '/mock/extract/llama-server.exe';
+        }
+      );
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        onProgress: (event) => progressEvents.push(event as unknown as Record<string, unknown>),
+      });
+
+      await manager.ensureBinary();
+
+      const extractionPercentages = progressEvents
+        .filter((event) => event.phase === 'extracting' && event.percent !== undefined)
+        .map((event) => event.percent);
+      expect(extractionPercentages).toEqual([0, 100, 100]);
+    });
+
+    it('emits installing after testing and before candidate assembly begins', async () => {
+      const timeline: string[] = [];
+      mockMkdir.mockImplementation(async (directory: string) => {
+        if (directory.includes('.candidate-')) timeline.push('mkdir:candidate');
+      });
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant],
+        onProgress: (event) => timeline.push(`progress:${event.phase}`),
+      });
+
+      await manager.ensureBinary();
+
+      expect(timeline.indexOf('progress:installing')).toBeGreaterThan(
+        timeline.indexOf('progress:testing')
+      );
+      expect(timeline.indexOf('mkdir:candidate')).toBeGreaterThan(
+        timeline.indexOf('progress:installing')
+      );
+    });
+
+    it('emits installing only for the fallback variant that passes validation', async () => {
+      const progressEvents: Array<Record<string, unknown>> = [];
+      setSpawnResponses([
+        { exitCode: 1, stderr: 'Missing drivers' },
+        { stdout: 'version 1.0', stderr: '', exitCode: 0 },
+      ]);
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant, cpuVariant],
+        onProgress: (event) => progressEvents.push(event as unknown as Record<string, unknown>),
+      });
+
+      await manager.ensureBinary();
+
+      expect(progressEvents.filter((event) => event.phase === 'testing')).toHaveLength(2);
+      expect(progressEvents.filter((event) => event.phase === 'installing')).toHaveLength(1);
+    });
+
+    it('reports installation for a failed assembly attempt and its successful fallback', async () => {
+      const progressEvents: Array<Record<string, unknown>> = [];
+      mockWriteFile.mockRejectedValueOnce(new Error('candidate metadata write failed'));
+      const manager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'win32-x64',
+        variants: [cudaVariant, cpuVariant],
+        onProgress: (event) => progressEvents.push(event as unknown as Record<string, unknown>),
+      });
+
+      await manager.ensureBinary();
+
+      expect(
+        progressEvents
+          .filter((event) => event.phase === 'testing' || event.phase === 'installing')
+          .map((event) => event.phase)
+      ).toEqual(['testing', 'installing', 'testing', 'installing']);
     });
 
     it('emits nothing without an onProgress callback (no throw)', async () => {
@@ -802,6 +1002,7 @@ describe('BinaryManager', () => {
     it('does not publish a staged candidate after its deadline expires', async () => {
       const controller = new AbortController();
       const reason = new DOMException('calibration deadline', 'TimeoutError');
+      const progressEvents: Array<Record<string, unknown>> = [];
       mockCalculateChecksum.mockImplementation(async (filePath: string) => {
         if (filePath.includes('.cuda.zip')) return 'abc123cuda';
         if (filePath.includes('.candidate-')) controller.abort(reason);
@@ -812,6 +1013,7 @@ describe('BinaryManager', () => {
         binaryName: 'llama-server',
         platformKey: 'win32-x64',
         variants: [cudaVariant],
+        onProgress: (event) => progressEvents.push(event as unknown as Record<string, unknown>),
       });
 
       await expect(manager.ensureBinary(false, controller.signal)).rejects.toBe(reason);
@@ -822,6 +1024,7 @@ describe('BinaryManager', () => {
           String(call[0]).includes('/mock/binaries/llama.candidate-')
         )
       ).toBe(true);
+      expect(progressEvents.filter((event) => event.phase === 'installing')).toHaveLength(1);
     });
   });
 
