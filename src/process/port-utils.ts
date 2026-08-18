@@ -47,13 +47,20 @@ export function findFreePort(host = '127.0.0.1'): Promise<number> {
  *
  * @param port - Port number to test
  * @param host - Host/interface to bind on (default: 127.0.0.1)
- * @returns True if a bind succeeds (port is free)
+ * @returns True if a bind succeeds (port is free), false only for EADDRINUSE
+ * @throws The original bind error for invalid interfaces, permissions, and other failures
  */
 export function isPortBindable(port: number, host = '127.0.0.1'): Promise<boolean> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.unref();
-    server.once('error', () => resolve(false));
+    server.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRINUSE') {
+        resolve(false);
+        return;
+      }
+      reject(error);
+    });
     server.listen(port, host, () => {
       server.close(() => resolve(true));
     });

@@ -3,7 +3,7 @@
  * Packed public-API verification.
  *
  * Builds the library, packs it exactly as `npm publish` would, installs that tarball into a
- * throwaway consumer project, runtime-checks its Electron-free policy entry under plain Node,
+ * throwaway consumer project, runtime-checks its Electron-free entries under plain Node,
  * type-checks a small TypeScript consumer against its declared package entries, and bundles the
  * packed root for an isolated runtime smoke. Those public checks use package-name exports only.
  * A separate packaging-only archive smoke addresses the verified packed archive utility by its
@@ -11,9 +11,9 @@
  *
  * The Electron-specific root cannot run directly under plain Node because Electron's npm stub has
  * no named `app` export. Its isolated bundle therefore uses a tiny `app.getPath()` build-time stub
- * so root evaluation can be exercised. The policy subpath is deliberately different and must
- * import directly without Electron installed or linked. CommonJS resolution is checked separately
- * without promising synchronous ESM execution across the whole supported Node/Electron range.
+ * so root evaluation can be exercised. The policy and launch subpaths are deliberately different
+ * and must import directly without Electron installed or linked. CommonJS resolution is checked
+ * separately without promising synchronous ESM execution across the supported Node/Electron range.
  *
  * Usage:
  *   node scripts/packed-api/run.mjs [--keep] [--skip-build]
@@ -41,8 +41,8 @@ const skipBuild = args.has('--skip-build');
 /** Runtime packages esbuild may traverse while bundling the packed root. */
 const BUNDLE_LINKED_DEPENDENCIES = ['@huggingface', 'tar'];
 
-/** Additional packages needed only while type-checking the packed declarations. */
-const TYPE_LINKED_DEPENDENCIES = ['@types', 'electron'];
+/** Node-only declaration dependencies linked before the optional Electron peer. */
+const NODE_TYPE_LINKED_DEPENDENCIES = ['@types/node', 'undici-types'];
 
 const ZIP_FIXTURE_FILES = [
   { entry: 'nested/alpha.txt', content: 'packed ZIP alpha\n' },
@@ -50,11 +50,14 @@ const ZIP_FIXTURE_FILES = [
 ];
 const EXPECTED_ZIP_FILES = ['nested/alpha.txt', 'nested/deeper/beta.bin'];
 
-/** Plain-Node runtime consumer for the Electron-free policy entry. */
+/** Plain-Node runtime consumer for the Electron-free policy and launch entries. */
 const POLICY_RUNTIME_SOURCE = `import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import * as importedPolicy from 'genai-electron/llm-calibration-policy';
+
+const importedLaunch = await import('genai-electron/llama-server-launch');
+const { buildLlamaServerArgs, normalizeHealthHost } = importedLaunch;
 
 const require = createRequire(import.meta.url);
 const isUnexportedPath = (error) => error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED';
@@ -68,8 +71,72 @@ assert.equal(path.basename(path.dirname(rootEntry)), 'dist');
 const policyEntry = require.resolve('genai-electron/llm-calibration-policy');
 assert.equal(path.basename(policyEntry), 'llm-calibration-policy.js');
 assert.equal(path.basename(path.dirname(policyEntry)), 'dist');
+const launchEntry = require.resolve('genai-electron/llama-server-launch');
+assert.equal(path.basename(launchEntry), 'llama-server-launch.js');
+assert.equal(path.basename(path.dirname(launchEntry)), 'dist');
+assert.deepEqual(
+  buildLlamaServerArgs(
+    {
+      port: 12345,
+      contextSize: 8192,
+      parallelRequests: 2,
+      gpuLayers: 20,
+      fit: 'off',
+    },
+    { path: '/models/model.gguf' }
+  ),
+  [
+    '-m', '/models/model.gguf', '--jinja', '--port', '12345', '-c', '8192',
+    '-n', '-1', '-ngl', '20', '-np', '2', '-fit', 'off'
+  ]
+);
+assert.equal(normalizeHealthHost('::'), '::1');
 await assert.rejects(import('genai-electron/dist/config/defaults.js'), isUnexportedPath);
 assert.throws(() => require.resolve('genai-electron/dist/config/defaults.js'), isUnexportedPath);
+`;
+
+/**
+ * Node-only facade declaration smoke. This deliberately runs before Electron is linked.
+ *
+ * We use native ESM here. A CommonJS-targeting compiler may downlevel await import() to require(),
+ * which this package does not promise: downstream CommonJS adopters must preserve native import()
+ * or use an ESM bridge. require.resolve() above proves resolution only, not CJS execution or a
+ * no-top-level-await invariant.
+ */
+const FACADE_CONSUMER_SOURCE = `import {
+  startLlamaServerRunner,
+  type LlamaServerHandle,
+  type LlamaServerRunnerConfig,
+  type LlamaServerRuntimeConfig,
+  type StartLlamaServerRunnerOptions,
+} from 'genai-electron/llama-server-launch';
+
+const runtime: LlamaServerRuntimeConfig = { gpuLayers: 20 };
+const config: LlamaServerRunnerConfig = runtime;
+const options: StartLlamaServerRunnerOptions = {
+  binaryPath: '/opt/llama/bin/llama-server',
+  model: { path: '/opt/models/model.gguf' },
+  config,
+  contextSize: 8192,
+  parallelRequests: 2,
+  startupTimeoutMs: 120000,
+  port: 12345,
+  slotsEndpoint: 'disabled',
+};
+const factory: (options: StartLlamaServerRunnerOptions) => Promise<LlamaServerHandle> =
+  startLlamaServerRunner;
+function consume(handle: LlamaServerHandle) {
+  const pid: number = handle.pid;
+  const loadTimeMs: number = handle.loadTimeMs;
+  const totalSlots: number = handle.capacity.totalSlots;
+  const contextSize: number = handle.config.contextSize;
+  const parallelRequests: number = handle.config.parallelRequests;
+  const fit: 'off' = handle.config.fit;
+  return { pid, loadTimeMs, totalSlots, contextSize, parallelRequests, fit };
+}
+void options;
+void factory;
+void consume;
 `;
 
 /**
@@ -538,6 +605,15 @@ function assertPackedPackageContract(packageDir) {
   if (bundledDependencies.includes('adm-zip')) {
     throw new Error('packed manifest must not bundle adm-zip as an install-time dependency');
   }
+  if (manifest.peerDependenciesMeta?.electron?.optional !== true) {
+    throw new Error('packed manifest must mark the Electron peer optional');
+  }
+  if (bundledDependencies.includes('electron')) {
+    throw new Error('packed manifest must not bundle Electron');
+  }
+  if (fs.existsSync(path.join(packageDir, 'node_modules', 'electron'))) {
+    throw new Error('packed tarball must not contain Electron');
+  }
   const embeddedVersion = manifest.devDependencies?.['adm-zip'];
   const esbuildVersion = manifest.devDependencies?.esbuild;
   if (!/^\d+\.\d+\.\d+$/.test(embeddedVersion ?? '')) {
@@ -789,8 +865,43 @@ async function main() {
     }
     const runtimeConsumer = path.join(consumerDir, 'policy-runtime.mjs');
     fs.writeFileSync(runtimeConsumer, POLICY_RUNTIME_SOURCE);
-    console.warn('[packed-api] importing the policy entry and checking CommonJS resolution');
+    console.warn('[packed-api] importing Node-safe entries and checking CommonJS resolution');
     run(process.execPath, [runtimeConsumer], { cwd: consumerDir });
+
+    for (const dependency of NODE_TYPE_LINKED_DEPENDENCIES) {
+      if (!linkDependency(dependency, consumerModules)) {
+        throw new Error(
+          `Node type-check dependency ${dependency} is not installed in the repository`
+        );
+      }
+    }
+    fs.writeFileSync(
+      path.join(consumerDir, 'package.json'),
+      `${JSON.stringify(
+        {
+          name: 'genai-electron-packed-consumer',
+          private: true,
+          version: '0.0.0',
+          type: 'module',
+          dependencies: { 'genai-electron': `file:${tarball.replace(/\\/g, '/')}` },
+        },
+        null,
+        2
+      )}\n`
+    );
+    fs.writeFileSync(
+      path.join(consumerDir, 'tsconfig.json'),
+      `${JSON.stringify(CONSUMER_TSCONFIG, null, 2)}\n`
+    );
+    fs.writeFileSync(path.join(consumerDir, 'src', 'consumer.ts'), FACADE_CONSUMER_SOURCE);
+    console.warn(
+      '[packed-api] type-checking the Node-only launch facade before Electron is linked'
+    );
+    run(
+      process.execPath,
+      [path.join(repoRoot, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.json'],
+      { cwd: consumerDir }
+    );
 
     for (const dependency of BUNDLE_LINKED_DEPENDENCIES) {
       if (!linkDependency(dependency, consumerModules)) {
@@ -810,30 +921,9 @@ async function main() {
     console.warn('[packed-api] running bundles with adm-zip unavailable');
     run(process.execPath, [isolatedLauncher], { cwd: isolatedDir });
 
-    for (const dependency of TYPE_LINKED_DEPENDENCIES) {
-      if (!linkDependency(dependency, consumerModules)) {
-        throw new Error(`type-check dependency ${dependency} is not installed in the repository`);
-      }
+    if (!linkDependency('electron', consumerModules)) {
+      throw new Error('root type-check dependency electron is not installed in the repository');
     }
-
-    fs.writeFileSync(
-      path.join(consumerDir, 'package.json'),
-      `${JSON.stringify(
-        {
-          name: 'genai-electron-packed-consumer',
-          private: true,
-          version: '0.0.0',
-          type: 'module',
-          dependencies: { 'genai-electron': `file:${tarball.replace(/\\/g, '/')}` },
-        },
-        null,
-        2
-      )}\n`
-    );
-    fs.writeFileSync(
-      path.join(consumerDir, 'tsconfig.json'),
-      `${JSON.stringify(CONSUMER_TSCONFIG, null, 2)}\n`
-    );
     fs.writeFileSync(path.join(consumerDir, 'src', 'consumer.ts'), CONSUMER_SOURCE);
 
     console.warn('[packed-api] type-checking the consumer against the packed declarations');

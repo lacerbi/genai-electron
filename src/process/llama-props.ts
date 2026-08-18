@@ -12,7 +12,23 @@ export interface LlamaRuntimeCapacity {
   effectiveContextSize: number;
   /** Runtime slot count when reported by llama-server. */
   totalSlots?: number;
+  /** Exact model path reported by llama-server when available. */
+  modelPath?: string;
 }
+
+/**
+ * Capacity evidence guaranteed by a successfully started isolated runner.
+ *
+ * @example
+ * ```ts
+ * const capacity: VerifiedLlamaRuntimeCapacity = {
+ *   effectiveContextSize: 4096,
+ *   totalSlots: 2,
+ *   modelPath: '/opt/models/model.gguf',
+ * };
+ * ```
+ */
+export type VerifiedLlamaRuntimeCapacity = LlamaRuntimeCapacity & { totalSlots: number };
 
 function runtimeUnavailable(
   message: string,
@@ -99,6 +115,8 @@ export async function fetchLlamaRuntimeCapacity(
     }
 
     const rawTotalSlots = (payload as Record<string, unknown>).total_slots;
+    const rawModelPath = (payload as Record<string, unknown>).model_path;
+    const modelPath = typeof rawModelPath === 'string' ? rawModelPath : undefined;
     let totalSlots: number | undefined;
     if (rawTotalSlots !== undefined) {
       if (
@@ -128,7 +146,7 @@ export async function fetchLlamaRuntimeCapacity(
       }
     }
 
-    return { effectiveContextSize, totalSlots };
+    return { effectiveContextSize, totalSlots, modelPath };
   } catch (error) {
     if (error instanceof ContextConstraintError) {
       throw error;

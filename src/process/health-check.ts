@@ -242,15 +242,16 @@ export async function isServerResponding(
 /**
  * Normalize a configured bind host into a host suitable for health checks
  *
- * Wildcard binds (0.0.0.0, ::) are reachable via loopback, so health checks
- * target 127.0.0.1 for them; undefined/empty falls back to 127.0.0.1
- * (llama-server's own default bind).
+ * Wildcard binds are reached through a loopback address from the same family:
+ * 0.0.0.0 maps to 127.0.0.1 and :: maps to ::1. Undefined/empty falls back to
+ * 127.0.0.1 (llama-server's own default bind).
  *
  * @param host - Configured bind host (ServerConfig.host)
  * @returns Host to use in health-check URLs
  */
 export function normalizeHealthHost(host?: string): string {
-  if (host === undefined || host === '' || host === '0.0.0.0' || host === '::') {
+  if (host === '::') return '::1';
+  if (host === undefined || host === '' || host === '0.0.0.0') {
     return '127.0.0.1';
   }
   return host;

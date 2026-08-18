@@ -3,7 +3,9 @@
 > **Version**: 0.23.0 (Granular binary provisioning progress)
 > **Status**: Production Ready - LLM & Image Generation
 
-Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
+Complete documentation for genai-electron—an Electron-first library for managing local AI model
+servers and resources, with supported plain-Node subpaths for direct llama-server launch and
+calibration policy metadata.
 
 ---
 
@@ -16,7 +18,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 ### Core APIs
 - **[System Detection](system-detection.md)** - SystemInfo API for hardware capability detection
 - **[Model Management](model-management.md)** - ModelManager API for downloading and managing GGUF models
-- **[LLM Server](llm-server.md)** - LlamaServerManager lifecycle, configuration, and adaptive/exact runtime calibration
+- **[LLM Server](llm-server.md)** - Electron manager lifecycle, Node-safe direct launch, and runtime calibration
 - **[Image Generation](image-generation.md)** - DiffusionServerManager API for local image generation
 - **[Resource Orchestration](resource-orchestration.md)** - ResourceOrchestrator for managing both LLM and image servers
 
@@ -55,11 +57,13 @@ Complete documentation for genai-electron - An Electron-specific library for man
 
 ## Overview
 
-genai-electron manages the runtime infrastructure for running local AI models (llama.cpp, stable-diffusion.cpp) in Electron applications, while genai-lite provides the high-level API abstraction layer for communicating with these models.
+genai-electron primarily manages the runtime infrastructure for local AI models in Electron
+applications, while genai-lite provides the high-level API abstraction layer. Plain Node hosts may
+also launch a caller-provided llama-server binary through `genai-electron/llama-server-launch`.
 
 **The Ecosystem**:
 - **genai-lite**: Lightweight, portable API abstraction layer for AI providers (cloud and local)
-- **genai-electron**: Electron-specific runtime management (this library)
+- **genai-electron**: Electron runtime management plus narrowly scoped Node-safe subpaths
 
 **Core Features**:
 - ✅ **System capability detection** - Automatic detection of RAM, CPU, GPU, and VRAM

@@ -78,6 +78,14 @@ export class ProcessManager {
         stdio: ['ignore', 'pipe', 'pipe'], // stdin ignored, stdout/stderr piped
       });
 
+      // Register this first: spawn failures such as ENOENT are emitted
+      // asynchronously even when no PID was assigned.
+      childProcess.on('error', (error) => {
+        if (options.onError) {
+          options.onError(error);
+        }
+      });
+
       if (!childProcess.pid) {
         throw new ServerError(`Failed to spawn process: ${command}`, { command, args });
       }
@@ -105,16 +113,6 @@ export class ProcessManager {
         if (options.onExit) {
           options.onExit(code, signal);
         }
-      });
-
-      // Handle spawn errors (e.g., ENOENT when binary doesn't exist)
-      childProcess.on('error', (error) => {
-        // Call error callback if provided
-        if (options.onError) {
-          options.onError(error);
-        }
-        // Note: We don't throw here because event handlers can't throw synchronously.
-        // The error will be handled by the caller through the exit event or onError callback.
       });
 
       return {

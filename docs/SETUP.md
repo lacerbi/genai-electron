@@ -58,7 +58,9 @@ node --version  # Should show v22.13.0 or newer
 npm --version   # Should show 10.x.x or higher
 ```
 
-**Note**: Electron 25+ is a peer dependency. It's included in the example app (`examples/electron-control-panel`), so no global installation needed for development.
+**Note**: Electron 25+ remains a consumer peer for root manager APIs. The root repository installs
+exact Electron 43.2.0 as a development dependency, while the example app owns its application
+runtime version. No global Electron installation is needed.
 
 ### Platform-Specific Requirements
 
@@ -442,17 +444,17 @@ This catches:
 
 #### "Cannot find module 'electron'"
 
-**Cause**: Electron is a peer dependency, not installed by default.
+**Cause**: Dependencies were not installed from the root lockfile, or a Node-only consumer imported
+the Electron-backed package root instead of a supported Node-safe subpath.
 
 **Fix**:
 ```bash
-npm install electron@>=25.0.0
+npm ci
 ```
 
-Or for development:
-```bash
-npm install --save-dev electron@latest
-```
+Plain Node consumers that do not install Electron must import
+`genai-electron/llama-server-launch` or `genai-electron/llm-calibration-policy`, never the package
+root.
 
 #### "Module not found" after adding new file
 

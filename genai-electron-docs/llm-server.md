@@ -42,6 +42,60 @@ LlamaServerManager manages llama-server processes with automatic binary download
 
 **Architecture**: Uses native llama-server (HTTP server from llama.cpp), spawned as a child process and managed by genai-electron.
 
+## Plain-Node Direct Launch
+
+`genai-electron/llama-server-launch` is an Electron-free ESM entry point for hosts that already
+know the executable and GGUF paths. It uses the same canonical argument builder as
+`LlamaServerManager`, but it does not download binaries, resolve model IDs, manage application
+storage, restart crashed processes, or apply manager policy.
+
+```typescript
+import { startLlamaServerRunner } from 'genai-electron/llama-server-launch';
+
+const handle = await startLlamaServerRunner({
+  binaryPath: '/opt/llama/bin/llama-server',
+  model: { path: '/opt/models/gemma.gguf' },
+  config: { host: '127.0.0.1', gpuLayers: 40, cacheTypeV: 'q8_0' },
+  contextSize: 12_288,
+  parallelRequests: 2,
+  startupTimeoutMs: 120_000,
+  port: 12_345,
+  slotsEndpoint: 'disabled',
+});
+
+try {
+  console.log(handle.pid, handle.port, handle.loadTimeMs, handle.capacity);
+} finally {
+  await handle.stop();
+}
+```
+
+The factory resolves only after health and mandatory `/props` verification. The returned
+`capacity.totalSlots`, per-slot effective context, PID, resolved config, and load time are therefore
+required fields. `capacity.modelPath`, when reported by llama-server b9860, is the exact `-m` value;
+compare it with the requested absolute model path before adopting an endpoint discovered elsewhere.
+
+With a fixed port, the factory checks both HTTP occupancy and TCP bindability before spawning and
+never retries. With no port, it asks the OS for a free port and retries one proven bind collision.
+The configured interface is used for bind tests, while HTTP probes normalize `0.0.0.0` to
+`127.0.0.1` and `::` to `::1`. Binding `0.0.0.0` or `::` can expose this unauthenticated server
+beyond loopback; use wildcard binds only with deliberate host firewall and network controls.
+
+`slotsEndpoint` is tri-state: omitted preserves llama-server's default, `'enabled'` emits `--slots`,
+and `'disabled'` emits `--no-slots`. A caller `slotSavePath` is never removed. Set
+`temporarySlotSavePath: true` with explicitly enabled slots for a factory-owned directory that is
+removed after startup failure, normal stop, or spontaneous exit. Strict `/props.total_slots` and
+per-slot context checks apply in every slots mode.
+
+The optional `signal` cancels startup only. Once the promise resolves, call `handle.stop()`; later
+signal abortion does not terminate the child. `exitPromise` settles after process exit and owned
+cleanup, and concurrent `stop()` calls share the same result.
+
+This subpath supports native ESM. `require.resolve()` can locate it, but does not prove that a
+CommonJS-transpiled dynamic import can execute. CommonJS builds must preserve native `import()` or
+call the subpath through an ESM bridge; TypeScript output that rewrites it to `require()` is not a
+supported contract.
+
 ---
 
 ## Import
@@ -354,7 +408,7 @@ if (healthy) {
 }
 ```
 
-**Health Endpoint**: The library checks `http://127.0.0.1:{port}/health` (loopback rather than `localhost` to avoid the Windows IPv6 resolution penalty), which returns a JSON response with a `status` field ('ok', 'loading', 'error', or 'unknown'). When a custom `host` is configured, health checks target that host instead; wildcard binds (`0.0.0.0` / `::`) are probed via `127.0.0.1`.
+**Health Endpoint**: The library checks `http://127.0.0.1:{port}/health` (loopback rather than `localhost` to avoid the Windows IPv6 resolution penalty), which returns a JSON response with a `status` field ('ok', 'loading', 'error', or 'unknown'). When a custom `host` is configured, health checks target that host instead; wildcard IPv4 `0.0.0.0` is probed via `127.0.0.1`, while wildcard IPv6 `::` is probed via `::1`.
 
 ---
 

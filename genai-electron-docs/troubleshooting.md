@@ -322,6 +322,28 @@ try {
 
 ## Initialization & Cache Issues
 
+### Direct llama-server launch failures
+
+The Node-safe `genai-electron/llama-server-launch` factory can surface historical
+`CALIBRATION_*` detail codes because it reuses the proven isolated calibration runner. Treat the
+code as the stable diagnostic discriminator even when the message mentions calibration.
+
+- `PortInUseError` means a fixed port answered the health probe or could not be bound because it
+  was occupied. Pick another port or omit it for automatic selection.
+- `INVALID_LLAMA_SERVER_RUNNER_OPTIONS` covers invalid ports, non-positive context/parallel/timeout
+  values, empty or whitespace-padded hosts, and conflicting slot options.
+- `CALIBRATION_SLOTS_UNAVAILABLE` means mandatory `/props` capacity evidence was absent,
+  incompatible, or did not match the requested slot/context profile. Confirm the pinned
+  llama-server version and inspect its logs.
+- `CALIBRATION_CANDIDATE_CRASHED` records an early or spontaneous child exit and includes the
+  retained stderr tail.
+- `CALIBRATION_CLEANUP_FAILED` means exact-child disappearance or factory-owned directory cleanup
+  could not be confirmed. Do not start a replacement until the process/directory is resolved.
+
+`slotsEndpoint: 'disabled'` cannot be combined with slot save state, and
+`temporarySlotSavePath: true` requires `slotsEndpoint: 'enabled'`. Binding `0.0.0.0` or `::` exposes
+an unauthenticated server beyond loopback unless the host supplies appropriate network controls.
+
 ### Library Called Before Electron Ready
 
 **Problem:** `Error: Cannot call app.getPath() before app is ready`

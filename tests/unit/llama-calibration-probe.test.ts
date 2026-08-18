@@ -156,6 +156,17 @@ describe('runCalibrationProbe', () => {
     const observation = await pending;
 
     expect(mockStartRunner).toHaveBeenCalledTimes(1);
+    expect(mockStartRunner).toHaveBeenCalledWith({
+      binaryPath: 'llama-server',
+      model,
+      config: { host: '127.0.0.1', gpuLayers: 30 },
+      contextSize: 12_288,
+      parallelRequests: 2,
+      startupTimeoutMs: 1_000,
+      signal: undefined,
+      slotsEndpoint: 'enabled',
+      temporarySlotSavePath: true,
+    });
     expect(stop).toHaveBeenCalledTimes(1);
     expect(observation.cleanupConfirmed).toBe(true);
     expect(observation.cleanup).toMatchObject({ confirmed: true, pid: 101 });

@@ -1,6 +1,10 @@
 ## Project Overview
 
-**genai-electron** is an Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). It handles platform-specific operations like model downloads, binary management, server lifecycle, and resource orchestration. This library complements **genai-lite** (the API abstraction layer) by managing the runtime infrastructure.
+**genai-electron** is an Electron-first library for managing local AI model servers (llama.cpp,
+stable-diffusion.cpp), with supported Electron-free subpaths for calibration policy metadata and
+direct caller-provisioned llama-server launch. It handles platform-specific operations like model
+downloads, binary management, server lifecycle, and resource orchestration. This library complements
+**genai-lite** (the API abstraction layer) by managing the runtime infrastructure.
 
 ## Essential Commands
 
@@ -121,6 +125,10 @@ src/
 - Errors include actionable suggestions in details
 
 **Key Exports** (Phase 2+)
+- **Declared entry points**: `genai-electron` (Electron-backed root),
+  `genai-electron/llm-calibration-policy` (Node-safe policy metadata),
+  `genai-electron/llama-server-launch` (Node-safe direct launch), and
+  `genai-electron/package.json`
 - **Classes**: ResourceOrchestrator, GenerationRegistry, DiffusionServerManager, ServerManager
 - **GGUF Utilities**: `fetchGGUFMetadata()`, `fetchLocalGGUFMetadata()`, `getArchField()` - Extract metadata from GGUF files
 - **Reasoning Detection**: `detectReasoningSupport()`, `REASONING_MODEL_PATTERNS` - Identify reasoning-capable models

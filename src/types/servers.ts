@@ -96,7 +96,7 @@ export interface ServerConfig {
   /**
    * Host/interface the server binds to (--host)
    * Default: unset → llama-server's default (127.0.0.1, loopback only).
-   * Health checks target this host (0.0.0.0/:: are checked via 127.0.0.1).
+   * Health checks target this host (0.0.0.0 is checked via 127.0.0.1; :: via ::1).
    */
   host?: string;
 
@@ -319,6 +319,81 @@ export interface LlamaServerConfig extends ServerConfig {
    */
   healthCheckInterval?: number;
 }
+
+/**
+ * Electron-free llama-server settings consumed by the canonical argument builder.
+ *
+ * This is a structural view of {@link LlamaServerConfig}; it deliberately excludes
+ * model registry identity and manager-only lifecycle policy.
+ *
+ * @example
+ * ```ts
+ * const config: LlamaServerRuntimeConfig = {
+ *   host: '127.0.0.1',
+ *   contextSize: 8192,
+ *   parallelRequests: 2,
+ *   gpuLayers: 40,
+ * };
+ * ```
+ */
+export type LlamaServerRuntimeConfig = Pick<
+  LlamaServerConfig,
+  | 'host'
+  | 'threads'
+  | 'contextSize'
+  | 'gpuLayers'
+  | 'parallelRequests'
+  | 'flashAttention'
+  | 'fit'
+  | 'cacheTypeK'
+  | 'cacheTypeV'
+  | 'swaFull'
+  | 'overrideTensors'
+  | 'cacheRam'
+  | 'cpuMoe'
+  | 'nCpuMoe'
+  | 'reasoningFormat'
+  | 'modelAlias'
+  | 'batchSize'
+  | 'continuousBatching'
+  | 'useMmap'
+  | 'useMlock'
+  | 'jinja'
+>;
+
+/**
+ * Caller-supplied settings for the isolated llama-server launch factory.
+ *
+ * Context size and parallelism are required top-level factory options, while
+ * `fit` is fixed to `'off'`; omitting them here prevents ambiguous precedence.
+ *
+ * @example
+ * ```ts
+ * const config: LlamaServerRunnerConfig = { host: '127.0.0.1', gpuLayers: 40 };
+ * ```
+ */
+export type LlamaServerRunnerConfig = Omit<
+  LlamaServerRuntimeConfig,
+  'contextSize' | 'parallelRequests' | 'fit'
+>;
+
+/**
+ * Fully resolved runtime configuration guaranteed by a successful launch factory call.
+ *
+ * @example
+ * ```ts
+ * const config: ResolvedLlamaServerRunnerConfig = {
+ *   host: '127.0.0.1', port: 12345, contextSize: 8192,
+ *   parallelRequests: 2, fit: 'off',
+ * };
+ * ```
+ */
+export type ResolvedLlamaServerRunnerConfig = LlamaServerRunnerConfig & {
+  port: number;
+  contextSize: number;
+  parallelRequests: number;
+  fit: 'off';
+};
 
 /**
  * Hints for SystemInfo.getOptimalConfig().

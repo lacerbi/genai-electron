@@ -10,12 +10,17 @@ Install via npm:
 npm install genai-electron
 ```
 
-**Peer Dependencies**:
+**Peer dependency for root manager APIs**:
 ```bash
 npm install electron@>=25.0.0
 ```
 
-**Important**: The library depends on Electron's `app.getPath('userData')` for model storage, so it must be initialized after Electron's 'ready' event. See [Integration Guide](integration-guide.md) for proper initialization patterns.
+Electron is optional when an application imports only `genai-electron/llama-server-launch` or
+`genai-electron/llm-calibration-policy`. The package root and manager APIs require an Electron host;
+they depend on `app.getPath('userData')` and must be used after Electron's ready event. This
+repository installs exact Electron 43.2.0 as a development dependency so builds and packed root
+declaration tests remain reproducible; that development pin does not change the consumer peer range.
+See [Integration Guide](integration-guide.md) for initialization and module-loader patterns.
 
 ---
 

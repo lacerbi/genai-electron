@@ -560,7 +560,7 @@ export class LlamaServerManager extends ServerManager {
     options: RunCalibrationProbeOptions
   ) => Promise<RunCalibrationProbeObservation>;
   private binaryPath?: string;
-  /** Host used for health checks (config.host normalized; 0.0.0.0/:: → 127.0.0.1) */
+  /** Host used for health checks (0.0.0.0 → 127.0.0.1; :: → ::1) */
   private healthHost = '127.0.0.1';
   /** Duration of the last successful start, spawn → healthy (ms) */
   private _loadTimeMs?: number;
@@ -1342,7 +1342,6 @@ export class LlamaServerManager extends ServerManager {
         const argvKey = JSON.stringify(
           buildLlamaServerArgs(
             {
-              modelId: model.id,
               port: 0,
               host: '127.0.0.1',
               fit: 'off',
@@ -2484,7 +2483,6 @@ export class LlamaServerManager extends ServerManager {
       JSON.stringify(
         buildLlamaServerArgs(
           {
-            modelId: model.id,
             port: 0,
             host: '127.0.0.1',
             fit: 'off',

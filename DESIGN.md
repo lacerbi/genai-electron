@@ -31,7 +31,10 @@
 
 ### Purpose
 
-`genai-electron` is an Electron-specific library for managing local AI model servers and resources. It complements `genai-lite` by handling the platform-specific heavy lifting required to run AI models locally on desktop systems.
+`genai-electron` is an Electron-first library for managing local AI model servers and resources. It
+also exposes narrow Electron-free package subpaths for direct caller-provisioned llama-server launch
+and calibration policy metadata. It complements `genai-lite` by handling the platform-specific
+heavy lifting required to run AI models locally on desktop systems.
 
 ### The Ecosystem Split
 
@@ -1573,7 +1576,10 @@ genai-electron/
 }
 ```
 
-**Note**: Electron should **NOT** be listed in `dependencies`. Apps provide their own Electron version.
+**Note**: Electron is an optional peer, never a production `dependencies` entry. Apps using the
+package root provide their own compatible Electron version; plain-Node consumers may use only the
+declared Node-safe subpaths. The repository keeps an exact Electron development dependency for
+builds, tests, and packed declaration validation.
 
 #### Runtime Dependencies
 

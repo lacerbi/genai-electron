@@ -5,6 +5,33 @@
 
 ---
 
+## Unreleased: Node-safe llama-server launch
+
+- Added `genai-electron/llama-server-launch`, a sealed Electron-free ESM facade for canonical argv
+  construction, caller-provisioned binary/model startup, strict `/props` capacity verification,
+  exact-child lifecycle control, host-aware port safety, and explicit slots/directory ownership.
+- Made Electron an optional consumer peer while retaining exact Electron 43.2.0 as the repository
+  development dependency. The Electron-backed root API and its manager contracts remain unchanged.
+
+**Validation:** `npm ci --dry-run --ignore-scripts`, build, format check, and lint pass (lint retains
+the repository's existing 115 warnings and has zero errors). All 39 suites / 1,088 tests pass.
+The packed consumer imports and type-checks the facade before Electron is linked, verifies the
+optional peer and sealed exports, and retains the Electron-backed root declaration smoke.
+Embedded and production audits report no high/critical production findings. The dry-run tarball
+contains 224 files (272,811 bytes packed; 1,429,662 bytes unpacked), and the example control panel
+type-checks against the unchanged root contract. The argument golden test was deliberately
+mutated, failed as expected, restored, and passed. Independent runtime and package-contract reviews
+found no remaining issue after their lifecycle and packed-smoke findings were corrected.
+
+**Migration:** Existing Electron applications require no changes. Plain Node consumers import only
+`genai-electron/llama-server-launch`; CommonJS builds must preserve native dynamic `import()` or use
+an ESM bridge rather than downleveling the call to `require()`.
+
+**Release status:** Unreleased. No version bump, migration guide, tag, GitHub release, or npm
+publish is included; those remain deferred until explicit release preparation.
+
+---
+
 ## v0.23.0: Granular Binary Provisioning Progress (2026-08-13)
 
 - **Granular binary extraction progress**: ZIP worker events now report cumulative uncompressed
