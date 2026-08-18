@@ -1,7 +1,7 @@
 # Plan: Node-Safe llama-server Launch Entry
 
 Created: 2026-08-18
-Status: COMPLETE (2026-08-18)
+Status: COMPLETE (2026-08-18; targeting v0.24.0)
 Repository: genai-electron (sister repo; the consumer lives in palimpsest-engine)
 Source issue: `docs/dev/issues/ISSUE-node-safe-server-launch.md`
 
@@ -729,6 +729,6 @@ change the calibration argv. No stored calibration schema, model metadata, or on
 
 ---
 
-**Completed 2026-08-18.** All implementation phases and verification gates passed. Independent
+**Completed 2026-08-18; release target v0.24.0.** All implementation phases and verification gates passed. Independent
 runtime and package-contract reviews found no remaining issue after their confirmed findings were
 fixed and retested. Release preparation and Palimpsest adoption remain deliberately out of scope.

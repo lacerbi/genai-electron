@@ -1,7 +1,7 @@
 # ISSUE — No Electron-free entry point for launching a local llama-server
 
 - Created: 2026-08-18
-- Status: RESOLVED — implemented and verified 2026-08-18; execution record in
+- Status: RESOLVED — implemented and verified 2026-08-18; targeting v0.24.0; execution record in
   `docs/dev/plans/PLAN-node-safe-server-launch.md`
 - Package: genai-electron
 - Affected API: package entry points, canonical llama-server arguments, isolated process runner,
@@ -176,9 +176,9 @@ no-top-level-await `require(esm)` contract.
 
 ## Release status
 
-This work remains unreleased. Implementation does not authorize a version bump, migration guide,
-tag, publication, release, or pull request. Palimpsest's emitted-loader validation is required before
-a future release but is not an implementation blocker in this repository.
+The implementation is included in the v0.24.0 release candidate. The release PR, tag, and GitHub
+release are not yet complete, and npm publication remains a manual maintainer handoff. Palimpsest's
+emitted-loader validation is downstream adoption work rather than a package-release blocker.
 
 ## Resolution
 
@@ -187,4 +187,4 @@ runtime config/argv types, exact-child launch handle, host/port/slots/capacity s
 Electron peer metadata with an exact development pin, packed Node-only contract checks, tests, and
 documentation. Independent runtime and package reviews found no remaining issue after two exit
 observation bugs and two packed-smoke precision gaps were corrected. The complete repository gate
-passed on 2026-08-18. The work remains unreleased under the repository release policy.
+passed on 2026-08-18. Release preparation targets v0.24.0 under the repository release policy.

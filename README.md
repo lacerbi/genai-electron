@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.23.0 | **Status**: Production Ready - Granular binary provisioning progress
+> **Version**: 0.24.0 | **Status**: Production Ready - Node-safe llama-server launch
 
 Electron-first library for managing local AI model servers (llama.cpp, stable-diffusion.cpp), with
 supported Electron-free subpaths for calibration policy metadata and direct llama-server launch.
