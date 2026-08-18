@@ -529,6 +529,15 @@ const preloadPath = join(__dirname, 'preload.cjs');
 
 See `examples/electron-control-panel/` for complete working example.
 
+### CommonJS hosts and the Node-safe launch subpath
+
+`genai-electron/llama-server-launch` is a native ESM entry. A CommonJS main process may call it only
+through a native dynamic `import()` or an ESM bridge. Inspect the emitted application artifact:
+TypeScript and some bundlers targeting CommonJS rewrite `await import(...)` to a deferred
+`require(...)`, which is not supported by this package and is not proven by `require.resolve()`.
+If the build cannot preserve native import or provide an ESM bridge, do not adopt the subpath until
+a separate CommonJS compatibility contract is designed and tested.
+
 ---
 
 ## See Also

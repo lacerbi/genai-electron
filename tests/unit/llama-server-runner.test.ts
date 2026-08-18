@@ -3,16 +3,21 @@ import { jest } from '@jest/globals';
 
 import {
   LlamaServerRunner,
-  startLlamaServerRunner,
+  startLlamaServerRunnerForTest,
   type LlamaServerRunnerOptions,
+  type StartLlamaServerRunnerOptions,
 } from '../../src/process/llama-server-runner.js';
 import { DEFAULT_TIMEOUTS, LLAMA_CALIBRATION_DEFAULTS } from '../../src/config/defaults.js';
+import { PortInUseError } from '../../src/errors/index.js';
 import type { ModelInfo } from '../../src/types/index.js';
 import type { SpawnOptions, SpawnResult } from '../../src/process/ProcessManager.js';
 
 class FakeProcessManager {
   running = true;
   options?: SpawnOptions;
+  child?: ChildProcess;
+  spawnedChildren: ChildProcess[] = [];
+  killedChildren: ChildProcess[] = [];
   killError?: Error;
   spawnStderr?: string;
   spawnError?: Error;
@@ -27,12 +32,15 @@ class FakeProcessManager {
     if (this.spawnError) throw this.spawnError;
     this.running = true;
     this.options = options;
+    this.child = { exitCode: null, signalCode: null } as ChildProcess;
+    this.spawnedChildren.push(this.child);
     if (this.spawnStderr) options?.onStderr?.(this.spawnStderr);
     this.onSpawn?.(this.spawnCount, options);
-    return { process: {} as ChildProcess, pid: 77 };
+    return { process: this.child, pid: 76 + this.spawnCount };
   }
 
-  async kill(_pid: number, timeout?: number): Promise<void> {
+  async kill(child: ChildProcess, timeout?: number): Promise<void> {
+    this.killedChildren.push(child);
     this.killTimeouts.push(timeout);
     if (this.killError) throw this.killError;
     this.running = this.remainRunningAfterKill;
@@ -41,8 +49,8 @@ class FakeProcessManager {
     }
   }
 
-  isRunning(): boolean {
-    return this.running;
+  isRunning(child: ChildProcess): boolean {
+    return child === this.child && this.running;
   }
 }
 
@@ -60,12 +68,37 @@ function options(processManager: FakeProcessManager): LlamaServerRunnerOptions {
   return {
     binaryPath: 'llama-server',
     model,
-    config: { modelId: model.id, gpuLayers: 10 },
+    config: { host: '127.0.0.1', gpuLayers: 10 },
     contextSize: 12_288,
     parallelRequests: 2,
     startupTimeoutMs: 1_000,
     processManager,
+    childController: processManager,
+    slotsEndpoint: 'enabled',
     slotSavePath: 'C:\\temp\\calibration-slots',
+  };
+}
+
+function publicOptions(): StartLlamaServerRunnerOptions {
+  return {
+    binaryPath: 'llama-server',
+    model,
+    config: { host: '127.0.0.1', gpuLayers: 10 },
+    contextSize: 12_288,
+    parallelRequests: 2,
+    startupTimeoutMs: 1_000,
+    slotsEndpoint: 'enabled',
+    slotSavePath: 'C:\\temp\\calibration-slots',
+  };
+}
+
+function factoryDependencies(processManager: FakeProcessManager) {
+  return {
+    processManager,
+    childController: processManager,
+    findFreePort: async () => 12_345,
+    isPortBindable: async () => true,
+    isServerResponding: async () => false,
   };
 }
 
@@ -191,7 +224,7 @@ describe('LlamaServerRunner', () => {
     const runner = new LlamaServerRunner(options(processManager), 12_345);
 
     await expect(runner.start()).rejects.toThrow('spawn failed');
-    expect(runner.pid).toBeUndefined();
+    expect(() => runner.pid).toThrow(/unavailable before successful startup/);
   });
 
   it('preserves stderr when readiness times out before the process exits', async () => {
@@ -306,7 +339,10 @@ describe('LlamaServerRunner', () => {
         )
       );
 
-    const runner = await startLlamaServerRunner(options(processManager));
+    const runner = await startLlamaServerRunnerForTest(
+      publicOptions(),
+      factoryDependencies(processManager)
+    );
 
     expect(processManager.spawnCount).toBe(LLAMA_CALIBRATION_DEFAULTS.maxRunnerStartAttempts);
     await runner.stop();
@@ -323,7 +359,9 @@ describe('LlamaServerRunner', () => {
         new Response(JSON.stringify({ default_generation_settings: { n_ctx: 6144 } }))
       );
 
-    await expect(startLlamaServerRunner(options(processManager))).rejects.toMatchObject({
+    await expect(
+      startLlamaServerRunnerForTest(publicOptions(), factoryDependencies(processManager))
+    ).rejects.toMatchObject({
       details: expect.objectContaining({ code: 'CALIBRATION_CLEANUP_FAILED', pid: 77 }),
     });
     expect(processManager.spawnCount).toBe(1);
@@ -333,7 +371,17 @@ describe('LlamaServerRunner', () => {
     const processManager = new FakeProcessManager();
     processManager.killError = new Error('access denied');
     const runner = new LlamaServerRunner(options(processManager), 12_345);
-    (runner as unknown as { _pid: number })._pid = 77;
+    processManager.spawnError = undefined;
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    await runner.start();
+    processManager.killError = new Error('access denied');
 
     await expect(runner.stop()).rejects.toMatchObject({
       details: expect.objectContaining({ code: 'CALIBRATION_CLEANUP_FAILED', pid: 77 }),
@@ -352,7 +400,15 @@ describe('LlamaServerRunner', () => {
       },
       12_345
     );
-    (runner as unknown as { _pid: number })._pid = 77;
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    await runner.start();
 
     await expect(runner.stop()).rejects.toMatchObject({
       details: expect.objectContaining({
@@ -368,7 +424,15 @@ describe('LlamaServerRunner', () => {
     const processManager = new FakeProcessManager();
     processManager.remainRunningAfterKill = true;
     const runner = new LlamaServerRunner(options(processManager), 12_345);
-    (runner as unknown as { _pid: number })._pid = 77;
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    await runner.start();
 
     const pending = runner.stop();
     const failure = expect(pending).rejects.toMatchObject({
@@ -386,7 +450,15 @@ describe('LlamaServerRunner', () => {
     const processManager = new FakeProcessManager();
     processManager.emitExitOnKill = false;
     const runner = new LlamaServerRunner(options(processManager), 12_345);
-    (runner as unknown as { _pid: number })._pid = 77;
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    await runner.start();
     let settled = false;
 
     const pending = runner.stop().then(() => {
@@ -398,5 +470,469 @@ describe('LlamaServerRunner', () => {
     await pending;
 
     expect(settled).toBe(true);
+  });
+
+  it('preserves production defaults, cwd, and caller-owned slot state', async () => {
+    const processManager = new FakeProcessManager();
+    const remove = jest.fn(async () => undefined);
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    const runner = new LlamaServerRunner(
+      {
+        binaryPath: 'llama-server',
+        model,
+        config: { gpuLayers: 10 },
+        contextSize: 12_288,
+        parallelRequests: 2,
+        startupTimeoutMs: 1_000,
+        cwd: 'C:\\runtime',
+        processManager,
+        childController: processManager,
+        slotSaveDirectoryRemover: remove,
+      },
+      12_345
+    );
+
+    await runner.start();
+
+    expect(runner.args).not.toEqual(expect.arrayContaining(['--host']));
+    expect(runner.args).not.toEqual(expect.arrayContaining(['--slots']));
+    expect(runner.args).not.toEqual(expect.arrayContaining(['--no-slots']));
+    expect(runner.args).not.toEqual(expect.arrayContaining(['--slot-save-path']));
+    expect(processManager.options?.cwd).toBe('C:\\runtime');
+    await runner.stop();
+    expect(remove).not.toHaveBeenCalled();
+    expect(processManager.killedChildren[0]).toBe(processManager.spawnedChildren[0]);
+  });
+
+  it('emits --no-slots while retaining mandatory capacity verification', async () => {
+    const processManager = new FakeProcessManager();
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    const runner = new LlamaServerRunner(
+      {
+        ...options(processManager),
+        slotsEndpoint: 'disabled',
+        slotSavePath: undefined,
+      },
+      12_345
+    );
+
+    await runner.start();
+    expect(runner.args).toContain('--no-slots');
+    expect(runner.capacity.totalSlots).toBe(2);
+    await runner.stop();
+  });
+
+  it.each([
+    [{ contextSize: 0 }, 'contextSize'],
+    [{ parallelRequests: Number.NaN }, 'parallelRequests'],
+    [{ startupTimeoutMs: -1 }, 'startupTimeoutMs'],
+    [{ stderrMaxBytes: 0 }, 'stderrMaxBytes'],
+    [{ port: 65_536 }, 'port'],
+    [{ config: { host: '' } }, 'host'],
+    [{ config: { host: ' ::1 ' } }, 'host'],
+  ])('rejects invalid options before side effects: %s', async (override, option) => {
+    const processManager = new FakeProcessManager();
+    const createDirectory = jest.fn(async () => 'C:\\temp\\owned');
+    const responding = jest.fn(async () => false);
+    const bindable = jest.fn(async () => true);
+
+    await expect(
+      startLlamaServerRunnerForTest(
+        { ...publicOptions(), temporarySlotSavePath: false, slotSavePath: undefined, ...override },
+        {
+          ...factoryDependencies(processManager),
+          temporaryDirectoryCreator: createDirectory,
+          isServerResponding: responding,
+          isPortBindable: bindable,
+        }
+      )
+    ).rejects.toMatchObject({
+      details: expect.objectContaining({ option }),
+    });
+    expect(createDirectory).not.toHaveBeenCalled();
+    expect(responding).not.toHaveBeenCalled();
+    expect(bindable).not.toHaveBeenCalled();
+    expect(processManager.spawnCount).toBe(0);
+  });
+
+  it.each([
+    [{ slotsEndpoint: 'disabled' as const, slotSavePath: 'C:\\slots' }],
+    [{ slotsEndpoint: 'disabled' as const, temporarySlotSavePath: true }],
+    [{ slotsEndpoint: 'default' as const, temporarySlotSavePath: true }],
+    [
+      {
+        slotsEndpoint: 'enabled' as const,
+        slotSavePath: 'C:\\slots',
+        temporarySlotSavePath: true,
+      },
+    ],
+  ])('rejects incompatible slot options before spawn', async (override) => {
+    const processManager = new FakeProcessManager();
+    await expect(
+      startLlamaServerRunnerForTest(
+        { ...publicOptions(), slotSavePath: undefined, ...override },
+        factoryDependencies(processManager)
+      )
+    ).rejects.toMatchObject({
+      details: expect.objectContaining({ code: 'INVALID_LLAMA_SERVER_RUNNER_OPTIONS' }),
+    });
+    expect(processManager.spawnCount).toBe(0);
+  });
+
+  it('checks fixed-port HTTP occupancy and bindability without retrying', async () => {
+    const occupiedManager = new FakeProcessManager();
+    const occupied = jest.fn(async () => true);
+    const bindable = jest.fn(async () => true);
+    await expect(
+      startLlamaServerRunnerForTest(
+        { ...publicOptions(), port: 12_345 },
+        {
+          ...factoryDependencies(occupiedManager),
+          isServerResponding: occupied,
+          isPortBindable: bindable,
+        }
+      )
+    ).rejects.toBeInstanceOf(PortInUseError);
+    expect(occupied).toHaveBeenCalledWith(12_345, 2_000, '127.0.0.1');
+    expect(bindable).not.toHaveBeenCalled();
+    expect(occupiedManager.spawnCount).toBe(0);
+
+    const boundManager = new FakeProcessManager();
+    await expect(
+      startLlamaServerRunnerForTest(
+        { ...publicOptions(), port: 12_345 },
+        {
+          ...factoryDependencies(boundManager),
+          isServerResponding: async () => false,
+          isPortBindable: async () => false,
+        }
+      )
+    ).rejects.toBeInstanceOf(PortInUseError);
+    expect(boundManager.spawnCount).toBe(0);
+  });
+
+  it.each([
+    ['::', '::1', 'http://[::1]:12345/health', 'http://[::1]:12345/props'],
+    ['::1', '::1', 'http://[::1]:12345/health', 'http://[::1]:12345/props'],
+    ['0.0.0.0', '127.0.0.1', 'http://127.0.0.1:12345/health', 'http://127.0.0.1:12345/props'],
+  ])(
+    'uses bind host %s and reachable HTTP host %s',
+    async (host, connectHost, healthUrl, propsUrl) => {
+      const processManager = new FakeProcessManager();
+      const responding = jest.fn(async () => false);
+      const bindable = jest.fn(async () => true);
+      jest
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+        .mockResolvedValueOnce(
+          new Response(
+            JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+          )
+        );
+
+      const runner = await startLlamaServerRunnerForTest(
+        { ...publicOptions(), config: { host }, port: 12_345 },
+        {
+          ...factoryDependencies(processManager),
+          isServerResponding: responding,
+          isPortBindable: bindable,
+        }
+      );
+
+      expect(responding).toHaveBeenCalledWith(12_345, 2_000, connectHost);
+      expect(bindable).toHaveBeenCalledWith(12_345, host);
+      expect(globalThis.fetch).toHaveBeenNthCalledWith(1, healthUrl, expect.any(Object));
+      expect(globalThis.fetch).toHaveBeenNthCalledWith(2, propsUrl, expect.any(Object));
+      await runner.stop();
+    }
+  );
+
+  it('uses one fixed-port launch attempt and propagates non-occupancy bind errors', async () => {
+    const bindError = Object.assign(new Error('bad interface'), { code: 'EADDRNOTAVAIL' });
+    const failedManager = new FakeProcessManager();
+    await expect(
+      startLlamaServerRunnerForTest(
+        { ...publicOptions(), port: 12_345 },
+        {
+          ...factoryDependencies(failedManager),
+          isPortBindable: async () => {
+            throw bindError;
+          },
+        }
+      )
+    ).rejects.toBe(bindError);
+
+    const processManager = new FakeProcessManager();
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    const runner = await startLlamaServerRunnerForTest(
+      { ...publicOptions(), port: 12_345 },
+      factoryDependencies(processManager)
+    );
+    expect(processManager.spawnCount).toBe(1);
+    await runner.stop();
+  });
+
+  it('rejects duplicate, concurrent, and post-stop starts without respawning', async () => {
+    const processManager = new FakeProcessManager();
+    let releaseHealth!: () => void;
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            releaseHealth = () => resolve(new Response(JSON.stringify({ status: 'ok' })));
+          })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    const runner = new LlamaServerRunner(options(processManager), 12_345);
+    const first = runner.start();
+    await expect(runner.start()).rejects.toMatchObject({
+      details: expect.objectContaining({ code: 'LLAMA_SERVER_RUNNER_INVALID_STATE' }),
+    });
+    releaseHealth();
+    await first;
+    await expect(runner.start()).rejects.toMatchObject({
+      details: expect.objectContaining({ code: 'LLAMA_SERVER_RUNNER_INVALID_STATE' }),
+    });
+    await runner.stop();
+    await expect(runner.start()).rejects.toMatchObject({
+      details: expect.objectContaining({ code: 'LLAMA_SERVER_RUNNER_INVALID_STATE' }),
+    });
+    expect(processManager.spawnCount).toBe(1);
+  });
+
+  it('shares concurrent stop and removes factory-owned state exactly once', async () => {
+    const processManager = new FakeProcessManager();
+    const remove = jest.fn(async () => undefined);
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    const runner = await startLlamaServerRunnerForTest(
+      {
+        ...publicOptions(),
+        slotSavePath: undefined,
+        temporarySlotSavePath: true,
+      },
+      {
+        ...factoryDependencies(processManager),
+        temporaryDirectoryCreator: async () => 'C:\\temp\\owned',
+        slotSaveDirectoryRemover: remove,
+      }
+    );
+
+    const first = runner.stop();
+    const second = runner.stop();
+    expect(first).toBe(second);
+    await Promise.all([first, second]);
+    await expect(runner.exitPromise).resolves.toEqual({ code: 0, signal: null });
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats the caller signal as startup-only after the factory resolves', async () => {
+    const processManager = new FakeProcessManager();
+    const controller = new AbortController();
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    const runner = await startLlamaServerRunnerForTest(
+      { ...publicOptions(), signal: controller.signal },
+      factoryDependencies(processManager)
+    );
+
+    controller.abort('too late');
+    await Promise.resolve();
+    expect(processManager.running).toBe(true);
+    expect(processManager.killedChildren).toHaveLength(0);
+    await runner.stop();
+  });
+
+  it('cleans owned state on spontaneous exit and shares cleanup failure with stop', async () => {
+    const processManager = new FakeProcessManager();
+    const cleanupFailure = new Error('directory locked');
+    const remove = jest.fn(async () => {
+      throw cleanupFailure;
+    });
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    const runner = await startLlamaServerRunnerForTest(
+      { ...publicOptions(), slotSavePath: undefined, temporarySlotSavePath: true },
+      {
+        ...factoryDependencies(processManager),
+        temporaryDirectoryCreator: async () => 'C:\\temp\\owned',
+        slotSaveDirectoryRemover: remove,
+      }
+    );
+    processManager.running = false;
+    processManager.options?.onExit?.(1, null);
+
+    const exitFailure = await runner.exitPromise.catch((error: unknown) => error);
+    const stopFailure = await runner.stop().catch((error: unknown) => error);
+    expect(exitFailure).toMatchObject({
+      details: expect.objectContaining({ code: 'CALIBRATION_CLEANUP_FAILED' }),
+    });
+    expect(stopFailure).toBe(exitFailure);
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not treat a nonterminal child error as confirmed exit', async () => {
+    const processManager = new FakeProcessManager();
+    const remove = jest.fn(async () => undefined);
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ total_slots: 2, default_generation_settings: { n_ctx: 6144 } })
+        )
+      );
+    const runner = new LlamaServerRunner(
+      {
+        ...options(processManager),
+        cleanupSlotSavePath: true,
+        slotSaveDirectoryRemover: remove,
+      },
+      12_345
+    );
+    await runner.start();
+    let exited = false;
+    void runner.exitPromise.then(() => {
+      exited = true;
+    });
+
+    processManager.options?.onError?.(new Error('failed to send signal'));
+    await Promise.resolve();
+
+    expect(processManager.running).toBe(true);
+    expect(exited).toBe(false);
+    expect(remove).not.toHaveBeenCalled();
+    expect(runner.stderrTail).toContain('failed to send signal');
+    await runner.stop();
+    expect(remove).toHaveBeenCalledTimes(1);
+  });
+
+  it('classifies exit during props immediately even while owned cleanup is pending', async () => {
+    const processManager = new FakeProcessManager();
+    let announceProps!: () => void;
+    let releaseCleanup!: () => void;
+    const propsStarted = new Promise<void>((resolve) => {
+      announceProps = resolve;
+    });
+    const cleanupGate = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const remove = jest.fn(async () => cleanupGate);
+    jest
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ status: 'ok' })))
+      .mockImplementationOnce(
+        (_url, init) =>
+          new Promise((_resolve, reject) => {
+            announceProps();
+            init?.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+          })
+      );
+    const runner = new LlamaServerRunner(
+      {
+        ...options(processManager),
+        cleanupSlotSavePath: true,
+        slotSaveDirectoryRemover: remove,
+      },
+      12_345
+    );
+    const pending = runner.start();
+    await propsStarted;
+
+    processManager.running = false;
+    processManager.options?.onExit?.(1, null);
+    await Promise.resolve();
+    expect(remove).toHaveBeenCalledTimes(1);
+    releaseCleanup();
+
+    await expect(pending).rejects.toMatchObject({
+      details: expect.objectContaining({ code: 'CALIBRATION_CANDIDATE_CRASHED' }),
+    });
+  });
+
+  it('removes factory-created state after constructor failure and avoids creating it on pre-abort', async () => {
+    const processManager = new FakeProcessManager();
+    const remove = jest.fn(async () => undefined);
+    await expect(
+      startLlamaServerRunnerForTest(
+        {
+          ...publicOptions(),
+          config: { cacheTypeV: 'q8_0', flashAttention: 'off' },
+          slotSavePath: undefined,
+          temporarySlotSavePath: true,
+        },
+        {
+          ...factoryDependencies(processManager),
+          temporaryDirectoryCreator: async () => 'C:\\temp\\owned',
+          slotSaveDirectoryRemover: remove,
+        }
+      )
+    ).rejects.toThrow(/requires flash attention/);
+    expect(remove).toHaveBeenCalledWith('C:\\temp\\owned');
+
+    const controller = new AbortController();
+    controller.abort('already aborted');
+    const create = jest.fn(async () => 'C:\\temp\\never-created');
+    await expect(
+      startLlamaServerRunnerForTest(
+        {
+          ...publicOptions(),
+          signal: controller.signal,
+          slotSavePath: undefined,
+          temporarySlotSavePath: true,
+        },
+        {
+          ...factoryDependencies(new FakeProcessManager()),
+          temporaryDirectoryCreator: create,
+        }
+      )
+    ).rejects.toMatchObject({
+      details: expect.objectContaining({ code: 'CALIBRATION_ABORTED' }),
+    });
+    expect(create).not.toHaveBeenCalled();
   });
 });

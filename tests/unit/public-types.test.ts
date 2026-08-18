@@ -3,7 +3,16 @@ import { describe, expect, it } from '@jest/globals';
 // Electron runtime. The root's re-export is proven type-side below and at runtime by
 // `npm run test:packed-api`.
 import { LlamaCalibrationResourceStabilityError } from '../../src/errors/index.js';
+import { startLlamaServerRunner } from '../../src/llama-server-launch.js';
 import type { LlamaCalibrationResourceStabilityError as RootStabilityError } from '../../src/index.js';
+import type {
+  LlamaServerHandle,
+  LlamaServerRunnerConfig,
+  LlamaServerRuntimeConfig,
+  ResolvedLlamaServerRunnerConfig,
+  StartLlamaServerRunnerOptions,
+} from '../../src/llama-server-launch.js';
+import type { ResolvedLlamaServerConfig } from '../../src/process/llama-server-args.js';
 import type {
   ContextConstraintDetails,
   ContextConstraintError,
@@ -42,10 +51,74 @@ import type {
   LlamaExactCalibrationReport,
   MemoryTelemetryRefreshStatus,
   OptimalConfigHints,
+  LlamaServerConfig,
+  ServerConfig,
   ServerEvent,
   ServerInfo,
   TelemetryCommandOptions,
 } from '../../src/index.js';
+
+describe('public Node-safe llama-server launch types', () => {
+  it('keeps full manager config structurally assignable to the runtime view', () => {
+    const full: LlamaServerConfig = {
+      modelId: 'model',
+      host: '127.0.0.1',
+      threads: 8,
+      contextSize: 8192,
+      gpuLayers: 20,
+      parallelRequests: 2,
+      flashAttention: 'on',
+    };
+    const runtime: LlamaServerRuntimeConfig = full;
+    const minimal: LlamaServerRuntimeConfig = { gpuLayers: 20 };
+    const serverFields: Pick<
+      ServerConfig,
+      'host' | 'threads' | 'contextSize' | 'gpuLayers' | 'parallelRequests' | 'flashAttention'
+    > = runtime;
+    const hints: OptimalConfigHints = { contextSize: 8192, parallelRequests: 2 };
+
+    expect({ runtime, minimal, serverFields, hints }).toBeDefined();
+  });
+
+  it('prevents nested factory precedence and guarantees the post-start handle', () => {
+    const runnerConfig: LlamaServerRunnerConfig = { gpuLayers: 20 };
+    const invalidContext: LlamaServerRunnerConfig = {
+      // @ts-expect-error contextSize is required at the factory top level
+      contextSize: 8192,
+    };
+    const invalidParallel: LlamaServerRunnerConfig = {
+      // @ts-expect-error parallelRequests is required at the factory top level
+      parallelRequests: 2,
+    };
+    const invalidFit: LlamaServerRunnerConfig = {
+      // @ts-expect-error runner fit is fixed to off after resolution
+      fit: 'on',
+    };
+    const launch: (options: StartLlamaServerRunnerOptions) => Promise<LlamaServerHandle> =
+      startLlamaServerRunner;
+    const requiredHandleFields = (handle: LlamaServerHandle) => {
+      const pid: number = handle.pid;
+      const loadTimeMs: number = handle.loadTimeMs;
+      const totalSlots: number = handle.capacity.totalSlots;
+      const resolved: ResolvedLlamaServerRunnerConfig = handle.config;
+      const contextSize: number = resolved.contextSize;
+      const parallelRequests: number = resolved.parallelRequests;
+      const fit: 'off' = resolved.fit;
+      return { pid, loadTimeMs, totalSlots, contextSize, parallelRequests, fit };
+    };
+    const managerResolved: ResolvedLlamaServerConfig = { modelId: 'model', port: 8080 };
+
+    expect({
+      runnerConfig,
+      invalidContext,
+      invalidParallel,
+      invalidFit,
+      launch,
+      requiredHandleFields,
+      managerResolved,
+    }).toBeDefined();
+  });
+});
 
 describe('public context-capacity types', () => {
   it('are consumable through the package root', () => {

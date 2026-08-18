@@ -55,5 +55,11 @@ describe('port-utils', () => {
       const port = await findFreePort();
       await expect(isPortBindable(port)).resolves.toBe(true);
     });
+
+    it('rejects non-occupancy bind failures with the original error code', async () => {
+      await expect(isPortBindable(45_678, '256.256.256.256')).rejects.toMatchObject({
+        code: 'ENOTFOUND',
+      });
+    });
   });
 });

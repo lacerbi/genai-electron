@@ -20,7 +20,7 @@ import type {
 } from '../types/index.js';
 import { median, weightedCalibrationScore, workloadSignature } from '../utils/llama-calibration.js';
 import { LlamaCalibrationClient } from './llama-calibration-client.js';
-import { startLlamaServerRunner, type LlamaServerRunner } from './llama-server-runner.js';
+import { startLlamaServerRunner, type LlamaServerHandle } from './llama-server-runner.js';
 
 type WeightedWorkload = LlamaCalibrationWorkload & { weight: number };
 
@@ -372,7 +372,7 @@ export async function runCalibrationProbe(
   };
   const workloadResults: LlamaCalibrationWorkloadResult[] = [];
   const promptTokenCounts = new Map<string, readonly number[]>();
-  let runner: LlamaServerRunner | undefined;
+  let runner: LlamaServerHandle | undefined;
   let status: LlamaCalibrationRun['status'] = 'ok';
   let errorText: string | undefined;
   let stderrTail: string | undefined;
@@ -393,22 +393,20 @@ export async function runCalibrationProbe(
   emitProgress({ phase: 'starting' });
   try {
     options.signal?.throwIfAborted();
+    const { contextSize, parallelRequests, ...runnerConfig } = options.resolvedConfig;
     runner = await startLlamaServerRunner({
       binaryPath: options.binaryPath,
       model: options.model,
-      config: { modelId: options.model.id, ...options.resolvedConfig },
-      contextSize: options.resolvedConfig.contextSize,
-      parallelRequests: options.resolvedConfig.parallelRequests,
+      config: { host: '127.0.0.1', ...runnerConfig },
+      contextSize,
+      parallelRequests,
       startupTimeoutMs: options.startupTimeoutMs,
       signal: options.signal,
+      slotsEndpoint: 'enabled',
+      temporarySlotSavePath: true,
     });
     loadTimeMs = runner.loadTimeMs;
     const capacity = runner.capacity;
-    if (!capacity || capacity.totalSlots === undefined) {
-      throw new ServerError('llama-server capacity was not verified for calibration', {
-        code: 'CALIBRATION_SLOTS_UNAVAILABLE',
-      });
-    }
     effectiveContextSize = capacity.effectiveContextSize;
     effectiveParallelRequests = capacity.totalSlots;
     const client = new LlamaCalibrationClient(runner, options.requestTimeoutMs, options.signal);

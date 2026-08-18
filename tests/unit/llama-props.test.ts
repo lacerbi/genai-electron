@@ -20,12 +20,14 @@ describe('fetchLlamaRuntimeCapacity', () => {
       json: async () => ({
         default_generation_settings: { n_ctx: 12288 },
         total_slots: 2,
+        model_path: '/models/model.gguf',
       }),
     } as Response);
 
     await expect(fetchLlamaRuntimeCapacity(8080, '127.0.0.1', 2)).resolves.toEqual({
       effectiveContextSize: 12288,
       totalSlots: 2,
+      modelPath: '/models/model.gguf',
     });
     expect(mockFetch).toHaveBeenCalledWith(
       'http://127.0.0.1:8080/props',
@@ -42,6 +44,23 @@ describe('fetchLlamaRuntimeCapacity', () => {
     await expect(fetchLlamaRuntimeCapacity(8080, 'localhost', 1)).resolves.toEqual({
       effectiveContextSize: 4096,
       totalSlots: undefined,
+      modelPath: undefined,
+    });
+  });
+
+  it('ignores a non-string model_path', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        default_generation_settings: { n_ctx: 4096 },
+        model_path: 42,
+      }),
+    } as Response);
+
+    await expect(fetchLlamaRuntimeCapacity(8080, 'localhost', 1)).resolves.toEqual({
+      effectiveContextSize: 4096,
+      totalSlots: undefined,
+      modelPath: undefined,
     });
   });
 

@@ -2,7 +2,7 @@
 
 import { ServerError } from '../errors/index.js';
 import type { LlamaCalibrationRequestTiming } from '../types/index.js';
-import type { LlamaServerRunner } from './llama-server-runner.js';
+import type { LlamaServerHandle } from './llama-server-runner.js';
 
 interface CompletionOptions {
   prompt: string;
@@ -29,7 +29,7 @@ export class LlamaCalibrationClient {
   private readonly baseUrl: string;
 
   constructor(
-    private readonly runner: LlamaServerRunner,
+    private readonly runner: LlamaServerHandle,
     private readonly requestTimeoutMs: number,
     private readonly signal?: AbortSignal
   ) {

@@ -11,9 +11,8 @@ const mockFetch = jest.fn();
 global.fetch = mockFetch as any;
 
 // Import after mocking
-const { checkHealth, waitForHealthy, isServerResponding } = await import(
-  '../../src/process/health-check.js'
-);
+const { checkHealth, waitForHealthy, isServerResponding, normalizeHealthHost, formatHttpHost } =
+  await import('../../src/process/health-check.js');
 const { ServerError } = await import('../../src/errors/index.js');
 
 describe('health-check', () => {
@@ -25,6 +24,14 @@ describe('health-check', () => {
   afterAll(() => {
     // Restore original fetch
     global.fetch = originalFetch;
+  });
+
+  it('normalizes wildcard bind hosts within their address family', () => {
+    expect(normalizeHealthHost(undefined)).toBe('127.0.0.1');
+    expect(normalizeHealthHost('0.0.0.0')).toBe('127.0.0.1');
+    expect(normalizeHealthHost('::')).toBe('::1');
+    expect(normalizeHealthHost('::1')).toBe('::1');
+    expect(formatHttpHost('::1')).toBe('[::1]');
   });
 
   describe('checkHealth()', () => {

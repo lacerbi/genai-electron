@@ -1,8 +1,10 @@
 # genai-electron
 
-> **Version**: 0.23.0 | **Status**: Production Ready - Granular binary provisioning progress
+> **Version**: 0.24.0 | **Status**: Production Ready - Node-safe llama-server launch
 
-Electron-specific library for managing local AI model servers (llama.cpp, stable-diffusion.cpp). Handles platform-specific operations to run AI models locally. Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
+Electron-first library for managing local AI model servers (llama.cpp, stable-diffusion.cpp), with
+supported Electron-free subpaths for calibration policy metadata and direct llama-server launch.
+Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstraction.
 
 ## Features
 
@@ -22,7 +24,7 @@ Electron-specific library for managing local AI model servers (llama.cpp, stable
 
 ```bash
 npm install genai-electron
-npm install electron@>=25.0.0  # Peer dependency
+npm install electron@>=25.0.0  # Required only for the package root/manager APIs
 ```
 
 ## Quick Start
@@ -68,7 +70,36 @@ console.log(LLAMA_CALIBRATION_DEFAULTS.policyVersion);
 ```
 
 Use this supported subpath when validating persisted calibration compatibility outside an Electron
-runtime. Other package functionality remains Electron-specific.
+runtime.
+
+### Electron-free llama-server launch
+
+Plain Node ESM applications can launch a caller-provided binary and GGUF without importing the
+Electron-backed managers:
+
+```typescript
+import { startLlamaServerRunner } from 'genai-electron/llama-server-launch';
+
+const server = await startLlamaServerRunner({
+  binaryPath: '/opt/llama/bin/llama-server',
+  model: { path: '/opt/models/model.gguf' },
+  config: { host: '127.0.0.1', gpuLayers: 40 },
+  contextSize: 8192,
+  parallelRequests: 2,
+  startupTimeoutMs: 120_000,
+  port: 12_345,
+  slotsEndpoint: 'disabled',
+});
+try {
+  console.log(server.port, server.capacity);
+} finally {
+  await server.stop();
+}
+```
+
+Electron is an optional peer for these two Node-safe subpaths. The supported loader contract is
+native ESM; a CommonJS build that rewrites dynamic `import()` to `require()` must preserve native
+import or use an ESM bridge.
 
 ## Documentation
 

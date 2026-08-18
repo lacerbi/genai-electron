@@ -429,6 +429,72 @@ Flash attention tri-state, plus `boolean` for backwards compatibility (`true` �
 type FlashAttentionSetting = boolean | 'on' | 'off' | 'auto';
 ```
 
+### Node-safe llama-server launch types
+
+Import these from `genai-electron/llama-server-launch`, not the Electron-backed package root:
+
+```typescript
+interface LlamaModelFile { path: string }
+type LlamaSlotsEndpointMode = 'default' | 'enabled' | 'disabled';
+
+type LlamaServerRuntimeConfig = Pick<LlamaServerConfig,
+  'host' | 'threads' | 'contextSize' | 'gpuLayers' | 'parallelRequests' |
+  'flashAttention' | 'fit' | 'cacheTypeK' | 'cacheTypeV' | 'swaFull' |
+  'overrideTensors' | 'cacheRam' | 'cpuMoe' | 'nCpuMoe' | 'reasoningFormat' |
+  'modelAlias' | 'batchSize' | 'continuousBatching' | 'useMmap' | 'useMlock' | 'jinja'
+>;
+type LlamaServerRunnerConfig = Omit<
+  LlamaServerRuntimeConfig,
+  'contextSize' | 'parallelRequests' | 'fit'
+>;
+type ResolvedLlamaServerRunnerConfig = LlamaServerRunnerConfig & {
+  port: number;
+  contextSize: number;
+  parallelRequests: number;
+  fit: 'off';
+};
+
+interface StartLlamaServerRunnerOptions {
+  binaryPath: string;
+  model: LlamaModelFile;
+  config: LlamaServerRunnerConfig;
+  contextSize: number;
+  parallelRequests: number;
+  startupTimeoutMs: number;
+  port?: number;
+  cwd?: string;
+  signal?: AbortSignal; // startup only
+  stderrMaxBytes?: number;
+  slotsEndpoint?: LlamaSlotsEndpointMode;
+  slotSavePath?: string; // caller-owned
+  temporarySlotSavePath?: boolean; // factory-owned; requires enabled slots
+}
+
+interface LlamaRuntimeCapacity {
+  effectiveContextSize: number;
+  totalSlots?: number;
+  modelPath?: string;
+}
+type VerifiedLlamaRuntimeCapacity = LlamaRuntimeCapacity & { totalSlots: number };
+
+interface LlamaServerHandle {
+  readonly port: number;
+  readonly args: readonly string[];
+  readonly config: ResolvedLlamaServerRunnerConfig;
+  readonly capacity: VerifiedLlamaRuntimeCapacity;
+  readonly loadTimeMs: number;
+  readonly pid: number;
+  readonly stderrTail: string;
+  readonly stdoutTail: string;
+  readonly exitPromise: Promise<LlamaServerExit>;
+  raceWithExit<T>(operation: Promise<T>): Promise<T>;
+  stop(): Promise<void>;
+}
+```
+
+The factory returns only after health and strict `/props` verification, so the handle's PID,
+load time, and verified capacity are required rather than optional.
+
 ### ServerConfig
 
 ```typescript
@@ -605,7 +671,7 @@ function findFreePort(host?: string): Promise<number>;   // host defaults to '12
 function isPortBindable(port: number, host?: string): Promise<boolean>;  // host defaults to '127.0.0.1'
 
 // Map a bind host to the host health checks should target
-// (wildcards '0.0.0.0' / '::' → '127.0.0.1'; unset → '127.0.0.1').
+// ('0.0.0.0' → '127.0.0.1'; '::' → '::1'; unset → '127.0.0.1').
 function normalizeHealthHost(host?: string): string;
 ```
 

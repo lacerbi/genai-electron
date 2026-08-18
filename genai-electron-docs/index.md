@@ -1,9 +1,11 @@
 # genai-electron Documentation
 
-> **Version**: 0.23.0 (Granular binary provisioning progress)
+> **Version**: 0.24.0 (Node-safe llama-server launch)
 > **Status**: Production Ready - LLM & Image Generation
 
-Complete documentation for genai-electron - An Electron-specific library for managing local AI model servers and resources.
+Complete documentation for genai-electron—an Electron-first library for managing local AI model
+servers and resources, with supported plain-Node subpaths for direct llama-server launch and
+calibration policy metadata.
 
 ---
 
@@ -16,7 +18,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 ### Core APIs
 - **[System Detection](system-detection.md)** - SystemInfo API for hardware capability detection
 - **[Model Management](model-management.md)** - ModelManager API for downloading and managing GGUF models
-- **[LLM Server](llm-server.md)** - LlamaServerManager lifecycle, configuration, and adaptive/exact runtime calibration
+- **[LLM Server](llm-server.md)** - Electron manager lifecycle, Node-safe direct launch, and runtime calibration
 - **[Image Generation](image-generation.md)** - DiffusionServerManager API for local image generation
 - **[Resource Orchestration](resource-orchestration.md)** - ResourceOrchestrator for managing both LLM and image servers
 
@@ -26,6 +28,7 @@ Complete documentation for genai-electron - An Electron-specific library for man
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.23.0 to v0.24.0](migration-0-23-to-0-24.md)** - Node-safe direct llama-server launch, optional Electron peer installation, and native-ESM adoption boundary
 - **[Migrating from v0.22.1 to v0.23.0](migration-0-22-1-to-0-23.md)** - Additive byte-level extraction telemetry plus truthful `finalizing` and `installing` phases
 - **[Migrating from v0.22.0 to v0.22.1](migration-0-22-0-to-0-22-1.md)** - Bundler-safe ZIP extraction with no loose `adm-zip` runtime module; remove downstream packaging workarounds
 - **[Migrating from v0.21.x to v0.22.0](migration-0-21-to-0-22.md)** - Electron-free policy metadata entry and strict package exports; migrate all internal `dist/` imports
@@ -55,11 +58,13 @@ Complete documentation for genai-electron - An Electron-specific library for man
 
 ## Overview
 
-genai-electron manages the runtime infrastructure for running local AI models (llama.cpp, stable-diffusion.cpp) in Electron applications, while genai-lite provides the high-level API abstraction layer for communicating with these models.
+genai-electron primarily manages the runtime infrastructure for local AI models in Electron
+applications, while genai-lite provides the high-level API abstraction layer. Plain Node hosts may
+also launch a caller-provided llama-server binary through `genai-electron/llama-server-launch`.
 
 **The Ecosystem**:
 - **genai-lite**: Lightweight, portable API abstraction layer for AI providers (cloud and local)
-- **genai-electron**: Electron-specific runtime management (this library)
+- **genai-electron**: Electron runtime management plus narrowly scoped Node-safe subpaths
 
 **Core Features**:
 - ✅ **System capability detection** - Automatic detection of RAM, CPU, GPU, and VRAM

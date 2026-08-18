@@ -1,12 +1,65 @@
 /** Shared llama-server config normalization and argument construction. */
 
 import { ServerError } from '../errors/index.js';
-import type { LlamaServerConfig, ModelInfo } from '../types/index.js';
+import type { LlamaServerConfig, LlamaServerRuntimeConfig } from '../types/index.js';
 
 export type ResolvedLlamaServerConfig = LlamaServerConfig & { port: number };
 
+/**
+ * Canonical runtime config with a concrete port.
+ *
+ * @example
+ * ```ts
+ * const config: ResolvedLlamaServerRuntimeConfig = { port: 12345, gpuLayers: 40 };
+ * ```
+ */
+export type ResolvedLlamaServerRuntimeConfig = LlamaServerRuntimeConfig & { port: number };
+
+/**
+ * Minimal model input required to construct llama-server arguments.
+ *
+ * @example
+ * ```ts
+ * const model: LlamaModelFile = { path: '/opt/models/model.gguf' };
+ * ```
+ */
+export interface LlamaModelFile {
+  /** Absolute or caller-resolved GGUF path passed to llama-server via `-m`. */
+  path: string;
+}
+
+/**
+ * `/slots` endpoint exposure mode for the pinned llama-server contract.
+ *
+ * @example
+ * ```ts
+ * const slots: LlamaSlotsEndpointMode = 'disabled';
+ * ```
+ */
+export type LlamaSlotsEndpointMode = 'default' | 'enabled' | 'disabled';
+
+/**
+ * Optional canonical argument-builder controls.
+ *
+ * @example
+ * ```ts
+ * const options: LlamaServerArgsOptions = {
+ *   slotsEndpoint: 'enabled',
+ *   slotSavePath: '/var/tmp/llama-slots',
+ * };
+ * ```
+ */
+export interface LlamaServerArgsOptions {
+  /** Omit a flag for the server default, or explicitly enable/disable `/slots`. */
+  slotsEndpoint?: LlamaSlotsEndpointMode;
+  /** Directory supplied to llama-server for saved slot state. */
+  slotSavePath?: string;
+}
+
 /** Enforce llama.cpp's quantized-V/flash-attention constraint without mutation. */
-export function normalizeLlamaVCacheConfig<T extends Partial<LlamaServerConfig>>(config: T): T {
+export function normalizeLlamaVCacheConfig<T extends Partial<LlamaServerRuntimeConfig>>(
+  config: T
+): T {
   const quantizedVCache =
     config.cacheTypeV !== undefined && config.cacheTypeV !== 'f16' && config.cacheTypeV !== 'bf16';
   if (!quantizedVCache) return { ...config };
@@ -27,10 +80,18 @@ export function normalizeLlamaVCacheConfig<T extends Partial<LlamaServerConfig>>
 
 /** Construct production-equivalent llama-server argv. */
 export function buildLlamaServerArgs(
-  config: ResolvedLlamaServerConfig,
-  modelInfo: ModelInfo,
-  options: { enableSlotsEndpoint?: boolean; slotSavePath?: string } = {}
+  config: ResolvedLlamaServerRuntimeConfig,
+  modelInfo: LlamaModelFile,
+  options: LlamaServerArgsOptions = {}
 ): string[] {
+  if (options.slotsEndpoint === 'disabled' && options.slotSavePath !== undefined) {
+    throw new ServerError('slotSavePath cannot be used when the /slots endpoint is disabled', {
+      slotsEndpoint: options.slotsEndpoint,
+      slotSavePath: options.slotSavePath,
+      suggestion: "Use slotsEndpoint: 'enabled' or omit slotSavePath",
+    });
+  }
+
   const args: string[] = ['-m', modelInfo.path];
   args.push(config.jinja !== false ? '--jinja' : '--no-jinja');
   if (config.host !== undefined) args.push('--host', config.host);
@@ -63,7 +124,8 @@ export function buildLlamaServerArgs(
   if (config.continuousBatching === false) args.push('--no-cont-batching');
   if (config.useMmap === false) args.push('--no-mmap');
   if (config.useMlock === true) args.push('--mlock');
-  if (options.enableSlotsEndpoint) args.push('--slots');
+  if (options.slotsEndpoint === 'enabled') args.push('--slots');
+  if (options.slotsEndpoint === 'disabled') args.push('--no-slots');
   if (options.slotSavePath) args.push('--slot-save-path', options.slotSavePath);
   return args;
 }

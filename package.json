@@ -1,7 +1,7 @@
 {
   "name": "genai-electron",
-  "version": "0.23.0",
-  "description": "Electron-specific library for managing local AI model servers and resources",
+  "version": "0.24.0",
+  "description": "Electron-first local AI runtime management with Node-safe llama-server launch utilities",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -14,6 +14,11 @@
       "types": "./dist/llm-calibration-policy.d.ts",
       "import": "./dist/llm-calibration-policy.js",
       "default": "./dist/llm-calibration-policy.js"
+    },
+    "./llama-server-launch": {
+      "types": "./dist/llama-server-launch.d.ts",
+      "import": "./dist/llama-server-launch.js",
+      "default": "./dist/llama-server-launch.js"
     },
     "./package.json": "./package.json"
   },
@@ -62,12 +67,18 @@
   "peerDependencies": {
     "electron": ">=25.0.0"
   },
+  "peerDependenciesMeta": {
+    "electron": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/jest": "^30.0.0",
     "@types/node": "^22.10.2",
     "adm-zip": "0.6.0",
     "cross-env": "^10.1.0",
+    "electron": "43.2.0",
     "esbuild": "0.28.1",
     "eslint": "^10.8.0",
     "eslint-config-prettier": "^10.1.8",
