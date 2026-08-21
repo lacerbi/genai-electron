@@ -866,9 +866,11 @@ describe('DiffusionServerManager calibration', () => {
         combos: [{ label: 'auto' }],
       });
 
-      // 'single': loadStartTime is the spawn, so the load stage swallows it
+      // 'single': loadStartTime is the spawn, so the load stage swallows it. The bound is
+      // below the 40 ms delay on purpose: setTimeout/Date.now() granularity can read a 40 ms
+      // wait as 39 ms on a busy CI runner; what matters is the cold/warm contrast below.
       expect(cold.usageMode).toBe('single');
-      expect(cold.runs[0]!.stageMs!.loadMs).toBeGreaterThanOrEqual(40);
+      expect(cold.runs[0]!.stageMs!.loadMs).toBeGreaterThanOrEqual(30);
 
       resetSdServerMocks();
       withSpawnDelay(40);
@@ -884,7 +886,8 @@ describe('DiffusionServerManager calibration', () => {
       // 'burst': the warmup paid for the spawn; the timed sample's loadStartTime is
       // the job submission, so loadMs is only the small pre-sampling time
       expect(warm.usageMode).toBe('burst');
-      expect(warm.runs[0]!.stageMs!.loadMs).toBeLessThan(40);
+      expect(warm.runs[0]!.stageMs!.loadMs).toBeLessThan(30);
+      expect(cold.runs[0]!.stageMs!.loadMs).toBeGreaterThan(warm.runs[0]!.stageMs!.loadMs);
     });
 
     it('hands back per-sweep combo copies, never the module default objects', async () => {
