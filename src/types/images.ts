@@ -216,9 +216,10 @@ export interface DiffusionBackendStatusEvent {
   /**
    * Why the transition happened. Release reasons use
    * {@link DiffusionBackendReleaseReason}; `'spawned'`, `'ready'`, and `'job'` mark
-   * the forward transitions.
+   * the forward transitions, and `'start-failed'` marks a spawn that never became
+   * ready (the child is already gone — this is not a crash of a working backend).
    */
-  reason?: DiffusionBackendReleaseReason | 'spawned' | 'ready' | 'job';
+  reason?: DiffusionBackendReleaseReason | 'spawned' | 'ready' | 'job' | 'start-failed';
 
   /** Process exit details when the transition was caused by the backend exiting */
   exit?: { code: number | null; signal: NodeJS.Signals | null };
@@ -387,7 +388,7 @@ export interface DiffusionServerInfo {
   /** Whether currently generating an image */
   busy?: boolean;
 
-  /** Internal stable-diffusion.cpp backend snapshot (additive; absent before Phase 3) */
+  /** Internal stable-diffusion.cpp backend snapshot (additive) */
   backend?: DiffusionBackendInfo;
 }
 
@@ -520,7 +521,11 @@ export interface DiffusionCalibrationGeneration {
    */
   threads?: number;
 
-  /** Batch size (sd.cpp `-b`) — match production. Omitted = sd.cpp default */
+  /**
+   * Batch size — match production. Maps to `batch_count` in the `sd-server` job request
+   * (the historical sd.cpp `-b` flag); the first image of the batch is returned.
+   * Omitted = sd.cpp default.
+   */
   batchSize?: number;
 }
 

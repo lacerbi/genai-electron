@@ -2,17 +2,20 @@
  * Unit tests for DiffusionServerManager.calibrate() (offload calibration)
  * and the pickRecommended pure helper.
  *
- * The spawn mock auto-completes each generation asynchronously and is
- * scriptable per spawn index (exit code / stderr / hang) so the sweep's
- * failure classification and abort paths can be exercised deterministically.
- * Winner picking is tested as a pure function — sweep tests never assert
- * wall-clock ordering.
+ * The sweep runs against the mocked `sd-server` runner + client pair: each
+ * generation is one submitted backend job, scriptable by index (failed job,
+ * process exit, hang) so the sweep's failure classification and abort paths stay
+ * deterministic. Because offload flags are LAUNCH arguments, a combo change
+ * releases and respawns the backend — launch counts therefore track distinct flag
+ * sets in sequence, not generations. Winner picking is tested as a pure function —
+ * sweep tests never assert wall-clock ordering.
  */
 
 import { jest } from '@jest/globals';
 import { EventEmitter } from 'events';
 import type {
   CalibrationRun,
+  DiffusionBackendStatusEvent,
   DiffusionCalibrationConfig,
   DiffusionCalibrationGeneration,
   DiffusionCalibrationProgress,
@@ -20,6 +23,18 @@ import type {
   DiffusionServerConfig,
   ModelInfo,
 } from '../../src/types/index.js';
+
+// Backend seam (shared with the DiffusionServerManager suites): the sweep drives
+// `sd-server` through the runner + client pair.
+import {
+  handles,
+  mockBuildRequest,
+  mockGetJob,
+  mockStartSdServerRunner,
+  mockSubmitImageJob,
+  resetSdServerMocks,
+  type FakeSdServerHandle,
+} from './helpers/sd-server-mocks.js';
 
 // Mock Electron app
 const mockApp = {
@@ -33,15 +48,21 @@ jest.unstable_mockModule('electron', () => ({
   app: mockApp,
 }));
 
-// Mock http module
+// Mock http module (the wrapper binds (port, host, callback))
 const mockHttpServer = new EventEmitter() as any;
-mockHttpServer.listen = jest.fn().mockImplementation((port: number, callback: () => void) => {
-  callback();
-  return mockHttpServer;
-});
-mockHttpServer.close = jest.fn().mockImplementation((callback: () => void) => {
-  callback();
-});
+const resetHttpServerMocks = (): void => {
+  mockHttpServer.listen = jest
+    .fn()
+    .mockImplementation((_port: number, _host: string, callback: () => void) => {
+      callback();
+      return mockHttpServer;
+    });
+  // close() is also called without a callback (startup-error cleanup)
+  mockHttpServer.close = jest.fn().mockImplementation((callback?: () => void) => {
+    callback?.();
+  });
+};
+resetHttpServerMocks();
 
 const mockCreateServer = jest.fn().mockReturnValue(mockHttpServer);
 
@@ -54,17 +75,6 @@ jest.unstable_mockModule('node:http', () => {
     ...httpModule,
   };
 });
-
-// Mock fs/promises
-const mockReadFile = jest.fn();
-const mockWriteFile = jest.fn();
-
-jest.unstable_mockModule('node:fs', () => ({
-  promises: {
-    readFile: mockReadFile,
-    writeFile: mockWriteFile,
-  },
-}));
 
 // Mock ModelManager
 const mockModelManager = {
@@ -90,21 +100,6 @@ jest.unstable_mockModule('../../src/system/SystemInfo.js', () => ({
   SystemInfo: {
     getInstance: jest.fn(() => mockSystemInfo),
   },
-}));
-
-// Mock ProcessManager
-const mockProcessSpawn = jest.fn();
-const mockProcessKill = jest.fn();
-const mockProcessIsRunning = jest.fn();
-
-class MockProcessManager {
-  spawn = mockProcessSpawn;
-  kill = mockProcessKill;
-  isRunning = mockProcessIsRunning;
-}
-
-jest.unstable_mockModule('../../src/process/ProcessManager.js', () => ({
-  ProcessManager: MockProcessManager,
 }));
 
 // Mock LogManager
@@ -147,6 +142,15 @@ const mockIsServerResponding = jest.fn();
 
 jest.unstable_mockModule('../../src/process/health-check.js', () => ({
   isServerResponding: mockIsServerResponding,
+  checkHealth: jest.fn(),
+  waitForHealthy: jest.fn(),
+  normalizeHealthHost: (host?: string) => {
+    if (host === '::') return '::1';
+    if (host === undefined || host === '' || host === '0.0.0.0') return '127.0.0.1';
+    return host;
+  },
+  formatHttpHost: (host: string) =>
+    host.includes(':') && !host.startsWith('[') ? `[${host}]` : host,
 }));
 
 // Mock port-utils (never bind real sockets in unit tests)
@@ -159,23 +163,31 @@ jest.unstable_mockModule('../../src/process/port-utils.js', () => ({
 }));
 
 // Mock file-utils
+const mockEnsureDirectory = jest.fn(async () => undefined);
 const mockDeleteFile = jest.fn();
 
 jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
+  ensureDirectory: mockEnsureDirectory,
   deleteFile: mockDeleteFile,
 }));
 
 // Mock paths
 const mockGetTempPath = jest.fn();
+const mockGetBinaryPath = jest.fn(
+  (type: string, binaryName: string) => `/test/binaries/${type}/${binaryName}`
+);
 
 jest.unstable_mockModule('../../src/config/paths.js', () => ({
+  BASE_DIR: '/test/userData',
   PATHS: {
     root: '/test',
     models: '/test/models',
     binaries: '/test/binaries',
     logs: '/test/logs',
     temp: '/test/temp',
+    loras: '/test/loras',
   },
+  getBinaryPath: mockGetBinaryPath,
   getTempPath: mockGetTempPath,
 }));
 
@@ -185,16 +197,22 @@ const { DiffusionServerManager, pickRecommended } = await import(
 );
 const { DIFFUSION_CALIBRATION_DEFAULTS } = await import('../../src/config/defaults.js');
 
-/** Script for one spawned generation (by spawn index) */
-interface SpawnScript {
-  /** Exit code (default 0) */
-  exitCode?: number;
-  /** stderr lines emitted before exit */
-  stderr?: string[];
-  /** stdout chunks emitted before exit */
-  stdout?: string[];
-  /** Never exit on its own — only via mocked kill() (abort tests) */
+/** Script for one generation (by generation index, i.e. submitted job order) */
+interface GenerationScript {
+  /** The backend job ends 'failed' with this message */
+  fail?: string;
+  /** The backend process dies mid-job with this exit code */
+  exit?: number;
+  /** stderr tail the failure classifier sees */
+  stderr?: string;
+  /** Never finish — only a cancel/kill ends it (abort tests) */
   hang?: boolean;
+}
+
+interface JobRecord {
+  handle: FakeSdServerHandle;
+  script: GenerationScript;
+  exitEmitted: boolean;
 }
 
 describe('DiffusionServerManager calibration', () => {
@@ -244,65 +262,93 @@ describe('DiffusionServerManager calibration', () => {
     });
   };
 
-  /** Args of every spawned generation, in order */
-  let spawnCalls: string[][] = [];
-  /** Per-spawn options handles (for the kill → exit wiring) */
-  let spawnOptionsByPid: Map<number, any>;
-  /** Per-spawn-index script; return undefined for a clean instant success */
-  let spawnScript: (index: number, args: string[]) => SpawnScript | undefined;
+  /** Normalized ImageGenerationConfig of every generation, in order */
+  let generationConfigs: any[] = [];
+  /** Per-generation-index script; return undefined for a clean instant success */
+  let generationScript: (index: number) => GenerationScript | undefined;
+  let generationIndex = 0;
+  let jobs: Map<string, JobRecord>;
+
+  /** Number of backend jobs submitted (= generations executed) */
+  const generationCount = (): number => mockSubmitImageJob.mock.calls.length;
+  /** Number of `sd-server` processes launched (= distinct flag sets in sequence) */
+  const launchCount = (): number => mockStartSdServerRunner.mock.calls.length;
+  /** Offload flags of every launch, in order */
+  const launchContextArgs = (): string[][] =>
+    handles.map((handle) => handle.launch.contextArgs as string[]);
 
   /**
-   * Install a spawn mock where each generation auto-completes on a later tick
-   * (success by default; failures/hangs per spawnScript).
+   * Install the job harness: every generation submits one job that completes on its
+   * first poll (unless scripted otherwise) and replays the backend's stdout markers.
    */
-  const installAutoSpawn = (): void => {
-    spawnCalls = [];
-    spawnOptionsByPid = new Map();
-    mockProcessSpawn.mockImplementation((_binaryPath: any, args: any, options: any) => {
-      const index = spawnCalls.length;
-      spawnCalls.push(args as string[]);
-      const pid = 1000 + index;
-      spawnOptionsByPid.set(pid, options);
-      const script = spawnScript(index, args as string[]) ?? {};
-      if (!script.hang) {
-        setTimeout(() => {
-          for (const chunk of script.stdout ?? []) {
-            options.onStdout?.(chunk);
-          }
-          for (const line of script.stderr ?? []) {
-            options.onStderr?.(line);
-          }
-          options.onExit?.(script.exitCode ?? 0, null);
-        }, 0);
-      }
-      return { pid };
+  const installJobHarness = (): void => {
+    generationConfigs = [];
+    generationIndex = 0;
+    jobs = new Map();
+
+    mockBuildRequest.mockImplementation((config: any, batchSize?: number) => {
+      generationConfigs.push(config);
+      return { prompt: config.prompt, seed: config.seed, batch_count: batchSize ?? 1 };
     });
-    // kill → the process "exits" (rejects as cancelled when the cancel flag is set)
-    mockProcessKill.mockImplementation(async (pid: number) => {
-      spawnOptionsByPid.get(pid)?.onExit?.(1, null);
+
+    mockSubmitImageJob.mockImplementation(async () => {
+      const index = generationIndex++;
+      const script = generationScript(index) ?? {};
+      const handle = handles[handles.length - 1]!;
+      const id = `job-${index}`;
+      jobs.set(id, { handle, script, exitEmitted: false });
+      if (script.stderr) handle.stderrTail = script.stderr;
+
+      // Structured stdout of one generation (sd.cpp marker literals via the runner tap)
+      if (!script.hang) {
+        handle.launch.onStdoutEvent({ type: 'marker', marker: 'generating' });
+        handle.launch.onStdoutEvent({ type: 'step', step: 2, steps: 4 });
+        handle.launch.onStdoutEvent({ type: 'step', step: 4, steps: 4 });
+        handle.launch.onStdoutEvent({ type: 'marker', marker: 'decoding' });
+        handle.launch.onStdoutEvent({ type: 'marker', marker: 'decoded' });
+      }
+      return { id };
+    });
+
+    mockGetJob.mockImplementation(async (id: string) => {
+      const record = jobs.get(id);
+      if (!record) return { id, status: 'completed', result: { images: [] } };
+      // A dead backend ends the (already rejected) poll loop instead of spinning
+      if (record.handle.state === 'stopped') return { id, status: 'cancelled' };
+      if (record.script.hang) return { id, status: 'generating' };
+      if (record.script.exit !== undefined) {
+        if (!record.exitEmitted) {
+          record.exitEmitted = true;
+          record.handle.emitExit({ code: record.script.exit, signal: null });
+        }
+        return { id, status: 'generating' };
+      }
+      if (record.script.fail) {
+        return { id, status: 'failed', error: { message: record.script.fail } };
+      }
+      return {
+        id,
+        status: 'completed',
+        result: { output_format: 'png', images: [{ index: 0, b64_json: 'aW1hZ2U=' }] },
+      };
     });
   };
 
   beforeEach(() => {
     jest.clearAllMocks();
+    resetSdServerMocks();
+    mockBinaryConfigs.length = 0;
 
     mockLogInitialize.mockResolvedValue(undefined);
     mockLogWrite.mockResolvedValue(undefined);
     mockLogGetRecent.mockResolvedValue([]);
     mockLogClear.mockResolvedValue(undefined);
-    mockEnsureBinary.mockResolvedValue('/test/binaries/sd');
-    mockBinaryConfigs.length = 0;
+    mockEnsureBinary.mockResolvedValue('/test/binaries/diffusion/sd-server');
     mockCreateServer.mockReturnValue(mockHttpServer);
-    mockHttpServer.listen.mockImplementation((port: number, callback: () => void) => {
-      callback();
-      return mockHttpServer;
-    });
-    mockHttpServer.close.mockImplementation((callback: () => void) => {
-      callback();
-    });
+    resetHttpServerMocks();
     mockGetTempPath.mockImplementation((filename: string) => `/test/temp/${filename}`);
     mockDeleteFile.mockResolvedValue(undefined);
-    mockReadFile.mockResolvedValue(Buffer.from('fake-image-data'));
+    mockEnsureDirectory.mockResolvedValue(undefined);
 
     diffusionServer = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
 
@@ -335,10 +381,9 @@ describe('DiffusionServerManager calibration', () => {
     mockIsServerResponding.mockResolvedValue(false);
     mockIsPortBindable.mockResolvedValue(true);
     mockFindFreePort.mockResolvedValue(49999);
-    mockProcessKill.mockResolvedValue(undefined);
 
-    spawnScript = () => undefined; // all generations succeed by default
-    installAutoSpawn();
+    generationScript = () => undefined; // all generations succeed by default
+    installJobHarness();
   });
 
   afterEach(() => {
@@ -420,14 +465,14 @@ describe('DiffusionServerManager calibration', () => {
       await diffusionServer.stop();
     });
 
-    it('rejects invalid sizes (non-multiple of 64) before any spawn', async () => {
+    it('rejects invalid sizes (non-multiple of 64) before any launch', async () => {
       await expect(
         runCalibrate(diffusionServer, {
           modelId: 'sdxl-turbo',
           sizes: [{ width: 500, height: 512 }],
         })
       ).rejects.toThrow(/multiples of 64/);
-      expect(mockProcessSpawn).not.toHaveBeenCalled();
+      expect(launchCount()).toBe(0);
     });
 
     it('rejects a pre-aborted signal immediately with empty partial runs', async () => {
@@ -442,7 +487,7 @@ describe('DiffusionServerManager calibration', () => {
         expect(error.details.code).toBe('CALIBRATION_ABORTED');
         expect(error.details.runs).toEqual([]);
       }
-      expect(mockProcessSpawn).not.toHaveBeenCalled();
+      expect(launchCount()).toBe(0);
       expect(diffusionServer.isCalibrating()).toBe(false);
     });
 
@@ -511,13 +556,14 @@ describe('DiffusionServerManager calibration', () => {
       // Stale flags from a prior stopped configuration must not leak into the
       // provisioning test that calibrate() performs before its sweep.
       expect(mockBinaryConfigs[0]).toMatchObject({
+        binaryName: 'sd-server',
         testOptimizationArgs: ['--clip-on-cpu'],
       });
     });
   });
 
   describe('sweep structure and per-run flag resolution', () => {
-    it('spawns combos × (warmup + samples × sizes) and applies per-combo flags', async () => {
+    it('runs combos × (warmup + samples × sizes) generations on one launch per combo', async () => {
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         sizes: [
@@ -531,36 +577,27 @@ describe('DiffusionServerManager calibration', () => {
         ],
       });
 
-      // 2 combos × (1 warmup + 1 sample × 2 sizes) = 6 generations
-      expect(spawnCalls).toHaveLength(6);
+      // 2 combos × (1 warmup + 1 sample × 2 sizes) = 6 generations...
+      expect(generationCount()).toBe(6);
+      // ...but offload flags are launch args, so only a combo change respawns
+      expect(launchCount()).toBe(2);
 
       // Combo 1 (clipOnCpu: false overrides auto=true): no offload flags at all
-      for (const args of spawnCalls.slice(0, 3)) {
-        expect(args).not.toContain('--clip-on-cpu');
-        expect(args).not.toContain('--vae-on-cpu');
-        expect(args).not.toContain('--offload-to-cpu');
-      }
+      expect(launchContextArgs()[0]).toEqual([]);
       // Combo 2: all three forced on
-      for (const args of spawnCalls.slice(3, 6)) {
-        expect(args).toContain('--clip-on-cpu');
-        expect(args).toContain('--vae-on-cpu');
-        expect(args).toContain('--offload-to-cpu');
-      }
+      expect(launchContextArgs()[1]).toEqual(['--clip-on-cpu', '--vae-on-cpu', '--offload-to-cpu']);
 
       // Identical work per generation: fixed seed/steps/sampler; warmup at first size
-      for (const args of spawnCalls) {
-        expect(args).toContain('-s');
-        expect(args[args.indexOf('-s') + 1]).toBe('42');
-        expect(args).toContain('--steps');
-        expect(args[args.indexOf('--steps') + 1]).toBe('4');
-        expect(args).toContain('--sampling-method');
-        expect(args[args.indexOf('--sampling-method') + 1]).toBe('euler');
+      for (const config of generationConfigs) {
+        expect(config.seed).toBe(42);
+        expect(config.steps).toBe(4);
+        expect(config.cfgScale).toBe(1);
+        expect(config.sampler).toBe('euler');
       }
-      const sizeOf = (args: string[]): string =>
-        `${args[args.indexOf('-W') + 1]}x${args[args.indexOf('-H') + 1]}`;
-      expect(sizeOf(spawnCalls[0]!)).toBe('768x768'); // warmup @ first size
-      expect(sizeOf(spawnCalls[1]!)).toBe('768x768');
-      expect(sizeOf(spawnCalls[2]!)).toBe('512x1024');
+      const sizeOf = (config: any): string => `${config.width}x${config.height}`;
+      expect(sizeOf(generationConfigs[0])).toBe('768x768'); // warmup @ first size
+      expect(sizeOf(generationConfigs[1])).toBe('768x768');
+      expect(sizeOf(generationConfigs[2])).toBe('512x1024');
 
       // One run per (combo, size), all OK, with timings and resolved flags
       expect(report.runs).toHaveLength(4);
@@ -592,6 +629,24 @@ describe('DiffusionServerManager calibration', () => {
       expect(diffusionServer.isCalibrating()).toBe(false);
     });
 
+    it('releases the backend when the sweep ends', async () => {
+      const events: DiffusionBackendStatusEvent[] = [];
+      diffusionServer.on('backend-status', (event: DiffusionBackendStatusEvent) =>
+        events.push(event)
+      );
+
+      await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      expect(launchCount()).toBe(1);
+      expect(handles[0]!.stop).toHaveBeenCalledTimes(1);
+      expect(diffusionServer.getBackendInfo()).toEqual({ state: 'absent' });
+      expect(events.at(-1)).toMatchObject({ state: 'absent', reason: 'calibration' });
+    });
+
     it('lets auto-detection resolve omitted flags (auto combo carries resolved values)', async () => {
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
@@ -600,11 +655,7 @@ describe('DiffusionServerManager calibration', () => {
       });
 
       // 8 GB GPU, 2 GB model → auto: clip=true, vae=false, offload=false
-      for (const args of spawnCalls) {
-        expect(args).toContain('--clip-on-cpu');
-        expect(args).not.toContain('--vae-on-cpu');
-        expect(args).not.toContain('--offload-to-cpu');
-      }
+      expect(launchContextArgs()).toEqual([['--clip-on-cpu']]);
       const calRun = report.runs[0]!;
       expect(calRun.resolved).toEqual({
         clipOnCpu: true,
@@ -615,21 +666,23 @@ describe('DiffusionServerManager calibration', () => {
       // Recommended combo is the AS-REQUESTED combo (auto), not the resolved flags
       expect(report.recommended['768x768']).toEqual({ label: 'auto' });
     });
+
+    it('mirrors production batching through generation.batchSize', async () => {
+      await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+        generation: { batchSize: 2 },
+      });
+
+      for (const call of mockBuildRequest.mock.calls) {
+        expect(call[1]).toBe(2);
+      }
+    });
   });
 
-  describe('stage timing and medians (stdout-driven)', () => {
-    // Realistic sd-cli stdout for one generation (sd.cpp master-746 literals)
-    const SD_STDOUT = [
-      'loading model from /test/models/diffusion/sdxl-turbo.gguf\n',
-      'generating image: 1/1 - seed 42\n',
-      '  |==>               | 2/4 - 1.50it/s\n',
-      '  |=========>        | 4/4 - 1.45it/s\n',
-      'decoding 1 latents\n',
-      'decode_first_stage completed, taking 1.23s\n',
-    ];
-
-    it('populates stageMs from stdout markers and medians multi-sample timings', async () => {
-      spawnScript = () => ({ stdout: [...SD_STDOUT] });
+  describe('stage timing and medians (backend-marker driven)', () => {
+    it('populates stageMs from the backend markers and medians multi-sample timings', async () => {
       const progressEvents: DiffusionCalibrationProgress[] = [];
 
       const report = await runCalibrate(diffusionServer, {
@@ -639,8 +692,9 @@ describe('DiffusionServerManager calibration', () => {
         onProgress: (p) => progressEvents.push(p),
       });
 
-      // 1 combo × (1 warmup + 2 samples) = 3 generations
-      expect(spawnCalls).toHaveLength(3);
+      // 1 combo × (1 warmup + 2 samples) = 3 generations on one backend
+      expect(generationCount()).toBe(3);
+      expect(launchCount()).toBe(1);
       const calRun = report.runs[0]!;
       expect(calRun.status).toBe('ok');
 
@@ -673,8 +727,10 @@ describe('DiffusionServerManager calibration', () => {
     it('hands back per-sweep combo copies, never the module default objects', async () => {
       const report = await runCalibrate(diffusionServer, { modelId: 'sdxl-turbo', samples: 1 });
 
-      // Default sweep: 6 combos × (1 warmup + 1 sample × 1 size) = 12 generations
-      expect(spawnCalls).toHaveLength(12);
+      // Default sweep: 6 combos × (1 warmup + 1 sample × 1 size) = 12 generations,
+      // one launch per combo (each combo is a distinct flag set in sequence)
+      expect(generationCount()).toBe(12);
+      expect(launchCount()).toBe(6);
       const firstDefault = DIFFUSION_CALIBRATION_DEFAULTS.combos[0]!;
       const firstRun = report.runs.find((r) => r.combo.label === firstDefault.label)!;
       expect(firstRun.combo).toEqual(firstDefault);
@@ -683,11 +739,11 @@ describe('DiffusionServerManager calibration', () => {
   });
 
   describe('failure classification', () => {
-    it('classifies an OOM combo, continues the sweep, and excludes it from recommendation', async () => {
-      // Combo B's warmup (spawn index 2) crashes with CUDA OOM
-      spawnScript = (index) =>
+    it('classifies an OOM combo from a backend exit, continues the sweep, and excludes it', async () => {
+      // Combo B's warmup (generation index 2) crashes with CUDA OOM
+      generationScript = (index) =>
         index === 2
-          ? { exitCode: 1, stderr: ['ggml_cuda_host_malloc: CUDA error: out of memory'] }
+          ? { exit: 1, stderr: 'ggml_cuda_host_malloc: CUDA error: out of memory' }
           : undefined;
 
       const report = await runCalibrate(diffusionServer, {
@@ -700,7 +756,7 @@ describe('DiffusionServerManager calibration', () => {
       });
 
       // Combo A: warmup + 1 sample; combo B: failed warmup only (samples skipped)
-      expect(spawnCalls).toHaveLength(3);
+      expect(generationCount()).toBe(3);
 
       const okRun = report.runs.find((r) => r.combo.label === 'auto')!;
       const oomRun = report.runs.find((r) => r.combo.label === 'all-resident')!;
@@ -712,10 +768,28 @@ describe('DiffusionServerManager calibration', () => {
       expect(report.recommended['768x768']).toEqual({ label: 'auto' });
     });
 
+    it('classifies an OOM combo from a failed backend job (details.stderr)', async () => {
+      generationScript = (index) =>
+        index === 0
+          ? { fail: 'image generation failed', stderr: 'cudaMalloc failed: out of memory' }
+          : undefined;
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      const calRun = report.runs[0]!;
+      expect(calRun.status).toBe('oom');
+      expect(calRun.error).toContain('stable-diffusion.cpp job failed');
+      expect(report.recommended['768x768']).toBeUndefined();
+    });
+
     it('classifies a non-OOM failure as error and keeps successful samplesMs', async () => {
-      // Second timed sample (spawn index 2: warmup, sample1, sample2) fails generically
-      spawnScript = (index) =>
-        index === 2 ? { exitCode: 1, stderr: ['some unrelated failure'] } : undefined;
+      // Second timed sample (generation index 2: warmup, sample1, sample2) fails generically
+      generationScript = (index) =>
+        index === 2 ? { exit: 1, stderr: 'some unrelated failure' } : undefined;
 
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
@@ -723,7 +797,7 @@ describe('DiffusionServerManager calibration', () => {
         combos: [{ label: 'auto' }],
       });
 
-      expect(spawnCalls).toHaveLength(3);
+      expect(generationCount()).toBe(3);
       const calRun = report.runs[0]!;
       expect(calRun.status).toBe('error');
       expect(calRun.samplesMs).toHaveLength(1); // first sample kept for diagnostics
@@ -733,9 +807,9 @@ describe('DiffusionServerManager calibration', () => {
 
     it('records a warmup failure on the first size but still attempts later sizes', async () => {
       const progress: DiffusionCalibrationProgress[] = [];
-      // Warmup (spawn 0) OOMs; the second size's sample (spawn 1) succeeds
-      spawnScript = (index) =>
-        index === 0 ? { exitCode: 1, stderr: ['cudaMalloc failed: out of memory'] } : undefined;
+      // Warmup (generation 0) OOMs; the second size's sample (generation 1) succeeds
+      generationScript = (index) =>
+        index === 0 ? { exit: 1, stderr: 'cudaMalloc failed: out of memory' } : undefined;
 
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
@@ -748,7 +822,9 @@ describe('DiffusionServerManager calibration', () => {
         onProgress: (p) => progress.push(p),
       });
 
-      expect(spawnCalls).toHaveLength(2); // failed warmup + second size's sample
+      expect(generationCount()).toBe(2); // failed warmup + second size's sample
+      // The crashed backend is gone, so the surviving generation respawns one
+      expect(launchCount()).toBe(2);
 
       const firstSizeRun = report.runs.find((r) => r.size.width === 768)!;
       const secondSizeRun = report.runs.find((r) => r.size.width === 512)!;
@@ -849,7 +925,11 @@ describe('DiffusionServerManager calibration', () => {
       }
 
       expect(diffusionServer.isCalibrating()).toBe(false);
+      // No backend survives an aborted sweep
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
+
       // A fresh calibrate works afterwards (state fully torn down)
+      installJobHarness();
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
@@ -860,8 +940,12 @@ describe('DiffusionServerManager calibration', () => {
 
     it('aborts an in-flight generation via the cancel path', async () => {
       const controller = new AbortController();
-      // Second spawn hangs; abort fires while it is in flight
-      spawnScript = (index) => {
+      const events: DiffusionBackendStatusEvent[] = [];
+      diffusionServer.on('backend-status', (event: DiffusionBackendStatusEvent) =>
+        events.push(event)
+      );
+      // The first timed sample hangs; abort fires while it is in flight
+      generationScript = (index) => {
         if (index === 1) {
           setTimeout(() => controller.abort(), 10);
           return { hang: true };
@@ -881,8 +965,10 @@ describe('DiffusionServerManager calibration', () => {
         expect(error.details.code).toBe('CALIBRATION_ABORTED');
       }
 
-      // The hanging process was killed via the cancel path
-      expect(mockProcessKill).toHaveBeenCalled();
+      // The hanging backend was killed via the cancel path (not merely by the
+      // sweep's own 'calibration' release in the finally block)
+      expect(handles[0]!.stop).toHaveBeenCalledTimes(1);
+      expect(events.map((event) => event.reason)).toContain('cancel');
       expect(diffusionServer.isCalibrating()).toBe(false);
     });
   });
@@ -905,9 +991,10 @@ describe('DiffusionServerManager calibration', () => {
       expect(report.skippedCombos![0]!.combo.label).toBe('max-savings');
       expect(report.skippedCombos![0]!.reason).toContain('1578');
 
-      // 5 active combos × (1 warmup + 1 sample × 1 size) = 10 generations
+      // 5 active combos × (1 warmup + 1 sample × 1 size) = 10 generations, 5 launches
       expect(report.runs).toHaveLength(5);
-      expect(spawnCalls).toHaveLength(10);
+      expect(generationCount()).toBe(10);
+      expect(launchCount()).toBe(5);
       expect(report.runs.every((r) => r.combo.clipOnCpu !== true)).toBe(true);
     });
   });
@@ -971,17 +1058,16 @@ describe('DiffusionServerManager calibration', () => {
       // Config restored (not the synthetic calibration config)
       expect(diffusionServer.getConfig()).toBe(configBefore);
       expect(diffusionServer.getStatus()).toBe('stopped');
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
 
       // Normal operation unaffected — and no leftover combo overrides
-      spawnCalls = [];
+      handles.length = 0;
+      installJobHarness();
       await diffusionServer.start(mockServerConfig);
       const result = await diffusionServer.generateImage({ prompt: 'test' });
-      expect(result.image).toEqual(Buffer.from('fake-image-data'));
-      const lastArgs = spawnCalls[spawnCalls.length - 1]!;
+      expect(result.image).toEqual(Buffer.from('image'));
       // Auto flags for this model/GPU: clip on CPU only (not the forced max-savings set)
-      expect(lastArgs).toContain('--clip-on-cpu');
-      expect(lastArgs).not.toContain('--vae-on-cpu');
-      expect(lastArgs).not.toContain('--offload-to-cpu');
+      expect(handles.at(-1)!.launch.contextArgs).toEqual(['--clip-on-cpu']);
       await diffusionServer.stop();
     });
   });

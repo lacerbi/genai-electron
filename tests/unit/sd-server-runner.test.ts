@@ -4,6 +4,7 @@ import { jest } from '@jest/globals';
 import {
   SD_SERVER_STDOUT_MARKERS,
   SdServerRunner,
+  isSdServerProgressBarLine,
   startSdServerRunnerForTest,
   type SdServerHandle,
   type SdServerRunnerTestDependencies,
@@ -661,5 +662,38 @@ describe('sd-server runner lifecycle', () => {
     expect(exited).toBe(false);
     expect(handle.stderrTail).toContain('failed to send signal');
     await handle.stop();
+  });
+});
+
+describe('isSdServerProgressBarLine', () => {
+  it.each([
+    '  |==================| 4/4 - 1.20it/s',
+    '|=====             | 2/4 - 0.83s/it',
+    '  |======| 512/1024 - 25.00MB/s',
+    '|=| 12/2048 - 1.50KB/s',
+    '|=| 1/2 - 3.00GB/s',
+    '|=| 900/1024 - 512.00B/s',
+  ])('recognizes the bar frame %s', (line) => {
+    expect(isSdServerProgressBarLine(line)).toBe(true);
+  });
+
+  it.each([
+    'generating image: 1/1 - seed 42',
+    'sampling using Euler method',
+    'decoding 1 latents',
+    'decode_first_stage completed, taking 0.42s',
+    'listening on: 127.0.0.1:51234',
+    'ggml_cuda_init: found 1 CUDA device',
+    '',
+  ])('leaves the ordinary line %s alone', (line) => {
+    expect(isSdServerProgressBarLine(line)).toBe(false);
+  });
+
+  it('is stateless across repeated calls (no sticky lastIndex)', () => {
+    const line = '  |==| 3/4 - 1.20it/s';
+
+    expect(isSdServerProgressBarLine(line)).toBe(true);
+    expect(isSdServerProgressBarLine(line)).toBe(true);
+    expect(isSdServerProgressBarLine(line)).toBe(true);
   });
 });

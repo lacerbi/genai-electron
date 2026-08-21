@@ -218,9 +218,33 @@ export interface SdServerRunnerTestDependencies {
   fetchCapabilities?: SdServerCapabilitiesProbe;
 }
 
-const STEP_BAR_PATTERN = /\|\s*(\d+)\/(\d+)\s*-\s*[\d.]+\s*(?:it\/s|s\/it)/g;
-const BYTE_BAR_PATTERN = /\|\s*(\d+)\/(\d+)\s*-\s*[\d.]+\s*(?:B|KB|MB|GB)\/s/g;
+const STEP_BAR_SOURCE = String.raw`\|\s*(\d+)\/(\d+)\s*-\s*[\d.]+\s*(?:it\/s|s\/it)`;
+const BYTE_BAR_SOURCE = String.raw`\|\s*(\d+)\/(\d+)\s*-\s*[\d.]+\s*(?:B|KB|MB|GB)\/s`;
+const STEP_BAR_PATTERN = new RegExp(STEP_BAR_SOURCE, 'g');
+const BYTE_BAR_PATTERN = new RegExp(BYTE_BAR_SOURCE, 'g');
+/** Non-global twin of the two bar patterns (a `g` regex would carry `lastIndex` state). */
+const PROGRESS_BAR_PATTERN = new RegExp(`${STEP_BAR_SOURCE}|${BYTE_BAR_SOURCE}`);
 const BIND_COLLISION_PATTERN = /address already in use|failed to bind|bind[^\n]*failed/i;
+
+/**
+ * Whether a line is one redraw frame of a stable-diffusion.cpp progress bar.
+ *
+ * Bars are redrawn with `\r` many times per second, so a caller that persists every
+ * line (a log file, say) should skip these: the same information already reaches it
+ * as structured {@link SdServerStdoutEvent}s.
+ *
+ * @param line - One complete output line from the tap
+ * @returns True for step (`it/s`) and weight-upload (`MB/s`) bar frames
+ *
+ * @example
+ * ```typescript
+ * isSdServerProgressBarLine('  |=====| 3/4 - 1.20it/s'); // true
+ * isSdServerProgressBarLine('generating image: 1/1');    // false
+ * ```
+ */
+export function isSdServerProgressBarLine(line: string): boolean {
+  return PROGRESS_BAR_PATTERN.test(line);
+}
 
 function boundedTail(previous: string, next: string, maxBytes: number): string {
   let result = previous + next;

@@ -412,6 +412,12 @@ export const DIFFUSION_BACKEND_DEFAULTS = {
   readyTimeoutMs: DEFAULT_TIMEOUTS.serverStart,
   /** Grace period between SIGTERM and SIGKILL when releasing the backend */
   stopTimeoutMs: DEFAULT_TIMEOUTS.serverStop,
+  /**
+   * Consecutive transient job-poll failures (request timeout / transport error) that
+   * end the generation. Below this count the poll loop retries — a dropped socket is
+   * not a failed image.
+   */
+  maxTransientPollFailures: 3,
 } as const;
 
 /**

@@ -11,9 +11,10 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
 
 ## Phase status
 
-- [ ] Phase 1: Backend modules (`sd-server-client.ts`, `sd-server-runner.ts`, types, defaults, paths)
-- [ ] Phase 2: Binary provisioning (`sd-server` primary, Phase-2 validation via the runner, POSIX chmod)
-- [ ] Phase 3: `DiffusionServerManager` rewire (resident backend, same wrapper contract, lifecycle)
+- [x] Phase 1: Backend modules (`sd-server-client.ts`, `sd-server-runner.ts`, types, defaults, paths) — `13b8dec`
+- [x] Phase 2: Binary provisioning (`sd-server` primary, Phase-2 validation via the runner, POSIX chmod) — `1ae88a5`
+- [x] Phase 3: `DiffusionServerManager` rewire (resident backend, same wrapper contract, lifecycle) — interim
+      doublecheck (3 Opus reviewers) folded in; 1260/1260
 - [ ] Phase 4: Residency policy + symmetric `ResourceOrchestrator` + LLM pre-start hook
 - [ ] Phase 5: Calibration re-base (`usageMode: 'single' | 'burst'`, `policyVersion`, VRAM fields)
 - [ ] Phase 6: Documentation, PROGRESS "Unreleased", DESIGN/dev-doc updates, example-app touch-ups
@@ -37,14 +38,25 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
   - [x] `BinaryManager.test.ts` adapted; build/lint/tests green; commit
   - [ ] live: pinned 782 provisioning + smoke re-run + re-validation (done in P7 if machine busy)
 - Phase 3 — manager rewire
-  - [ ] config fields + host bind + `VALID_CONFIG_FIELDS`
-  - [ ] backend state machine (`ensureBackend`/`releaseBackend`/idle timer/`getBackendInfo`)
-  - [ ] `executeImageGeneration` over backend; progress from backend events; error mapping
-  - [ ] busy claim single owner; POST guards (not-running, malformed JSON, usageMode)
-  - [ ] cancel (initiate, not await); crash handler; `stop()` ordering; lifecycle release (before stop)
-  - [ ] `getInfo().backend`/pid, `/health.backend`, `isHealthy()` wrapper-scoped; `ServerEvent` union
-  - [ ] `calibrate()` minimum adaptation
-  - [ ] tests: lifecycle/routes/generation split; calibration test harness; lifecycle test; commit
+  - [x] config fields + host bind + `VALID_CONFIG_FIELDS`
+  - [x] backend state machine (`ensureBackend`/`releaseBackend`/idle timer/`getBackendInfo`)
+  - [x] `executeImageGeneration` over backend; progress from backend events; error mapping
+  - [x] busy claim single owner; POST guards (not-running, malformed JSON, usageMode)
+  - [x] cancel (initiate, not await); crash handler; `stop()` ordering; lifecycle release (before stop)
+  - [x] `getInfo().backend`/pid, `/health.backend`, `isHealthy()` wrapper-scoped; `ServerEvent` union
+  - [x] `calibrate()` minimum adaptation
+  - [x] tests — 3a: lifecycle (`DiffusionServerManager.lifecycle.test.ts`, 43 `it`s; old
+    `DiffusionServerManager.test.ts` deleted; `electron-lifecycle.test.ts` adapted).
+    3b: `…routes.test.ts` (31 `it`s), `…generation.test.ts` (51 `it`s),
+    `diffusion-calibration.test.ts` re-based on the runner/client mocks (27 `it`s).
+    Commit still pending.
+  - [x] interim `/doublecheck` after 3b (3 read-only Opus reviewers: manager impl / HTTP+lifecycle
+        invariants / tests+calibration harness) → fold fixes → commit Phase 3.
+        Fixed: spawn-abort on release, release-reason rank upgrade, no-orphan cancel across the
+        submit round-trip, sticky unconfirmed-PID respawn guard, split cold/warm load estimates,
+        transient poll-failure tolerance, bar-line log filtering, stale-handle tap gating,
+        cancellation → `'cancelled'`, plus a shared faithful `raceWithExit` test seam
+        (`tests/unit/helpers/sd-server-mocks.ts`) and 51 new tests.
 - Phase 4 — residency + orchestrator
   - [ ] `resolveUsageMode`/`settleResidency`/callback; settle-once ownership
   - [ ] orchestrator branches + `onDiffusionBackendReleased(reason)` + `orchestrateBatchGeneration`
@@ -421,6 +433,41 @@ launch path; existing installs re-validate without re-downloading on every platf
 
 **Verification**:
 - [ ] Build/lint/test green; `ResourceOrchestrator.test.ts` unchanged and green (26/26).
+  Phase 3a (2026-08-21, implementation + lifecycle test): build 0 errors, `npm run lint`
+  0 errors, `format:check` clean, `ResourceOrchestrator.test.ts` 26/26 untouched, full suite
+  1099/1099 across 40 suites — **`diffusion-calibration.test.ts` is deliberately red until
+  3b** (suite fails to load: its `health-check.js` mock lacks `formatHttpHost`, and its
+  `installAutoSpawn` harness is spawn-per-image).
+  Phase 3b (2026-08-21, tests): build 0 errors, `npm run lint` 0 errors (114 pre-existing
+  warnings), `format:check` clean, full suite **1208/1208 across 43 suites**
+  (routes 31 + generation 51 + calibration 27 new/re-based; `ResourceOrchestrator.test.ts`
+  26/26 still untouched). No `src/` change was needed: three deliberate mutations
+  (drop the poll-loop VAE fallback, make the POST busy claim asynchronous, ignore
+  `details.code` in `mapErrorCode`) each fail the new suites. Calibration launch counts
+  now follow distinct flag sets in sequence (6 default combos → 6 launches).
+  Phase 3 doublecheck (2026-08-21, 3 read-only Opus reviewers): **25 findings — 14
+  implementation, 11 test-coverage; all fixed, none deferred.** Implementation: abort an
+  in-flight spawn on release (`stop()` no longer waits out a cold load); rank release reasons so
+  a `stop()` behind a `'cancel'` reports `'stop'`; never race `submitImageJob` against the abort
+  promise (a cancel mid-round-trip cancels the accepted job instead of orphaning it); a
+  `SD_SERVER_TERMINATION_UNCONFIRMED` kill records a sticky PID that blocks the next spawn while
+  it is alive (`BACKEND_TERMINATION_UNCONFIRMED` → wire `BACKEND_ERROR`); separate cold
+  (`modelLoadTime`) and warm (`warmLoadTime`) load estimates so a cold generation after warm
+  ones cannot regress from 100 % to 40 %; tolerate 2 consecutive transient job-poll failures
+  (`DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures`); keep progress-bar redraws out of the
+  log file (`isSdServerProgressBarLine`); gate the stdout tap on the emitting handle; guard the
+  `'backend-status'` emit and the exit watcher; hoist `cleanupSyntheticProgress()` in
+  `releaseBackend`; identity-check `inFlight`/`progressConfig`; `'start-failed'` (not
+  `'crashed'`) for a spawn that never became ready; `getPid()` override; cancellation maps to
+  `'GENERATION_CANCELLED'` and registry `'cancelled'`; `electron-lifecycle` wraps
+  `releaseBackend` in its own try/catch. Tests: shared faithful backend seam
+  (`tests/unit/helpers/sd-server-mocks.ts` — `raceWithExit` really races observed exit),
+  imported statically by all four suites; new coverage for poll-loop termination, spawn
+  concurrency, unconfirmed termination, spawn failure/abort, a wire error-code table, mid-poll
+  errors, synthetic-VAE teardown, `waitForInFlight`, the three dropped lifecycle tests, stale
+  stdout, `getActiveGenerationId`, library defaults, post-crash recovery, and the
+  cold→warm→cold progress sequence. Full suite **1259/1259 across 43 suites** (was 1208);
+  build 0 errors, lint 0 errors (114 pre-existing warnings), `format:check` clean.
 - [ ] Live (Phase 7): `netstat -ano | findstr :8081` shows a `127.0.0.1` listener.
 
 ### Phase 4: Residency policy + symmetric orchestrator
@@ -435,7 +482,10 @@ batch through the orchestrator, quit-time safety.
   `generateImage()` settle only in the no-orchestrator branch (single and batch); with an
   orchestrator, `orchestrateImageGeneration`/`orchestrateBatchGeneration` settle in both of their
   branches. Manager `releaseBackend()` calls `orchestrator?.onDiffusionBackendReleased(reason)`
-  after confirmed death.
+  after confirmed death — the Phase-3 seam `onBackendReleased(reason)` already delivers the
+  FINAL, rank-upgraded reason (a `stop()` that joined a `'cancel'` release reports `'stop'`), so
+  the reason filter can be written against it directly. `settleResidency('burst')` also takes
+  ownership of `armIdleTimer()`, which Phase 3 arms from `executeImageGeneration`'s `finally`.
 - `ResourceOrchestrator.orchestrateImageGeneration`: offload branch → after result/error:
   `mode = diffusionServer.resolveUsageMode(config.usageMode, true)`; `await
   diffusionServer.settleResidency(mode)`; `mode === 'single'` → `fireAndForgetReload()`
@@ -605,7 +655,7 @@ sample) = the common production case and today's report semantics; `'burst'` opt
 
 | Area | Files |
 |---|---|
-| New | `src/process/sd-server-client.ts`, `src/process/sd-server-runner.ts`, `tests/unit/sd-server-client.test.ts`, `tests/unit/sd-server-runner.test.ts`, `tests/unit/DiffusionServerManager.{lifecycle,routes,generation}.test.ts` |
+| New | `src/process/sd-server-client.ts`, `src/process/sd-server-runner.ts`, `tests/unit/sd-server-client.test.ts`, `tests/unit/sd-server-runner.test.ts`, `tests/unit/DiffusionServerManager.{lifecycle,routes,generation}.test.ts`, `tests/unit/helpers/sd-server-mocks.ts` |
 | Types/config | `src/types/images.ts`, `src/types/servers.ts`, `src/types/index.ts`, `src/index.ts`, `src/config/defaults.ts`, `src/config/paths.ts`, `eslint.config.js` |
 | Managers/utils | `src/managers/DiffusionServerManager.ts`, `src/managers/ResourceOrchestrator.ts`, `src/managers/LlamaServerManager.ts` (hook only), `src/managers/BinaryManager.ts`, `src/utils/electron-lifecycle.ts` |
 | Tests adapted | `tests/unit/DiffusionServerManager.test.ts` (replaced by the split), `diffusion-calibration.test.ts`, `ResourceOrchestrator.test.ts`, `LlamaServerManager.test.ts`, `BinaryManager.test.ts`, `electron-lifecycle.test.ts`, `public-types.test.ts` |

@@ -434,7 +434,13 @@ export type ServerEvent =
   | 'health-check-ok'
   | 'health-check-failed'
   | 'binary-log'
-  | 'binary-progress';
+  | 'binary-progress'
+  /** Diffusion only: internal stable-diffusion.cpp backend transition
+   * (`DiffusionBackendStatusEvent`) */
+  | 'backend-status'
+  /** Diffusion only: offload-calibration sweep progress
+   * (`DiffusionCalibrationProgress`) */
+  | 'calibration-progress';
 
 /**
  * Server event data
