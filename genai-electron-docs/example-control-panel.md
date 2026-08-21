@@ -38,9 +38,9 @@ Reference implementation demonstrating genai-electron integration patterns for i
 
 **LLM Server**: Start/stop/restart with auto-config or manual mode, real-time logs, test chat (with reasoning request toggle), health monitoring. The config form exposes the v0.6.0 options: a **flashAttention tri-state** select (`auto` / `on` / `off`) and **KV cache** selects for `cacheTypeK` / `cacheTypeV` (`f16`, `q8_0`, …)
 
-**Diffusion Server**: Start/stop, generate images with full parameter control (prompt, dimensions, steps, samplers), **Cancel** button to abort an in-flight generation, real-time progress, metadata display, preset-matched recommended settings with one-click apply
+**Diffusion Server**: Start/stop, generate images with full parameter control (prompt, dimensions, steps, samplers), **Cancel** button to abort an in-flight generation, real-time progress, metadata display, preset-matched recommended settings with one-click apply. The status grid adds a **`Backend:`** row (`getInfo().backend?.state` — `absent` / `starting` / `ready` / `busy` / `stopping`) and a **`Backend PID:`** row, because the wrapper is in-process and the `sd-server` child is the thing with a PID: it appears at the first image and may disappear again right after under `'single'` residency
 
-**Resource Monitor**: Memory polling (2s), GPU/VRAM tracking, server status grid, resource orchestration status, event log (20 events), debug tools
+**Resource Monitor**: Memory polling (2s), GPU/VRAM tracking, server status grid (the diffusion row's PID is labelled **`Backend PID:`** for the same reason), resource orchestration status, event log (20 events), debug tools
 
 ---
 

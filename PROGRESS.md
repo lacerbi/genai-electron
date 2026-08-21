@@ -54,10 +54,10 @@
 - New config fields on `DiffusionServerConfig`: `host`, `startupTimeout`, `usageMode`,
   `idleTimeoutMs`; `ImageGenerationConfig` gains `usageMode`. New exported types:
   `DiffusionUsageMode`, `DiffusionBackendState`, `DiffusionBackendReleaseReason`,
-  `DiffusionBackendInfo`, `DiffusionBackendStatusEvent`; new constant `DIFFUSION_BACKEND_DEFAULTS`
-  (`idleTimeoutMs` 300 000, `jobPollIntervalMs` 200, ready/stop timeouts,
-  `maxTransientPollFailures`). `ServerEvent` declares `'backend-status'` and the already-emitted
-  `'calibration-progress'`.
+  `DiffusionBackendInfo`, `DiffusionBackendStatusEvent`, `LlamaPreStartHook`; new constant
+  `DIFFUSION_BACKEND_DEFAULTS` (`idleTimeoutMs` 300 000, `jobPollIntervalMs` 200,
+  `jobRequestTimeoutMs` 10 000, ready/stop timeouts, `maxTransientPollFailures` 3). `ServerEvent`
+  declares `'backend-status'` and the already-emitted `'calibration-progress'`.
 - HTTP wrapper: a malformed JSON body is now `400 INVALID_REQUEST`, a POST while the wrapper is not
   running is `503 SERVER_NOT_RUNNING`, an invalid `usageMode` is `400`, and a cancelled generation
   reports `GENERATION_CANCELLED` with registry status `cancelled`. The 503 `SERVER_BUSY` gate is
@@ -104,9 +104,34 @@
   has no PID of its own) and is absent whenever the backend is `'absent'`.
 - Existing installs re-validate the diffusion binary once, without re-downloading, because the
   primary binary name changed from `sd-cli` to `sd-server`.
-- `stop()` always releases the backend first and resolves only after confirmed death — including a
+- Batch generation (`count > 1`) now goes through the resource orchestrator; before this it
+  bypassed orchestration entirely, so the highest-VRAM operation was the one that never offloaded
+  the LLM.
+- `stop()` always releases the backend first and resolves after the stop completes — including a
   backend left resident by `calibrate()`; `attachAppLifecycle()` releases the backend (reason
-  `'shutdown'`, which starts no LLM) before stopping the servers.
+  `'shutdown'`, which starts no LLM) before stopping the **diffusion** server (the LLM server is
+  stopped first). A termination that cannot be confirmed is logged, the state still becomes
+  `'absent'`, and the orphan PID blocks new spawns until it exits
+  (`BACKEND_TERMINATION_UNCONFIRMED` → wire `BACKEND_ERROR`).
+- The LLM reload also fires on release reason `'cancel'`: a cancelled generation kills the backend
+  and then ends, so under `'burst'` nothing else would ever free the VRAM. The full reload set is
+  `idle-timeout | explicit | crashed | stop | cancel`.
+- Starting the LLM while an offload calibration sweep is running now fails with `ServerError`
+  `details.code: 'CALIBRATION_IN_PROGRESS'` (the sweep owns the backend and restores the LLM
+  itself). Auto-restarts are unaffected — hook errors are logged and ignored on that path.
+- Backend job requests get their own `jobRequestTimeoutMs` (10 s, longer than the client's 5 s
+  default because the backend answers from the sampling thread); after
+  `maxTransientPollFailures` consecutive transient failures the generation fails **and the job is
+  stopped**, so a lost job never keeps holding the GPU.
+- A full backend job queue maps to `SERVER_BUSY` (a transient "come back later") instead of
+  `BACKEND_ERROR`, and a cold spawn aborted by a cancel maps to `GENERATION_CANCELLED` instead of
+  a start failure.
+- `batchSize` is clamped to `max(1, floor(batchSize ?? 1))` before it becomes `batch_count` — the
+  backend rejects `batch_count: 0`.
+- Retained stdout/stderr tails exclude progress-bar redraw frames, so a diagnostic is no longer
+  evicted by thousands of bar frames.
+- Fresh POSIX installs now get the exec bit on the primary binary (previously only the
+  existing-install re-validation path chmod'ed it).
 - Malformed JSON on `POST /v1/images/generations` answers `400` (was `500`); a POST while the
   wrapper is not running answers `503 SERVER_NOT_RUNNING`; a cancelled generation surfaces
   `GENERATION_CANCELLED` and registry status `cancelled`.
@@ -127,12 +152,15 @@
 
 **Validation:** Build passes with 0 TypeScript errors; ESLint reports 0 errors with the
 repository's existing 114 warnings; `npm run format:check` is clean; the full suite passes
-1331/1331 across 44 suites at `b5706c1`. Deliberate mutations were used at each phase to prove the
+1370/1370 across 45 suites. Deliberate mutations were used at each phase to prove the
 new assertions bite (release-reason filtering, reload ordering, the estimator override, idle-timer
 ownership, the no-orchestrator settle, sampler-interval leaks, the post-release abort re-check, the
 VRAM peak arithmetic, the default calibration mode, and warm reuse in `'single'` mode). Live smoke
-against the pinned `master-782-b290693` binary is **pending** (planned as Phase 7 of
-`docs/dev/plans/PLAN-sd-server-migration.md`), as is the final `/doublecheck`.
+against the pinned `master-782-b290693` binary: S1–S6 passed (wrapper bound to `127.0.0.1`, cold
+and warm timings, cancel, backend kill/respawn, offload/reload ordering, burst deferral); S7–S11
+were being re-run at the time of writing (see Phase 7 of
+`docs/dev/plans/PLAN-sd-server-migration.md`), after which the final `/doublecheck` closes the
+branch.
 
 Smoke reference (2026-08-21, RTX 4060 Laptop 8 GB, cached `master-746` build, FLUX.2 klein 4B Q4_0,
 768², 4 steps, cfg 1, euler, seed 42): with `--clip-on-cpu --diffusion-fa` spawn→listening 2.4 s,

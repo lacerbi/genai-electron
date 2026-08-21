@@ -595,7 +595,10 @@ export class DiffusionServerManager extends ServerManager {
    * Idempotent and safe to call at any time: `'absent'` returns immediately, an
    * in-progress release is awaited rather than duplicated. The backend state is set to
    * `'stopping'` BEFORE the kill so the exit handler treats the exit as intended
-   * (no `'crashed'` reporting), and the method resolves only after confirmed death.
+   * (no `'crashed'` reporting), and the method resolves after the stop completes. A
+   * termination that could NOT be confirmed is logged, the state still becomes
+   * `'absent'`, and the orphan PID blocks new spawns until it is gone
+   * (`BACKEND_TERMINATION_UNCONFIRMED`).
    *
    * An in-progress spawn is aborted rather than waited out, so a `stop()` during a
    * cold model load returns in milliseconds. When a release is already running, the

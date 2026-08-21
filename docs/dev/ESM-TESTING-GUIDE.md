@@ -267,10 +267,10 @@ it('should handle process events', async () => {
 **Use case**: several suites drive the same subsystem and the fakes must stay faithful in one
 place. `DiffusionServerManager` reaches its stable-diffusion.cpp backend through exactly two
 modules — `src/process/sd-server-runner.ts` (spawn, stdout tap, confirmed stop) and
-`src/process/sd-server-client.ts` (the `/sdcpp/v1/*` job API) — so all four diffusion suites
-(`DiffusionServerManager.{lifecycle,routes,generation}.test.ts` and
-`diffusion-calibration.test.ts`) mock that pair through **one shared helper**,
-`tests/unit/helpers/sd-server-mocks.ts`.
+`src/process/sd-server-client.ts` (the `/sdcpp/v1/*` job API) — so all five consumers
+(`DiffusionServerManager.{lifecycle,routes,generation}.test.ts`,
+`diffusion-calibration.test.ts`, and `ResourceOrchestrator.integration.test.ts`) mock that pair
+through **one shared helper**, `tests/unit/helpers/sd-server-mocks.ts`.
 
 Two rules make this work:
 
@@ -480,6 +480,7 @@ expect(formatBytes(1024)).toBe('1 KB');
 | diffusion-calibration.test.ts | ✅ Passing | - | Shared `sd-server` seam (launch counts per mode) |
 | sd-server-runner.test.ts | ✅ Passing | - | Pure DI (injected processManager/port/fetch) |
 | sd-server-client.test.ts | ✅ Passing | - | Global `fetch` mocking |
+| public-exports.test.ts | ✅ Passing | - | Real `src/index.ts` import behind an `electron` mock |
 
 > The three `DiffusionServerManager.*` suites replaced the single
 > `DiffusionServerManager.test.ts` in the 2026-08-21 backend migration; per-suite counts move

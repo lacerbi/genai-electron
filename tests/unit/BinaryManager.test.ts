@@ -422,6 +422,40 @@ describe('BinaryManager', () => {
       );
     });
 
+    it('names the missing Intel-macOS prebuilt for a diffusion darwin-x64 install', async () => {
+      const intelMacManager = new BinaryManager({
+        type: 'diffusion',
+        binaryName: 'sd-server',
+        platformKey: 'darwin-x64',
+        variants: [],
+      });
+
+      const error = (await intelMacManager.ensureBinary().then(
+        () => undefined,
+        (caught: unknown) => caught
+      )) as BinaryError | undefined;
+
+      expect(error).toBeInstanceOf(BinaryError);
+      expect(error?.message).toContain('darwin-x64');
+      expect(error?.message).toContain('no Intel-macOS prebuilt');
+      const suggestion = (error?.details as { suggestion?: string } | undefined)?.suggestion ?? '';
+      expect(suggestion).toContain('Apple-silicon');
+      expect(suggestion).toContain('sd-server');
+    });
+
+    it('keeps the generic no-variants message on other platforms', async () => {
+      const linuxManager = new BinaryManager({
+        type: 'diffusion',
+        binaryName: 'sd-server',
+        platformKey: 'linux-x64',
+        variants: [],
+      });
+
+      await expect(linuxManager.ensureBinary()).rejects.toThrow(
+        'No binary variants available for platform: linux-x64'
+      );
+    });
+
     it('should ensure binary directory exists', async () => {
       // Default spawnBehavior set in beforeEach works for this test
 
@@ -1543,6 +1577,63 @@ describe('BinaryManager', () => {
         destination: expect.stringContaining('.cpu.zip'),
         onProgress: expect.any(Function),
       });
+    });
+
+    // Upstream stable-diffusion.cpp publishes no Linux CUDA asset, so an NVIDIA box
+    // silently falls back to Vulkan. Provisioning must say so once.
+    const createLinuxDiffusionManager = () =>
+      new BinaryManager({
+        type: 'diffusion',
+        binaryName: 'sd-server',
+        platformKey: 'linux-x64',
+        variants: [vulkanVariant, cpuVariant],
+        log: mockLogger,
+      });
+
+    it('warns a Linux CUDA machine that stable-diffusion.cpp falls back to Vulkan', async () => {
+      mockDetectGPU.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        cuda: true,
+        name: 'NVIDIA RTX 4090',
+      });
+
+      await createLinuxDiffusionManager().ensureBinary();
+
+      const warnings = mockLogger.mock.calls.filter(
+        (call) => call[1] === 'warn' && String(call[0]).includes('No Linux CUDA prebuilt')
+      );
+      expect(warnings).toHaveLength(1);
+      expect(String(warnings[0]?.[0])).toContain('Vulkan variant');
+    });
+
+    it('does not warn about the Vulkan fallback without a CUDA GPU', async () => {
+      mockDetectGPU.mockResolvedValue({ available: true, type: 'amd', rocm: true });
+
+      await createLinuxDiffusionManager().ensureBinary();
+
+      expect(mockLogger).not.toHaveBeenCalledWith(
+        expect.stringContaining('No Linux CUDA prebuilt'),
+        'warn'
+      );
+    });
+
+    it('does not warn about the Vulkan fallback for the llama binary', async () => {
+      mockDetectGPU.mockResolvedValue({ available: true, type: 'nvidia', cuda: true });
+
+      const llamaLinuxManager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'linux-x64',
+        variants: [vulkanVariant, cpuVariant],
+        log: mockLogger,
+      });
+      await llamaLinuxManager.ensureBinary();
+
+      expect(mockLogger).not.toHaveBeenCalledWith(
+        expect.stringContaining('No Linux CUDA prebuilt'),
+        'warn'
+      );
     });
   });
 

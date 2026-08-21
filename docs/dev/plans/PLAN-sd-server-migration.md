@@ -14,14 +14,15 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
 - [x] Phase 1: Backend modules (`sd-server-client.ts`, `sd-server-runner.ts`, types, defaults, paths) — `13b8dec`
 - [x] Phase 2: Binary provisioning (`sd-server` primary, Phase-2 validation via the runner, POSIX chmod) — `1ae88a5`
 - [x] Phase 3: `DiffusionServerManager` rewire (resident backend, same wrapper contract, lifecycle) — interim
-      doublecheck (3 Opus reviewers) folded in; 1260/1260
+      doublecheck (3 Opus reviewers) folded in; 1260/1260 — `03688af`
 - [x] Phase 4: Residency policy + symmetric `ResourceOrchestrator` + LLM pre-start hook — 1321/1321
+      — `def5f72`
 - [x] Phase 5: Calibration re-base (`usageMode: 'single' | 'burst'`, `policyVersion`, VRAM fields) —
-      1331/1331
-- [ ] Phase 6: Documentation, PROGRESS "Unreleased", DESIGN/dev-doc updates, example-app touch-ups —
-      dev docs / PROGRESS / DESIGN / AGENTS / example app done 2026-08-21; `genai-electron-docs/**`
-      + `README.md` owned by a parallel agent; commit + gates pending in the main thread
-- [ ] Phase 7: Live smoke (main thread, pinned binary) + final `/doublecheck`
+      1331/1331 — `b5706c1`
+- [x] Phase 6: Documentation, PROGRESS "Unreleased", DESIGN/dev-doc updates, example-app touch-ups —
+      `482367c`; final doc corrections + the queued small-fix batch folded in afterwards
+- [ ] Phase 7: Live smoke (main thread, pinned binary) + final `/doublecheck` — final doublecheck
+      fixes landed as `816b0c0`
 - [ ] Flip `Status:` to `COMPLETE (date)` with a short results note
 
 ## Tracking (live checklist; details in the phase sections below)
@@ -69,7 +70,11 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
   - [x] `usageMode` single/burst sweep; `stageMs` semantics; `policyVersion`; VRAM sampling
   - [x] tests (29 → 39 in `diffusion-calibration.test.ts`); commit pending
 - Phase 6 — docs/housekeeping
-  - [ ] user docs (`genai-electron-docs/**`) + `README.md` — parallel agent
+  - [x] user docs (`genai-electron-docs/**`) + `README.md` — parallel agent, plus a final
+    corrections pass (residency/cancel wording, built-in vs custom orchestrator,
+    `BACKEND_TERMINATION_UNCONFIRMED` and `CALIBRATION_IN_PROGRESS` entries, the wire-code table,
+    `jobRequestTimeoutMs`, the calibration cost arithmetic, the `darwin-x64` / Linux-Vulkan
+    platform notes)
   - [x] `DESIGN.md` (§7 "Update (2026-08-21)" + history note; process-model statements at the
     architecture bullet, manager list, flow walkthrough, DiffusionServer section, quick-start
     comments, and the stable-diffusion.cpp binary note)
@@ -87,7 +92,8 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
   - [x] example app (`main/genai-api.ts` crash-note rationale, `main/ipc-handlers.ts` +
     `renderer/components/DiffusionServerControl.tsx` sd-cli wording, backend-state + "Backend PID"
     status rows, `ResourceMonitor.tsx` PID relabel)
-  - [ ] commit (main thread, after `npm run format` + the CI gates and the example-app build)
+  - [x] commit (main thread, after `npm run format` + the CI gates and the example-app build)
+    — `482367c`
 - Phase 7 — live smoke + doublecheck
   - [ ] live checklist on pinned binary; `/doublecheck`; status flip
 
@@ -453,7 +459,7 @@ launch path; existing installs re-validate without re-downloading on every platf
   untouched.
 
 **Verification**:
-- [ ] Build/lint/test green; `ResourceOrchestrator.test.ts` unchanged and green (26/26).
+- [x] Build/lint/test green; `ResourceOrchestrator.test.ts` unchanged and green (26/26).
   Phase 3a (2026-08-21, implementation + lifecycle test): build 0 errors, `npm run lint`
   0 errors, `format:check` clean, `ResourceOrchestrator.test.ts` 26/26 untouched, full suite
   1099/1099 across 40 suites — **`diffusion-calibration.test.ts` is deliberately red until
@@ -723,16 +729,34 @@ sample) = the common production case and today's report semantics; `'burst'` opt
 - `/doublecheck` with read-only Opus reviewers (core impl / API + docs / tests + example) + the
   CI gate in the main thread; fold findings back in; flip `Status:`.
 
+**Final doublecheck (2026-08-21)** — three read-only Opus reviewers ran in parallel over the whole
+branch:
+1. **Core implementation** — `DiffusionServerManager` backend state machine, `ResourceOrchestrator`
+   residency/reload logic, the `LlamaServerManager` pre-start hook, `electron-lifecycle`.
+2. **API surface + documentation** — public exports and types against `genai-electron-docs/**`,
+   `README.md`, `AGENTS.md`, `PROGRESS.md`, and the wire contract genai-lite consumes.
+3. **Tests, provisioning and the example app** — the four diffusion suites and the shared seam,
+   `BinaryManager` provisioning/validation, `examples/electron-control-panel`.
+
+All implementation findings were folded into `816b0c0` (orchestrator reload correctness incl.
+`'cancel'` and single-after-burst, the `prepareForLLMStart` auto-`gpuLayers` estimate and
+`CALIBRATION_IN_PROGRESS`, cancel-during-cold-spawn, sticky unconfirmed PID at start time, lost-job
+stop, `jobRequestTimeoutMs`, `BACKEND_QUEUE_FULL` → `SERVER_BUSY`, `batch_count` clamp, bar-frame-free
+tails, the fresh-POSIX exec bit, the per-line GPU-error scan). The remaining documentation findings
+plus the queued small-fix batch (`darwin-x64` explicit error, `sd35LargePattern` expiry note,
+Linux-NVIDIA Vulkan warning, root export-surface guard) landed in the follow-up pass on top of it.
+The live Phase-7 checklist and the `Status:` flip stay with the main thread.
+
 ## Files touched (expected)
 
 | Area | Files |
 |---|---|
-| New | `src/process/sd-server-client.ts`, `src/process/sd-server-runner.ts`, `tests/unit/sd-server-client.test.ts`, `tests/unit/sd-server-runner.test.ts`, `tests/unit/DiffusionServerManager.{lifecycle,routes,generation}.test.ts`, `tests/unit/helpers/sd-server-mocks.ts` |
-| Types/config | `src/types/images.ts`, `src/types/servers.ts`, `src/types/index.ts`, `src/index.ts`, `src/config/defaults.ts`, `src/config/paths.ts`, `eslint.config.js` |
+| New | `src/process/sd-server-client.ts`, `src/process/sd-server-runner.ts`, `tests/unit/sd-server-client.test.ts`, `tests/unit/sd-server-runner.test.ts`, `tests/unit/DiffusionServerManager.{lifecycle,routes,generation}.test.ts`, `tests/unit/helpers/sd-server-mocks.ts`, `tests/unit/ResourceOrchestrator.integration.test.ts`, `tests/unit/public-exports.test.ts`, `ISSUE-diffusion-followups.md` |
+| Types/config | `src/types/images.ts`, `src/types/servers.ts`, `src/types/index.ts`, `src/index.ts`, `src/config/defaults.ts`, `src/config/paths.ts`, `eslint.config.mjs` |
 | Managers/utils | `src/managers/DiffusionServerManager.ts`, `src/managers/ResourceOrchestrator.ts`, `src/managers/LlamaServerManager.ts` (hook only), `src/managers/BinaryManager.ts`, `src/utils/electron-lifecycle.ts` |
-| Tests adapted | `tests/unit/DiffusionServerManager.test.ts` (replaced by the split), `diffusion-calibration.test.ts`, `ResourceOrchestrator.test.ts`, `LlamaServerManager.test.ts`, `BinaryManager.test.ts`, `electron-lifecycle.test.ts`, `public-types.test.ts` |
+| Tests adapted | `tests/unit/DiffusionServerManager.test.ts` (replaced by the split), `diffusion-calibration.test.ts`, `ResourceOrchestrator.test.ts`, `LlamaServerManager.test.ts`, `BinaryManager.test.ts`, `electron-lifecycle.test.ts` |
 | Docs | listed in Phase 6 |
-| Example app | `main/genai-api.ts`, `main/ipc-handlers.ts`, `renderer/components/DiffusionServerControl.tsx` (+ status line) |
+| Example app | `main/genai-api.ts`, `main/ipc-handlers.ts`, `renderer/components/DiffusionServerControl.tsx` (+ status rows), `renderer/components/ResourceMonitor.tsx` (PID relabel) |
 
 ## Documentation
 

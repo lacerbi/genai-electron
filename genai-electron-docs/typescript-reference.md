@@ -621,8 +621,10 @@ interface DiffusionBackendStatusEvent {
 ```
 
 `releaseBackend()` takes `{ reason?: DiffusionBackendReleaseReason; waitForInFlight?: boolean }`
-and resolves after confirmed process death; `getBackendInfo(): DiffusionBackendInfo` is the
-synchronous snapshot.
+and resolves after the stop completes. Normally that means confirmed process death; a termination
+that cannot be confirmed is logged, the state still becomes `'absent'`, and the orphan PID blocks
+new spawns until it is gone (`BACKEND_TERMINATION_UNCONFIRMED`, wire code `BACKEND_ERROR`).
+`getBackendInfo(): DiffusionBackendInfo` is the synchronous snapshot.
 
 ### LlamaServerConfig
 
@@ -673,6 +675,12 @@ type ServerEvent =
 wrapper, which survives a backend failure. An unexpected backend exit surfaces as
 `'backend-status'` with `reason: 'crashed'`.
 
+**Payload shapes differ.** Most events deliver a [`ServerEventData`](#servereventdata) envelope.
+The two diffusion-only events do **not**: `'backend-status'` delivers a bare
+`DiffusionBackendStatusEvent` and `'calibration-progress'` a bare `DiffusionCalibrationProgress`.
+Destructure them directly (`on('backend-status', ({ state, reason }) => …)`) rather than reaching
+through `.serverInfo`.
+
 ### LlamaPreStartHook
 
 Callback registered through `llamaServer.registerPreStartHook()`; runs inside `start()` right
@@ -690,6 +698,10 @@ registerPreStartHook(hook: LlamaPreStartHook): () => void; // returns an unregis
 
 A hook that throws fails a manual `start()` (status resets to `'stopped'`, typed errors preserved);
 on the auto-restart path the error is logged and ignored.
+
+Hooks are held in a `Set` keyed by **function identity**: registering the same function reference
+twice still runs it once, and any of the unregister handles returned for it removes it. Register a
+distinct closure per registration if you really want it to run more than once.
 
 ### ServerEventData
 
@@ -2172,6 +2184,9 @@ const DIFFUSION_BACKEND_DEFAULTS = {
   idleTimeoutMs: 300_000,             // idle time before a 'burst'-resident backend is released
                                       //   (DiffusionServerConfig.idleTimeoutMs: 0 = never)
   jobPollIntervalMs: 200,             // poll interval for GET /sdcpp/v1/jobs/{id}
+  jobRequestTimeoutMs: 10_000,        // per-request timeout for the backend job API; longer than
+                                      //   the client's own 5 s default because the backend answers
+                                      //   from the thread that runs sampling
   readyTimeoutMs: 120_000,            // DEFAULT_TIMEOUTS.serverStart — max spawn → ready wait
   stopTimeoutMs: 10_000,              // DEFAULT_TIMEOUTS.serverStop — SIGTERM → SIGKILL grace
   maxTransientPollFailures: 3,        // consecutive transient job-poll failures that fail the

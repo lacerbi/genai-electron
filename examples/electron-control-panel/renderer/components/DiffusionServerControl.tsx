@@ -230,8 +230,8 @@ const DiffusionServerControl: React.FC = () => {
     } catch (err) {
       setGenerateError(`Cancel failed: ${(err as Error).message}`);
     }
-    // Note: with genai-lite <= 0.9.0 the awaiting generateImage promise only
-    // settles at its own client timeout; the resident sd-server backend is killed now.
+    // A still-queued backend job is cancelled through the sd-server job API; one
+    // already generating is stopped by killing the backend process.
     setGenerating(false);
     setGenerationProgress(null);
   };
@@ -357,7 +357,7 @@ const DiffusionServerControl: React.FC = () => {
           </div>
           <div className="status-item">
             <label>Backend PID:</label>
-            <span>{serverInfo.pid ?? '—'}</span>
+            <span>{serverInfo.backend?.pid ?? '—'}</span>
           </div>
           <div className="status-item">
             <label>Port:</label>

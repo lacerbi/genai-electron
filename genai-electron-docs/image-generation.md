@@ -100,7 +100,7 @@ Force VAE model to run on CPU instead of GPU. Maps to `--vae-on-cpu`. Auto-detec
 ```typescript
 batchSize?: number
 ```
-Batch size for processing. Maps to `batch_count` in the backend's job request (the first image of the batch is returned). If not specified, `batch_count: 1` is sent — sd.cpp's own default. Not to be confused with `ImageGenerationConfig.count`, which asks the library for N separate images.
+Batch size for processing. Maps to `batch_count` in the backend's job request (the first image of the batch is returned) as `max(1, floor(batchSize ?? 1))` — omitted, fractional, or below-1 values become `1`, since the backend rejects `batch_count: 0` and "no batch" means one image. Not to be confused with `ImageGenerationConfig.count`, which asks the library for N separate images.
 
 ### stop()
 
@@ -111,7 +111,7 @@ Stops the diffusion server gracefully.
 await diffusionServer.stop();
 ```
 
-In order: closes the POST gate (further requests get `503 SERVER_NOT_RUNNING`), cancels any ongoing generation (its status becomes `'cancelled'`), **releases the `sd-server` backend and waits for its confirmed death**, closes the HTTP wrapper, and destroys the generation registry.
+In order: closes the POST gate (further requests get `503 SERVER_NOT_RUNNING`), cancels any ongoing generation (its status becomes `'cancelled'`), **releases the `sd-server` backend** (normally waiting for its confirmed death — see [`releaseBackend()`](#releasebackendoptions) for the unconfirmed case), closes the HTTP wrapper, and destroys the generation registry.
 
 Calling `stop()` on an already-stopped server is not a no-op for the backend: it still releases a backend left behind by `calibrate()`, which runs while the wrapper's own status is `'stopped'`.
 
@@ -150,6 +150,10 @@ await diffusionServer.start({ modelId: 'flux-2-klein', usageMode: 'burst', idleT
 
 A `'burst'`-resident backend is released automatically after `idleTimeoutMs` (default **300 000 ms = 5 minutes**) of no generations. Set `idleTimeoutMs: 0` to disable the timer entirely — the host then owns the release (via `releaseBackend()` or `stop()`). This is diffusion-only; the LLM server has no idle timer.
 
+### Job-request timeouts
+
+Each poll of the backend's job API gets `DIFFUSION_BACKEND_DEFAULTS.jobRequestTimeoutMs` (**10 000 ms**) — deliberately longer than the client's own 5 s default, because the backend answers job requests from the same thread that runs sampling and can take seconds to reply under load. Up to `maxTransientPollFailures` (**3**) consecutive request timeouts or transport errors are retried; past that the generation fails **and the job is stopped**, so a lost job never keeps holding the GPU.
+
 ### releaseBackend(options?)
 
 ```typescript
@@ -159,10 +163,12 @@ releaseBackend(options?: {
 }): Promise<void>
 ```
 
-Frees the backend (and its VRAM) without stopping the wrapper. Idempotent and safe at any time: an absent backend returns immediately, an in-progress release is joined rather than duplicated, and an in-progress *spawn* is aborted rather than waited out. Resolves only after confirmed process death.
+Frees the backend (and its VRAM) without stopping the wrapper. Idempotent and safe at any time: an absent backend returns immediately, an in-progress release is joined rather than duplicated, and an in-progress *spawn* is aborted rather than waited out. Resolves after the stop completes.
 
 - `reason` (default `'explicit'`) is echoed on the `'backend-status'` event and decides whether a deferred LLM reload fires (see below).
 - `waitForInFlight: true` lets a generation that is already running finish first.
+
+> **Unconfirmed termination.** Normally the process is confirmed dead before this resolves. If it cannot be confirmed (even after SIGKILL), the failure is **logged**, the state still becomes `'absent'`, and the orphan PID is recorded: until that PID is observably gone, every new spawn is refused with `BACKEND_TERMINATION_UNCONFIRMED` (wire code `BACKEND_ERROR`). End the process manually and the next release or request clears the record. See [Troubleshooting](troubleshooting.md#backend_termination_unconfirmed--every-image-fails).
 
 ```typescript
 // Free the GPU for something else, keep serving requests
@@ -200,7 +206,7 @@ diffusionServer.on('backend-status', ({ state, previous, reason, exit }) => {
 
 ### Deferred LLM reload under `'burst'`
 
-When the orchestrator offloaded the LLM for an image and the mode resolves to `'burst'`, the backend deliberately stays warm and **the LLM reload is deferred** — it fires when the backend is finally released for a reason that means "the VRAM is free again": `'idle-timeout'`, `'explicit'`, `'crashed'`, or `'stop'`. See [Resource Orchestration](resource-orchestration.md#residency-and-the-reload-decision).
+When the orchestrator offloaded the LLM for an image and the mode resolves to `'burst'`, the backend deliberately stays warm and **the LLM reload is deferred** — it fires when the backend is finally released for a reason that means "the VRAM is free again": `'idle-timeout'`, `'explicit'`, `'crashed'`, `'cancel'`, or `'stop'`. See [Resource Orchestration](resource-orchestration.md#residency-and-the-reload-decision).
 
 ### Backend crashes
 
@@ -253,6 +259,7 @@ Cancels an in-flight async-API generation by its registry ID. Marks the generati
 
 **How the backend job is stopped** depends on how far it got:
 
+- **Still spawning** (a cold backend is loading the model) — the spawn itself is aborted, so no job is ever submitted. The generation ends as `status: 'cancelled'`, and `stop()` no longer has to wait out a 120 s cold load.
 - **Still queued** — cancelled through the backend's own job API; the backend stays resident and the next image is still warm.
 - **Already generating** — stable-diffusion.cpp cannot interrupt sampling, so the backend process is **killed**. The cost is the same as before this was a persistent process: the next image reloads the model.
 
@@ -390,13 +397,13 @@ const { status, busy, backend } = await (await fetch('http://127.0.0.1:8081/heal
 
 | Code | Description | Typical Cause |
 |------|-------------|---------------|
-| `SERVER_BUSY` | Server is processing another generation | Multiple concurrent requests |
-| `SERVER_NOT_RUNNING` | The wrapper is stopped or stopping | POST after `stop()` (503) |
+| `SERVER_BUSY` | Server is processing another generation. Also what a full backend job queue maps to — a transient "come back later", not a malfunction (the 503 busy gate makes it unreachable in practice) | Multiple concurrent requests |
+| `SERVER_NOT_RUNNING` | The wrapper is not `'running'` — stopped, stopping, still `'starting'`, or `'crashed'` | POST after `stop()`, or before `start()` resolves (503) |
 | `NOT_FOUND` | Generation ID not found | Invalid ID or expired (TTL) |
 | `INVALID_REQUEST` | Invalid parameters | Missing prompt, invalid `count`/`usageMode`, malformed JSON body |
 | `ALREADY_TERMINAL` | Generation is already `complete`/`error` | DELETE arriving too late |
-| `GENERATION_CANCELLED` | Internal classification for a cancelled generation | DELETE, `cancelImageGeneration()`, or `stop()` mid-image. Pollers normally observe this as the terminal **`status: 'cancelled'`** rather than as an `error.code` — the cancellation is not reported as a failure |
-| `BACKEND_ERROR` | The `sd-server` backend failed the job | Failed job (CUDA/OOM), backend exited or crashed mid-job, spawn never became ready, backend job queue full |
+| `GENERATION_CANCELLED` | Internal classification for a cancelled generation | DELETE, `cancelImageGeneration()`, or `stop()` mid-image. It **never** reaches a poller as `error.code`: the generation is marked terminal **`status: 'cancelled'`** with no `error` object. A cancel that aborts a still-loading cold spawn lands here too |
+| `BACKEND_ERROR` | The `sd-server` backend failed the job | Failed job (CUDA/OOM), backend exited or crashed mid-job, spawn never became ready, or a previous kill could not be confirmed (`BACKEND_TERMINATION_UNCONFIRMED`) |
 | `IO_ERROR` | The returned image could not be decoded | Empty/absent base64 payload in the job result |
 | `INTERNAL_ERROR` | Unhandled error inside a route | Bug — check `diffusion-server.log` |
 | `UNKNOWN_ERROR` | Unclassified failure | Fallback when nothing else matched |
@@ -473,7 +480,7 @@ Runs the sweep and returns a report. The caller persists/applies the recommendat
 
 > ⚠️ **`generation` must match what you generate with in production** — these parameters define the *compute profile* the sweep measures, and a mismatch makes the benchmark rank the combos wrong. In particular **`cfgScale`**: a value > 1 enables classifier-free guidance, which runs **two model passes per step (~2× the diffusion cost)** and can flip which offload combo wins. Guidance-distilled models (Flux Klein, SDXL-Lightning/Turbo) run at `cfgScale: 1`; standard models are typically 5–8. (`steps`, `cfgScale`, `sampler`, and `sizes` have no library defaults precisely so calibration can never *silently* diverge from production.)
 
-Default sweep cost: 6 combos × (1 warmup + 2 samples) = 18 generations per size — typically a few minutes.
+Sweep cost: `combos × (1 + samples × sizes)` generations. The warmup is **per combo**, not per size — with the defaults and one size that is 6 × (1 + 2 × 1) = **18 generations**, typically a few minutes; a second size adds 12 more, not 18.
 
 **Contract:**
 - The server must be **stopped** and is left stopped, with no backend resident. `start()` throws while calibrating; `isCalibrating()` exposes the state (`getInfo().busy` may briefly read `true` while `status` stays `'stopped'` — harmless).

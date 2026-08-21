@@ -340,6 +340,7 @@ export class BinaryManager {
     // Check if any CUDA variants exist
     const hasCudaVariants = variants.some((v) => v.type === 'cuda');
     if (!hasCudaVariants) {
+      await this.warnWhenNoCudaVariantExists();
       return variants;
     }
 
@@ -366,6 +367,38 @@ export class BinaryManager {
   }
 
   /**
+   * Tell a Linux NVIDIA user that the diffusion backend will run on Vulkan
+   *
+   * Upstream stable-diffusion.cpp publishes no Linux CUDA asset, so a CUDA-capable
+   * Linux box silently falls back to the Vulkan variant, whose performance is uneven
+   * across GPUs (leejet/stable-diffusion.cpp#1114). Everything still works — this is a
+   * heads-up, not a failure. Emitted at most once per {@link BinaryManager.ensureBinary}
+   * call, from the branch that runs when no CUDA variant is configured at all.
+   *
+   * @private
+   */
+  private async warnWhenNoCudaVariantExists(): Promise<void> {
+    if (this.config.type !== 'diffusion' || this.config.platformKey !== 'linux-x64') {
+      return;
+    }
+
+    try {
+      const gpu = await detectGPU();
+      if (!gpu.available || gpu.cuda !== true) {
+        return;
+      }
+    } catch {
+      // GPU detection is best-effort here; a failure just means no warning
+      return;
+    }
+
+    this.log(
+      'No Linux CUDA prebuilt for stable-diffusion.cpp; using the Vulkan variant — performance may be lower; build from source for CUDA',
+      'warn'
+    );
+  }
+
+  /**
    * Ensure binary is available, downloading if necessary
    *
    * Tries each variant in priority order until one works.
@@ -385,6 +418,17 @@ export class BinaryManager {
     let { variants } = this.config;
 
     if (!variants || variants.length === 0) {
+      // stable-diffusion.cpp publishes no Intel-macOS asset, so this is a supported
+      // platform with an unsupported binary — say so instead of "check DESIGN.md".
+      if (type === 'diffusion' && platformKey === 'darwin-x64') {
+        throw new BinaryError(
+          `stable-diffusion.cpp is not available for platform: ${platformKey} — upstream stable-diffusion.cpp publishes no Intel-macOS prebuilt binary`,
+          {
+            platform: platformKey,
+            suggestion: `Use an Apple-silicon Mac or another supported platform, or build stable-diffusion.cpp from source and place \`sd-server\` in the binaries directory (${PATHS.binaries.diffusion})`,
+          }
+        );
+      }
       throw new BinaryError(`No binary variants available for platform: ${platformKey}`, {
         platform: platformKey,
         suggestion: 'Check platform support in DESIGN.md',

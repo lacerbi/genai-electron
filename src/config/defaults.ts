@@ -442,7 +442,14 @@ export const DIFFUSION_CALIBRATION_DEFAULTS: {
   readonly prompt: string;
   /** Runs within this % of the fastest prefer fewer forced flags (robustness tie-break) */
   readonly tieTolerancePct: number;
-  /** Models matching this id/name pattern skip clipOnCpu combos (leejet/stable-diffusion.cpp#1578) */
+  /**
+   * Models matching this id/name pattern skip clipOnCpu combos.
+   *
+   * Workaround for leejet/stable-diffusion.cpp#1578 (SD 3.5 Large crashes with the text
+   * encoder on CPU). It is an upstream-bug filter, not a policy: **re-check it at every pin
+   * bump and remove it once the bug is fixed upstream** — see the checklist in
+   * `docs/dev/UPDATING-BINARIES.md`.
+   */
   readonly sd35LargePattern: RegExp;
   /** stderr/message patterns classifying a failed generation as out-of-memory */
   readonly oomPatterns: readonly RegExp[];

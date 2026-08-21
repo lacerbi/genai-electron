@@ -256,12 +256,29 @@ Hooks run in registration order, sequentially, each awaited.
 | `'start'` | Propagates | `start()` rejects through the normal startup-failure path: status is reset to `'stopped'` and typed library errors (`GenaiElectronError` subclasses) are preserved |
 | `'auto-restart'` | Swallowed | Logged to `llama-server.log` and ignored — a hook must never abort an auto-restart or consume its restart budget |
 
+Hooks are held in a `Set` keyed by **function identity**. Registering the same function reference
+twice still runs it once, and any of the unregister handles returned for it removes it — register a
+distinct closure per registration if you want it to run more than once.
+
 **Built-in hook**: `DiffusionServerManager` registers one automatically whenever it is constructed
 with a `LlamaServerManager` (the exported `llamaServer` / `diffusionServer` singletons are). It
-releases a resident stable-diffusion.cpp backend when the LLM about to start and that backend would
+releases a resident stable-diffusion.cpp backend when that backend and the LLM about to start would
 not fit together — see
 [LLM Start Yields the Diffusion Backend](resource-orchestration.md#llm-start-yields-the-diffusion-backend).
 Registering your own hooks does not disturb it.
+
+Two behaviors of that built-in hook are worth knowing:
+
+- **`CALIBRATION_IN_PROGRESS`** — while `diffusionServer.calibrate()` is sweeping, the hook throws
+  `ServerError` with `details.code: 'CALIBRATION_IN_PROGRESS'`, so a manual `start()` fails loudly
+  instead of racing a sweep that owns the backend (and restores the LLM itself). An auto-restart is
+  unaffected: hook errors are logged and ignored on that path.
+- **Omitted `gpuLayers` is estimated, not read as zero** — hooks see the raw configuration, and
+  `start()` auto-configures `gpuLayers` afterwards. Taking the raw `undefined` at face value would
+  price the LLM at 0 VRAM and the two would always "fit", so the hook resolves it the way
+  auto-configuration will (the same `SystemInfo.getOptimalConfig()` call with the same hints;
+  a full GPU offload as the conservative fallback). An **explicit** `gpuLayers: 0` means "CPU-only
+  LLM" and yields nothing — the diffusion backend stays resident.
 
 **Example**:
 ```typescript

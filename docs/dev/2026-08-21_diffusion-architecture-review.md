@@ -1,10 +1,13 @@
 # Diffusion Path Architecture Review: sd.cpp, FLUX.2 klein, and What to Change
 
 **Date:** 2026-08-21
-**Status:** 📋 REVIEW — findings and recommendations only, no code changes yet
-**Implementation:** §3, §5.1-3 and §5.5, and §8.1-2 implemented via
-`docs/dev/plans/PLAN-sd-server-migration.md` (branch `feat/sd-server-backend`, unreleased);
-§5.4, §5.6-7 and §8.3-7 remain open
+**Status:** 📋 REVIEW (2026-08-21) — implemented in part; see the Implementation line
+**Implementation:** §3, §5.1 (bind), §5.2, §5.3, §5.5, §8.1, §8.2 and §8.6 (the busy-gate and
+temp-PNG halves; the `darwin-x64` explicit error and the `sd35LargePattern` expiry note were added
+in the follow-up small-fix batch) implemented via `docs/dev/plans/PLAN-sd-server-migration.md`
+(branch `feat/sd-server-backend`, unreleased). §5.4, §5.6 (Linux-Vulkan: a provisioning **warning**
+only — no CUDA asset exists upstream), §5.7, §8.3–§8.5 and §8.7 are tracked in
+`ISSUE-diffusion-followups.md`
 **Scope:** Image-generation path (DiffusionServerManager, ResourceOrchestrator, model/binary
 strategy). LLM path touched only where the two interact.
 **Reference machine:** laptop, 8 GB VRAM NVIDIA GPU, 24 GB RAM — FLUX.2 klein 4B (quantized
@@ -302,6 +305,37 @@ track:
    `sd35LargePattern`, drop or honor `gpuLayers` on the diffusion config.
 7. **Benchmark Mage-Flow 4B vs klein 4B** on the reference machine before considering a
    default change.
+
+---
+
+## Post-implementation notes (2026-08-21)
+
+The migration landed on `feat/sd-server-backend`. What the live smoke on the reference machine
+(RTX 4060 Laptop 8 GB, FLUX.2 klein 4B Q4_0, 768², 4 steps, cfg 1, euler) showed against the
+**pinned `master-782-b290693`** binary, which is the number set that supersedes the `master-746`
+figures quoted earlier in this document:
+
+- **Cold image ≈ 10.3–11.4 s** in steady state; the very first run after provisioning was **16.5 s**
+  (cold OS page cache for the model files, not a runtime cost).
+- **Warm image 6.3 s** with the backend resident — the ~35–40 % burst saving the plan predicted.
+- **Peak 4249 MiB** with `--offload-to-cpu --diffusion-fa`, i.e. roughly half the all-resident peak,
+  which is what makes the LLM + diffusion coexistence question interesting on 8 GB at all.
+- Cancel (queued and generating), a deliberate `taskkill` of the backend mid-job, the idle timeout,
+  and Phase-2 re-validation after deleting `.validation.json` all behaved as designed.
+
+Two findings from that smoke were fixed before release, and both are worth recording because
+neither was visible to the unit tests as they stood:
+
+1. **`prepareForLLMStart()` never fired.** The hook is handed the *raw* start configuration, in
+   which `gpuLayers` is normally absent — `start()` auto-configures it later. Reading the raw value
+   priced the LLM at 0 VRAM, so "both fit" was always true and a resident backend was never yielded.
+   The estimate now resolves an omitted `gpuLayers` the way auto-configuration will (an explicit
+   `gpuLayers: 0` is still honoured as a CPU-only LLM).
+2. **`'burst'` + cancel stranded the LLM.** A cancelled generation kills the backend and then ends;
+   with the reload set as originally specified (`idle-timeout | explicit | crashed | stop`) nothing
+   would ever have released the VRAM afterwards, so an offloaded LLM stayed down indefinitely.
+   `'cancel'` is now a qualifying release reason, and a later non-offload request settling `'single'`
+   is a second safety net.
 
 ---
 

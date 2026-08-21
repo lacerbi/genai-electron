@@ -346,6 +346,10 @@ Checksums:
 - [ ] For a stable-diffusion.cpp bump: confirm the zip still ships `sd-server(.exe)` (the binary the
       library runs) and re-verify the stdout markers in `SD_SERVER_STDOUT_MARKERS` plus the
       `/sdcpp/v1/*` job-API shapes with a live generation
+- [ ] For a stable-diffusion.cpp bump: re-check
+      `DIFFUSION_CALIBRATION_DEFAULTS.sd35LargePattern` against
+      leejet/stable-diffusion.cpp#1578 — it exists only to skip `clipOnCpu` combos for SD 3.5
+      Large while that upstream bug is open, and should be deleted once the bump fixes it
 - [ ] Commit with descriptive message
 - [ ] Update PROGRESS.md if this is a significant change
 
@@ -508,8 +512,12 @@ The library automatically performs real GPU functionality testing during variant
      throwaway `--lora-model-dir`; generation-only batch/thread settings are excluded. The
      child is always stopped with confirmed death — a termination that cannot be confirmed
      aborts the whole variant loop instead of downloading the next variant over a live child.
-     No output file is written (the image comes back as base64 in the job result).
-4. Parses line-anchored output diagnostics for GPU errors:
+     No output file is written (the image comes back as base64 in the job result). Every
+     backend output line is scanned for GPU errors **as it arrives** (`onLog` →
+     `GPU_ERROR_PATTERNS`), not only at the end: the retained tails are bounded, so a
+     diagnostic printed during a long model load can otherwise be evicted before the verdict.
+4. Scans each captured output line against `BinaryManager.GPU_ERROR_PATTERNS` for GPU errors
+   (the scan is line-anchored and runs per line as output arrives):
    - "CUDA error"
    - "failed to allocate"
    - "out of memory"
@@ -565,7 +573,7 @@ curl -s http://127.0.0.1:51234/sdcpp/v1/jobs/<id>
 
 - **Location**: `src/managers/BinaryManager.ts` - `runRealFunctionalityTest()` method
 - **Timeout**: 120 s when a multi-component test model is configured (large component loads), 15 s for single-file models (see `runSdServerTest()` in `BinaryManager.ts`). The job gets that same budget again as a second, independent clock.
-- **Error Patterns**: See `errorPatterns` array in `runRealFunctionalityTest()`
+- **Error Patterns**: See the static `GPU_ERROR_PATTERNS` table in `BinaryManager.ts`
 - **Automatic**: No configuration needed, happens transparently during `start()`
 
 ## stable-diffusion.cpp Specifics
@@ -585,7 +593,7 @@ The same process applies to the diffusion binaries (`BINARY_VERSIONS.diffusionCp
 - **CUDA dependency**: `cudart-sd-bin-win-cu12-x64.zip`. It has been byte-identical across releases (compare digests before assuming a new download is needed); only the URL tag changes.
 - **Zip contents**: `sd-server(.exe)` (the binary genai-electron runs — a native HTTP server with an async job API), `sd-cli(.exe)` (the one-shot CLI; extracted but never executed by the library), the `stable-diffusion` shared library, and ggml backend DLLs. `BinaryManager.ts` locates the primary binary by exact match on `['sd-server.exe', 'sd-server']`.
 - **Primary-binary switch → one-time re-validation**: the primary name moved from `sd-cli` to `sd-server` in the 2026-08-21 backend migration. An existing install therefore fails its cached `.validation.json.checksum` comparison once and re-validates **without** re-downloading (the version is unchanged and the variant is preserved). On POSIX this only works because the install path `chmod 0o755`s the primary binary *before* re-testing it — the ZIP worker extracts without original permissions (adm-zip writes `0o666`), so a name switch would otherwise look like "existing binary not working, re-downloading". Keep that ordering if you ever change the primary name again.
-- **Log-format coupling**: the backend's job JSON carries no progress at the pin, so `DiffusionServerManager` still parses `sd-server` stdout for stage/step progress. The literals live in ONE exported table — `SD_SERVER_STDOUT_MARKERS` in `src/process/sd-server-runner.ts` (`generating image:` / `sampling using` → `generating`, `decoding 1 latents` → `decoding`, `decode_first_stage completed` → `decoded`, `generate_image completed` → `completed`, plus the `listening on:` hint) — alongside the step/byte bar regexes and `isSdServerProgressBarLine()` (which keeps bar redraws out of the log file). After a bump, run a live generation and confirm stage transitions and step progress still report; if the format drifts, update that table (and the bar patterns), not scattered call sites. Note that readiness itself is NOT coupled to stdout: it is `GET /sdcpp/v1/capabilities` returning 200. Also re-check the job API shapes (202 on submit, 409 on cancelling a generating job, 429 on a full queue, 410 after the result TTL). Precedent: at `master-746` upstream renamed the `loading tensors from` literal to `loading model from` and switched loading progress to `#`-style byte bars (`| N/M - X.XXGB/s`), both of which required parser updates.
+- **Log-format coupling**: the backend's job JSON carries no progress at the pin, so `sd-server` stdout is still parsed for stage/step progress. The parsing lives in `src/process/sd-server-runner.ts` (the runner's line-buffered stdout tap), which emits structured events; `DiffusionServerManager` only consumes them. The literals live in ONE exported table — `SD_SERVER_STDOUT_MARKERS` in `src/process/sd-server-runner.ts` (`generating image:` / `sampling using` → `generating`, `decoding 1 latents` → `decoding`, `decode_first_stage completed` → `decoded`, `generate_image completed` → `completed`, plus the `listening on:` hint) — alongside the step/byte bar regexes and `isSdServerProgressBarLine()` (which keeps bar redraws out of the log file). After a bump, run a live generation and confirm stage transitions and step progress still report; if the format drifts, update that table (and the bar patterns), not scattered call sites. Note that readiness itself is NOT coupled to stdout: it is `GET /sdcpp/v1/capabilities` returning 200. Also re-check the job API shapes (202 on submit, 409 on cancelling a generating job, 429 on a full queue, 410 after the result TTL). Precedent: at `master-746` upstream renamed the `loading tensors from` literal to `loading model from` and switched loading progress to `#`-style byte bars (`| N/M - X.XXGB/s`), both of which required parser updates.
 - **Sampler-surface coupling**: a method appearing in `--help` is not sufficient evidence that it
   is safe to expose. Compare the sampler enum/CLI-name table with every display-name table and run
   the method. At `master-782-b290693`, `dpm++2m_sde` and `dpm++2m_sde_bt` were added to the enum and

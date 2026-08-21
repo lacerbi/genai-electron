@@ -43,6 +43,22 @@ await llamaServer.start({
 
 **If you need CUDA on Linux:** Build llama.cpp from source with CUDA enabled and point genai-lite at it via `LLAMACPP_API_BASE_URL` (see the FAQ below). Windows CUDA prebuilts are unaffected.
 
+**The same is true for image generation, and provisioning now says so.** Upstream stable-diffusion.cpp publishes no Linux CUDA asset either, so a CUDA-capable Linux box gets the Vulkan `sd-server` variant and one warning during provisioning:
+
+```
+No Linux CUDA prebuilt for stable-diffusion.cpp; using the Vulkan variant — performance may be lower; build from source for CUDA
+```
+
+Nothing is broken — Vulkan works, but its throughput is uneven across GPUs and drivers, so a Linux image can be slower than the same GPU under Windows CUDA. Build stable-diffusion.cpp from source with CUDA and place `sd-server` in `<userData>/binaries/diffusion` if that matters.
+
+### Image Generation on an Intel Mac (`darwin-x64`)
+
+**Problem:** `diffusionServer.start()` throws `BinaryError: … stable-diffusion.cpp is not available for platform: darwin-x64 — upstream stable-diffusion.cpp publishes no Intel-macOS prebuilt binary`.
+
+**Cause:** exactly what it says — there is no `darwin-x64` asset to download, so there is nothing for the variant loop to try. This is a deliberate, terminal error, not a provisioning failure worth retrying.
+
+**Options:** use an Apple-silicon Mac or another supported platform, or build stable-diffusion.cpp from source and place `sd-server` in `<userData>/binaries/diffusion`. LLM features work normally on Intel Macs.
+
 ### CUDA + CPU Offloading Crash (fixed upstream; re-verified in `master-782-b290693`)
 
 **Problem (historical):** On sd.cpp builds up to `master-504-636d3cb`, diffusion generation crashed silently (exit code `0xC0000005`) when the CUDA backend was combined with any CPU offloading flag: `--clip-on-cpu`, `--vae-on-cpu`, or `--offload-to-cpu`. genai-electron used to suppress these flags automatically on CUDA installs.
@@ -112,13 +128,13 @@ kept as a recovery copy for the next provisioning run.
 
 | Code | Description | Solution |
 |------|-------------|----------|
-| `SERVER_BUSY` | Server processing another generation | Wait for current generation to complete |
-| `SERVER_NOT_RUNNING` | Wrapper is stopped or stopping (503) | Start the server; don't POST during `stop()` |
+| `SERVER_BUSY` | Server processing another generation (503). Also the mapping for a full backend job queue, which the 503 gate makes unreachable in practice | Wait for current generation to complete |
+| `SERVER_NOT_RUNNING` | The wrapper is not `'running'` — stopped, stopping, still `'starting'`, or `'crashed'` (503) | Wait for `start()` to resolve; don't POST during `stop()` |
 | `NOT_FOUND` | Generation ID not found | ID invalid or result expired (TTL) |
 | `INVALID_REQUEST` | Invalid parameters | Check prompt, `count` (1-5), `usageMode` (`'burst'`/`'single'`), and that the body is valid JSON |
 | `ALREADY_TERMINAL` | DELETE on a `complete`/`error` generation | Nothing to cancel |
-| `GENERATION_CANCELLED` | Internal classification for a cancelled generation | Expected after DELETE, `cancelImageGeneration()`, or `stop()` mid-image — pollers normally see the terminal `status: 'cancelled'` instead of an error |
-| `BACKEND_ERROR` | The stable-diffusion.cpp backend failed | Failed job (OOM/CUDA), backend exited or crashed, spawn never became ready, or its job queue was full — see [Backend Crashed](#backend-crashed--backend-status) |
+| `GENERATION_CANCELLED` | Internal classification for a cancelled generation | Expected after DELETE, `cancelImageGeneration()`, or `stop()` mid-image. It **never** reaches a poller as `error.code`: the generation is marked terminal `status: 'cancelled'` with no `error` object at all |
+| `BACKEND_ERROR` | The stable-diffusion.cpp backend failed | Failed job (OOM/CUDA), backend exited or crashed, spawn never became ready, or a prior kill could not be confirmed — see [Backend Crashed](#backend-crashed--backend-status) and [`BACKEND_TERMINATION_UNCONFIRMED`](#backend_termination_unconfirmed--every-image-fails) |
 | `IO_ERROR` | The returned image could not be decoded | The job result carried no usable image payload; check logs |
 | `INTERNAL_ERROR` / `UNKNOWN_ERROR` | Unhandled/unclassified failure | Check `diffusion-server.log` |
 
@@ -261,7 +277,9 @@ diffusionServer.on('backend-status', ({ state, reason, exit }) => {
 });
 ```
 
-If the backend crashes repeatedly, look at `diffusion-server.log` and the error's `details.stderr`: the usual causes are VRAM exhaustion (try `offloadToCpu: true` / `clipOnCpu: true`, or a smaller size) and driver-level CUDA failures (re-run with `forceValidation: true` after driver updates).
+If the backend crashes repeatedly, look at `diffusion-server.log` first: the usual causes are VRAM exhaustion (try `offloadToCpu: true` / `clipOnCpu: true`, or a smaller size) and driver-level CUDA failures (re-run with `forceValidation: true` after driver updates).
+
+**Where the stderr tail is.** Over HTTP there is no `details` object — a poller sees only `error.{message, code}`. For a backend **exit** the retained stderr tail is folded into `error.message` itself (`stable-diffusion.cpp exited with code … <tail> Args: …`); for a **failed job** the message carries the backend's own error string. `details.stderr` / `details.stdout` exist only on the `ServerError` thrown in-process (`generateImage()`, and the calibration classifier that reads them to tell OOM from other failures).
 
 ### The LLM Didn't Come Back After Generating Images
 
@@ -273,15 +291,48 @@ If the backend crashes repeatedly, look at `diffusion-server.log` and the error'
 
 ```typescript
 await diffusionServer.releaseBackend();     // frees VRAM; qualifies for the deferred reload
-await orchestrator.waitForReload();         // optional: wait until llama-server is back
+
+// The reload runs in the background; watch the LLM's own status to know when it is back
+while (llamaServer.getStatus() !== 'running') {
+  await new Promise((r) => setTimeout(r, 500));
+}
 ```
 
 **Or avoid the situation:**
 
 - Leave `usageMode` at its `'auto'` default — after an offload it resolves to `'single'`, which releases the backend immediately and reloads the LLM right away.
-- Lower `idleTimeoutMs` (default 300 000 ms) if you want burst mode but a faster automatic return.
+- Lower `idleTimeoutMs` (default 300 000 ms) if you want burst mode but a faster automatic return. `idleTimeoutMs: 0` disables the timer entirely, so the LLM then stays down until you release the backend or issue a request that settles `'single'`.
 
-`waitForReload()` resolves *immediately* in this situation: no reload has been started yet, so there is nothing to wait for. See [Residency and the Reload Decision](resource-orchestration.md#residency-and-the-reload-decision).
+`orchestrator.waitForReload()` is **not** available on the singleton path: `DiffusionServerManager` builds its orchestrator internally and exposes no accessor, and an orchestrator you construct yourself is a different instance that never sees the built-in release callback. Use `waitForReload()` only when your own orchestrator performed the offload. See [Built-in vs custom orchestrator](resource-orchestration.md#built-in-vs-custom-orchestrator) and [Residency and the Reload Decision](resource-orchestration.md#residency-and-the-reload-decision).
+
+### `BACKEND_TERMINATION_UNCONFIRMED` — Every Image Fails
+
+**Symptom:** every generation fails with `error.code: 'BACKEND_ERROR'` and a message like `stable-diffusion.cpp backend termination could not be confirmed (pid 12345); refusing to start a second backend`.
+
+**Cause:** a previous release killed the backend but could not observe it exit (even after escalating to SIGKILL). That process may still own the GPU, so the manager records its PID and refuses to spawn a second backend over it — doubling the VRAM claim would be worse than failing.
+
+**Recovery:** end the process yourself, then release again (or just issue the next request):
+
+```bash
+# Windows
+taskkill /F /PID 12345
+# macOS / Linux
+kill -9 12345
+```
+
+```typescript
+await diffusionServer.releaseBackend();   // clears the record once the PID is observably gone
+```
+
+The record is sticky but self-clearing: the very next spawn attempt re-probes the PID and drops it as soon as the process is gone. `releaseBackend()` itself never hangs on this — the state still becomes `'absent'` and the failure is logged to `diffusion-server.log`.
+
+### Cannot Start the LLM During a Calibration Sweep
+
+**Symptom:** `llamaServer.start()` rejects with `ServerError` whose `details.code` is `'CALIBRATION_IN_PROGRESS'`.
+
+**Cause:** `diffusionServer.calibrate()` is running. The sweep owns the backend (and, when orchestration is wired, the offloaded LLM state it restores itself), so the built-in pre-start hook refuses a manual start instead of racing it.
+
+**Fix:** wait for `calibrate()` to resolve, or abort it through the `signal` you passed. `diffusionServer.isCalibrating()` reports the state. An **auto-restart** is not affected: hook errors on that path are logged and ignored, so the watchdog keeps its restart budget.
 
 ### VRAM Still Occupied After an Image Finished
 
