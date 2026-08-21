@@ -294,7 +294,6 @@ describe('DiffusionServerManager calibration', () => {
     });
   };
 
-
   const GPU_TOTAL_BYTES = 8 * 1024 ** 3;
 
   /**
