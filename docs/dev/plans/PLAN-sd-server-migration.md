@@ -16,7 +16,8 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
 - [x] Phase 3: `DiffusionServerManager` rewire (resident backend, same wrapper contract, lifecycle) — interim
       doublecheck (3 Opus reviewers) folded in; 1260/1260
 - [x] Phase 4: Residency policy + symmetric `ResourceOrchestrator` + LLM pre-start hook — 1321/1321
-- [ ] Phase 5: Calibration re-base (`usageMode: 'single' | 'burst'`, `policyVersion`, VRAM fields)
+- [x] Phase 5: Calibration re-base (`usageMode: 'single' | 'burst'`, `policyVersion`, VRAM fields) —
+      1331/1331
 - [ ] Phase 6: Documentation, PROGRESS "Unreleased", DESIGN/dev-doc updates, example-app touch-ups
 - [ ] Phase 7: Live smoke (main thread, pinned binary) + final `/doublecheck`
 - [ ] Flip `Status:` to `COMPLETE (date)` with a short results note
@@ -63,8 +64,8 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
   - [x] `LlamaServerManager.registerPreStartHook` (after `'starting'`); `prepareForLLMStart`; estimator override
   - [x] tests (orchestrator, llama hook, integration-style, lifecycle, idle timeout); commit pending
 - Phase 5 — calibration
-  - [ ] `usageMode` single/burst sweep; `stageMs` semantics; `policyVersion`; VRAM sampling
-  - [ ] tests; commit
+  - [x] `usageMode` single/burst sweep; `stageMs` semantics; `policyVersion`; VRAM sampling
+  - [x] tests (29 → 39 in `diffusion-calibration.test.ts`); commit pending
 - Phase 6 — docs/housekeeping
   - [ ] user docs; DESIGN; UPDATING-BINARIES; ESM guide; AGENTS; PROGRESS Unreleased; example app; commit
 - Phase 7 — live smoke + doublecheck
@@ -604,7 +605,33 @@ sample) = the common production case and today's report semantics; `'burst'` opt
   mid-launch, state restore, LLM offload ordering.
 
 **Verification**:
-- [ ] Build/lint/test green.
+- [x] Build/lint/test green.
+  Done 2026-08-21: build 0 errors, `npm run lint` 0 errors (114 pre-existing warnings — no new
+  ones), `npm run format` + `format:check` clean, full suite **1331/1331 across 44 suites**
+  (was 1321/1321; `diffusion-calibration.test.ts` 29 → 39). The "worker process has failed to
+  exit gracefully" line stays pre-existing (see `PLAN-diffusion-calibration.md:229`); the suite
+  reports no open handles under `--detectOpenHandles`.
+  Implementation notes: `timeTakenMs` reuses `executeImageGeneration`'s own total (it clocks
+  from before `ensureBackend()`, so a cold sample already contains spawn + weight load — no
+  second stopwatch around the call); the release that makes a `'single'` sample cold happens
+  BEFORE the timed window and again in a `finally` after it (so a failed warmup/sample also
+  leaves no backend), each with reason `'calibration'` (ignored by the orchestrator's reload
+  filter, and additionally suppressed by `isCalibrating()`); `'burst'` releases once per combo
+  after its sizes. The release-before-sample opened a new abort window, so the signal is
+  re-checked immediately after it in both the warmup and the sample path. VRAM comes from a
+  private `CalibrationVramSampler` fed by `createTelemetrySnapshotCapture()` over a GPU-only
+  source adapter (`refreshMemoryTelemetry` stubbed `'not-required'` — the sweep never compares
+  host memory), gated once per sweep on `process.platform !== 'darwin'` + a fresh
+  `getGPUInfo()` with a finite `vramAvailable`/`vram`; 1 s unref'd interval plus a reading at
+  each window edge, `peak = vramTotal − min(vramAvailable)`, `idle = vramTotal − vramAvailable`
+  from one extra reading taken after the release (`'single'`) or right after the job
+  (`'burst'`); any unusable reading omits BOTH fields, nothing ever throws into the sweep, and
+  `dispose()` runs first in `calibrate()`'s `finally`. Both figures are taken from the same
+  representative sample as `stageMs` (closest to the median).
+  Five deliberate mutations each fail the suite: leaking the sampler interval (fake-timer
+  `getTimerCount()` test), dropping the post-release abort re-check, inverting the peak
+  arithmetic to a maximum, flipping the default mode to `'burst'`, and (implicitly, via the six
+  launch-count assertions) making `'single'` reuse a warm backend.
 - [ ] Live (Phase 7): short sweep (2 combos × 1 size × 2 samples) in each mode on the laptop;
   `single` medians ≈ 11 s / `burst` ≈ 7 s for the offload combo; `loadMs` present in both (large
   cold, small warm); report carries `policyVersion` and VRAM fields; timing with sampling on vs

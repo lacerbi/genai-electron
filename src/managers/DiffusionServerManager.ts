@@ -43,6 +43,10 @@ import {
   type SdServerJobStatus,
 } from '../process/sd-server-client.js';
 import {
+  createTelemetrySnapshotCapture,
+  type CaptureResourceSnapshot,
+} from '../utils/llama-resource-guard-capture.js';
+import {
   GenaiElectronError,
   ServerError,
   ModelNotFoundError,
@@ -130,6 +134,23 @@ const TRANSIENT_POLL_ERROR_CODES: ReadonlySet<string> = new Set([
   'BACKEND_REQUEST_TIMEOUT',
   'BACKEND_REQUEST_FAILED',
 ]);
+
+/**
+ * Cadence of the calibration VRAM sampler, which fixes the resolution of the reported
+ * peak. Each sample costs one platform telemetry command (e.g. `nvidia-smi`); the
+ * measured work is GPU-bound, so the perturbation at 1 s is negligible.
+ * @internal
+ */
+const CALIBRATION_VRAM_SAMPLE_INTERVAL_MS = 1_000;
+
+/** Per-read bound for one calibration VRAM telemetry capture. @internal */
+const CALIBRATION_VRAM_TELEMETRY_TIMEOUT_MS = 5_000;
+
+/** Machine-wide VRAM figures of one calibration timed sample. @internal */
+interface CalibrationVramSample {
+  vramPeakBytes?: number;
+  vramIdleBytes?: number;
+}
 
 /**
  * The busy-gate claim for one generation request.
@@ -1170,6 +1191,11 @@ export class DiffusionServerManager extends ServerManager {
    * Contract:
    * - The server must be STOPPED and is left stopped afterwards; start() throws
    *   while a calibration is in flight.
+   * - config.usageMode selects WHAT is measured (default 'single'): 'single' makes
+   *   every timed sample a cold spawn -> generate -> release cycle (single-shot
+   *   latency), 'burst' launches the backend once per combo and times warm samples.
+   *   The report echoes the mode and the policy version, because timings from the two
+   *   modes are not comparable.
    * - When constructed with a llamaServer, a running LLM is offloaded once for
    *   the whole sweep and restored afterwards. Otherwise stop the LLM yourself
    *   before calibrating.
@@ -1235,6 +1261,9 @@ export class DiffusionServerManager extends ServerManager {
       }
     }
     const samples = Math.max(1, Math.floor(config.samples ?? defaults.samples));
+    // What the sweep measures: cold single-shot latency ('single') or warm burst
+    // latency ('burst'). Echoed in the report — the two are not comparable.
+    const usageMode: DiffusionUsageMode = config.usageMode ?? defaults.usageMode;
     const steps = config.generation.steps;
     const cfgScale = config.generation.cfgScale;
     const seed = config.seed ?? defaults.seed;
@@ -1258,11 +1287,12 @@ export class DiffusionServerManager extends ServerManager {
     };
     config.signal?.addEventListener('abort', abortListener);
 
-    // Hoisted for the finally block ('restoring-llm'/'done' emits)
+    // Hoisted for the finally block ('restoring-llm'/'done' emits, sampler teardown)
     let emitFn: ((p: DiffusionCalibrationProgress) => void) | undefined;
     let comboCountForProgress = 0;
     let lastOverallPercent = 0;
     let succeeded = false;
+    let vramSampler: CalibrationVramSampler | undefined;
 
     try {
       // --- Setup (phase 'preparing') ---
@@ -1364,7 +1394,7 @@ export class DiffusionServerManager extends ServerManager {
             .map((s) => `${s.width}x${s.height}`)
             .join(',')}, combos=${combos.length}${
             skippedCombos.length > 0 ? ` (${skippedCombos.length} skipped: SD3.5-Large)` : ''
-          }, steps=${steps}, samples=${samples}`,
+          }, steps=${steps}, samples=${samples}, usageMode=${usageMode}`,
           'info'
         )
         .catch(() => void 0);
@@ -1391,6 +1421,10 @@ export class DiffusionServerManager extends ServerManager {
       await this.orchestrator?.waitForReload();
       await this.orchestrator?.offloadLLM();
 
+      // Machine-wide VRAM sampling for the timed windows (undefined when the platform
+      // exposes no trustworthy VRAM availability — the sweep runs unchanged either way)
+      vramSampler = await this.createCalibrationVramSampler();
+
       // --- Sweep (combo-outer, size-inner; every generation does identical work) ---
       for (let comboIndex = 0; comboIndex < combos.length; comboIndex++) {
         const combo = combos[comboIndex]!;
@@ -1401,7 +1435,10 @@ export class DiffusionServerManager extends ServerManager {
           sizeCount: sizes.length,
         };
 
-        // Warmup at the first size (discarded; stabilizes disk cache / first-spawn overhead)
+        // Warmup at the first size. Discarded either way, but for different reasons:
+        // in 'burst' it absorbs the spawn and the lazy weight placement so the timed
+        // samples are warm; in 'single' it primes the OS page cache and the driver so
+        // the timed cold spawns are not the first one on this machine.
         let warmupFailure: { status: 'oom' | 'error'; message: string } | undefined;
         if (config.signal?.aborted) {
           throw this.calibrationAbortError(runs);
@@ -1414,6 +1451,14 @@ export class DiffusionServerManager extends ServerManager {
           overallPercent: overallPercent(),
         });
         try {
+          if (usageMode === 'single') {
+            // Cold by construction, and re-check the signal afterwards so an abort
+            // that lands during the release cannot buy a whole extra generation
+            await this.releaseCalibrationBackend();
+            if (config.signal?.aborted) {
+              throw this.calibrationAbortError(runs);
+            }
+          }
           await this.runCalibrationGeneration({
             prompt,
             size: sizes[0]!,
@@ -1437,6 +1482,11 @@ export class DiffusionServerManager extends ServerManager {
             throw this.calibrationAbortError(runs);
           }
           warmupFailure = this.classifyCalibrationFailure(error);
+        } finally {
+          // Also on failure: the next attempt must start from no backend at all
+          if (usageMode === 'single') {
+            await this.releaseCalibrationBackend();
+          }
         }
         completedUnits++;
 
@@ -1444,6 +1494,7 @@ export class DiffusionServerManager extends ServerManager {
           const size = sizes[sizeIndex]!;
           const samplesMs: number[] = [];
           const snapshots: { loadMs?: number; diffusionMs?: number; decodeMs?: number }[] = [];
+          const vramSamples: CalibrationVramSample[] = [];
           let resolved: CalibrationRun['resolved'];
           let failure: { status: 'oom' | 'error'; message: string } | undefined;
 
@@ -1468,30 +1519,54 @@ export class DiffusionServerManager extends ServerManager {
                 overallPercent: overallPercent(),
               });
               try {
-                const result = await this.runCalibrationGeneration({
-                  prompt,
-                  size,
-                  steps,
-                  cfgScale,
-                  seed,
-                  sampler,
-                  combo,
-                  onGenerationProgress: (pct) =>
-                    emit({
-                      phase: 'sampling',
-                      ...baseProgress,
-                      sizeIndex,
-                      size,
-                      sample,
-                      sampleCount: samples,
-                      generationPercent: pct,
-                      overallPercent: overallPercent(pct / 100),
-                    }),
-                });
+                if (usageMode === 'single') {
+                  // Release BEFORE the timed window: the sample must pay for the spawn
+                  // and the weight load, exactly like a one-off production image does
+                  await this.releaseCalibrationBackend();
+                  if (config.signal?.aborted) {
+                    throw this.calibrationAbortError(runs);
+                  }
+                }
+                let result: ImageGenerationResult;
+                await vramSampler?.begin();
+                try {
+                  result = await this.runCalibrationGeneration({
+                    prompt,
+                    size,
+                    steps,
+                    cfgScale,
+                    seed,
+                    sampler,
+                    combo,
+                    onGenerationProgress: (pct) =>
+                      emit({
+                        phase: 'sampling',
+                        ...baseProgress,
+                        sizeIndex,
+                        size,
+                        sample,
+                        sampleCount: samples,
+                        generationPercent: pct,
+                        overallPercent: overallPercent(pct / 100),
+                      }),
+                  });
+                } finally {
+                  // Close the peak window, then settle: 'single' releases the backend
+                  // first (untimed), so its idle figure is what the combo leaves behind;
+                  // 'burst' reads what it keeps resident between images.
+                  await vramSampler?.end();
+                  if (usageMode === 'single') {
+                    await this.releaseCalibrationBackend();
+                  }
+                  await vramSampler?.measureIdle();
+                }
+                // executeImageGeneration() times itself from before ensureBackend(), so
+                // a cold sample's total already includes spawn + weight load
                 samplesMs.push(result.timeTaken);
                 // Snapshot per sample: the stage timestamps are instance
                 // fields reset by the next generation
                 snapshots.push(this.snapshotStageMs());
+                vramSamples.push(vramSampler?.result() ?? {});
                 resolved = this.lastResolvedOptimizations
                   ? { ...this.lastResolvedOptimizations }
                   : undefined;
@@ -1537,6 +1612,14 @@ export class DiffusionServerManager extends ServerManager {
             ) {
               run.stageMs = stage;
             }
+            // VRAM comes from the same representative sample as the stage split
+            const vram = vramSamples[bestIdx];
+            if (vram?.vramPeakBytes !== undefined) {
+              run.vramPeakBytes = vram.vramPeakBytes;
+            }
+            if (vram?.vramIdleBytes !== undefined) {
+              run.vramIdleBytes = vram.vramIdleBytes;
+            }
           }
           runs.push(run);
           void this.logManager
@@ -1547,6 +1630,12 @@ export class DiffusionServerManager extends ServerManager {
               run.status === 'ok' ? 'info' : 'warn'
             )
             .catch(() => void 0);
+        }
+
+        // 'burst' held one backend for the whole combo — free its VRAM before the next
+        // combo's launch ('single' already released after every generation)
+        if (usageMode === 'burst') {
+          await this.releaseCalibrationBackend();
         }
       }
 
@@ -1571,6 +1660,8 @@ export class DiffusionServerManager extends ServerManager {
         cfgScale,
         sampler,
         samples,
+        usageMode,
+        policyVersion: defaults.policyVersion,
         runs,
         recommended,
       };
@@ -1583,11 +1674,13 @@ export class DiffusionServerManager extends ServerManager {
     } finally {
       config.signal?.removeEventListener('abort', abortListener);
 
-      // Never leave a backend (and its VRAM) behind: the sweep's last combo would
-      // otherwise stay resident while the server is 'stopped'
-      await this.releaseBackend({ reason: 'calibration' }).catch((error: unknown) => {
-        debugLog('[Calibrate] backend release failed:', error);
-      });
+      // First: no sampling timer may outlive the sweep, whatever ended it
+      vramSampler?.dispose();
+
+      // Never leave a backend (and its VRAM) behind: an aborted sweep, or a 'burst'
+      // combo that failed before its release, would otherwise stay resident while the
+      // server is 'stopped'
+      await this.releaseCalibrationBackend();
 
       // Restore instance state (server remains stopped)
       this._config = savedConfig;
@@ -1647,6 +1740,66 @@ export class DiffusionServerManager extends ServerManager {
       runs: [...runs],
       suggestion: 'Partial results are available in error.details.runs',
     });
+  }
+
+  /**
+   * Release the backend between calibration generations
+   *
+   * Never throws: a release that could not be completed is logged, and the sweep
+   * continues (the next `ensureBackend()` refuses to start a second process while a
+   * previous one may still be alive, so a lost backend surfaces as a run failure
+   * rather than as two children fighting over the GPU).
+   *
+   * Reason `'calibration'` is deliberate: the orchestrator ignores it, so these
+   * releases never bring the offloaded LLM back mid-sweep.
+   * @private
+   */
+  private async releaseCalibrationBackend(): Promise<void> {
+    try {
+      await this.releaseBackend({ reason: 'calibration' });
+    } catch (error) {
+      debugLog('[Calibrate] backend release failed:', error);
+    }
+  }
+
+  /**
+   * Build the sweep's VRAM sampler, or undefined when this machine cannot support it
+   *
+   * Gated up front (once per sweep) rather than per sample: macOS has unified memory
+   * and no VRAM availability telemetry, and a platform that reports no `vramAvailable`
+   * would only produce untrusted readings. The adapter reads the GPU exclusively —
+   * host-memory telemetry is not refreshed, since the sweep never compares it.
+   * @private
+   */
+  private async createCalibrationVramSampler(): Promise<CalibrationVramSampler | undefined> {
+    if (process.platform === 'darwin') return undefined;
+
+    try {
+      const gpu = await this.systemInfo.getGPUInfo({
+        timeoutMs: CALIBRATION_VRAM_TELEMETRY_TIMEOUT_MS,
+      });
+      if (gpu.vramAvailable === undefined) return undefined;
+      if (gpu.vram === undefined || !Number.isFinite(gpu.vram) || gpu.vram <= 0) return undefined;
+
+      const capture = createTelemetrySnapshotCapture(
+        {
+          // Host memory is never read by this sampler; claiming 'not-required' keeps the
+          // shared adapter's VRAM path (and its trust rules) without paying for a host
+          // telemetry command every second.
+          refreshMemoryTelemetry: async () => 'not-required',
+          getMemoryInfo: () => ({ available: 0 }),
+          getGPUInfo: (options) => this.systemInfo.getGPUInfo(options),
+        },
+        {
+          telemetryTimeoutMs: CALIBRATION_VRAM_TELEMETRY_TIMEOUT_MS,
+          onDiagnostic: (message, error) => debugLog(`[Calibrate] ${message}`, error),
+        }
+      );
+      return new CalibrationVramSampler(capture, gpu.vram, CALIBRATION_VRAM_SAMPLE_INTERVAL_MS);
+    } catch (error) {
+      debugLog('[Calibrate] VRAM sampling unavailable:', error);
+      return undefined;
+    }
   }
 
   /**
@@ -3214,6 +3367,140 @@ function backendExitError(handle: SdServerHandle, exit: SdServerExit): ServerErr
       args,
     }
   );
+}
+
+/**
+ * Machine-wide VRAM sampler for the timed samples of a calibration sweep.
+ *
+ * One instance serves a whole sweep and is reused window by window: {@link begin}
+ * opens a measurement window (immediate reading plus a periodic timer), {@link end}
+ * closes it with a final reading, and {@link measureIdle} takes the single settled
+ * reading after the backend was released (`'single'`) or the job finished (`'burst'`).
+ *
+ * Two invariants make it safe to run inside an expensive sweep:
+ *
+ * - **Never throws into the sweep.** A failed or untrusted reading marks the window
+ *   untrusted and both figures are omitted; a benchmark is never lost to telemetry.
+ * - **Never leaks a timer.** The interval is unref'd and cleared by `end()`/`dispose()`.
+ *
+ * Trust rules are not reimplemented here: the injected capture is the same
+ * {@link createTelemetrySnapshotCapture} adapter the LLM calibration guard uses, so
+ * "VRAM is trusted only when a fresh `getGPUInfo()` supplies a finite non-negative
+ * `vramAvailable`" is stated in exactly one place.
+ * @internal
+ */
+class CalibrationVramSampler {
+  /** Lowest trusted `vramAvailable` observed in the current window */
+  private minAvailableBytes?: number;
+  /** Settled `vramAvailable` from the current window's idle reading */
+  private idleAvailableBytes?: number;
+  /** Cleared by any unusable reading in the current window */
+  private trusted = true;
+  private timer?: NodeJS.Timeout;
+  /** Serializes readings: a telemetry command may outlive one interval tick */
+  private pending = false;
+  /** Identifies the current window so a late reading cannot land in the next one */
+  private windowId = 0;
+
+  constructor(
+    private readonly capture: CaptureResourceSnapshot,
+    private readonly totalBytes: number,
+    private readonly intervalMs: number
+  ) {}
+
+  /** Open a measurement window: reset, read once, then sample periodically */
+  async begin(): Promise<void> {
+    this.disarm();
+    this.windowId++;
+    this.minAvailableBytes = undefined;
+    this.idleAvailableBytes = undefined;
+    this.trusted = true;
+    await this.sample();
+    this.arm();
+  }
+
+  /** Close the window with a final reading and stop sampling */
+  async end(): Promise<void> {
+    this.disarm();
+    await this.sample();
+  }
+
+  /** Take the settled reading the idle figure is computed from */
+  async measureIdle(): Promise<void> {
+    const available = await this.read();
+    if (available === undefined) {
+      this.trusted = false;
+      return;
+    }
+    this.idleAvailableBytes = available;
+  }
+
+  /** Figures of the window just closed; both omitted when anything was untrusted */
+  result(): CalibrationVramSample {
+    if (!this.trusted) return {};
+    const sample: CalibrationVramSample = {};
+    if (this.minAvailableBytes !== undefined) {
+      sample.vramPeakBytes = Math.max(0, this.totalBytes - this.minAvailableBytes);
+    }
+    if (this.idleAvailableBytes !== undefined) {
+      sample.vramIdleBytes = Math.max(0, this.totalBytes - this.idleAvailableBytes);
+    }
+    return sample;
+  }
+
+  /** Stop sampling for good (idempotent; safe from a `finally`) */
+  dispose(): void {
+    this.disarm();
+    this.windowId++;
+  }
+
+  /** One reading folded into the window's minimum @private */
+  private async sample(): Promise<void> {
+    if (this.pending) return;
+    this.pending = true;
+    const windowId = this.windowId;
+    try {
+      const available = await this.read();
+      if (windowId !== this.windowId) return; // the window closed while this was in flight
+      if (available === undefined) {
+        this.trusted = false;
+        return;
+      }
+      if (this.minAvailableBytes === undefined || available < this.minAvailableBytes) {
+        this.minAvailableBytes = available;
+      }
+    } finally {
+      this.pending = false;
+    }
+  }
+
+  /** Available VRAM in bytes, or undefined when the reading is unusable @private */
+  private async read(): Promise<number | undefined> {
+    try {
+      const snapshot = await this.capture({});
+      return snapshot.vram.trusted ? snapshot.vram.availableBytes : undefined;
+    } catch (error) {
+      debugLog('[Calibrate] VRAM reading failed:', error);
+      return undefined;
+    }
+  }
+
+  /** @private */
+  private arm(): void {
+    const timer = setInterval(() => {
+      void this.sample();
+    }, this.intervalMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.timer = timer;
+  }
+
+  /** @private */
+  private disarm(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
+    }
+  }
 }
 
 /**

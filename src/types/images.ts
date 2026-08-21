@@ -4,6 +4,9 @@
  */
 
 import type { ServerStatus, HealthStatus } from './servers.js';
+// Type-only (erased at compile time): keeps the calibration policy identifier declared
+// in exactly one place, the shipped defaults object.
+import type { DIFFUSION_CALIBRATION_DEFAULTS } from '../config/defaults.js';
 
 /**
  * Available sampler algorithms for image generation
@@ -550,6 +553,24 @@ export interface DiffusionCalibrationConfig {
    */
   generation: DiffusionCalibrationGeneration;
 
+  /**
+   * Residency mode the sweep measures (default:
+   * `DIFFUSION_CALIBRATION_DEFAULTS.usageMode` = `'single'`).
+   *
+   * - `'single'` — every timed sample is its own cold spawn → generate → release cycle,
+   *   so `timeTakenMs` is the latency of a one-off image (process start + weight
+   *   placement + sampling + decode). This mirrors the common single-shot production
+   *   case and the pre-migration report semantics, where every image spawned `sd-cli`.
+   * - `'burst'` — one backend launch per combo: a discarded warmup absorbs the model
+   *   load and the timed samples are warm generations on resident weights, i.e. the
+   *   latency of the 2nd..nth image of a burst.
+   *
+   * Warm medians run well below cold ones, so timings are only comparable between
+   * reports measured in the SAME mode — {@link DiffusionCalibrationReport.usageMode}
+   * echoes which one was used.
+   */
+  usageMode?: DiffusionUsageMode;
+
   /** Offload combos to benchmark (default: curated set in DIFFUSION_CALIBRATION_DEFAULTS) */
   combos?: DiffusionOffloadCombo[];
 
@@ -637,9 +658,38 @@ export interface CalibrationRun {
 
   /**
    * Per-stage wall-clock split of the sample closest to the median
-   * (fields omitted when stage markers were missed)
+   * (fields omitted when stage markers were missed).
+   *
+   * `loadMs` spans that sample's start → the backend's first `generating` marker, and
+   * what "start" means follows the sweep's
+   * {@link DiffusionCalibrationReport.usageMode}: in `'single'` it is the backend
+   * SPAWN, so `loadMs` covers process start, weight placement and conditioning; in
+   * `'burst'` the weights are already resident and it is the JOB SUBMISSION, so
+   * `loadMs` is only the small pre-sampling (conditioning) time — not a model load.
+   * `diffusionMs` (generating → decoding) and `decodeMs` (decoding → decoded) mean the
+   * same thing in both modes.
    */
   stageMs?: { loadMs?: number; diffusionMs?: number; decodeMs?: number };
+
+  /**
+   * Machine-wide peak VRAM use during the timed sample this run reports
+   * (`vramTotal − min(vramAvailable)`, sampled at ~1 s resolution over the same
+   * representative sample as {@link CalibrationRun.stageMs}).
+   *
+   * Machine-wide, not process-scoped: anything else using the GPU is included.
+   * Omitted when GPU telemetry is unavailable or untrusted at any point of the
+   * window, and always on macOS (unified memory, no VRAM availability telemetry).
+   */
+  vramPeakBytes?: number;
+
+  /**
+   * Machine-wide VRAM use once that sample settled (`vramTotal − vramAvailable`),
+   * read after the backend was released in `'single'` mode and right after the job in
+   * `'burst'` mode — so `'burst'` reports what the combo keeps resident between images
+   * and `'single'` reports what it leaves behind. Omitted under the same conditions as
+   * {@link CalibrationRun.vramPeakBytes}.
+   */
+  vramIdleBytes?: number;
 
   /** Raw totals of successful samples (kept even on failed runs, for diagnostics) */
   samplesMs?: number[];
@@ -674,6 +724,26 @@ export interface DiffusionCalibrationReport {
 
   /** Timed samples per (combo, size) (methodology echo) */
   samples: number;
+
+  /**
+   * Residency mode the sweep measured (echo of the resolved
+   * {@link DiffusionCalibrationConfig.usageMode}). `'single'` = cold spawn per timed
+   * sample, `'burst'` = warm samples on one launch per combo. `timeTakenMs`,
+   * `stageMs.loadMs` and the VRAM figures are only comparable between reports that
+   * share this value.
+   */
+  usageMode: DiffusionUsageMode;
+
+  /**
+   * Calibration policy identifier for persisted recommendations
+   * (`DIFFUSION_CALIBRATION_DEFAULTS.policyVersion`).
+   *
+   * A stored report with NO `policyVersion` field is a pre-migration v1 report: it was
+   * measured by spawning `sd-cli` once per image, under a different process model, so
+   * its numbers are only ever comparable to `usageMode: 'single'` results and its
+   * recommendation is worth re-measuring.
+   */
+  policyVersion: typeof DIFFUSION_CALIBRATION_DEFAULTS.policyVersion;
 
   /** All benchmark runs (one per active combo × size) */
   runs: CalibrationRun[];
