@@ -7,3 +7,4 @@ package-lock.json
 scripts/calibration-quiet-trace/artifacts/
 src/generated/adm-zip-worker-source.ts
 examples/electron-control-panel/.vite/
+scripts/live-smoke/artifacts/

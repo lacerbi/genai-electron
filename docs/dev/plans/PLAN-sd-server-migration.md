@@ -735,8 +735,9 @@ sample) = the common production case and today's report semantics; `'burst'` opt
   CI gate in the main thread; fold findings back in; flip `Status:`.
 
 **Live smoke results (2026-08-21, RTX 4060 Laptop 8 GB, pinned `master-782-b290693`, klein 4B
-Q4_0, 768² / 4 steps / cfg 1 / euler unless noted; harness = Electron main-process script reusing
-the example app's `userData`, HTTP path identical to genai-lite's adapter):**
+Q4_0, 768² / 4 steps / cfg 1 / euler unless noted; harness = `scripts/live-smoke/sd-server-live-smoke.mjs`,
+an Electron main-process script reusing the example app's `userData`, HTTP path identical to
+genai-lite's adapter; see `scripts/live-smoke/README.md`):**
 
 | Step | Result |
 |---|---|
