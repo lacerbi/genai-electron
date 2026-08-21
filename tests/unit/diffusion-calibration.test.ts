@@ -2,17 +2,25 @@
  * Unit tests for DiffusionServerManager.calibrate() (offload calibration)
  * and the pickRecommended pure helper.
  *
- * The spawn mock auto-completes each generation asynchronously and is
- * scriptable per spawn index (exit code / stderr / hang) so the sweep's
- * failure classification and abort paths can be exercised deterministically.
- * Winner picking is tested as a pure function — sweep tests never assert
- * wall-clock ordering.
+ * The sweep runs against the mocked `sd-server` runner + client pair: each
+ * generation is one submitted backend job, scriptable by index (failed job,
+ * process exit, hang) so the sweep's failure classification and abort paths stay
+ * deterministic. Winner picking is tested as a pure function — sweep tests never
+ * assert wall-clock ordering.
+ *
+ * Launch counts are the signature of the measured mode, because offload flags are
+ * LAUNCH arguments and a released backend must be respawned:
+ * - `usageMode: 'single'` (the default) → combos × (1 warmup + samples × sizes)
+ *   launches: every timed sample is its own cold spawn → generate → release cycle.
+ * - `usageMode: 'burst'` → one launch per combo: the warmup absorbs the load and the
+ *   timed samples are warm.
  */
 
 import { jest } from '@jest/globals';
 import { EventEmitter } from 'events';
 import type {
   CalibrationRun,
+  DiffusionBackendStatusEvent,
   DiffusionCalibrationConfig,
   DiffusionCalibrationGeneration,
   DiffusionCalibrationProgress,
@@ -20,6 +28,19 @@ import type {
   DiffusionServerConfig,
   ModelInfo,
 } from '../../src/types/index.js';
+
+// Backend seam (shared with the DiffusionServerManager suites): the sweep drives
+// `sd-server` through the runner + client pair.
+import {
+  createSdServerHandle,
+  handles,
+  mockBuildRequest,
+  mockGetJob,
+  mockStartSdServerRunner,
+  mockSubmitImageJob,
+  resetSdServerMocks,
+  type FakeSdServerHandle,
+} from './helpers/sd-server-mocks.js';
 
 // Mock Electron app
 const mockApp = {
@@ -33,15 +54,21 @@ jest.unstable_mockModule('electron', () => ({
   app: mockApp,
 }));
 
-// Mock http module
+// Mock http module (the wrapper binds (port, host, callback))
 const mockHttpServer = new EventEmitter() as any;
-mockHttpServer.listen = jest.fn().mockImplementation((port: number, callback: () => void) => {
-  callback();
-  return mockHttpServer;
-});
-mockHttpServer.close = jest.fn().mockImplementation((callback: () => void) => {
-  callback();
-});
+const resetHttpServerMocks = (): void => {
+  mockHttpServer.listen = jest
+    .fn()
+    .mockImplementation((_port: number, _host: string, callback: () => void) => {
+      callback();
+      return mockHttpServer;
+    });
+  // close() is also called without a callback (startup-error cleanup)
+  mockHttpServer.close = jest.fn().mockImplementation((callback?: () => void) => {
+    callback?.();
+  });
+};
+resetHttpServerMocks();
 
 const mockCreateServer = jest.fn().mockReturnValue(mockHttpServer);
 
@@ -54,17 +81,6 @@ jest.unstable_mockModule('node:http', () => {
     ...httpModule,
   };
 });
-
-// Mock fs/promises
-const mockReadFile = jest.fn();
-const mockWriteFile = jest.fn();
-
-jest.unstable_mockModule('node:fs', () => ({
-  promises: {
-    readFile: mockReadFile,
-    writeFile: mockWriteFile,
-  },
-}));
 
 // Mock ModelManager
 const mockModelManager = {
@@ -90,21 +106,6 @@ jest.unstable_mockModule('../../src/system/SystemInfo.js', () => ({
   SystemInfo: {
     getInstance: jest.fn(() => mockSystemInfo),
   },
-}));
-
-// Mock ProcessManager
-const mockProcessSpawn = jest.fn();
-const mockProcessKill = jest.fn();
-const mockProcessIsRunning = jest.fn();
-
-class MockProcessManager {
-  spawn = mockProcessSpawn;
-  kill = mockProcessKill;
-  isRunning = mockProcessIsRunning;
-}
-
-jest.unstable_mockModule('../../src/process/ProcessManager.js', () => ({
-  ProcessManager: MockProcessManager,
 }));
 
 // Mock LogManager
@@ -147,6 +148,15 @@ const mockIsServerResponding = jest.fn();
 
 jest.unstable_mockModule('../../src/process/health-check.js', () => ({
   isServerResponding: mockIsServerResponding,
+  checkHealth: jest.fn(),
+  waitForHealthy: jest.fn(),
+  normalizeHealthHost: (host?: string) => {
+    if (host === '::') return '::1';
+    if (host === undefined || host === '' || host === '0.0.0.0') return '127.0.0.1';
+    return host;
+  },
+  formatHttpHost: (host: string) =>
+    host.includes(':') && !host.startsWith('[') ? `[${host}]` : host,
 }));
 
 // Mock port-utils (never bind real sockets in unit tests)
@@ -159,23 +169,31 @@ jest.unstable_mockModule('../../src/process/port-utils.js', () => ({
 }));
 
 // Mock file-utils
+const mockEnsureDirectory = jest.fn(async () => undefined);
 const mockDeleteFile = jest.fn();
 
 jest.unstable_mockModule('../../src/utils/file-utils.js', () => ({
+  ensureDirectory: mockEnsureDirectory,
   deleteFile: mockDeleteFile,
 }));
 
 // Mock paths
 const mockGetTempPath = jest.fn();
+const mockGetBinaryPath = jest.fn(
+  (type: string, binaryName: string) => `/test/binaries/${type}/${binaryName}`
+);
 
 jest.unstable_mockModule('../../src/config/paths.js', () => ({
+  BASE_DIR: '/test/userData',
   PATHS: {
     root: '/test',
     models: '/test/models',
     binaries: '/test/binaries',
     logs: '/test/logs',
     temp: '/test/temp',
+    loras: '/test/loras',
   },
+  getBinaryPath: mockGetBinaryPath,
   getTempPath: mockGetTempPath,
 }));
 
@@ -184,17 +202,24 @@ const { DiffusionServerManager, pickRecommended } = await import(
   '../../src/managers/DiffusionServerManager.js'
 );
 const { DIFFUSION_CALIBRATION_DEFAULTS } = await import('../../src/config/defaults.js');
+const { ServerError } = await import('../../src/errors/index.js');
 
-/** Script for one spawned generation (by spawn index) */
-interface SpawnScript {
-  /** Exit code (default 0) */
-  exitCode?: number;
-  /** stderr lines emitted before exit */
-  stderr?: string[];
-  /** stdout chunks emitted before exit */
-  stdout?: string[];
-  /** Never exit on its own — only via mocked kill() (abort tests) */
+/** Script for one generation (by generation index, i.e. submitted job order) */
+interface GenerationScript {
+  /** The backend job ends 'failed' with this message */
+  fail?: string;
+  /** The backend process dies mid-job with this exit code */
+  exit?: number;
+  /** stderr tail the failure classifier sees */
+  stderr?: string;
+  /** Never finish — only a cancel/kill ends it (abort tests) */
   hang?: boolean;
+}
+
+interface JobRecord {
+  handle: FakeSdServerHandle;
+  script: GenerationScript;
+  exitEmitted: boolean;
 }
 
 describe('DiffusionServerManager calibration', () => {
@@ -244,65 +269,133 @@ describe('DiffusionServerManager calibration', () => {
     });
   };
 
-  /** Args of every spawned generation, in order */
-  let spawnCalls: string[][] = [];
-  /** Per-spawn options handles (for the kill → exit wiring) */
-  let spawnOptionsByPid: Map<number, any>;
-  /** Per-spawn-index script; return undefined for a clean instant success */
-  let spawnScript: (index: number, args: string[]) => SpawnScript | undefined;
+  /** Normalized ImageGenerationConfig of every generation, in order */
+  let generationConfigs: any[] = [];
+  /** Per-generation-index script; return undefined for a clean instant success */
+  let generationScript: (index: number) => GenerationScript | undefined;
+  let generationIndex = 0;
+  let jobs: Map<string, JobRecord>;
+
+  /** Number of backend jobs submitted (= generations executed) */
+  const generationCount = (): number => mockSubmitImageJob.mock.calls.length;
+  /** Number of `sd-server` processes launched (cold spawns paid by the sweep) */
+  const launchCount = (): number => mockStartSdServerRunner.mock.calls.length;
+  /** Offload flags of every launch, in order */
+  const launchContextArgs = (): string[][] =>
+    handles.map((handle) => handle.launch.contextArgs as string[]);
+
+  /** Give every spawn a measurable cost, so a cold `loadMs` is distinguishable */
+  const withSpawnDelay = (ms: number): void => {
+    mockStartSdServerRunner.mockImplementation(async (options: any) => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      const handle = createSdServerHandle();
+      handle.launch = options;
+      return handle;
+    });
+  };
+
+  const GPU_TOTAL_BYTES = 8 * 1024 ** 3;
 
   /**
-   * Install a spawn mock where each generation auto-completes on a later tick
-   * (success by default; failures/hangs per spawnScript).
+   * Script the VRAM telemetry the calibration sampler reads.
+   *
+   * The sampler goes through the shared telemetry-capture adapter, which always passes
+   * TelemetryCommandOptions; auto-detection and the report's machine block call
+   * getGPUInfo() bare. That difference is the seam used to script only the sampler's
+   * readings (the last entry repeats).
    */
-  const installAutoSpawn = (): void => {
-    spawnCalls = [];
-    spawnOptionsByPid = new Map();
-    mockProcessSpawn.mockImplementation((_binaryPath: any, args: any, options: any) => {
-      const index = spawnCalls.length;
-      spawnCalls.push(args as string[]);
-      const pid = 1000 + index;
-      spawnOptionsByPid.set(pid, options);
-      const script = spawnScript(index, args as string[]) ?? {};
-      if (!script.hang) {
-        setTimeout(() => {
-          for (const chunk of script.stdout ?? []) {
-            options.onStdout?.(chunk);
-          }
-          for (const line of script.stderr ?? []) {
-            options.onStderr?.(line);
-          }
-          options.onExit?.(script.exitCode ?? 0, null);
-        }, 0);
-      }
-      return { pid };
+  const scriptVramReadings = (readings: (number | undefined)[]): void => {
+    let index = 0;
+    mockSystemInfo.getGPUInfo.mockImplementation(async (options?: any) => {
+      const base = {
+        available: true,
+        type: 'nvidia',
+        name: 'RTX Test 8GB',
+        vram: GPU_TOTAL_BYTES,
+      };
+      if (!options) return { ...base, vramAvailable: 7 * 1024 ** 3 };
+      const value = readings[Math.min(index, readings.length - 1)];
+      index++;
+      return { ...base, vramAvailable: value };
     });
-    // kill → the process "exits" (rejects as cancelled when the cancel flag is set)
-    mockProcessKill.mockImplementation(async (pid: number) => {
-      spawnOptionsByPid.get(pid)?.onExit?.(1, null);
+  };
+
+  /** getGPUInfo calls made by the sampler (they carry telemetry options) */
+  const telemetryReadCount = (): number =>
+    mockSystemInfo.getGPUInfo.mock.calls.filter((call: any[]) => call[0] !== undefined).length;
+
+  /**
+   * Install the job harness: every generation submits one job that completes on its
+   * first poll (unless scripted otherwise) and replays the backend's stdout markers.
+   */
+  const installJobHarness = (): void => {
+    generationConfigs = [];
+    generationIndex = 0;
+    jobs = new Map();
+
+    mockBuildRequest.mockImplementation((config: any, batchSize?: number) => {
+      generationConfigs.push(config);
+      return { prompt: config.prompt, seed: config.seed, batch_count: batchSize ?? 1 };
+    });
+
+    mockSubmitImageJob.mockImplementation(async () => {
+      const index = generationIndex++;
+      const script = generationScript(index) ?? {};
+      const handle = handles[handles.length - 1]!;
+      const id = `job-${index}`;
+      jobs.set(id, { handle, script, exitEmitted: false });
+      if (script.stderr) handle.stderrTail = script.stderr;
+
+      // Structured stdout of one generation (sd.cpp marker literals via the runner tap)
+      if (!script.hang) {
+        handle.launch.onStdoutEvent({ type: 'marker', marker: 'generating' });
+        handle.launch.onStdoutEvent({ type: 'step', step: 2, steps: 4 });
+        handle.launch.onStdoutEvent({ type: 'step', step: 4, steps: 4 });
+        handle.launch.onStdoutEvent({ type: 'marker', marker: 'decoding' });
+        handle.launch.onStdoutEvent({ type: 'marker', marker: 'decoded' });
+      }
+      return { id };
+    });
+
+    mockGetJob.mockImplementation(async (id: string) => {
+      const record = jobs.get(id);
+      if (!record) return { id, status: 'completed', result: { images: [] } };
+      // A dead backend ends the (already rejected) poll loop instead of spinning
+      if (record.handle.state === 'stopped') return { id, status: 'cancelled' };
+      if (record.script.hang) return { id, status: 'generating' };
+      if (record.script.exit !== undefined) {
+        if (!record.exitEmitted) {
+          record.exitEmitted = true;
+          record.handle.emitExit({ code: record.script.exit, signal: null });
+        }
+        return { id, status: 'generating' };
+      }
+      if (record.script.fail) {
+        return { id, status: 'failed', error: { message: record.script.fail } };
+      }
+      return {
+        id,
+        status: 'completed',
+        result: { output_format: 'png', images: [{ index: 0, b64_json: 'aW1hZ2U=' }] },
+      };
     });
   };
 
   beforeEach(() => {
     jest.clearAllMocks();
+    resetSdServerMocks();
+    mockBinaryConfigs.length = 0;
 
     mockLogInitialize.mockResolvedValue(undefined);
     mockLogWrite.mockResolvedValue(undefined);
     mockLogGetRecent.mockResolvedValue([]);
     mockLogClear.mockResolvedValue(undefined);
-    mockEnsureBinary.mockResolvedValue('/test/binaries/sd');
-    mockBinaryConfigs.length = 0;
+    mockEnsureBinary.mockResolvedValue('/test/binaries/diffusion/sd-server');
     mockCreateServer.mockReturnValue(mockHttpServer);
-    mockHttpServer.listen.mockImplementation((port: number, callback: () => void) => {
-      callback();
-      return mockHttpServer;
-    });
-    mockHttpServer.close.mockImplementation((callback: () => void) => {
-      callback();
-    });
+    resetHttpServerMocks();
     mockGetTempPath.mockImplementation((filename: string) => `/test/temp/${filename}`);
     mockDeleteFile.mockResolvedValue(undefined);
-    mockReadFile.mockResolvedValue(Buffer.from('fake-image-data'));
+    mockEnsureDirectory.mockResolvedValue(undefined);
 
     diffusionServer = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
 
@@ -335,10 +428,9 @@ describe('DiffusionServerManager calibration', () => {
     mockIsServerResponding.mockResolvedValue(false);
     mockIsPortBindable.mockResolvedValue(true);
     mockFindFreePort.mockResolvedValue(49999);
-    mockProcessKill.mockResolvedValue(undefined);
 
-    spawnScript = () => undefined; // all generations succeed by default
-    installAutoSpawn();
+    generationScript = () => undefined; // all generations succeed by default
+    installJobHarness();
   });
 
   afterEach(() => {
@@ -420,14 +512,14 @@ describe('DiffusionServerManager calibration', () => {
       await diffusionServer.stop();
     });
 
-    it('rejects invalid sizes (non-multiple of 64) before any spawn', async () => {
+    it('rejects invalid sizes (non-multiple of 64) before any launch', async () => {
       await expect(
         runCalibrate(diffusionServer, {
           modelId: 'sdxl-turbo',
           sizes: [{ width: 500, height: 512 }],
         })
       ).rejects.toThrow(/multiples of 64/);
-      expect(mockProcessSpawn).not.toHaveBeenCalled();
+      expect(launchCount()).toBe(0);
     });
 
     it('rejects a pre-aborted signal immediately with empty partial runs', async () => {
@@ -442,7 +534,7 @@ describe('DiffusionServerManager calibration', () => {
         expect(error.details.code).toBe('CALIBRATION_ABORTED');
         expect(error.details.runs).toEqual([]);
       }
-      expect(mockProcessSpawn).not.toHaveBeenCalled();
+      expect(launchCount()).toBe(0);
       expect(diffusionServer.isCalibrating()).toBe(false);
     });
 
@@ -511,15 +603,17 @@ describe('DiffusionServerManager calibration', () => {
       // Stale flags from a prior stopped configuration must not leak into the
       // provisioning test that calibrate() performs before its sweep.
       expect(mockBinaryConfigs[0]).toMatchObject({
+        binaryName: 'sd-server',
         testOptimizationArgs: ['--clip-on-cpu'],
       });
     });
   });
 
   describe('sweep structure and per-run flag resolution', () => {
-    it('spawns combos × (warmup + samples × sizes) and applies per-combo flags', async () => {
+    it('runs combos × (warmup + samples × sizes) generations on one launch per combo in burst mode', async () => {
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
+        usageMode: 'burst',
         sizes: [
           { width: 768, height: 768 },
           { width: 512, height: 1024 },
@@ -531,36 +625,28 @@ describe('DiffusionServerManager calibration', () => {
         ],
       });
 
-      // 2 combos × (1 warmup + 1 sample × 2 sizes) = 6 generations
-      expect(spawnCalls).toHaveLength(6);
+      // 2 combos × (1 warmup + 1 sample × 2 sizes) = 6 generations...
+      expect(generationCount()).toBe(6);
+      // ...on one warm backend per combo (the samples reuse the warmup's process)
+      expect(launchCount()).toBe(2);
+      expect(report.usageMode).toBe('burst');
 
       // Combo 1 (clipOnCpu: false overrides auto=true): no offload flags at all
-      for (const args of spawnCalls.slice(0, 3)) {
-        expect(args).not.toContain('--clip-on-cpu');
-        expect(args).not.toContain('--vae-on-cpu');
-        expect(args).not.toContain('--offload-to-cpu');
-      }
+      expect(launchContextArgs()[0]).toEqual([]);
       // Combo 2: all three forced on
-      for (const args of spawnCalls.slice(3, 6)) {
-        expect(args).toContain('--clip-on-cpu');
-        expect(args).toContain('--vae-on-cpu');
-        expect(args).toContain('--offload-to-cpu');
-      }
+      expect(launchContextArgs()[1]).toEqual(['--clip-on-cpu', '--vae-on-cpu', '--offload-to-cpu']);
 
       // Identical work per generation: fixed seed/steps/sampler; warmup at first size
-      for (const args of spawnCalls) {
-        expect(args).toContain('-s');
-        expect(args[args.indexOf('-s') + 1]).toBe('42');
-        expect(args).toContain('--steps');
-        expect(args[args.indexOf('--steps') + 1]).toBe('4');
-        expect(args).toContain('--sampling-method');
-        expect(args[args.indexOf('--sampling-method') + 1]).toBe('euler');
+      for (const config of generationConfigs) {
+        expect(config.seed).toBe(42);
+        expect(config.steps).toBe(4);
+        expect(config.cfgScale).toBe(1);
+        expect(config.sampler).toBe('euler');
       }
-      const sizeOf = (args: string[]): string =>
-        `${args[args.indexOf('-W') + 1]}x${args[args.indexOf('-H') + 1]}`;
-      expect(sizeOf(spawnCalls[0]!)).toBe('768x768'); // warmup @ first size
-      expect(sizeOf(spawnCalls[1]!)).toBe('768x768');
-      expect(sizeOf(spawnCalls[2]!)).toBe('512x1024');
+      const sizeOf = (config: any): string => `${config.width}x${config.height}`;
+      expect(sizeOf(generationConfigs[0])).toBe('768x768'); // warmup @ first size
+      expect(sizeOf(generationConfigs[1])).toBe('768x768');
+      expect(sizeOf(generationConfigs[2])).toBe('512x1024');
 
       // One run per (combo, size), all OK, with timings and resolved flags
       expect(report.runs).toHaveLength(4);
@@ -592,6 +678,98 @@ describe('DiffusionServerManager calibration', () => {
       expect(diffusionServer.isCalibrating()).toBe(false);
     });
 
+    it('spawns a cold backend per warmup and per timed sample in single mode (default)', async () => {
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        sizes: [
+          { width: 768, height: 768 },
+          { width: 512, height: 1024 },
+        ],
+        samples: 1,
+        combos: [
+          { label: 'clip-gpu', clipOnCpu: false },
+          { label: 'max-savings', clipOnCpu: true, vaeOnCpu: true, offloadToCpu: true },
+        ],
+      });
+
+      // Same 6 generations as burst, but every one of them is cold:
+      // 2 combos × (1 warmup + 1 sample × 2 sizes) = 6 launches
+      expect(generationCount()).toBe(6);
+      expect(launchCount()).toBe(6);
+      // ...and each is released before the next one starts
+      for (const handle of handles) {
+        expect(handle.stop).toHaveBeenCalled();
+      }
+
+      // Flags follow the combo, not the launch: 3 launches per combo
+      expect(launchContextArgs()).toEqual([
+        [],
+        [],
+        [],
+        ['--clip-on-cpu', '--vae-on-cpu', '--offload-to-cpu'],
+        ['--clip-on-cpu', '--vae-on-cpu', '--offload-to-cpu'],
+        ['--clip-on-cpu', '--vae-on-cpu', '--offload-to-cpu'],
+      ]);
+
+      // Methodology echo: 'single' is the library default, and the policy version
+      // marks the report as post-sd-server (absent = pre-migration v1)
+      expect(report.usageMode).toBe('single');
+      expect(report.usageMode).toBe(DIFFUSION_CALIBRATION_DEFAULTS.usageMode);
+      expect(report.policyVersion).toBe('diffusion-offload-v2');
+      expect(report.policyVersion).toBe(DIFFUSION_CALIBRATION_DEFAULTS.policyVersion);
+
+      // The warmup stays discarded in both modes: one timed sample per (combo, size)
+      expect(report.runs).toHaveLength(4);
+      for (const calRun of report.runs) {
+        expect(calRun.samplesMs).toHaveLength(1);
+      }
+    });
+
+    it('releases the backend when the sweep ends', async () => {
+      const events: DiffusionBackendStatusEvent[] = [];
+      diffusionServer.on('backend-status', (event: DiffusionBackendStatusEvent) =>
+        events.push(event)
+      );
+
+      await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      // Default 'single': warmup + 1 timed sample = 2 cold backends, both released
+      expect(launchCount()).toBe(2);
+      expect(handles[0]!.stop).toHaveBeenCalledTimes(1);
+      expect(handles[1]!.stop).toHaveBeenCalledTimes(1);
+      expect(diffusionServer.getBackendInfo()).toEqual({ state: 'absent' });
+      expect(events.at(-1)).toMatchObject({ state: 'absent', reason: 'calibration' });
+    });
+
+    it('releases the burst backend at the end of each combo', async () => {
+      const events: DiffusionBackendStatusEvent[] = [];
+      diffusionServer.on('backend-status', (event: DiffusionBackendStatusEvent) =>
+        events.push(event)
+      );
+
+      await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        usageMode: 'burst',
+        samples: 2,
+        combos: [{ label: 'auto' }, { label: 'clip-gpu', clipOnCpu: false }],
+      });
+
+      // One warm backend per combo, each killed before the next combo launches
+      expect(generationCount()).toBe(6);
+      expect(launchCount()).toBe(2);
+      expect(handles[0]!.stop).toHaveBeenCalledTimes(1);
+      expect(handles[1]!.stop).toHaveBeenCalledTimes(1);
+      // The releases are attributed to the sweep (the orchestrator ignores that reason)
+      expect(
+        events.filter((event) => event.state === 'absent').every((e) => e.reason === 'calibration')
+      ).toBe(true);
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
+    });
+
     it('lets auto-detection resolve omitted flags (auto combo carries resolved values)', async () => {
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
@@ -599,12 +777,9 @@ describe('DiffusionServerManager calibration', () => {
         combos: [{ label: 'auto' }],
       });
 
-      // 8 GB GPU, 2 GB model → auto: clip=true, vae=false, offload=false
-      for (const args of spawnCalls) {
-        expect(args).toContain('--clip-on-cpu');
-        expect(args).not.toContain('--vae-on-cpu');
-        expect(args).not.toContain('--offload-to-cpu');
-      }
+      // 8 GB GPU, 2 GB model → auto: clip=true, vae=false, offload=false.
+      // Re-resolved per generation, so every cold spawn of the sweep agrees.
+      expect(launchContextArgs()).toEqual([['--clip-on-cpu'], ['--clip-on-cpu']]);
       const calRun = report.runs[0]!;
       expect(calRun.resolved).toEqual({
         clipOnCpu: true,
@@ -615,21 +790,23 @@ describe('DiffusionServerManager calibration', () => {
       // Recommended combo is the AS-REQUESTED combo (auto), not the resolved flags
       expect(report.recommended['768x768']).toEqual({ label: 'auto' });
     });
+
+    it('mirrors production batching through generation.batchSize', async () => {
+      await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+        generation: { batchSize: 2 },
+      });
+
+      for (const call of mockBuildRequest.mock.calls) {
+        expect(call[1]).toBe(2);
+      }
+    });
   });
 
-  describe('stage timing and medians (stdout-driven)', () => {
-    // Realistic sd-cli stdout for one generation (sd.cpp master-746 literals)
-    const SD_STDOUT = [
-      'loading model from /test/models/diffusion/sdxl-turbo.gguf\n',
-      'generating image: 1/1 - seed 42\n',
-      '  |==>               | 2/4 - 1.50it/s\n',
-      '  |=========>        | 4/4 - 1.45it/s\n',
-      'decoding 1 latents\n',
-      'decode_first_stage completed, taking 1.23s\n',
-    ];
-
-    it('populates stageMs from stdout markers and medians multi-sample timings', async () => {
-      spawnScript = () => ({ stdout: [...SD_STDOUT] });
+  describe('stage timing and medians (backend-marker driven)', () => {
+    it('populates stageMs from the backend markers and medians multi-sample timings', async () => {
       const progressEvents: DiffusionCalibrationProgress[] = [];
 
       const report = await runCalibrate(diffusionServer, {
@@ -639,8 +816,9 @@ describe('DiffusionServerManager calibration', () => {
         onProgress: (p) => progressEvents.push(p),
       });
 
-      // 1 combo × (1 warmup + 2 samples) = 3 generations
-      expect(spawnCalls).toHaveLength(3);
+      // 1 combo × (1 warmup + 2 samples) = 3 generations, each cold under 'single'
+      expect(generationCount()).toBe(3);
+      expect(launchCount()).toBe(3);
       const calRun = report.runs[0]!;
       expect(calRun.status).toBe('ok');
 
@@ -670,11 +848,48 @@ describe('DiffusionServerManager calibration', () => {
       }
     });
 
+    it('measures a cold load in single mode and a warm one in burst mode', async () => {
+      // 40 ms of spawn cost separates "this loadMs contains a process start" from
+      // "this loadMs is only the pre-sampling work on resident weights"
+      withSpawnDelay(40);
+
+      const cold = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      // 'single': loadStartTime is the spawn, so the load stage swallows it. The bound is
+      // below the 40 ms delay on purpose: setTimeout/Date.now() granularity can read a 40 ms
+      // wait as 39 ms on a busy CI runner; what matters is the cold/warm contrast below.
+      expect(cold.usageMode).toBe('single');
+      expect(cold.runs[0]!.stageMs!.loadMs).toBeGreaterThanOrEqual(30);
+
+      resetSdServerMocks();
+      withSpawnDelay(40);
+      installJobHarness();
+
+      const warm = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        usageMode: 'burst',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      // 'burst': the warmup paid for the spawn; the timed sample's loadStartTime is
+      // the job submission, so loadMs is only the small pre-sampling time
+      expect(warm.usageMode).toBe('burst');
+      expect(warm.runs[0]!.stageMs!.loadMs).toBeLessThan(30);
+      expect(cold.runs[0]!.stageMs!.loadMs).toBeGreaterThan(warm.runs[0]!.stageMs!.loadMs);
+    });
+
     it('hands back per-sweep combo copies, never the module default objects', async () => {
       const report = await runCalibrate(diffusionServer, { modelId: 'sdxl-turbo', samples: 1 });
 
-      // Default sweep: 6 combos × (1 warmup + 1 sample × 1 size) = 12 generations
-      expect(spawnCalls).toHaveLength(12);
+      // Default sweep: 6 combos × (1 warmup + 1 sample × 1 size) = 12 generations,
+      // all cold under the default 'single' mode
+      expect(generationCount()).toBe(12);
+      expect(launchCount()).toBe(12);
       const firstDefault = DIFFUSION_CALIBRATION_DEFAULTS.combos[0]!;
       const firstRun = report.runs.find((r) => r.combo.label === firstDefault.label)!;
       expect(firstRun.combo).toEqual(firstDefault);
@@ -683,11 +898,11 @@ describe('DiffusionServerManager calibration', () => {
   });
 
   describe('failure classification', () => {
-    it('classifies an OOM combo, continues the sweep, and excludes it from recommendation', async () => {
-      // Combo B's warmup (spawn index 2) crashes with CUDA OOM
-      spawnScript = (index) =>
+    it('classifies an OOM combo from a backend exit, continues the sweep, and excludes it', async () => {
+      // Combo B's warmup (generation index 2) crashes with CUDA OOM
+      generationScript = (index) =>
         index === 2
-          ? { exitCode: 1, stderr: ['ggml_cuda_host_malloc: CUDA error: out of memory'] }
+          ? { exit: 1, stderr: 'ggml_cuda_host_malloc: CUDA error: out of memory' }
           : undefined;
 
       const report = await runCalibrate(diffusionServer, {
@@ -700,7 +915,7 @@ describe('DiffusionServerManager calibration', () => {
       });
 
       // Combo A: warmup + 1 sample; combo B: failed warmup only (samples skipped)
-      expect(spawnCalls).toHaveLength(3);
+      expect(generationCount()).toBe(3);
 
       const okRun = report.runs.find((r) => r.combo.label === 'auto')!;
       const oomRun = report.runs.find((r) => r.combo.label === 'all-resident')!;
@@ -712,10 +927,54 @@ describe('DiffusionServerManager calibration', () => {
       expect(report.recommended['768x768']).toEqual({ label: 'auto' });
     });
 
+    it('classifies an OOM combo from a failed backend job (details.stderr)', async () => {
+      generationScript = (index) =>
+        index === 0
+          ? { fail: 'image generation failed', stderr: 'cudaMalloc failed: out of memory' }
+          : undefined;
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      const calRun = report.runs[0]!;
+      expect(calRun.status).toBe('oom');
+      expect(calRun.error).toContain('stable-diffusion.cpp job failed');
+      expect(report.recommended['768x768']).toBeUndefined();
+    });
+
+    it('classifies a load-time OOM from a startup failure (details.stderrTail)', async () => {
+      // The backend dies while placing weights: no job is ever submitted, so the only
+      // backend output is the one the RUNNER captured — spelled `stderrTail`, not
+      // `stderr` (which is what a failed job carries).
+      mockStartSdServerRunner.mockImplementationOnce(async () => {
+        throw new ServerError('stable-diffusion.cpp sd-server exited with code 1', {
+          code: 'SD_SERVER_EXITED',
+          exitCode: 1,
+          stderrTail: 'ggml_cuda_host_malloc: CUDA error: out of memory',
+          stdoutTail: '',
+          args: [],
+        });
+      });
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      const calRun = report.runs[0]!;
+      expect(calRun.status).toBe('oom');
+      expect(generationCount()).toBe(0); // it never got as far as a job
+      expect(report.recommended['768x768']).toBeUndefined();
+    });
+
     it('classifies a non-OOM failure as error and keeps successful samplesMs', async () => {
-      // Second timed sample (spawn index 2: warmup, sample1, sample2) fails generically
-      spawnScript = (index) =>
-        index === 2 ? { exitCode: 1, stderr: ['some unrelated failure'] } : undefined;
+      // Second timed sample (generation index 2: warmup, sample1, sample2) fails generically
+      generationScript = (index) =>
+        index === 2 ? { exit: 1, stderr: 'some unrelated failure' } : undefined;
 
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
@@ -723,7 +982,7 @@ describe('DiffusionServerManager calibration', () => {
         combos: [{ label: 'auto' }],
       });
 
-      expect(spawnCalls).toHaveLength(3);
+      expect(generationCount()).toBe(3);
       const calRun = report.runs[0]!;
       expect(calRun.status).toBe('error');
       expect(calRun.samplesMs).toHaveLength(1); // first sample kept for diagnostics
@@ -733,9 +992,9 @@ describe('DiffusionServerManager calibration', () => {
 
     it('records a warmup failure on the first size but still attempts later sizes', async () => {
       const progress: DiffusionCalibrationProgress[] = [];
-      // Warmup (spawn 0) OOMs; the second size's sample (spawn 1) succeeds
-      spawnScript = (index) =>
-        index === 0 ? { exitCode: 1, stderr: ['cudaMalloc failed: out of memory'] } : undefined;
+      // Warmup (generation 0) OOMs; the second size's sample (generation 1) succeeds
+      generationScript = (index) =>
+        index === 0 ? { exit: 1, stderr: 'cudaMalloc failed: out of memory' } : undefined;
 
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
@@ -748,7 +1007,9 @@ describe('DiffusionServerManager calibration', () => {
         onProgress: (p) => progress.push(p),
       });
 
-      expect(spawnCalls).toHaveLength(2); // failed warmup + second size's sample
+      expect(generationCount()).toBe(2); // failed warmup + second size's sample
+      // The crashed backend is gone, so the surviving generation respawns one
+      expect(launchCount()).toBe(2);
 
       const firstSizeRun = report.runs.find((r) => r.size.width === 768)!;
       const secondSizeRun = report.runs.find((r) => r.size.width === 512)!;
@@ -849,7 +1110,11 @@ describe('DiffusionServerManager calibration', () => {
       }
 
       expect(diffusionServer.isCalibrating()).toBe(false);
+      // No backend survives an aborted sweep
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
+
       // A fresh calibrate works afterwards (state fully torn down)
+      installJobHarness();
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
         samples: 1,
@@ -860,8 +1125,12 @@ describe('DiffusionServerManager calibration', () => {
 
     it('aborts an in-flight generation via the cancel path', async () => {
       const controller = new AbortController();
-      // Second spawn hangs; abort fires while it is in flight
-      spawnScript = (index) => {
+      const events: DiffusionBackendStatusEvent[] = [];
+      diffusionServer.on('backend-status', (event: DiffusionBackendStatusEvent) =>
+        events.push(event)
+      );
+      // The first timed sample hangs; abort fires while it is in flight
+      generationScript = (index) => {
         if (index === 1) {
           setTimeout(() => controller.abort(), 10);
           return { hang: true };
@@ -881,8 +1150,39 @@ describe('DiffusionServerManager calibration', () => {
         expect(error.details.code).toBe('CALIBRATION_ABORTED');
       }
 
-      // The hanging process was killed via the cancel path
-      expect(mockProcessKill).toHaveBeenCalled();
+      // The hanging backend (the timed sample's own cold spawn) was killed via the
+      // cancel path, not merely by the sweep's 'calibration' release in the finally
+      expect(handles.at(-1)!.stop).toHaveBeenCalledTimes(1);
+      expect(events.map((event) => event.reason)).toContain('cancel');
+      expect(diffusionServer.isCalibrating()).toBe(false);
+    });
+
+    it('does not start a generation when the abort lands during the cold release', async () => {
+      const controller = new AbortController();
+
+      try {
+        await runCalibrate(diffusionServer, {
+          modelId: 'sdxl-turbo',
+          samples: 1,
+          combos: [{ label: 'auto' }],
+          signal: controller.signal,
+          onProgress: (p) => {
+            // The 'sampling' emit happens BEFORE the release that makes the sample
+            // cold, i.e. exactly in the window the release opens
+            if (p.phase === 'sampling' && !controller.signal.aborted) {
+              controller.abort();
+            }
+          },
+        });
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error.details.code).toBe('CALIBRATION_ABORTED');
+      }
+
+      // Only the warmup ran: the abort is re-checked after the release, so the sweep
+      // never buys a full extra generation while tearing the backend down
+      expect(generationCount()).toBe(1);
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
       expect(diffusionServer.isCalibrating()).toBe(false);
     });
   });
@@ -905,9 +1205,10 @@ describe('DiffusionServerManager calibration', () => {
       expect(report.skippedCombos![0]!.combo.label).toBe('max-savings');
       expect(report.skippedCombos![0]!.reason).toContain('1578');
 
-      // 5 active combos × (1 warmup + 1 sample × 1 size) = 10 generations
+      // 5 active combos × (1 warmup + 1 sample × 1 size) = 10 cold generations
       expect(report.runs).toHaveLength(5);
-      expect(spawnCalls).toHaveLength(10);
+      expect(generationCount()).toBe(10);
+      expect(launchCount()).toBe(10);
       expect(report.runs.every((r) => r.combo.clipOnCpu !== true)).toBe(true);
     });
   });
@@ -926,6 +1227,8 @@ describe('DiffusionServerManager calibration', () => {
           callOrder.push('llm-start');
           return {};
         }),
+        // The manager registers a pre-start hook so an LLM start can reclaim VRAM
+        registerPreStartHook: jest.fn(() => () => {}),
       };
       const server = new DiffusionServerManager(
         mockModelManager as any,
@@ -950,8 +1253,258 @@ describe('DiffusionServerManager calibration', () => {
       // done comes after the restore
       expect(phases.indexOf('restoring-llm')).toBeLessThan(phases.indexOf('done'));
       expect(report.runs[0]!.status).toBe('ok');
+      // The sweep owns the LLM state itself; the residency policy stays out of it
+      expect(mockLlamaServer.registerPreStartHook).toHaveBeenCalledTimes(1);
 
       server.removeAllListeners();
+    });
+  });
+
+  describe('VRAM sampling', () => {
+    it('reports machine-wide peak and idle VRAM per run when telemetry is trusted', async () => {
+      // gate, window start, window end, idle-after-release (then repeats)
+      scriptVramReadings([
+        7 * 1024 ** 3,
+        6 * 1024 ** 3,
+        2 * 1024 ** 3, // deepest point of the timed window
+        5 * 1024 ** 3, // settled, after the 'single' release
+      ]);
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      const calRun = report.runs[0]!;
+      // peak = total − min(available) over the window; idle = total − settled available
+      expect(calRun.vramPeakBytes).toBe(GPU_TOTAL_BYTES - 2 * 1024 ** 3);
+      expect(calRun.vramIdleBytes).toBe(GPU_TOTAL_BYTES - 5 * 1024 ** 3);
+    });
+
+    it('measures the burst idle figure right after the job, with the backend resident', async () => {
+      scriptVramReadings([
+        7 * 1024 ** 3,
+        6 * 1024 ** 3,
+        3 * 1024 ** 3,
+        5.5 * 1024 ** 3, // still holding the weights: burst idle > single idle
+      ]);
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        usageMode: 'burst',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      const calRun = report.runs[0]!;
+      expect(calRun.vramPeakBytes).toBe(GPU_TOTAL_BYTES - 3 * 1024 ** 3);
+      expect(calRun.vramIdleBytes).toBe(GPU_TOTAL_BYTES - 5.5 * 1024 ** 3);
+    });
+
+    it('omits both fields when any reading in the window is untrusted', async () => {
+      // The window's first reading has no vramAvailable → nothing is comparable
+      scriptVramReadings([7 * 1024 ** 3, undefined, 4 * 1024 ** 3, 5 * 1024 ** 3]);
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      const calRun = report.runs[0]!;
+      expect(calRun.status).toBe('ok'); // a telemetry gap never fails a benchmark
+      expect(calRun.vramPeakBytes).toBeUndefined();
+      expect(calRun.vramIdleBytes).toBeUndefined();
+    });
+
+    it('does not sample at all when the platform reports no VRAM availability', async () => {
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'amd',
+        name: 'Radeon Test',
+        vram: GPU_TOTAL_BYTES,
+      });
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      expect(report.runs[0]!.vramPeakBytes).toBeUndefined();
+      expect(report.runs[0]!.vramIdleBytes).toBeUndefined();
+      // Only the one-time gate probe was paid for
+      expect(telemetryReadCount()).toBe(1);
+    });
+
+    it('never samples on macOS (unified memory reports no VRAM availability)', async () => {
+      // Apple GPUs never carry `vramAvailable` (gpu-detect only sets it for NVIDIA on
+      // Linux/Windows), so the one-time gate probe is the only telemetry read.
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'apple',
+        name: 'Apple M-series',
+        vram: GPU_TOTAL_BYTES,
+      });
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      expect(report.runs[0]!.vramPeakBytes).toBeUndefined();
+      expect(report.runs[0]!.vramIdleBytes).toBeUndefined();
+      expect(telemetryReadCount()).toBe(1);
+    });
+
+    /**
+     * The sweep's private sampler, built exactly as calibrate() builds it. Driving it
+     * directly is the only way to observe a single measurement window (a sweep opens
+     * and closes them faster than the 1 s interval).
+     */
+    const buildSampler = async (): Promise<any> =>
+      await (diffusionServer as any).createCalibrationVramSampler();
+
+    it('folds a deeper mid-window interval reading into the peak', async () => {
+      // gate, window start, the 1 s tick, window end, idle
+      scriptVramReadings([
+        7 * 1024 ** 3,
+        6 * 1024 ** 3,
+        2 * 1024 ** 3, // only the periodic tick ever sees the real peak
+        5 * 1024 ** 3,
+        4 * 1024 ** 3,
+      ]);
+      const sampler = await buildSampler();
+
+      jest.useFakeTimers({
+        doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask', 'Date', 'performance'],
+      });
+      try {
+        await sampler.begin();
+        expect(jest.getTimerCount()).toBe(1); // the 1 s sampling interval is armed
+        await jest.advanceTimersByTimeAsync(1_000);
+        await sampler.end();
+        await sampler.measureIdle();
+        sampler.dispose();
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        sampler.dispose();
+        jest.useRealTimers();
+      }
+
+      expect(sampler.result()).toEqual({
+        vramPeakBytes: GPU_TOTAL_BYTES - 2 * 1024 ** 3,
+        vramIdleBytes: GPU_TOTAL_BYTES - 4 * 1024 ** 3,
+      });
+    });
+
+    it('omits both figures when the window produced no peak reading', async () => {
+      scriptVramReadings([7 * 1024 ** 3, 6 * 1024 ** 3, 5 * 1024 ** 3, 4 * 1024 ** 3]);
+      const sampler = await buildSampler();
+
+      // A telemetry command from the previous window is still in flight, so this
+      // window's own readings are skipped (they would land in the wrong window)...
+      (sampler as any).pending = true;
+      await sampler.begin();
+      await sampler.end();
+      (sampler as any).pending = false;
+      // ...while the idle reading, which is not gated, does land
+      await sampler.measureIdle();
+      sampler.dispose();
+
+      // An idle figure without its peak is not a measurement — report neither
+      expect(sampler.result()).toEqual({});
+    });
+
+    it('stops sampling when a sweep is aborted mid-window', async () => {
+      scriptVramReadings([7 * 1024 ** 3, 6 * 1024 ** 3]);
+
+      // Capture the sampler the sweep builds, so the assertion is about ITS timer and
+      // not about whatever else an aborted generation may still have pending
+      let sampler: any;
+      const buildForSweep = (diffusionServer as any).createCalibrationVramSampler.bind(
+        diffusionServer
+      );
+      (diffusionServer as any).createCalibrationVramSampler = async () => {
+        sampler = await buildForSweep();
+        return sampler;
+      };
+
+      const controller = new AbortController();
+      // The first timed sample hangs; the abort lands while its window is open
+      generationScript = (index) => {
+        if (index === 1) {
+          setTimeout(() => controller.abort(), 10);
+          return { hang: true };
+        }
+        return undefined;
+      };
+
+      await expect(
+        runCalibrate(diffusionServer, {
+          modelId: 'sdxl-turbo',
+          samples: 1,
+          combos: [{ label: 'auto' }],
+          signal: controller.signal,
+        })
+      ).rejects.toMatchObject({
+        details: expect.objectContaining({ code: 'CALIBRATION_ABORTED' }),
+      });
+
+      // dispose() runs first in calibrate()'s finally, whatever ended the sweep
+      expect(sampler).toBeDefined();
+      expect((sampler as any).timer).toBeUndefined();
+    });
+
+    it('leaves no sampling timer behind when the sweep ends', async () => {
+      scriptVramReadings([7 * 1024 ** 3, 6 * 1024 ** 3]);
+      // Only setTimeout/setInterval are faked (auto-advanced by real time), so the
+      // sweep runs normally while pending timers stay observable
+      jest.useFakeTimers({
+        doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask', 'Date', 'performance'],
+        advanceTimers: true,
+      });
+
+      try {
+        await runCalibrate(diffusionServer, {
+          modelId: 'sdxl-turbo',
+          samples: 2,
+          combos: [{ label: 'auto' }],
+        });
+
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
+  describe('residency policy', () => {
+    it('never settles residency (the sweep manages the backend itself)', async () => {
+      const settle = jest.spyOn(diffusionServer, 'settleResidency');
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 2,
+        combos: [{ label: 'auto' }, { label: 'clip-gpu', clipOnCpu: false }],
+      });
+
+      expect(report.runs).toHaveLength(2);
+      expect(settle).not.toHaveBeenCalled();
+      settle.mockRestore();
+    });
+
+    it('leaves no idle timer armed behind a sweep', async () => {
+      await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      expect((diffusionServer as any).backend.idleTimer).toBeUndefined();
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
     });
   });
 
@@ -971,17 +1524,16 @@ describe('DiffusionServerManager calibration', () => {
       // Config restored (not the synthetic calibration config)
       expect(diffusionServer.getConfig()).toBe(configBefore);
       expect(diffusionServer.getStatus()).toBe('stopped');
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
 
       // Normal operation unaffected — and no leftover combo overrides
-      spawnCalls = [];
+      handles.length = 0;
+      installJobHarness();
       await diffusionServer.start(mockServerConfig);
       const result = await diffusionServer.generateImage({ prompt: 'test' });
-      expect(result.image).toEqual(Buffer.from('fake-image-data'));
-      const lastArgs = spawnCalls[spawnCalls.length - 1]!;
+      expect(result.image).toEqual(Buffer.from('image'));
       // Auto flags for this model/GPU: clip on CPU only (not the forced max-savings set)
-      expect(lastArgs).toContain('--clip-on-cpu');
-      expect(lastArgs).not.toContain('--vae-on-cpu');
-      expect(lastArgs).not.toContain('--offload-to-cpu');
+      expect(handles.at(-1)!.launch.contextArgs).toEqual(['--clip-on-cpu']);
       await diffusionServer.stop();
     });
   });

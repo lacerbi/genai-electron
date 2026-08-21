@@ -6,6 +6,31 @@ import { describe, it, expect, beforeEach, jest } from '@jest/globals';
 import { attachAppLifecycle } from '../../src/utils/electron-lifecycle.js';
 import type { ServerManagers } from '../../src/utils/electron-lifecycle.js';
 
+// ResourceOrchestrator (imported below) reaches Electron through ModelManager's paths
+jest.unstable_mockModule('../../src/config/paths.js', () => ({
+  BASE_DIR: '/test/userData',
+  PATHS: {
+    models: { llm: '/test/models/llm', diffusion: '/test/models/diffusion' },
+    binaries: { llama: '/test/binaries/llama', diffusion: '/test/binaries/diffusion' },
+    logs: '/test/logs',
+    config: '/test/config',
+    temp: '/test/temp',
+    loras: '/test/loras',
+  },
+  ensureDirectories: jest.fn(),
+  getModelDirectory: jest.fn(),
+  getModelMetadataPath: jest.fn(),
+  getModelFilePath: jest.fn(),
+  getBinaryPath: jest.fn(),
+  getLogPath: jest.fn(),
+  getConfigPath: jest.fn(),
+  getTempPath: jest.fn(),
+}));
+
+// The real reason filter decides whether a backend release reloads the LLM, so the
+// quit-time assertion below is about behaviour, not about a hand-written stub.
+const { ResourceOrchestrator } = await import('../../src/managers/ResourceOrchestrator.js');
+
 // Mock types
 interface MockApp {
   on: jest.Mock;
@@ -17,11 +42,15 @@ interface MockServerManager {
   stop: jest.Mock;
 }
 
+interface MockDiffusionServerManager extends MockServerManager {
+  releaseBackend: jest.Mock;
+}
+
 describe('electron-lifecycle', () => {
   describe('attachAppLifecycle', () => {
     let mockApp: MockApp;
     let mockLlamaServer: MockServerManager;
-    let mockDiffusionServer: MockServerManager;
+    let mockDiffusionServer: MockDiffusionServerManager;
     let beforeQuitHandler: ((event: { preventDefault: () => void }) => Promise<void>) | null;
 
     beforeEach(() => {
@@ -47,6 +76,7 @@ describe('electron-lifecycle', () => {
       mockDiffusionServer = {
         getStatus: jest.fn(() => 'stopped'),
         stop: jest.fn(async () => {}),
+        releaseBackend: jest.fn(async () => {}),
       };
 
       // Spy on console methods
@@ -60,6 +90,8 @@ describe('electron-lifecycle', () => {
       });
 
       expect(mockApp.on).toHaveBeenCalledWith('before-quit', expect.any(Function));
+      // Every test below drives this handler; a null one would make them vacuous
+      expect(beforeQuitHandler).not.toBeNull();
     });
 
     it('should stop running LLM server on app quit', async () => {
@@ -98,6 +130,126 @@ describe('electron-lifecycle', () => {
         expect(mockDiffusionServer.stop).toHaveBeenCalled();
         expect(mockApp.exit).toHaveBeenCalledWith(0);
       }
+    });
+
+    it('should release the diffusion backend before stopping the wrapper', async () => {
+      mockDiffusionServer.getStatus = jest.fn(() => 'running');
+
+      attachAppLifecycle(mockApp as unknown as Parameters<typeof attachAppLifecycle>[0], {
+        diffusionServer: mockDiffusionServer as never,
+      });
+
+      expect(beforeQuitHandler).not.toBeNull();
+      await beforeQuitHandler!({ preventDefault: jest.fn() });
+
+      expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({ reason: 'shutdown' });
+      expect(mockDiffusionServer.releaseBackend.mock.invocationCallOrder[0]).toBeLessThan(
+        mockDiffusionServer.stop.mock.invocationCallOrder[0] as number
+      );
+    });
+
+    it('should release the diffusion backend even when the wrapper is stopped', async () => {
+      // calibrate() can leave a backend alive while the wrapper status is 'stopped'
+      mockDiffusionServer.getStatus = jest.fn(() => 'stopped');
+
+      attachAppLifecycle(mockApp as unknown as Parameters<typeof attachAppLifecycle>[0], {
+        diffusionServer: mockDiffusionServer as never,
+      });
+
+      expect(beforeQuitHandler).not.toBeNull();
+      await beforeQuitHandler!({ preventDefault: jest.fn() });
+
+      expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({ reason: 'shutdown' });
+      expect(mockDiffusionServer.stop).not.toHaveBeenCalled();
+      expect(mockApp.exit).toHaveBeenCalledWith(0);
+    });
+
+    it("never reloads an offloaded LLM from the quit-time 'shutdown' release", async () => {
+      const llmConfig = { modelId: 'llama-2-7b', port: 8080 };
+      const llamaServer: any = {
+        getStatus: jest.fn(() => 'stopped'),
+        isRunning: jest.fn(() => true),
+        getConfig: jest.fn(() => llmConfig),
+        stop: jest.fn(async () => {}),
+        start: jest.fn(async () => ({})),
+      };
+      const diffusionServer: any = {
+        getStatus: jest.fn(() => 'running'),
+        stop: jest.fn(async () => {}),
+        isCalibrating: jest.fn(() => false),
+        getBackendInfo: jest.fn(() => ({ state: 'absent' })),
+        // Same seam as the real manager: the confirmed release reports its reason
+        releaseBackend: jest.fn(async (options: { reason: string }) => {
+          orchestrator.onDiffusionBackendReleased(options.reason as never);
+        }),
+      };
+      const orchestrator = new ResourceOrchestrator(
+        {} as never,
+        llamaServer,
+        diffusionServer,
+        {} as never
+      );
+
+      // A 'burst'-deferred cycle left the LLM offloaded with its state saved
+      await orchestrator.offloadLLM();
+      llamaServer.isRunning.mockReturnValue(false);
+      expect(orchestrator.getSavedState()).toBeDefined();
+
+      attachAppLifecycle(mockApp as unknown as Parameters<typeof attachAppLifecycle>[0], {
+        llamaServer,
+        diffusionServer,
+      });
+      expect(beforeQuitHandler).not.toBeNull();
+      await beforeQuitHandler!({ preventDefault: jest.fn() });
+
+      expect(diffusionServer.releaseBackend).toHaveBeenCalledWith({ reason: 'shutdown' });
+      // Nothing may start after app.exit(0)
+      expect(llamaServer.start).not.toHaveBeenCalled();
+      expect(mockApp.exit).toHaveBeenCalledWith(0);
+
+      // Control: the same saved state DOES come back on a qualifying reason
+      orchestrator.onDiffusionBackendReleased('stop');
+      await orchestrator.waitForReload();
+      expect(llamaServer.start).toHaveBeenCalledWith(llmConfig);
+    });
+
+    it('should still stop the wrapper and exit when the backend release fails', async () => {
+      mockDiffusionServer.getStatus = jest.fn(() => 'running');
+      mockDiffusionServer.releaseBackend = jest.fn(async () => {
+        throw new Error('kill failed');
+      });
+
+      attachAppLifecycle(mockApp as unknown as Parameters<typeof attachAppLifecycle>[0], {
+        diffusionServer: mockDiffusionServer as never,
+      });
+
+      expect(beforeQuitHandler).not.toBeNull();
+      await beforeQuitHandler!({ preventDefault: jest.fn() });
+
+      expect(console.error).toHaveBeenCalled();
+      // A backend that refuses to die must not skip the wrapper shutdown
+      expect(mockDiffusionServer.stop).toHaveBeenCalled();
+      expect(mockApp.exit).toHaveBeenCalledWith(0);
+    });
+
+    it('should still stop the LLM server when the backend release fails', async () => {
+      mockLlamaServer.getStatus = jest.fn(() => 'running');
+      mockDiffusionServer.getStatus = jest.fn(() => 'running');
+      mockDiffusionServer.releaseBackend = jest.fn(async () => {
+        throw new Error('kill failed');
+      });
+
+      attachAppLifecycle(mockApp as unknown as Parameters<typeof attachAppLifecycle>[0], {
+        llamaServer: mockLlamaServer as never,
+        diffusionServer: mockDiffusionServer as never,
+      });
+
+      expect(beforeQuitHandler).not.toBeNull();
+      await beforeQuitHandler!({ preventDefault: jest.fn() });
+
+      expect(mockLlamaServer.stop).toHaveBeenCalled();
+      expect(mockDiffusionServer.stop).toHaveBeenCalled();
+      expect(mockApp.exit).toHaveBeenCalledWith(0);
     });
 
     it('should stop both servers when both are running', async () => {

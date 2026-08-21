@@ -321,6 +321,36 @@ export interface LlamaServerConfig extends ServerConfig {
 }
 
 /**
+ * Callback invoked by {@link LlamaServerManager.start} before the server is provisioned.
+ *
+ * Registered through `LlamaServerManager.registerPreStartHook()`, hooks run inside
+ * `start()`'s own error handling, right after the status flips to `'starting'` (so the
+ * concurrency guard already rejects re-entrant starts while a hook awaits) and before
+ * any port/binary/model work. They exist so another subsystem can free resources for
+ * the LLM that is about to load — genai-electron itself uses one to release the
+ * stable-diffusion.cpp backend when both would not fit.
+ *
+ * A hook that throws fails the `start()` call (the status is reset to `'stopped'` and
+ * typed library errors are preserved). On the auto-restart path (`reason:
+ * 'auto-restart'`) a hook error is logged and ignored so it cannot consume the
+ * restart budget.
+ *
+ * @example
+ * ```typescript
+ * const unregister = llamaServer.registerPreStartHook(async ({ config, reason }) => {
+ *   console.log(`llama-server starting (${reason}) with model ${config.modelId}`);
+ * });
+ * // later: unregister();
+ * ```
+ */
+export type LlamaPreStartHook = (ctx: {
+  /** Configuration the caller passed to `start()` */
+  config: LlamaServerConfig;
+  /** Whether this start was requested by a caller or by the auto-restart timer */
+  reason: 'start' | 'auto-restart';
+}) => Promise<void> | void;
+
+/**
  * Electron-free llama-server settings consumed by the canonical argument builder.
  *
  * This is a structural view of {@link LlamaServerConfig}; it deliberately excludes
@@ -434,7 +464,13 @@ export type ServerEvent =
   | 'health-check-ok'
   | 'health-check-failed'
   | 'binary-log'
-  | 'binary-progress';
+  | 'binary-progress'
+  /** Diffusion only: internal stable-diffusion.cpp backend transition
+   * (`DiffusionBackendStatusEvent`) */
+  | 'backend-status'
+  /** Diffusion only: offload-calibration sweep progress
+   * (`DiffusionCalibrationProgress`) */
+  | 'calibration-progress';
 
 /**
  * Server event data

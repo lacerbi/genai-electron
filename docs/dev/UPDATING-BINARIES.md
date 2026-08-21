@@ -343,6 +343,13 @@ Checksums:
 - [ ] Update all 7 checksums with correct hashes
 - [ ] Run `npm run build` to verify TypeScript compiles
 - [ ] Test download on at least one platform
+- [ ] For a stable-diffusion.cpp bump: confirm the zip still ships `sd-server(.exe)` (the binary the
+      library runs) and re-verify the stdout markers in `SD_SERVER_STDOUT_MARKERS` plus the
+      `/sdcpp/v1/*` job-API shapes with a live generation
+- [ ] For a stable-diffusion.cpp bump: re-check
+      `DIFFUSION_CALIBRATION_DEFAULTS.sd35LargePattern` against
+      leejet/stable-diffusion.cpp#1578 — it exists only to skip `clipOnCpu` combos for SD 3.5
+      Large while that upstream bug is open, and should be deleted once the bump fixes it
 - [ ] Commit with descriptive message
 - [ ] Update PROGRESS.md if this is a significant change
 
@@ -497,10 +504,20 @@ The library automatically performs real GPU functionality testing during variant
 2. Downloads dependencies if needed (CUDA runtime DLLs)
 3. Runs **real inference test** instead of just `--version`:
    - **LLM**: Generates 1 token with GPU layers forced (`-ngl 1`)
-   - **Diffusion**: Generates 64x64 image with 1 step and the production-resolved
-     `--clip-on-cpu`, `--vae-on-cpu`, `--offload-to-cpu`, and `--diffusion-fa`
-     flags. Generation-only batch/thread settings are excluded.
-4. Parses line-anchored output diagnostics for GPU errors:
+   - **Diffusion**: Launches `sd-server` on an ephemeral loopback port through the same
+     runner/client the production path uses (`src/process/sd-server-runner.ts` +
+     `sd-server-client.ts`), waits for `GET /sdcpp/v1/capabilities`, and pushes one
+     64x64 / 1-step job through the job API. Launch args carry the production-resolved
+     `--clip-on-cpu`, `--vae-on-cpu`, `--offload-to-cpu`, and `--diffusion-fa` flags plus a
+     throwaway `--lora-model-dir`; generation-only batch/thread settings are excluded. The
+     child is always stopped with confirmed death — a termination that cannot be confirmed
+     aborts the whole variant loop instead of downloading the next variant over a live child.
+     No output file is written (the image comes back as base64 in the job result). Every
+     backend output line is scanned for GPU errors **as it arrives** (`onLog` →
+     `GPU_ERROR_PATTERNS`), not only at the end: the retained tails are bounded, so a
+     diagnostic printed during a long model load can otherwise be evicted before the verdict.
+4. Scans each captured output line against `BinaryManager.GPU_ERROR_PATTERNS` for GPU errors
+   (the scan is line-anchored and runs per line as output arrives):
    - "CUDA error"
    - "failed to allocate"
    - "out of memory"
@@ -543,15 +560,20 @@ cd /path/to/binaries
 **For stable-diffusion.cpp:**
 ```bash
 cd /path/to/binaries
-./sd -m /path/to/model.safetensors -p "test" -o test.png --width 64 --height 64 --steps 1
-# Check stderr for "CUDA error" or "Vulkan error"
+# Same shape as the library's Phase 2: start the server, then submit one tiny job.
+./sd-server -m /path/to/model.safetensors --listen-ip 127.0.0.1 --listen-port 51234 &
+curl -s http://127.0.0.1:51234/sdcpp/v1/capabilities
+curl -s -X POST http://127.0.0.1:51234/sdcpp/v1/img_gen -H 'Content-Type: application/json' \
+  -d '{"prompt":"test","width":64,"height":64,"sample_params":{"sample_steps":1}}'
+curl -s http://127.0.0.1:51234/sdcpp/v1/jobs/<id>
+# Check stderr for "CUDA error" or "Vulkan error"; kill the server when done
 ```
 
 ### Implementation Details
 
 - **Location**: `src/managers/BinaryManager.ts` - `runRealFunctionalityTest()` method
-- **Timeout**: 120 s when a multi-component test model is configured (large component loads), 15 s for single-file models (see `runDiffusionTest()` in `BinaryManager.ts`)
-- **Error Patterns**: See `errorPatterns` array in `runRealFunctionalityTest()`
+- **Timeout**: 120 s when a multi-component test model is configured (large component loads), 15 s for single-file models (see `runSdServerTest()` in `BinaryManager.ts`). The job gets that same budget again as a second, independent clock.
+- **Error Patterns**: See the static `GPU_ERROR_PATTERNS` table in `BinaryManager.ts`
 - **Automatic**: No configuration needed, happens transparently during `start()`
 
 ## stable-diffusion.cpp Specifics
@@ -567,10 +589,11 @@ The same process applies to the diffusion binaries (`BINARY_VERSIONS.diffusionCp
   ```
 
 - **Asset naming**: `sd-master-<shortsha>-bin-<platform>.zip`, all `.zip` (including macOS and Linux — no `.tar.gz`). The Darwin asset name embeds the CI runner's macOS version (e.g. `...bin-Darwin-macOS-15.7.7-arm64.zip`) — expect it to change every release. No darwin-x64 asset exists.
-- **Windows CPU consolidation** (since ~mid-2026): the per-ISA zips (`win-noavx/avx/avx2/avx512`) were replaced by a single `win-cpu-x64.zip` built with runtime CPU dispatch (`GGML_BACKEND_DL=ON`, `GGML_CPU_ALL_VARIANTS=ON`) — it ships `ggml-cpu-<arch>.dll` backends and the best one is selected at runtime. ALL extracted DLLs must stay next to `sd-cli.exe` (the standard copy logic handles this).
+- **Windows CPU consolidation** (since ~mid-2026): the per-ISA zips (`win-noavx/avx/avx2/avx512`) were replaced by a single `win-cpu-x64.zip` built with runtime CPU dispatch (`GGML_BACKEND_DL=ON`, `GGML_CPU_ALL_VARIANTS=ON`) — it ships `ggml-cpu-<arch>.dll` backends and the best one is selected at runtime. ALL extracted DLLs must stay next to `sd-server.exe` (the standard copy logic handles this).
 - **CUDA dependency**: `cudart-sd-bin-win-cu12-x64.zip`. It has been byte-identical across releases (compare digests before assuming a new download is needed); only the URL tag changes.
-- **Zip contents**: `sd-cli(.exe)` (the binary genai-electron runs), `sd-server(.exe)` (unused), the `stable-diffusion` shared library, and ggml backend DLLs. The binary search order in `BinaryManager.ts` prefers `sd-cli` over the legacy `sd` name.
-- **Log-format coupling**: `DiffusionServerManager.processStdoutForProgress()` parses sd.cpp stdout (stage literals and progress bars). After a bump, run a live generation and confirm stage transitions and step progress still report. Precedent: at `master-746` upstream renamed the `loading tensors from` literal to `loading model from` and switched loading progress to `#`-style byte bars (`| N/M - X.XXGB/s`), both of which required parser updates.
+- **Zip contents**: `sd-server(.exe)` (the binary genai-electron runs — a native HTTP server with an async job API), `sd-cli(.exe)` (the one-shot CLI; extracted but never executed by the library), the `stable-diffusion` shared library, and ggml backend DLLs. `BinaryManager.ts` locates the primary binary by exact match on `['sd-server.exe', 'sd-server']`.
+- **Primary-binary switch → one-time re-validation**: the primary name moved from `sd-cli` to `sd-server` in the 2026-08-21 backend migration. An existing install therefore fails its cached `.validation.json.checksum` comparison once and re-validates **without** re-downloading (the version is unchanged and the variant is preserved). On POSIX this only works because the install path `chmod 0o755`s the primary binary *before* re-testing it — the ZIP worker extracts without original permissions (adm-zip writes `0o666`), so a name switch would otherwise look like "existing binary not working, re-downloading". Keep that ordering if you ever change the primary name again.
+- **Log-format coupling**: the backend's job JSON carries no progress at the pin, so `sd-server` stdout is still parsed for stage/step progress. The parsing lives in `src/process/sd-server-runner.ts` (the runner's line-buffered stdout tap), which emits structured events; `DiffusionServerManager` only consumes them. The literals live in ONE exported table — `SD_SERVER_STDOUT_MARKERS` in `src/process/sd-server-runner.ts` (`generating image:` → `generating` — deliberately NOT `sampling using`, which sd-server prints at job start before conditioning and the lazy weight upload; `decoding 1 latents` → `decoding`, `decode_first_stage completed` → `decoded`, `generate_image completed` → `completed`, plus the `listening on:` hint) — alongside the step/byte bar regexes and `isSdServerProgressBarLine()` (which keeps bar redraws out of the log file). After a bump, run a live generation and confirm stage transitions and step progress still report (`scripts/live-smoke/sd-server-live-smoke.mjs` covers this end to end — provisioning, cold/warm generation, cancel, crash, the LLM cycle, calibration, re-validation; see `scripts/live-smoke/README.md`); if the format drifts, update that table (and the bar patterns), not scattered call sites. Note that readiness itself is NOT coupled to stdout: it is `GET /sdcpp/v1/capabilities` returning 200. Also re-check the job API shapes (202 on submit, 409 on cancelling a generating job, 429 on a full queue, 410 after the result TTL). Precedent: at `master-746` upstream renamed the `loading tensors from` literal to `loading model from` and switched loading progress to `#`-style byte bars (`| N/M - X.XXGB/s`), both of which required parser updates.
 - **Sampler-surface coupling**: a method appearing in `--help` is not sufficient evidence that it
   is safe to expose. Compare the sampler enum/CLI-name table with every display-name table and run
   the method. At `master-782-b290693`, `dpm++2m_sde` and `dpm++2m_sde_bt` were added to the enum and

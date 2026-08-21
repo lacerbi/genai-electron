@@ -768,6 +768,7 @@ async function buildPackedRuntimeBundles({ consumerDir, packageDir, isolatedDir 
 import * as packedApi from 'genai-electron';
 export const rootExportNames = Object.keys(packedApi);
 assert.equal(rootExportNames.includes('systemInfo'), true);
+assert.equal(rootExportNames.includes('DIFFUSION_BACKEND_DEFAULTS'), true);
 `,
       loader: 'js',
       resolveDir: consumerDir,

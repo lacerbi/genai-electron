@@ -68,6 +68,15 @@ paths until `app.whenReady()` as shown above.
 
 Attach automatic cleanup handlers for graceful server shutdown on app quit.
 
+On `before-quit` it stops a running llama-server, then **always releases the diffusion manager's
+internal stable-diffusion.cpp backend** (release reason `'shutdown'`) before stopping the diffusion
+server itself. Two details matter:
+
+- The release happens even when the diffusion wrapper is not running — that covers a backend left
+  behind by `calibrate()`, which runs while the wrapper's own status is `'stopped'`.
+- Reason `'shutdown'` never triggers an LLM reload, so nothing can start a `llama-server` that
+  would race `app.exit(0)`.
+
 **Function Signature:**
 ```typescript
 attachAppLifecycle(
@@ -364,6 +373,9 @@ recommendation, retry, or ignore it belongs to the host. See
           │              ┌─────────────────┐
           └─────────────►│  HTTP wrapper   │
                          │  (port 8081)    │
+                         │    ↓ job API    │
+                         │  sd-server      │
+                         │  (resident)     │
                          └─────────────────┘
 ```
 

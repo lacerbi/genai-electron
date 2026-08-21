@@ -4,6 +4,9 @@
  */
 
 import type { ServerStatus, HealthStatus } from './servers.js';
+// Type-only (erased at compile time): keeps the calibration policy identifier declared
+// in exactly one place, the shipped defaults object.
+import type { DIFFUSION_CALIBRATION_DEFAULTS } from '../config/defaults.js';
 
 /**
  * Available sampler algorithms for image generation
@@ -80,6 +83,19 @@ export interface ImageGenerationConfig {
   /** Number of images to generate (default: 1, recommended max: 5) */
   count?: number;
 
+  /**
+   * Residency policy for the stable-diffusion.cpp backend around THIS request.
+   *
+   * - `'burst'` — keep the backend resident after the image so follow-up requests
+   *   skip the model load (released later by the idle timer or an explicit release).
+   * - `'single'` — release the backend (and its VRAM) as soon as the image is done.
+   *
+   * Omitted = the server-level `DiffusionServerConfig.usageMode` decides, and when that
+   * is `'auto'` (the default) the library picks `'single'` when the LLM had to be
+   * offloaded to make room for this image and `'burst'` otherwise.
+   */
+  usageMode?: DiffusionUsageMode;
+
   /** Progress callback with stage information */
   onProgress?: (
     currentStep: number,
@@ -87,6 +103,129 @@ export interface ImageGenerationConfig {
     stage: ImageGenerationStage,
     percentage?: number
   ) => void;
+}
+
+/**
+ * Residency policy for the internal stable-diffusion.cpp backend process.
+ *
+ * The public diffusion server is a node:http wrapper; the actual `sd-server` child is
+ * spawned lazily and may either stay warm between images (`'burst'`) or be torn down
+ * right after each image (`'single'`). Staying warm skips the model load (measured
+ * ~33-39 % faster per image) at the cost of holding VRAM.
+ *
+ * @example
+ * ```typescript
+ * const mode: DiffusionUsageMode = 'burst';
+ * ```
+ */
+export type DiffusionUsageMode = 'burst' | 'single';
+
+/**
+ * Lifecycle state of the internal stable-diffusion.cpp backend process.
+ *
+ * - `'absent'` — no backend process exists (the wrapper may still be running)
+ * - `'starting'` — spawned, waiting for the backend to answer its capabilities probe
+ * - `'ready'` — resident and idle
+ * - `'busy'` — resident and working on a job
+ * - `'stopping'` — terminating; a new backend is only spawned after confirmed death
+ */
+export type DiffusionBackendState = 'absent' | 'starting' | 'ready' | 'busy' | 'stopping';
+
+/**
+ * Why the internal stable-diffusion.cpp backend was released.
+ *
+ * Consumed by the `'backend-status'` event and by the ResourceOrchestrator, which
+ * reloads a previously offloaded LLM only for `'idle-timeout' | 'explicit' |
+ * 'crashed' | 'stop'` — the other reasons either reload through a different path
+ * (`'single'`) or must not start an LLM at all (`'llm-start'`, `'shutdown'`,
+ * `'calibration'`).
+ *
+ * @example
+ * ```typescript
+ * const reason: DiffusionBackendReleaseReason = 'idle-timeout';
+ * ```
+ */
+export type DiffusionBackendReleaseReason =
+  | 'single'
+  | 'idle-timeout'
+  | 'explicit'
+  | 'flags-changed'
+  | 'cancel'
+  | 'crashed'
+  | 'stop'
+  | 'shutdown'
+  | 'llm-start'
+  | 'calibration';
+
+/**
+ * Snapshot of the internal stable-diffusion.cpp backend process.
+ *
+ * Surfaced additively through {@link DiffusionServerInfo.backend}; every field other
+ * than `state` is absent while the backend is `'absent'`.
+ *
+ * @example
+ * ```typescript
+ * const info = diffusionServer.getInfo();
+ * if (info.backend?.state === 'ready') {
+ *   console.log('warm backend pid', info.backend.pid);
+ * }
+ * ```
+ */
+export interface DiffusionBackendInfo {
+  /** Current backend lifecycle state */
+  state: DiffusionBackendState;
+
+  /** Backend process ID (present once spawned) */
+  pid?: number;
+
+  /** When the backend process was spawned (ISO timestamp) */
+  startedAt?: string;
+
+  /** Spawn-to-ready duration in milliseconds (present once ready) */
+  loadTimeMs?: number;
+
+  /** When the backend last finished a job (ISO timestamp) */
+  lastUsedAt?: string;
+
+  /** Offload flags the resident backend was launched with */
+  flags?: {
+    clipOnCpu: boolean;
+    vaeOnCpu: boolean;
+    offloadToCpu: boolean;
+    diffusionFlashAttention: boolean;
+  };
+}
+
+/**
+ * Payload of the `'backend-status'` event emitted by DiffusionServerManager.
+ *
+ * A backend crash is reported here rather than as `'crashed'`: the wrapper is still
+ * serving, and the next request simply respawns the backend.
+ *
+ * @example
+ * ```typescript
+ * diffusionServer.on('backend-status', (event: DiffusionBackendStatusEvent) => {
+ *   console.log(`${event.previous} -> ${event.state} (${event.reason ?? 'n/a'})`);
+ * });
+ * ```
+ */
+export interface DiffusionBackendStatusEvent {
+  /** New backend state */
+  state: DiffusionBackendState;
+
+  /** Backend state immediately before this transition */
+  previous: DiffusionBackendState;
+
+  /**
+   * Why the transition happened. Release reasons use
+   * {@link DiffusionBackendReleaseReason}; `'spawned'`, `'ready'`, and `'job'` mark
+   * the forward transitions, and `'start-failed'` marks a spawn that never became
+   * ready (the child is already gone — this is not a crash of a working backend).
+   */
+  reason?: DiffusionBackendReleaseReason | 'spawned' | 'ready' | 'job' | 'start-failed';
+
+  /** Process exit details when the transition was caused by the backend exiting */
+  exit?: { code: number | null; signal: NodeJS.Signals | null };
 }
 
 /**
@@ -119,6 +258,42 @@ export interface DiffusionServerConfig {
 
   /** Port to listen on (default: 8081; 'auto' picks a free OS-assigned port) */
   port?: number | 'auto';
+
+  /**
+   * Interface the HTTP wrapper binds to (default: `'127.0.0.1'`).
+   *
+   * The wrapper is unauthenticated and allows CORS from any origin, so it binds
+   * loopback-only by default. Set `'0.0.0.0'` (or a specific interface) ONLY behind
+   * deliberate network controls.
+   */
+  host?: string;
+
+  /**
+   * Maximum wait, in milliseconds, for the internal stable-diffusion.cpp backend to
+   * become ready after it is spawned (default: `DEFAULT_TIMEOUTS.serverStart`).
+   *
+   * This bounds the backend spawn, not `start()` — `start()` only brings up the HTTP
+   * wrapper and never loads a model.
+   */
+  startupTimeout?: number;
+
+  /**
+   * Default residency policy for the internal backend (default: `'auto'`).
+   *
+   * `'auto'` picks `'single'` when the LLM had to be offloaded to make room for the
+   * image and `'burst'` otherwise. A per-request
+   * {@link ImageGenerationConfig.usageMode} overrides this value.
+   */
+  usageMode?: DiffusionUsageMode | 'auto';
+
+  /**
+   * How long a `'burst'`-resident backend may sit idle before it is released, in
+   * milliseconds (default: `DIFFUSION_BACKEND_DEFAULTS.idleTimeoutMs`, 300 000).
+   *
+   * `0` disables the timer entirely — the host then owns the release (via
+   * `releaseBackend()` or `stop()`). Diffusion-only: the LLM server has no idle timer.
+   */
+  idleTimeoutMs?: number;
 
   /** Number of CPU threads (auto-detected if not specified) */
   threads?: number;
@@ -161,8 +336,8 @@ export interface DiffusionServerConfig {
   /**
    * Batch size for image generation. Lower values reduce VRAM usage.
    *
-   * Not auto-detected — passthrough only. If specified, maps to `-b` flag
-   * in stable-diffusion.cpp.
+   * Not auto-detected — passthrough only. If specified, maps to `batch_count` in the
+   * stable-diffusion.cpp job request (the first image of the batch is returned).
    */
   batchSize?: number;
 
@@ -193,7 +368,12 @@ export interface DiffusionServerInfo {
   /** Health check status */
   health: HealthStatus;
 
-  /** Process ID (if running) - for HTTP wrapper, this is the wrapper's PID */
+  /**
+   * Process ID of the internal stable-diffusion.cpp backend while it is resident.
+   *
+   * The public server is an in-process node:http wrapper and therefore has no PID of
+   * its own; this field is absent whenever the backend is `'absent'`.
+   */
   pid?: number;
 
   /** Port server is listening on */
@@ -210,6 +390,9 @@ export interface DiffusionServerInfo {
 
   /** Whether currently generating an image */
   busy?: boolean;
+
+  /** Internal stable-diffusion.cpp backend snapshot (additive) */
+  backend?: DiffusionBackendInfo;
 }
 
 /**
@@ -341,7 +524,11 @@ export interface DiffusionCalibrationGeneration {
    */
   threads?: number;
 
-  /** Batch size (sd.cpp `-b`) — match production. Omitted = sd.cpp default */
+  /**
+   * Batch size — match production. Maps to `batch_count` in the `sd-server` job request
+   * (the historical sd.cpp `-b` flag); the first image of the batch is returned.
+   * Omitted → 1 (values below 1 are clamped to 1).
+   */
   batchSize?: number;
 }
 
@@ -365,6 +552,24 @@ export interface DiffusionCalibrationConfig {
    * work your real generations do — see {@link DiffusionCalibrationGeneration}.
    */
   generation: DiffusionCalibrationGeneration;
+
+  /**
+   * Residency mode the sweep measures (default:
+   * `DIFFUSION_CALIBRATION_DEFAULTS.usageMode` = `'single'`).
+   *
+   * - `'single'` — every timed sample is its own cold spawn → generate → release cycle,
+   *   so `timeTakenMs` is the latency of a one-off image (process start + weight
+   *   placement + sampling + decode). This mirrors the common single-shot production
+   *   case and the pre-migration report semantics, where every image spawned `sd-cli`.
+   * - `'burst'` — one backend launch per combo: a discarded warmup absorbs the model
+   *   load and the timed samples are warm generations on resident weights, i.e. the
+   *   latency of the 2nd..nth image of a burst.
+   *
+   * Warm medians run well below cold ones, so timings are only comparable between
+   * reports measured in the SAME mode — {@link DiffusionCalibrationReport.usageMode}
+   * echoes which one was used.
+   */
+  usageMode?: DiffusionUsageMode;
 
   /** Offload combos to benchmark (default: curated set in DIFFUSION_CALIBRATION_DEFAULTS) */
   combos?: DiffusionOffloadCombo[];
@@ -453,9 +658,38 @@ export interface CalibrationRun {
 
   /**
    * Per-stage wall-clock split of the sample closest to the median
-   * (fields omitted when stage markers were missed)
+   * (fields omitted when stage markers were missed).
+   *
+   * `loadMs` spans that sample's start → the backend's first `generating` marker, and
+   * what "start" means follows the sweep's
+   * {@link DiffusionCalibrationReport.usageMode}: in `'single'` it is the backend
+   * SPAWN, so `loadMs` covers process start, weight placement and conditioning; in
+   * `'burst'` the weights are already resident and it is the JOB SUBMISSION, so
+   * `loadMs` is only the small pre-sampling (conditioning) time — not a model load.
+   * `diffusionMs` (generating → decoding) and `decodeMs` (decoding → decoded) mean the
+   * same thing in both modes.
    */
   stageMs?: { loadMs?: number; diffusionMs?: number; decodeMs?: number };
+
+  /**
+   * Machine-wide peak VRAM use during the timed sample this run reports
+   * (`vramTotal − min(vramAvailable)`, sampled at ~1 s resolution over the same
+   * representative sample as {@link CalibrationRun.stageMs}).
+   *
+   * Machine-wide, not process-scoped: anything else using the GPU is included.
+   * Omitted when GPU telemetry is unavailable or untrusted at any point of the
+   * window, and always on macOS (unified memory, no VRAM availability telemetry).
+   */
+  vramPeakBytes?: number;
+
+  /**
+   * Machine-wide VRAM use once that sample settled (`vramTotal − vramAvailable`),
+   * read after the backend was released in `'single'` mode and right after the job in
+   * `'burst'` mode — so `'burst'` reports what the combo keeps resident between images
+   * and `'single'` reports what it leaves behind. Omitted under the same conditions as
+   * {@link CalibrationRun.vramPeakBytes}.
+   */
+  vramIdleBytes?: number;
 
   /** Raw totals of successful samples (kept even on failed runs, for diagnostics) */
   samplesMs?: number[];
@@ -490,6 +724,26 @@ export interface DiffusionCalibrationReport {
 
   /** Timed samples per (combo, size) (methodology echo) */
   samples: number;
+
+  /**
+   * Residency mode the sweep measured (echo of the resolved
+   * {@link DiffusionCalibrationConfig.usageMode}). `'single'` = cold spawn per timed
+   * sample, `'burst'` = warm samples on one launch per combo. `timeTakenMs`,
+   * `stageMs.loadMs` and the VRAM figures are only comparable between reports that
+   * share this value.
+   */
+  usageMode: DiffusionUsageMode;
+
+  /**
+   * Calibration policy identifier for persisted recommendations
+   * (`DIFFUSION_CALIBRATION_DEFAULTS.policyVersion`).
+   *
+   * A stored report with NO `policyVersion` field is a pre-migration v1 report: it was
+   * measured by spawning `sd-cli` once per image, under a different process model, so
+   * its numbers are only ever comparable to `usageMode: 'single'` results and its
+   * recommendation is worth re-measuring.
+   */
+  policyVersion: typeof DIFFUSION_CALIBRATION_DEFAULTS.policyVersion;
 
   /** All benchmark runs (one per active combo × size) */
   runs: CalibrationRun[];

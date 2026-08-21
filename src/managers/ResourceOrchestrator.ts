@@ -15,8 +15,11 @@ import { ModelManager } from './ModelManager.js';
 import type {
   ServerConfig,
   LlamaServerConfig,
+  DiffusionBackendReleaseReason,
+  DiffusionUsageMode,
   ImageGenerationConfig,
   ImageGenerationResult,
+  ModelInfo,
 } from '../types/index.js';
 import { estimateKVBytesPerToken } from '../utils/kv-cache-math.js';
 import { getExpertWeightsBytesWithFallback } from '../utils/model-metadata-helpers.js';
@@ -74,6 +77,37 @@ interface ResourceRequirements {
 export class ResourceOrchestrator {
   private static readonly RELOAD_RETRY_DELAY_MS = 2000;
 
+  /**
+   * Backend release reasons that may bring a previously offloaded LLM back.
+   *
+   * `'cancel'` is in the set because a cancelled generation kills the backend and
+   * then ends: under `'burst'` nothing else would ever release the VRAM, so the LLM
+   * would stay down forever. Double reloads are impossible by construction —
+   * {@link fireAndForgetReload} is the single trigger and every caller checks
+   * `pendingReload` first.
+   *
+   * Everything else is deliberately silent: `'single'` reloads through the
+   * orchestration branch that owns the offload context, `'llm-start'` fires from
+   * inside the LLM's own pre-start hook, `'shutdown'` runs while the app is quitting,
+   * `'calibration'` belongs to a sweep that restores the LLM itself, and
+   * `'flags-changed'` is immediately followed by another spawn for the same image.
+   */
+  private static readonly RELOAD_RELEASE_REASONS: ReadonlySet<DiffusionBackendReleaseReason> =
+    new Set<DiffusionBackendReleaseReason>([
+      'idle-timeout',
+      'explicit',
+      'crashed',
+      'stop',
+      'cancel',
+    ]);
+
+  /** Backend states in which a process is holding (or about to hold) VRAM */
+  private static readonly RESIDENT_BACKEND_STATES: ReadonlySet<string> = new Set([
+    'starting',
+    'ready',
+    'busy',
+  ]);
+
   private systemInfo: SystemInfo;
   private llamaServer: LlamaServerManager;
   private diffusionServer: DiffusionServerManager;
@@ -123,13 +157,60 @@ export class ResourceOrchestrator {
    */
   async orchestrateImageGeneration(config: ImageGenerationConfig): Promise<ImageGenerationResult> {
     debugLog('[Orchestrator] orchestrateImageGeneration called');
+    return await this.orchestrateGeneration(config, () =>
+      this.diffusionServer.executeImageGeneration(config)
+    );
+  }
 
+  /**
+   * Orchestrate a multi-image (batch) generation with automatic resource management
+   *
+   * Same offload window as {@link orchestrateImageGeneration}, opened once around the
+   * whole batch: the LLM is offloaded at most once and residency is settled once, after
+   * the last image.
+   *
+   * @param config - Image generation configuration (`count` > 1)
+   * @returns One result per generated image
+   *
+   * @example
+   * ```typescript
+   * const results = await orchestrator.orchestrateBatchGeneration({
+   *   prompt: 'A serene mountain landscape',
+   *   count: 3,
+   * });
+   * ```
+   */
+  async orchestrateBatchGeneration(
+    config: ImageGenerationConfig
+  ): Promise<ImageGenerationResult[]> {
+    debugLog('[Orchestrator] orchestrateBatchGeneration called');
+    return await this.orchestrateGeneration(config, () =>
+      this.diffusionServer.executeBatchGeneration(config)
+    );
+  }
+
+  /**
+   * Shared offload window for single and batch generation
+   *
+   * Offloads the LLM when both servers would not fit, runs the generation, and then
+   * settles diffusion residency exactly once — the orchestrator owns that decision
+   * because it owns the offload context.
+   *
+   * @param config - Image generation configuration (its `usageMode` is the request hint)
+   * @param run - The generation to execute inside the window
+   * @private
+   */
+  private async orchestrateGeneration<T>(
+    config: ImageGenerationConfig,
+    run: () => Promise<T>
+  ): Promise<T> {
     // If a previous generation's reload is still in progress, wait for it
     // to finish before potentially offloading again (prevents VRAM contention)
-    if (this.pendingReload) {
+    const inFlightReload = this.pendingReload;
+    if (inFlightReload) {
       debugLog('[Orchestrator] Awaiting pending LLM reload from previous generation...');
-      await this.pendingReload;
-      this.pendingReload = null;
+      await inFlightReload;
+      if (this.pendingReload === inFlightReload) this.pendingReload = null;
     }
 
     // Check if we need to offload LLM
@@ -144,31 +225,189 @@ export class ResourceOrchestrator {
       // Save LLM state and offload
       await this.offloadLLM();
 
-      let result: ImageGenerationResult;
+      let result: T;
       try {
-        // Generate image directly (bypassing orchestrator to avoid recursion)
+        // Generate directly (bypassing orchestrator to avoid recursion)
         debugLog('[Orchestrator] Generating image with LLM offloaded...');
-        result = await this.diffusionServer.executeImageGeneration(config);
+        result = await run();
       } catch (error) {
-        // Image generation failed — still reload LLM in background, then rethrow
-        debugLog('[Orchestrator] Image generation failed, reloading LLM in background...');
-        this.fireAndForgetReload();
+        // Generation failed — still settle residency and reload, then rethrow
+        debugLog('[Orchestrator] Image generation failed, settling residency...');
+        await this.settleAfterOffload(config);
         throw error;
       }
 
-      // Image ready — return immediately, reload LLM in background
-      debugLog('[Orchestrator] Image ready, reloading LLM in background...');
-      this.fireAndForgetReload();
+      // Image ready — settle residency, then return (the reload runs in background)
+      await this.settleAfterOffload(config);
       return result;
-    } else {
-      if (!needsOffload) {
-        debugLog('[Orchestrator] ✅ Sufficient resources - generating directly without offload');
-      } else {
-        debugLog('[Orchestrator] ✅ LLM not running - generating directly');
-      }
-      // Enough resources, generate directly (bypassing orchestrator to avoid recursion)
-      return await this.diffusionServer.executeImageGeneration(config);
     }
+
+    if (!needsOffload) {
+      debugLog('[Orchestrator] ✅ Sufficient resources - generating directly without offload');
+    } else {
+      debugLog('[Orchestrator] ✅ LLM not running - generating directly');
+    }
+    // Enough resources, generate directly (bypassing orchestrator to avoid recursion)
+    try {
+      return await run();
+    } finally {
+      // No offload happened HERE, so the default residency is 'burst'
+      const mode = this.diffusionServer.resolveUsageMode(config.usageMode, false);
+      await this.settleResidency(mode);
+
+      // An EARLIER 'burst' cycle may still be holding a saved LLM state. Releasing the
+      // backend for reason 'single' does not qualify for the callback (it is normally
+      // owned by the offload branch), so this branch has to bring the LLM back itself —
+      // otherwise a burst-then-single sequence would leave the LLM down forever.
+      if (
+        mode === 'single' &&
+        this.savedLLMState &&
+        !this.pendingReload &&
+        !this.diffusionServer.isCalibrating()
+      ) {
+        debugLog('[Orchestrator] Backend released for a single-mode request - reloading LLM');
+        this.fireAndForgetReload();
+      }
+    }
+  }
+
+  /**
+   * Settle diffusion residency for a generation that ran with the LLM offloaded
+   *
+   * `'single'` releases the backend BEFORE the LLM reload starts, so the two never
+   * hold VRAM at the same time. `'burst'` keeps the backend (and the saved LLM state):
+   * the reload is deferred until the backend is released for a qualifying reason
+   * (idle timeout, explicit release, crash, cancel, or `stop()`).
+   *
+   * The `'single'` reload is skipped when one is already in flight: a cancelled or
+   * crashed generation already released the backend for a qualifying reason, and
+   * {@link onDiffusionBackendReleased} started the reload from there.
+   *
+   * @param config - The generation's configuration (its `usageMode` is the request hint)
+   * @private
+   */
+  private async settleAfterOffload(config: ImageGenerationConfig): Promise<void> {
+    const mode = this.diffusionServer.resolveUsageMode(config.usageMode, true);
+    debugLog('[Orchestrator] Settling residency after offload:', mode);
+
+    await this.settleResidency(mode);
+
+    if (mode === 'single' && !this.pendingReload) {
+      debugLog('[Orchestrator] Backend released, reloading LLM in background...');
+      this.fireAndForgetReload();
+    } else if (mode === 'single') {
+      debugLog('[Orchestrator] Backend released - a reload is already in flight');
+    } else {
+      debugLog('[Orchestrator] Backend stays warm - LLM reload deferred until it is released');
+    }
+  }
+
+  /**
+   * Ask the diffusion manager to apply a residency decision
+   *
+   * Never throws: a backend that refuses to die must not keep the LLM offloaded.
+   *
+   * @param mode - Residency policy to apply
+   * @private
+   */
+  private async settleResidency(mode: DiffusionUsageMode): Promise<void> {
+    try {
+      await this.diffusionServer.settleResidency(mode);
+    } catch (error) {
+      console.warn('[Orchestrator] ⚠️ Failed to settle diffusion residency:', error);
+    }
+  }
+
+  /**
+   * React to the diffusion backend becoming absent
+   *
+   * Called by DiffusionServerManager after every confirmed release (with the final,
+   * rank-upgraded reason). Brings a deferred LLM back when — and only when — the
+   * release means "the VRAM is free again and nobody else is about to use it":
+   * see {@link ResourceOrchestrator.RELOAD_RELEASE_REASONS}.
+   *
+   * @param reason - Why the backend was released
+   * @internal
+   */
+  onDiffusionBackendReleased(reason: DiffusionBackendReleaseReason): void {
+    if (!ResourceOrchestrator.RELOAD_RELEASE_REASONS.has(reason)) {
+      debugLog('[Orchestrator] Backend released - no reload for reason:', reason);
+      return;
+    }
+    if (this.llamaServer.isRunning()) {
+      // The host (or the pre-start hook's own caller) already brought the LLM back;
+      // the saved state describes a server that exists again. Starting it a second
+      // time would throw, and keeping the state would make a later release restart
+      // a configuration the host has since replaced.
+      debugLog('[Orchestrator] Backend released - LLM already running, dropping saved state');
+      this.savedLLMState = undefined;
+      return;
+    }
+    if (!this.savedLLMState) {
+      debugLog('[Orchestrator] Backend released - no saved LLM state to restore');
+      return;
+    }
+    if (this.pendingReload) {
+      debugLog('[Orchestrator] Backend released - a reload is already in flight');
+      return;
+    }
+    if (this.diffusionServer.isCalibrating()) {
+      // A sweep releases its backend between combos and restores the LLM itself
+      debugLog('[Orchestrator] Backend released - suppressed while calibrating');
+      return;
+    }
+
+    debugLog('[Orchestrator] Backend released - reloading deferred LLM:', reason);
+    this.fireAndForgetReload();
+  }
+
+  /**
+   * Free VRAM for an LLM that is about to start
+   *
+   * Registered as a `LlamaServerManager` pre-start hook, making the orchestrator
+   * symmetric: an image request may offload the LLM, and an LLM start may release a
+   * resident stable-diffusion.cpp backend. No-op unless a backend is actually resident
+   * and the two would not fit together (same 75 % arithmetic as the image path, but
+   * estimating the LLM from the configuration it is about to start with).
+   *
+   * The hook sees the RAW configuration, before `start()` auto-configures it, so an
+   * omitted `gpuLayers` is resolved the way auto-configuration will resolve it — see
+   * {@link estimateAutoGpuLayers}. An explicit `gpuLayers: 0` is honoured as "CPU-only
+   * LLM" and yields nothing.
+   *
+   * The release carries reason `'llm-start'`, which never triggers a reload — the LLM
+   * start that caused it is already under way.
+   *
+   * @param ctx - The start context handed to the hook
+   * @throws {ServerError} `details.code` `'CALIBRATION_IN_PROGRESS'` when an offload
+   *   calibration sweep is running: the sweep owns the backend (and restores the LLM
+   *   itself when it is done), so a manual start must fail loudly instead of racing it.
+   *   The auto-restart path logs and ignores hook errors by design.
+   * @internal
+   */
+  async prepareForLLMStart(ctx: { config: LlamaServerConfig }): Promise<void> {
+    if (this.diffusionServer.isCalibrating()) {
+      throw new ServerError('Cannot start the LLM while diffusion calibration is running', {
+        code: 'CALIBRATION_IN_PROGRESS',
+        suggestion:
+          'Wait for calibrate() to finish (it restores the LLM itself), or abort it via its AbortSignal',
+      });
+    }
+
+    const backendState = this.diffusionServer.getBackendInfo().state;
+    if (!ResourceOrchestrator.RESIDENT_BACKEND_STATES.has(backendState)) {
+      debugLog('[Orchestrator] LLM start - no resident diffusion backend:', backendState);
+      return;
+    }
+
+    const needsRelease = await this.needsOffloadForImage(ctx.config);
+    if (!needsRelease) {
+      debugLog('[Orchestrator] LLM start - both fit, keeping the diffusion backend resident');
+      return;
+    }
+
+    debugLog('[Orchestrator] ⚠️  LLM start - releasing the diffusion backend to make room');
+    await this.diffusionServer.releaseBackend({ reason: 'llm-start', waitForInFlight: true });
   }
 
   /**
@@ -179,17 +418,19 @@ export class ResourceOrchestrator {
    *
    * Uses 75% threshold to leave headroom for OS and other processes.
    *
+   * @param llmConfigOverride - Estimate the LLM from this configuration instead of the
+   *   running server's (used by {@link prepareForLLMStart}, where the LLM is not up yet)
    * @returns True if offload is needed
    * @private
    */
-  private async needsOffloadForImage(): Promise<boolean> {
+  private async needsOffloadForImage(llmConfigOverride?: LlamaServerConfig): Promise<boolean> {
     debugLog('[Orchestrator] Checking if offload needed...');
 
     const memory = this.systemInfo.getMemoryInfo();
     const capabilities = await this.systemInfo.detect();
 
     // Estimate resource usage
-    const llamaUsage = await this.estimateLLMUsage();
+    const llamaUsage = await this.estimateLLMUsage(llmConfigOverride);
     const diffusionUsage = await this.estimateDiffusionUsage();
 
     // Determine bottleneck resource
@@ -241,16 +482,28 @@ export class ResourceOrchestrator {
    * - VRAM = model_size * gpu_ratio * 1.2
    * where gpu_ratio = gpu_layers / estimated_total_layers
    *
+   * @param configOverride - Estimate this configuration instead of the running
+   *   server's. With an override the "is it running?" short-circuit is skipped
+   *   entirely: the caller is asking what the LLM WOULD cost, which is exactly the
+   *   question a pre-start hook has to answer, and an omitted `gpuLayers` is resolved
+   *   the way `start()` will resolve it (see {@link estimateAutoGpuLayers}).
    * @returns Resource requirements
    * @private
    */
-  private async estimateLLMUsage(): Promise<ResourceRequirements> {
-    if (!this.llamaServer.isRunning()) {
-      debugLog('[Orchestrator] LLM not running - usage: 0');
-      return { ram: 0, vram: 0 };
+  private async estimateLLMUsage(
+    configOverride?: LlamaServerConfig
+  ): Promise<ResourceRequirements> {
+    let config: ServerConfig | undefined = configOverride;
+
+    if (!config) {
+      if (!this.llamaServer.isRunning()) {
+        debugLog('[Orchestrator] LLM not running - usage: 0');
+        return { ram: 0, vram: 0 };
+      }
+
+      config = this.llamaServer.getConfig();
     }
 
-    const config = this.llamaServer.getConfig();
     if (!config) {
       debugLog('[Orchestrator] LLM config not found - usage: 0');
       return { ram: 0, vram: 0 };
@@ -258,10 +511,16 @@ export class ResourceOrchestrator {
 
     try {
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
-      const gpuLayers = config.gpuLayers || 0;
 
       // Get actual layer count from GGUF metadata (or fallback to estimation)
       const totalLayers = await this.modelManager.getModelLayerCount(config.modelId);
+
+      // A RAW start configuration usually has no gpuLayers yet — start() fills it in
+      // from SystemInfo. Taking it at face value would price the LLM at zero VRAM.
+      const gpuLayers =
+        configOverride !== undefined && configOverride.gpuLayers === undefined
+          ? await this.estimateAutoGpuLayers(modelInfo, configOverride, totalLayers)
+          : config.gpuLayers || 0;
 
       // Real KV-cache cost for the configured context (0 without metadata,
       // matching the legacy weights-only estimate)
@@ -316,6 +575,69 @@ export class ResourceOrchestrator {
       // If we can't get model info, return conservative estimate
       debugLog('[Orchestrator] Failed to get LLM model info:', error);
       return { ram: 0, vram: 0 };
+    }
+  }
+
+  /**
+   * GPU layers an LLM start would actually end up using
+   *
+   * `prepareForLLMStart()` is handed the RAW configuration the caller passed to
+   * `start()`, where `gpuLayers` is normally absent — `LlamaServerManager` resolves it
+   * from `SystemInfo.getOptimalConfig()` later, inside `start()` itself. Reading the raw
+   * value would score the LLM at 0 VRAM, the two would always "fit", and the hook would
+   * never yield the diffusion backend.
+   *
+   * Mirrors the auto-configuration by asking the same source, with the same hints. When
+   * that is unavailable, falls back to "everything on the GPU" whenever a GPU with VRAM
+   * is detected — the conservative answer for a fit question.
+   *
+   * @param modelInfo - The LLM model that is about to start
+   * @param config - The raw start configuration (its `gpuLayers` is undefined)
+   * @param totalLayers - Layer count of the model
+   * @returns Layers that would be placed on the GPU
+   * @private
+   */
+  private async estimateAutoGpuLayers(
+    modelInfo: ModelInfo,
+    config: LlamaServerConfig,
+    totalLayers: number
+  ): Promise<number> {
+    try {
+      // Same hint shape LlamaServerManager.autoConfigureIfNeeded() passes: the exact
+      // context size wins, otherwise the context POLICY fields do (mutually exclusive).
+      const usePolicyForSizing = config.contextSize === undefined;
+      const optimal = await this.systemInfo.getOptimalConfig(modelInfo, {
+        contextSize: config.contextSize,
+        minimumContextSize: usePolicyForSizing ? config.minimumContextSize : undefined,
+        preferredContextSize: usePolicyForSizing ? config.preferredContextSize : undefined,
+        maximumContextSize: usePolicyForSizing ? config.maximumContextSize : undefined,
+        parallelRequests: config.parallelRequests,
+        flashAttention: config.flashAttention,
+        cacheTypeK: config.cacheTypeK,
+        cacheTypeV: config.cacheTypeV,
+        cpuMoe: config.cpuMoe,
+        nCpuMoe: config.nCpuMoe,
+        overrideTensors: config.overrideTensors,
+      });
+      if (typeof optimal.gpuLayers === 'number' && Number.isFinite(optimal.gpuLayers)) {
+        debugLog(
+          '[Orchestrator] LLM start - auto gpuLayers from optimal config:',
+          optimal.gpuLayers
+        );
+        return optimal.gpuLayers;
+      }
+    } catch (error) {
+      debugLog('[Orchestrator] LLM start - optimal config unavailable:', error);
+    }
+
+    try {
+      const capabilities = await this.systemInfo.detect();
+      const onGpu = capabilities.gpu.available && !!capabilities.gpu.vram;
+      debugLog('[Orchestrator] LLM start - assuming', onGpu ? 'a full' : 'no', 'GPU offload');
+      return onGpu ? totalLayers : 0;
+    } catch (error) {
+      debugLog('[Orchestrator] LLM start - GPU detection failed:', error);
+      return 0;
     }
   }
 
@@ -465,17 +787,28 @@ export class ResourceOrchestrator {
    * Start LLM reload in the background (fire-and-forget)
    *
    * Stores the reload promise so concurrent orchestration calls
-   * can await it before starting a new offload cycle.
+   * can await it before starting a new offload cycle, and clears that slot again once
+   * this cycle settles — otherwise a completed reload would keep every later
+   * qualifying release from starting a new one.
+   *
+   * The single trigger for an LLM reload: every caller checks `pendingReload` first,
+   * which is what makes "exactly one reload per offload cycle" true even when a cancel
+   * or a crash releases the backend before the orchestration branch settles.
    *
    * @private
    */
   private fireAndForgetReload(): void {
-    this.pendingReload = this.reloadLLM();
+    const reload = this.reloadLLM();
+    this.pendingReload = reload;
     // Safety net: prevent unhandled rejection warnings.
     // reloadLLM() handles all errors internally, but Node.js
     // may still flag the detached promise.
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    this.pendingReload.catch(() => {});
+    void reload
+      .catch(() => undefined)
+      .finally(() => {
+        // Identity check: a newer cycle may already own the slot
+        if (this.pendingReload === reload) this.pendingReload = null;
+      });
   }
 
   /**
@@ -529,6 +862,13 @@ export class ResourceOrchestrator {
    *
    * Resolves immediately if no reload is in progress.
    *
+   * **Residency caveat**: under `'burst'` after an offload the LLM is intentionally
+   * still down when this resolves — no reload has been started yet. The deferred
+   * reload fires when the diffusion backend is released (idle timeout, an explicit
+   * `releaseBackend()`, a backend crash, a cancelled generation, or
+   * `diffusionServer.stop()`), so a caller that needs the LLM back right away should
+   * release the backend first.
+   *
    * @example
    * ```typescript
    * const result = await orchestrator.orchestrateImageGeneration(config);
@@ -538,9 +878,10 @@ export class ResourceOrchestrator {
    * ```
    */
   async waitForReload(): Promise<void> {
-    if (this.pendingReload) {
-      await this.pendingReload;
-      this.pendingReload = null;
+    const inFlightReload = this.pendingReload;
+    if (inFlightReload) {
+      await inFlightReload;
+      if (this.pendingReload === inFlightReload) this.pendingReload = null;
     }
   }
 

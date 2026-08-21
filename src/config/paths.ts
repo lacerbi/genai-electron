@@ -36,8 +36,21 @@ export const PATHS = {
   logs: path.join(BASE_DIR, 'logs'),
   /** Configuration files directory */
   config: path.join(BASE_DIR, 'config'),
-  /** Temporary files directory (for intermediate image generation outputs, etc.) */
+  /**
+   * General scratch directory for short-lived files.
+   *
+   * Image generation no longer writes here: results travel from the `sd-server`
+   * backend as base64 in JSON and are decoded in memory.
+   */
   temp: path.join(BASE_DIR, 'temp'),
+  /**
+   * LoRA directory handed to stable-diffusion.cpp as `--lora-model-dir`.
+   *
+   * Always a library-owned directory (never the model directory): sd.cpp enumerates the
+   * LoRA dir, and pointing it at the models directory would make it try to read model
+   * files as LoRAs (leejet/stable-diffusion.cpp#1468). Normally empty.
+   */
+  loras: path.join(BASE_DIR, 'loras'),
 } as const;
 
 /**
@@ -61,6 +74,7 @@ export async function ensureDirectories(): Promise<void> {
     PATHS.logs,
     PATHS.config,
     PATHS.temp,
+    PATHS.loras,
   ];
 
   await Promise.all(directories.map((dir) => mkdir(dir, { recursive: true })));
@@ -173,15 +187,15 @@ export function getConfigPath(configName: string): string {
 }
 
 /**
- * Get the temp file path
+ * Get a path inside the general scratch directory
  *
- * @param filename - Temporary file name (e.g., "sd-output-12345.png")
+ * @param filename - Temporary file name (e.g., "download-manifest.json")
  * @returns Absolute path to temp file
  *
  * @example
  * ```typescript
- * const tempPath = getTempPath('sd-output-12345.png');
- * // Returns: /path/to/userData/temp/sd-output-12345.png
+ * const tempPath = getTempPath('download-manifest.json');
+ * // Returns: /path/to/userData/temp/download-manifest.json
  * ```
  */
 export function getTempPath(filename: string): string {

@@ -42,7 +42,11 @@ Each manager is independent but can coordinate:
 - **SystemInfo**: Hardware detection, capability assessment, config recommendations
 - **ModelManager**: Model downloads, storage, metadata, checksums
 - **LlamaServerManager**: Binary downloads, process spawning, health monitoring, lifecycle management
-- **DiffusionServerManager**: Image generation server, HTTP wrapper for stable-diffusion.cpp (Phase 2)
+- **DiffusionServerManager**: Image generation server — a `node:http` wrapper in front of a
+  persistent stable-diffusion.cpp `sd-server` backend (spawned lazily on the first image, driven
+  through its async job API). Residency is a policy: `'single'` releases the backend after the
+  image, `'burst'` keeps it warm until `idleTimeoutMs`; `'auto'` picks `'single'` after an LLM
+  offload and `'burst'` otherwise
 
 ### Module Organization
 
@@ -51,7 +55,8 @@ src/
 ├── managers/       # Core managers (ModelManager, LlamaServerManager, DiffusionServerManager,
 │                   #   ResourceOrchestrator, GenerationRegistry, StorageManager, ServerManager)
 ├── system/         # Platform-specific hardware detection (SystemInfo, CPU, GPU, memory)
-├── process/        # Process lifecycle (spawn, health checks, logs)
+├── process/        # Process lifecycle (spawn, health checks, logs, sd-server runner/client).
+│                   #   Node-safe by lint rule: no `electron` or `config/paths.js` imports here
 ├── download/       # Download utilities (streaming, checksums, HuggingFace URLs)
 ├── config/         # Paths, defaults, binary versions
 ├── types/          # TypeScript definitions
@@ -82,6 +87,9 @@ src/
 - Downloaded on first `start()` call from GitHub releases
 - Cached in `userData/binaries/` with version tracking
 - Platform-specific downloads only (~50-100MB per platform)
+- Primary validated binaries: `llama-server` and `sd-server` (the diffusion zip also contains
+  `sd-cli`, which the library never executes). Diffusion Phase-2 validation launches `sd-server`
+  through the production runner/client and pushes one 64×64/1-step job through its job API
 - See `src/config/defaults.ts` for `BINARY_VERSIONS` configuration
 
 **5. Event-Driven Server Lifecycle**
@@ -135,9 +143,11 @@ src/
 - **Generation ID**: `generateId()` - Used internally by async image generation API
 - **Multi-Component**: `DIFFUSION_COMPONENT_FLAGS`, `DIFFUSION_COMPONENT_ORDER`, `getModelDirectory()` - Multi-file diffusion model support
 - **Port Utilities**: `findFreePort()`, `isPortBindable()` - Free-port selection and bind testing (also `port: 'auto'` on server configs)
-- **Cancellation**: `DiffusionServerManager.cancelImageGeneration()` / `getActiveGenerationId()` - Cancel in-flight async image generation (also `DELETE /v1/images/generations/:id`)
+- **Cancellation**: `DiffusionServerManager.cancelImageGeneration()` / `getActiveGenerationId()` - Cancel in-flight async image generation (also `DELETE /v1/images/generations/:id`). A queued job is cancelled through the backend; a generating one kills the backend and answers on initiation (wire code `GENERATION_CANCELLED`)
+- **Diffusion Backend Residency**: `DiffusionServerManager.releaseBackend({ reason, waitForInFlight })` / `getBackendInfo()` / `resolveUsageMode()` / `settleResidency()`, the `'backend-status'` event (`DiffusionBackendStatusEvent`), `getInfo().backend`, `/health.backend`, and `DIFFUSION_BACKEND_DEFAULTS` (`idleTimeoutMs` 300 000, `jobPollIntervalMs`, `jobRequestTimeoutMs` 10 000, ready/stop timeouts, `maxTransientPollFailures`). Config: `host` (default `127.0.0.1`), `startupTimeout`, `usageMode`, `idleTimeoutMs`; per-request `ImageGenerationConfig.usageMode`. Types: `DiffusionUsageMode`, `DiffusionBackendState`, `DiffusionBackendReleaseReason`, `DiffusionBackendInfo`, `DiffusionBackendStatusEvent`. A backend crash surfaces as `'backend-status'` (`reason: 'crashed'`), never as `'crashed'`; `isHealthy()` stays wrapper-scoped
+- **LLM Pre-Start Hook**: `LlamaServerManager.registerPreStartHook(hook) => unregister` - Hooks run inside `start()` after `setStatus('starting')`; `ResourceOrchestrator` uses it (`prepareForLLMStart()`) so an LLM start yields a resident diffusion backend, making orchestration symmetric (release-before-reload, deferred reload under `'burst'`, batches through `orchestrateBatchGeneration()`). The deferred reload fires on release reasons `idle-timeout | explicit | crashed | stop | cancel` (`'cancel'` included because a cancelled generation kills the backend and then ends). The built-in hook throws `ServerError` `details.code: 'CALIBRATION_IN_PROGRESS'` while an offload sweep is running (auto-restart logs and ignores it)
 - **LLM Runtime Calibration**: `LlamaServerManager.calibrate()` / `isCalibrating()`, `LLAMA_CALIBRATION_DEFAULTS`, and the `'calibration-progress'` event. Adaptive mode uses one or two comparable `profiles` and no `combos`; exact diagnostic mode uses one singular `profile` plus non-empty caller-ordered `combos`. Schema-v4 reports (policy `llama-runtime-v4`) use one total method-entry clock with a fixed 60-minute library default, optional unbounded-by-default `maxProbes`, time-based progress, and best-clean `selected` results with literal `selectionEvidence` plus `searchCompleteness`; `resultKind` exhaustively separates ordinary reports from preparation-time limits. The library remains report-only; the host may apply, persist, present, or ignore a selection. Run-level `resourceMonitoring` and chronological probes retain required `resourceValidity` plus optional `resourceBoundaries`; a typed resource rejection may carry application-ready clean prior `bestKnown` evidence. One fixed baseline per enabled trusted metric (host RAM, VRAM) is captured after preparation and never re-anchored, so comparison is cumulative; a confirmed crossing of its band in either direction, or a suspicious boundary that cannot be verified clean, hard-stops **both** modes with `LlamaCalibrationResourceStabilityError` (`details.code` is `CALIBRATION_RESOURCE_DRIFT` or `CALIBRATION_RESOURCE_STABILITY_UNVERIFIED`, details carry a `LlamaCalibrationResourceFailurePartialReport`). Snapshots call `SystemInfo.refreshMemoryTelemetry()`, whose typed status decides host trust. See `genai-electron-docs/llm-server.md`.
-- **Offload Calibration**: `DiffusionServerManager.calibrate()` / `isCalibrating()`, `DIFFUSION_CALIBRATION_DEFAULTS`, `'calibration-progress'` event - Benchmark CPU-offload flag combos per machine. `calibrate()` requires `sizes` + a `generation` block (`steps`/`cfgScale`/`sampler`) that must mirror production — a `cfgScale` mismatch doubles the measured work and can invert the ranking (types: `DiffusionOffloadCombo`, `CalibrationSize`, `DiffusionCalibrationGeneration`, `CalibrationRun`, `DiffusionCalibration{Config,Progress,Report}`)
+- **Offload Calibration**: `DiffusionServerManager.calibrate()` / `isCalibrating()`, `DIFFUSION_CALIBRATION_DEFAULTS`, `'calibration-progress'` event - Benchmark CPU-offload flag combos per machine. `calibrate()` requires `sizes` + a `generation` block (`steps`/`cfgScale`/`sampler`) that must mirror production — a `cfgScale` mismatch doubles the measured work and can invert the ranking. `usageMode` selects what is measured (default `'single'` = a cold backend spawn per timed sample; `'burst'` = warm samples on one launch per combo), reports echo it plus `policyVersion: 'diffusion-offload-v2'` and per-run `vramPeakBytes`/`vramIdleBytes` (omitted when GPU telemetry is untrusted, always on macOS). `stageMs.loadMs` is mode-dependent (spawn-relative in `'single'`, submit-relative in `'burst'`), so timings only compare within one `usageMode`; a stored report with no `policyVersion` is a pre-migration v1 report (types: `DiffusionOffloadCombo`, `CalibrationSize`, `DiffusionCalibrationGeneration`, `CalibrationRun`, `DiffusionCalibration{Config,Progress,Report}`)
 - **Types**: `ArtifactProvenance`, `DiffusionComponentRole`, `DiffusionComponentInfo`, `DiffusionModelComponents`, `DiffusionComponentDownload`, `ShardInfo`, `KVCacheType`, `FlashAttentionSetting`, `LogRotationOptions`
 - **Complete list**: See `src/index.ts` for all exported utilities, types, and classes
 

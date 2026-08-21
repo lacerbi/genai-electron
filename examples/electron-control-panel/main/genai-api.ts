@@ -73,8 +73,10 @@ export function setupServerEventForwarding(): void {
     }
   });
 
-  // Note: DiffusionServerManager does not currently emit 'crashed' (it uses on-demand
-  // spawning, not a persistent process). Kept for forward-compatibility.
+  // Note: DiffusionServerManager does not currently emit 'crashed'. The public server is an
+  // in-process HTTP wrapper; when its resident sd-server backend dies, that surfaces as a
+  // 'backend-status' event (reason: 'crashed') and the wrapper keeps running. Kept for
+  // forward-compatibility.
   diffusionServer.on('crashed', (data: { code: number | null; signal: string | null }) => {
     const mainWindow = BrowserWindow.getAllWindows()[0];
     if (mainWindow) {

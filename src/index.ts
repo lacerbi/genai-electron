@@ -6,7 +6,7 @@
  * to run AI models locally on desktop systems.
  *
  * @module genai-electron
- * @version 0.24.0
+ * @version 0.25.0
  * @license MIT
  *
  * @example
@@ -142,7 +142,11 @@ export const llamaServer = new LlamaServerManager();
  * When generateImage() is called, the server automatically manages resources:
  * - If resources are constrained, temporarily offloads the LLM server
  * - Generates the image
- * - Restores the LLM server to its previous state
+ * - Restores the LLM server to its previous state — immediately under the `'single'`
+ *   residency policy (the default once the LLM had to be offloaded). Under `'burst'`
+ *   the stable-diffusion.cpp backend stays warm for the next image and the LLM reload
+ *   is deferred until that backend is released (idle timeout, explicit
+ *   `releaseBackend()`, crash, cancellation, or `stop()`).
  *
  * @example
  * ```typescript
@@ -254,6 +258,7 @@ export {
   DIFFUSION_COMPONENT_FLAGS,
   DIFFUSION_COMPONENT_ORDER,
   DIFFUSION_CALIBRATION_DEFAULTS,
+  DIFFUSION_BACKEND_DEFAULTS,
   LLAMA_CALIBRATION_DEFAULTS,
 } from './config/defaults.js';
 
@@ -294,6 +299,7 @@ export type {
   ServerInfo,
   LlamaServerReadyState,
   LlamaServerConfig,
+  LlamaPreStartHook,
   ServerEvent,
   ServerEventData,
   BinaryLogEvent,
@@ -379,6 +385,11 @@ export type {
   ImageGenerationResult,
   DiffusionServerConfig,
   DiffusionServerInfo,
+  DiffusionUsageMode,
+  DiffusionBackendState,
+  DiffusionBackendReleaseReason,
+  DiffusionBackendInfo,
+  DiffusionBackendStatusEvent,
   GenerationStatus,
   GenerationState,
   DiffusionOffloadCombo,

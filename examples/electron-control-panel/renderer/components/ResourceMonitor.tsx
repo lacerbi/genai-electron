@@ -145,7 +145,8 @@ const ResourceMonitor: React.FC = () => {
                 </div>
                 {usage.diffusionServer.pid && (
                   <div className="detail-item">
-                    <label>PID:</label>
+                    {/* The wrapper is in-process; this PID is the sd-server backend's. */}
+                    <label>Backend PID:</label>
                     <span>{usage.diffusionServer.pid}</span>
                   </div>
                 )}

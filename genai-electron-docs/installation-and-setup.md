@@ -30,6 +30,11 @@ See [Integration Guide](integration-guide.md) for initialization and module-load
 - Version 11+ (Big Sur and later)
 - Architectures: Intel (x64), Apple Silicon (arm64)
 - GPU: Metal support automatic on 2016+ Macs
+- **Image generation is Apple-silicon only.** Upstream stable-diffusion.cpp publishes no
+  Intel-macOS prebuilt binary, so `diffusionServer.start()` on an Intel Mac fails with a
+  `BinaryError` that says so. The LLM server ships a `darwin-x64` CPU build and is unaffected.
+  Workaround: build stable-diffusion.cpp from source and drop `sd-server` into
+  `<userData>/binaries/diffusion`.
 
 ### Windows
 - Version 10+ (64-bit)
@@ -40,6 +45,12 @@ See [Integration Guide](integration-guide.md) for initialization and module-load
 - Distributions: Ubuntu 20.04+, Debian 11+, Fedora 35+
 - Architecture: x64
 - GPU: NVIDIA CUDA, AMD ROCm (experimental), Intel
+- **NVIDIA GPUs run through Vulkan, not CUDA.** At the pinned builds neither upstream ships a
+  Linux CUDA release asset, so the Linux variant chain is **Vulkan → CPU** for both servers.
+  Diffusion provisioning additionally logs a warning on a CUDA-capable machine
+  (`No Linux CUDA prebuilt for stable-diffusion.cpp; using the Vulkan variant …`). It works, but
+  Vulkan throughput is uneven across GPUs and drivers. Build from source with CUDA if that
+  matters — see [Troubleshooting](troubleshooting.md#linux-nvidia-no-cuda-prebuilt-vulkan-used).
 
 **Technology Stack**: Node.js >=22.0.0, TypeScript ^5.7.2, and two external runtime
 dependencies (`@huggingface/gguf`, `tar`). The exact-pinned adm-zip implementation is embedded in
@@ -53,7 +64,9 @@ GPU acceleration is optional but recommended for performance.
 
 **macOS**: Metal support is automatic on modern Macs (2016+). No driver installation needed.
 
-**Windows/Linux NVIDIA**: Install latest NVIDIA drivers. CUDA toolkit is **not required** - bundled binaries include CUDA runtime.
+**Windows NVIDIA**: Install latest NVIDIA drivers. CUDA toolkit is **not required** - the downloaded binaries include the CUDA runtime.
+
+**Linux NVIDIA**: Install latest NVIDIA drivers **plus the Vulkan loader / NVIDIA Vulkan driver** — at the pinned builds neither upstream ships a Linux CUDA asset, so acceleration goes through Vulkan (see the platform note above).
 
 **Linux AMD**: Install ROCm drivers (experimental support, may not work with all models).
 

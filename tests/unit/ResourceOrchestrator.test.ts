@@ -15,6 +15,7 @@ const mockSystemInfo = {
   detect: jest.fn(),
   getMemoryInfo: jest.fn(),
   clearCache: jest.fn(),
+  getOptimalConfig: jest.fn(),
 };
 
 jest.unstable_mockModule('../../src/system/SystemInfo.js', () => ({
@@ -75,11 +76,23 @@ describe('ResourceOrchestrator', () => {
       start: jest.fn(),
     };
 
+    // Plain-object stand-in for DiffusionServerManager. The residency methods mirror
+    // the real manager's semantics (see resolveUsageMode/settleResidency there) so the
+    // orchestration branches are exercised against faithful defaults.
     mockDiffusionServer = {
       isRunning: jest.fn(),
       getConfig: jest.fn(),
       generateImage: jest.fn(),
       executeImageGeneration: jest.fn(),
+      executeBatchGeneration: jest.fn(),
+      resolveUsageMode: jest.fn(
+        (requestMode: 'burst' | 'single' | undefined, llmWasOffloaded: boolean) =>
+          requestMode ?? (llmWasOffloaded ? 'single' : 'burst')
+      ),
+      settleResidency: jest.fn(async () => {}),
+      releaseBackend: jest.fn(async () => {}),
+      isCalibrating: jest.fn(() => false),
+      getBackendInfo: jest.fn(() => ({ state: 'absent' })),
     };
 
     // Setup default mocks
@@ -114,6 +127,9 @@ describe('ResourceOrchestrator', () => {
       throw new Error('layer count not mocked');
     });
 
+    // What LlamaServerManager.autoConfigureIfNeeded() would fill in for a raw config
+    mockSystemInfo.getOptimalConfig.mockResolvedValue({ gpuLayers: 32, threads: 7 });
+
     mockLlamaServer.isRunning.mockReturnValue(false);
     mockLlamaServer.stop.mockResolvedValue(undefined);
     mockLlamaServer.start.mockResolvedValue({ status: 'running', port: 8080 });
@@ -128,6 +144,16 @@ describe('ResourceOrchestrator', () => {
       width: 1024,
       height: 1024,
     });
+    mockDiffusionServer.executeBatchGeneration.mockImplementation(async (config: any) =>
+      Array.from({ length: config.count ?? 1 }, (_unused, index) => ({
+        image: Buffer.from(`fake-image-${index}`),
+        format: 'png',
+        timeTaken: 5000,
+        seed: 12345 + index,
+        width: 1024,
+        height: 1024,
+      }))
+    );
 
     // Create orchestrator with mocked servers
     orchestrator = new ResourceOrchestrator(
@@ -137,6 +163,32 @@ describe('ResourceOrchestrator', () => {
       mockModelManager
     );
   });
+
+  /** 6 GB VRAM: the LLM + a 6.5 GB diffusion model never fit together. */
+  const constrainVram = (vramGiB = 6): void => {
+    mockSystemInfo.detect.mockResolvedValue({
+      cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+      memory: { total: 16 * 1024 ** 3, available: 12 * 1024 ** 3, used: 4 * 1024 ** 3 },
+      gpu: { available: true, type: 'nvidia', vram: vramGiB * 1024 ** 3 },
+      platform: 'linux',
+      recommendations: {
+        maxModelSize: '7B',
+        recommendedQuantization: ['Q4_K_M'],
+        threads: 7,
+        gpuLayers: 35,
+      },
+    });
+  };
+
+  /** A running LLM whose offload the constrained-VRAM setup will require. */
+  const runningLLM = (): void => {
+    mockLlamaServer.isRunning.mockReturnValue(true);
+    mockLlamaServer.getConfig.mockReturnValue({
+      modelId: 'llama-2-7b',
+      port: 8080,
+      gpuLayers: 35,
+    });
+  };
 
   describe('orchestrateImageGeneration()', () => {
     const imageConfig: ImageGenerationConfig = {
@@ -538,6 +590,533 @@ describe('ResourceOrchestrator', () => {
 
       consoleWarnSpy.mockRestore();
       jest.useRealTimers();
+    });
+  });
+
+  describe('residency settle (Phase 4)', () => {
+    const imageConfig: ImageGenerationConfig = { prompt: 'a cat', width: 512, height: 512 };
+
+    it("releases the backend BEFORE the LLM reload starts in 'single' mode", async () => {
+      runningLLM();
+      constrainVram();
+
+      await orchestrator.orchestrateImageGeneration(imageConfig);
+
+      // Default after an offload is 'single'
+      expect(mockDiffusionServer.resolveUsageMode).toHaveBeenCalledWith(undefined, true);
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledWith('single');
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledTimes(1);
+
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+      // Release-before-reload: the settle is awaited before start() is even called
+      expect(mockDiffusionServer.settleResidency.mock.invocationCallOrder[0]).toBeLessThan(
+        mockLlamaServer.start.mock.invocationCallOrder[0]
+      );
+    });
+
+    it("settles once and reloads once when the generation FAILS in 'single' mode", async () => {
+      runningLLM();
+      constrainVram();
+      mockDiffusionServer.executeImageGeneration.mockRejectedValue(new Error('Generation failed'));
+
+      await expect(orchestrator.orchestrateImageGeneration(imageConfig)).rejects.toThrow(
+        'Generation failed'
+      );
+
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledTimes(1);
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledWith('single');
+
+      await orchestrator.waitForReload();
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+    });
+
+    it("keeps the backend and DEFERS the reload in 'burst' mode", async () => {
+      runningLLM();
+      constrainVram();
+
+      await orchestrator.orchestrateImageGeneration({ ...imageConfig, usageMode: 'burst' });
+
+      expect(mockDiffusionServer.resolveUsageMode).toHaveBeenCalledWith('burst', true);
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledWith('burst');
+
+      await orchestrator.waitForReload();
+
+      // Still offloaded: nothing released the backend yet
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
+      expect(orchestrator.getSavedState()).toBeDefined();
+      // offloadLLM() stopped it — the mock has to say so, or the callback below reads
+      // the LLM as already back up
+      mockLlamaServer.isRunning.mockReturnValue(false);
+
+      // The deferred reload fires on a qualifying release
+      orchestrator.onDiffusionBackendReleased('idle-timeout');
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+      expect(orchestrator.getSavedState()).toBeUndefined();
+    });
+
+    it('honours a server-level usageMode through the manager resolver', async () => {
+      runningLLM();
+      constrainVram();
+      // The manager (not the orchestrator) applies request > server config > default
+      mockDiffusionServer.resolveUsageMode.mockReturnValue('burst');
+
+      await orchestrator.orchestrateImageGeneration(imageConfig);
+      await orchestrator.waitForReload();
+
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledWith('burst');
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
+    });
+
+    it('settles with the no-offload default when nothing had to be offloaded', async () => {
+      mockLlamaServer.isRunning.mockReturnValue(false);
+
+      await orchestrator.orchestrateImageGeneration(imageConfig);
+
+      expect(mockDiffusionServer.resolveUsageMode).toHaveBeenCalledWith(undefined, false);
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledWith('burst');
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
+    });
+
+    it("settles an explicit 'single' request even without an offload", async () => {
+      mockLlamaServer.isRunning.mockReturnValue(false);
+
+      await orchestrator.orchestrateImageGeneration({ ...imageConfig, usageMode: 'single' });
+
+      expect(mockDiffusionServer.resolveUsageMode).toHaveBeenCalledWith('single', false);
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledWith('single');
+    });
+
+    it('still settles when a non-offloaded generation fails', async () => {
+      mockLlamaServer.isRunning.mockReturnValue(false);
+      mockDiffusionServer.executeImageGeneration.mockRejectedValue(new Error('boom'));
+
+      await expect(orchestrator.orchestrateImageGeneration(imageConfig)).rejects.toThrow('boom');
+
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledTimes(1);
+    });
+
+    /**
+     * The manager releases the backend mid-generation (cancel, crash) and reports the
+     * confirmed release through the same seam the real one uses, then the generation
+     * fails. Mirrors DiffusionServerManager.releaseBackend() → onBackendReleased().
+     */
+    const releaseDuringGeneration = (reason: 'cancel' | 'crashed', message: string): void => {
+      mockDiffusionServer.executeImageGeneration.mockImplementation(async () => {
+        // offloadLLM() really stopped the LLM before the generation started
+        mockLlamaServer.isRunning.mockReturnValue(false);
+        orchestrator.onDiffusionBackendReleased(reason);
+        throw new Error(message);
+      });
+    };
+
+    it("reloads exactly once when a 'burst' generation is cancelled", async () => {
+      runningLLM();
+      constrainVram();
+      releaseDuringGeneration('cancel', 'Image generation cancelled');
+
+      await expect(
+        orchestrator.orchestrateImageGeneration({ ...imageConfig, usageMode: 'burst' })
+      ).rejects.toThrow('cancelled');
+      await orchestrator.waitForReload();
+
+      // Without 'cancel' in the reload set the LLM would stay down forever: burst
+      // defers the reload, and the cancel already killed the backend that would
+      // otherwise have released it later.
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+      expect(orchestrator.getSavedState()).toBeUndefined();
+    });
+
+    it("reloads exactly once when a 'single' generation is cancelled", async () => {
+      runningLLM();
+      constrainVram();
+      releaseDuringGeneration('cancel', 'Image generation cancelled');
+
+      await expect(
+        orchestrator.orchestrateImageGeneration({ ...imageConfig, usageMode: 'single' })
+      ).rejects.toThrow('cancelled');
+      await orchestrator.waitForReload();
+
+      // The cancel callback reloaded; the 'single' settle must not reload a second time
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+    });
+
+    it('reloads exactly once when the backend crashes during an offloaded generation', async () => {
+      runningLLM();
+      constrainVram();
+      releaseDuringGeneration('crashed', 'stable-diffusion.cpp exited with code 1');
+
+      await expect(orchestrator.orchestrateImageGeneration(imageConfig)).rejects.toThrow(
+        'exited with code 1'
+      );
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+    });
+
+    it("reloads a burst-deferred LLM when a later non-offload request settles as 'single'", async () => {
+      runningLLM();
+      constrainVram();
+      await orchestrator.orchestrateImageGeneration({ ...imageConfig, usageMode: 'burst' });
+      await orchestrator.waitForReload();
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
+      expect(orchestrator.getSavedState()).toBeDefined();
+
+      // The LLM is down now, so the next request takes the NON-offload branch — which
+      // still has to bring it back when that request releases the backend
+      mockLlamaServer.isRunning.mockReturnValue(false);
+      await orchestrator.orchestrateImageGeneration({ ...imageConfig, usageMode: 'single' });
+
+      expect(mockDiffusionServer.settleResidency).toHaveBeenLastCalledWith('single');
+      await orchestrator.waitForReload();
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+      expect(orchestrator.getSavedState()).toBeUndefined();
+    });
+
+    it("keeps a burst-deferred LLM down when a later non-offload request stays 'burst'", async () => {
+      runningLLM();
+      constrainVram();
+      await orchestrator.orchestrateImageGeneration({ ...imageConfig, usageMode: 'burst' });
+      mockLlamaServer.isRunning.mockReturnValue(false);
+
+      await orchestrator.orchestrateImageGeneration({ ...imageConfig, usageMode: 'burst' });
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
+      expect(orchestrator.getSavedState()).toBeDefined();
+    });
+
+    it('reloads the LLM even when the settle itself fails', async () => {
+      runningLLM();
+      constrainVram();
+      mockDiffusionServer.settleResidency.mockRejectedValue(new Error('kill failed'));
+      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await orchestrator.orchestrateImageGeneration(imageConfig);
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+      consoleWarnSpy.mockRestore();
+    });
+  });
+
+  describe('onDiffusionBackendReleased()', () => {
+    const imageConfig: ImageGenerationConfig = { prompt: 'a cat' };
+
+    /** Offload the LLM and leave the backend resident (burst), so a reload is pending. */
+    const offloadAndDefer = async (): Promise<void> => {
+      runningLLM();
+      constrainVram();
+      await orchestrator.orchestrateImageGeneration({ ...imageConfig, usageMode: 'burst' });
+      await orchestrator.waitForReload();
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
+      mockLlamaServer.isRunning.mockReturnValue(false);
+    };
+
+    it.each(['idle-timeout', 'explicit', 'crashed', 'stop', 'cancel'] as const)(
+      "reloads the deferred LLM for reason '%s'",
+      async (reason) => {
+        await offloadAndDefer();
+
+        orchestrator.onDiffusionBackendReleased(reason);
+        await orchestrator.waitForReload();
+
+        expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+      }
+    );
+
+    it.each(['single', 'llm-start', 'shutdown', 'calibration', 'flags-changed'] as const)(
+      "never reloads for reason '%s'",
+      async (reason) => {
+        await offloadAndDefer();
+
+        orchestrator.onDiffusionBackendReleased(reason);
+        await orchestrator.waitForReload();
+
+        expect(mockLlamaServer.start).not.toHaveBeenCalled();
+        expect(orchestrator.getSavedState()).toBeDefined();
+      }
+    );
+
+    it('drops the saved state instead of restarting an LLM the host already brought back', async () => {
+      await offloadAndDefer();
+      // The host started the LLM itself while the backend was still warm
+      mockLlamaServer.isRunning.mockReturnValue(true);
+
+      orchestrator.onDiffusionBackendReleased('idle-timeout');
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
+      expect(orchestrator.getSavedState()).toBeUndefined();
+    });
+
+    it('can reload again after an earlier reload cycle completed', async () => {
+      // Deliberately never calls waitForReload()/orchestrate*() in between: those clear
+      // the pending-reload slot themselves, so only a self-clearing slot makes the
+      // second release reload again.
+      const settle = async (): Promise<void> => {
+        for (let i = 0; i < 3; i++) await new Promise((resolve) => setImmediate(resolve));
+      };
+
+      await offloadAndDefer();
+      orchestrator.onDiffusionBackendReleased('explicit');
+      await settle();
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+      expect(orchestrator.getSavedState()).toBeUndefined();
+
+      // A second offload cycle leaves a new saved state behind
+      runningLLM();
+      await orchestrator.offloadLLM();
+      mockLlamaServer.isRunning.mockReturnValue(false);
+
+      orchestrator.onDiffusionBackendReleased('explicit');
+      await settle();
+
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(2);
+    });
+
+    it('does nothing without saved LLM state', async () => {
+      orchestrator.onDiffusionBackendReleased('idle-timeout');
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
+    });
+
+    it('does not start a second reload while one is already in flight', async () => {
+      await offloadAndDefer();
+
+      orchestrator.onDiffusionBackendReleased('explicit');
+      // Second release before the first reload settled
+      orchestrator.onDiffusionBackendReleased('explicit');
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+    });
+
+    it('is suppressed while an offload calibration sweep is running', async () => {
+      await offloadAndDefer();
+      mockDiffusionServer.isCalibrating.mockReturnValue(true);
+
+      orchestrator.onDiffusionBackendReleased('explicit');
+      await orchestrator.waitForReload();
+
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
+      expect(orchestrator.getSavedState()).toBeDefined();
+    });
+  });
+
+  describe('orchestrateBatchGeneration()', () => {
+    const batchConfig: ImageGenerationConfig = { prompt: 'a cat', count: 3 };
+
+    it('opens ONE offload window around the whole batch', async () => {
+      runningLLM();
+      constrainVram();
+
+      const results = await orchestrator.orchestrateBatchGeneration(batchConfig);
+
+      expect(results).toHaveLength(3);
+      expect(mockDiffusionServer.executeBatchGeneration).toHaveBeenCalledWith(batchConfig);
+      expect(mockDiffusionServer.executeImageGeneration).not.toHaveBeenCalled();
+      expect(mockLlamaServer.stop).toHaveBeenCalledTimes(1);
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledTimes(1);
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledWith('single');
+
+      await orchestrator.waitForReload();
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+    });
+
+    it('settles once without offloading when resources are sufficient', async () => {
+      mockLlamaServer.isRunning.mockReturnValue(false);
+
+      const results = await orchestrator.orchestrateBatchGeneration(batchConfig);
+
+      expect(results).toHaveLength(3);
+      expect(mockLlamaServer.stop).not.toHaveBeenCalled();
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledTimes(1);
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledWith('burst');
+    });
+
+    it('settles and reloads when the batch fails midway', async () => {
+      runningLLM();
+      constrainVram();
+      mockDiffusionServer.executeBatchGeneration.mockRejectedValue(new Error('image 2 failed'));
+
+      await expect(orchestrator.orchestrateBatchGeneration(batchConfig)).rejects.toThrow(
+        'image 2 failed'
+      );
+
+      expect(mockDiffusionServer.settleResidency).toHaveBeenCalledTimes(1);
+      await orchestrator.waitForReload();
+      expect(mockLlamaServer.start).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('prepareForLLMStart()', () => {
+    const llmStartConfig: LlamaServerConfig = {
+      modelId: 'llama-2-7b',
+      port: 8080,
+      gpuLayers: 32,
+    };
+
+    beforeEach(() => {
+      // A concrete layer count makes the LLM estimate meaningful (the default mock
+      // throws, which collapses the estimate to zero)
+      mockModelManager.getModelLayerCount.mockResolvedValue(32);
+      mockDiffusionServer.getBackendInfo.mockReturnValue({ state: 'ready' });
+    });
+
+    it.each(['absent', 'stopping'] as const)(
+      "is a no-op when the backend is '%s'",
+      async (state) => {
+        mockDiffusionServer.getBackendInfo.mockReturnValue({ state });
+
+        await orchestrator.prepareForLLMStart({ config: llmStartConfig });
+
+        expect(mockDiffusionServer.releaseBackend).not.toHaveBeenCalled();
+        expect(mockSystemInfo.detect).not.toHaveBeenCalled();
+      }
+    );
+
+    it.each(['starting', 'ready', 'busy'] as const)(
+      "releases a '%s' backend when both would not fit",
+      async (state) => {
+        mockDiffusionServer.getBackendInfo.mockReturnValue({ state });
+        // 12 GB: diffusion 7.8 GB + LLM 4.8 GB = 12.6 GB > 9 GB threshold
+        constrainVram(12);
+
+        await orchestrator.prepareForLLMStart({ config: llmStartConfig });
+
+        expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({
+          reason: 'llm-start',
+          waitForInFlight: true,
+        });
+      }
+    );
+
+    it('resolves an omitted gpuLayers the way auto-configuration will', async () => {
+      // The raw start config a host passes: no gpuLayers yet (start() fills it in).
+      // Taken at face value the LLM would cost 0 VRAM and nothing would ever yield.
+      const rawConfig: LlamaServerConfig = { modelId: 'llama-2-7b', port: 8080 };
+      constrainVram(12);
+
+      await orchestrator.prepareForLLMStart({ config: rawConfig });
+
+      expect(mockSystemInfo.getOptimalConfig).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'llama-2-7b' }),
+        expect.objectContaining({ contextSize: undefined })
+      );
+      expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({
+        reason: 'llm-start',
+        waitForInFlight: true,
+      });
+    });
+
+    it('assumes a full GPU offload when the optimal config is unavailable', async () => {
+      mockSystemInfo.getOptimalConfig.mockRejectedValue(new Error('no metadata'));
+      constrainVram(12);
+
+      await orchestrator.prepareForLLMStart({
+        config: { modelId: 'llama-2-7b', port: 8080 },
+      });
+
+      expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({
+        reason: 'llm-start',
+        waitForInFlight: true,
+      });
+    });
+
+    it('honours an explicit gpuLayers: 0 as a CPU-only LLM', async () => {
+      // 11 GB: diffusion alone (7.8 GB) fits under the 8.25 GB threshold, but adding a
+      // fully GPU-resident LLM (4.8 GB) would not — so this only passes if the explicit
+      // gpuLayers: 0 really wins over the auto-configured 32
+      constrainVram(11);
+
+      await orchestrator.prepareForLLMStart({
+        config: { modelId: 'llama-2-7b', port: 8080, gpuLayers: 0 },
+      });
+
+      // A CPU-only LLM claims no VRAM, so the resident backend keeps it
+      expect(mockSystemInfo.getOptimalConfig).not.toHaveBeenCalled();
+      expect(mockDiffusionServer.releaseBackend).not.toHaveBeenCalled();
+    });
+
+    it('honours an explicit gpuLayers instead of the auto-configured one', async () => {
+      // Optimal config would say "everything on the GPU"; the caller said 1 layer
+      mockSystemInfo.getOptimalConfig.mockResolvedValue({ gpuLayers: 32 });
+      constrainVram(11);
+
+      await orchestrator.prepareForLLMStart({
+        config: { modelId: 'llama-2-7b', port: 8080, gpuLayers: 1 },
+      });
+
+      expect(mockSystemInfo.getOptimalConfig).not.toHaveBeenCalled();
+      // 1/32 of a 4 GB model keeps the pair under the 8.25 GB threshold
+      expect(mockDiffusionServer.releaseBackend).not.toHaveBeenCalled();
+    });
+
+    it('refuses the start while an offload calibration sweep is running', async () => {
+      mockDiffusionServer.isCalibrating.mockReturnValue(true);
+
+      await expect(
+        orchestrator.prepareForLLMStart({ config: llmStartConfig })
+      ).rejects.toMatchObject({
+        message: expect.stringContaining('calibration'),
+        details: expect.objectContaining({ code: 'CALIBRATION_IN_PROGRESS' }),
+      });
+      // The sweep owns the backend; nothing is released behind its back
+      expect(mockDiffusionServer.releaseBackend).not.toHaveBeenCalled();
+      expect(mockDiffusionServer.getBackendInfo).not.toHaveBeenCalled();
+    });
+
+    it('keeps the backend resident when both fit', async () => {
+      // 24 GB: 12.6 GB < 18 GB threshold
+      constrainVram(24);
+
+      await orchestrator.prepareForLLMStart({ config: llmStartConfig });
+
+      expect(mockDiffusionServer.releaseBackend).not.toHaveBeenCalled();
+    });
+
+    it('estimates from the override config, not from the (not yet running) server', async () => {
+      // The LLM is NOT running: the legacy estimator short-circuit would report zero
+      // usage here and make the hook a permanent no-op.
+      mockLlamaServer.isRunning.mockReturnValue(false);
+      mockLlamaServer.getConfig.mockReturnValue(undefined);
+      constrainVram(12);
+
+      await orchestrator.prepareForLLMStart({ config: llmStartConfig });
+
+      expect(mockModelManager.getModelInfo).toHaveBeenCalledWith('llama-2-7b');
+      expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({
+        reason: 'llm-start',
+        waitForInFlight: true,
+      });
+    });
+
+    it('never triggers an LLM reload from inside the hook', async () => {
+      // Saved state from an earlier burst-deferred cycle
+      runningLLM();
+      constrainVram();
+      await orchestrator.orchestrateImageGeneration({ prompt: 'x', usageMode: 'burst' });
+      await orchestrator.waitForReload();
+      expect(orchestrator.getSavedState()).toBeDefined();
+      mockLlamaServer.start.mockClear();
+
+      // The manager forwards the release reason exactly as the real seam does
+      mockDiffusionServer.releaseBackend.mockImplementation(async (options: any) => {
+        orchestrator.onDiffusionBackendReleased(options.reason);
+      });
+      mockDiffusionServer.getBackendInfo.mockReturnValue({ state: 'ready' });
+      constrainVram(12);
+
+      await orchestrator.prepareForLLMStart({ config: llmStartConfig });
+      await orchestrator.waitForReload();
+
+      expect(mockDiffusionServer.releaseBackend).toHaveBeenCalled();
+      expect(mockLlamaServer.start).not.toHaveBeenCalled();
     });
   });
 

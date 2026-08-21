@@ -1,10 +1,10 @@
 /**
  * DiffusionServerManager - Manages diffusion server lifecycle
  *
- * Creates an HTTP wrapper server for stable-diffusion.cpp executable.
- * Unlike llama-server (native HTTP server), stable-diffusion.cpp is a
- * one-shot executable, so we create our own HTTP server that spawns
- * the executable on-demand.
+ * Creates an HTTP wrapper server (node:http) that is the public diffusion server, and
+ * drives an internal, lazily-spawned stable-diffusion.cpp `sd-server` backend process
+ * through its native job API. The backend may stay resident between images ('burst') or
+ * be released right after one ('single'); the wrapper's HTTP contract is unchanged.
  *
  * @module managers/DiffusionServerManager
  */
@@ -12,12 +12,10 @@
 import { ServerManager } from './ServerManager.js';
 import { ModelManager } from './ModelManager.js';
 import { SystemInfo } from '../system/SystemInfo.js';
-import { ProcessManager } from '../process/ProcessManager.js';
 import { ResourceOrchestrator } from './ResourceOrchestrator.js';
 import { GenerationRegistry } from './GenerationRegistry.js';
 import http from 'node:http';
-import { promises as fs } from 'node:fs';
-import { getTempPath } from '../config/paths.js';
+import { PATHS } from '../config/paths.js';
 import {
   BINARY_VERSIONS,
   DEFAULT_PORTS,
@@ -25,10 +23,29 @@ import {
   DIFFUSION_COMPONENT_FLAGS,
   DIFFUSION_COMPONENT_ORDER,
   DIFFUSION_CALIBRATION_DEFAULTS,
+  DIFFUSION_BACKEND_DEFAULTS,
 } from '../config/defaults.js';
-import { deleteFile } from '../utils/file-utils.js';
+import { ensureDirectory } from '../utils/file-utils.js';
 import { debugLog } from '../utils/debug-log.js';
 import { findFreePort } from '../process/port-utils.js';
+import { normalizeHealthHost } from '../process/health-check.js';
+import {
+  isSdServerProgressBarLine,
+  startSdServerRunner,
+  type SdServerExit,
+  type SdServerHandle,
+  type SdServerStdoutEvent,
+} from '../process/sd-server-runner.js';
+import {
+  SdServerClient,
+  buildSdServerImageRequest,
+  type SdServerJob,
+  type SdServerJobStatus,
+} from '../process/sd-server-client.js';
+import {
+  createTelemetrySnapshotCapture,
+  type CaptureResourceSnapshot,
+} from '../utils/llama-resource-guard-capture.js';
 import {
   GenaiElectronError,
   ServerError,
@@ -38,12 +55,17 @@ import {
 import type {
   CalibrationRun,
   CalibrationSize,
+  DiffusionBackendInfo,
+  DiffusionBackendReleaseReason,
+  DiffusionBackendState,
+  DiffusionBackendStatusEvent,
   DiffusionCalibrationConfig,
   DiffusionCalibrationProgress,
   DiffusionCalibrationReport,
   DiffusionOffloadCombo,
   DiffusionServerConfig,
   DiffusionServerInfo,
+  DiffusionUsageMode,
   ImageGenerationConfig,
   ImageGenerationResult,
   ImageSampler,
@@ -60,14 +82,110 @@ interface ResolvedDiffusionOptimizations {
   batchSize?: number;
 }
 
+/** The four launch-time offload flags a backend process is pinned to. */
+type ResolvedDiffusionFlags = Omit<ResolvedDiffusionOptimizations, 'batchSize'>;
+
+/** Internal bookkeeping for the (at most one) resident backend process. */
+interface DiffusionBackendRuntime {
+  state: DiffusionBackendState;
+  handle?: SdServerHandle;
+  client?: SdServerClient;
+  /** Flags the resident process was launched with (its identity for reuse) */
+  flags?: ResolvedDiffusionFlags;
+  pid?: number;
+  startedAt?: number;
+  loadTimeMs?: number;
+  lastUsedAt?: number;
+  idleTimer?: NodeJS.Timeout;
+  /** In-progress spawn; awaited by concurrent ensureBackend() callers */
+  startPromise?: Promise<void>;
+  /** Cancels the in-progress spawn so a release never waits out a cold model load */
+  startAbort?: AbortController;
+  /** In-progress release; awaited before any respawn and by stop() */
+  stopPromise?: Promise<void>;
+  /**
+   * Reason the in-progress release will report. A release that starts while another
+   * one is already running upgrades this to the higher-ranked reason, so the event
+   * and the orchestrator callback describe why the backend is really going away.
+   */
+  stopReason?: DiffusionBackendReleaseReason;
+}
+
+/**
+ * Precedence of release reasons; the highest-ranked reason of the callers that
+ * asked for one release wins (see {@link DiffusionServerManager.releaseBackend}).
+ * @internal
+ */
+const RELEASE_REASON_RANK: Record<DiffusionBackendReleaseReason, number> = {
+  shutdown: 100,
+  stop: 90,
+  'llm-start': 80,
+  calibration: 70,
+  'flags-changed': 60,
+  'idle-timeout': 50,
+  explicit: 40,
+  single: 30,
+  cancel: 20,
+  crashed: 10,
+};
+
+/** `details.code` values from the client that a job poll may retry instead of failing. */
+const TRANSIENT_POLL_ERROR_CODES: ReadonlySet<string> = new Set([
+  'BACKEND_REQUEST_TIMEOUT',
+  'BACKEND_REQUEST_FAILED',
+]);
+
+/**
+ * Cadence of the calibration VRAM sampler, which fixes the resolution of the reported
+ * peak. Each sample costs one platform telemetry command (e.g. `nvidia-smi`); the
+ * measured work is GPU-bound, so the perturbation at 1 s is negligible.
+ * @internal
+ */
+const CALIBRATION_VRAM_SAMPLE_INTERVAL_MS = 1_000;
+
+/** Per-read bound for one calibration VRAM telemetry capture. @internal */
+const CALIBRATION_VRAM_TELEMETRY_TIMEOUT_MS = 5_000;
+
+/** Machine-wide VRAM figures of one calibration timed sample. @internal */
+interface CalibrationVramSample {
+  vramPeakBytes?: number;
+  vramIdleBytes?: number;
+}
+
+/**
+ * The busy-gate claim for one generation request.
+ *
+ * Created synchronously by whoever starts a generation (HTTP route, generateImage(),
+ * calibration) and released by that same owner in a `finally`, so batch loops keep the
+ * gate closed between images. executeImageGeneration() never assigns or clears it — it
+ * only refines the cancel behaviour once a backend job exists.
+ */
+interface GenerationClaim {
+  /** Registry id, when the generation was started through the async HTTP API */
+  id?: string;
+  /** The owner's in-flight promise (used by releaseBackend({waitForInFlight})) */
+  promise?: Promise<unknown>;
+  /** Latched by cancel() so a cancel arriving before submit is not lost */
+  cancelRequested: boolean;
+  cancel: () => void;
+}
+
+/** Job-level handle owned by executeImageGeneration while a backend job is in flight. */
+interface InFlightBackendJob {
+  /** Cancel the backend job (cancel a queued job, kill the backend while generating) */
+  cancel: () => void;
+  /** Reject the generation promise (backend crash) */
+  reject: (error: unknown) => void;
+}
+
 /**
  * DiffusionServerManager class
  *
  * Manages the lifecycle of diffusion HTTP wrapper server.
  *
  * Features:
- * - HTTP server wrapper around stable-diffusion.cpp executable
- * - On-demand spawning of stable-diffusion.cpp for image generation
+ * - HTTP server wrapper in front of a stable-diffusion.cpp `sd-server` backend
+ * - Lazily spawned backend process (no VRAM is held until the first image)
  * - Progress tracking during generation
  * - Automatic binary download and variant testing
  * - Log capture and retrieval
@@ -94,10 +212,20 @@ interface ResolvedDiffusionOptimizations {
  * ```
  */
 export class DiffusionServerManager extends ServerManager {
-  /** Fields accepted by DiffusionServerManager.start() (DiffusionServerConfig) */
+  /**
+   * Fields accepted by DiffusionServerManager.start() (DiffusionServerConfig).
+   *
+   * `gpuLayers` is accepted but ignored: stable-diffusion.cpp has no GPU-layers flag
+   * (that is llama.cpp). It stays in the allowlist because removing it would reject
+   * configs that are valid today.
+   */
   private static readonly VALID_CONFIG_FIELDS: ReadonlySet<string> = new Set([
     'modelId',
     'port',
+    'host',
+    'startupTimeout',
+    'usageMode',
+    'idleTimeoutMs',
     'threads',
     'gpuLayers',
     'forceValidation',
@@ -108,24 +236,23 @@ export class DiffusionServerManager extends ServerManager {
     'diffusionFlashAttention',
   ]);
 
-  private processManager: ProcessManager;
   private modelManager: ModelManager;
   private systemInfo: SystemInfo;
   private orchestrator?: ResourceOrchestrator;
   private registry: GenerationRegistry;
   private binaryPath?: string;
   private httpServer?: http.Server;
-  private currentGeneration?: {
-    promise: Promise<ImageGenerationResult>;
-    cancel: () => void;
-  };
   /**
-   * Registry-tracked generation currently being processed by
-   * runAsyncGeneration. The `cancelled` flag is checked between batch
-   * iterations, so cancellation also works in the gap when no sd-cli
-   * child process is alive.
+   * Busy gate. Non-undefined means "a generation is in flight" — the single owner
+   * that created it releases it; nothing else assigns or clears it.
    */
-  private activeGeneration?: { id: string; cancelled: boolean };
+  private currentGeneration?: GenerationClaim;
+  /** Backend job currently in flight (set by executeImageGeneration only) */
+  private inFlight?: InFlightBackendJob;
+  /** The one resident backend process, if any */
+  private backend: DiffusionBackendRuntime = { state: 'absent' };
+  /** Normalized config of the generation whose progress the stdout tap feeds */
+  private progressConfig?: ImageGenerationConfig;
   private currentModelInfo?: ModelInfo;
   /**
    * Flags resolved by the most recent computeDiffusionOptimizations() call.
@@ -134,9 +261,27 @@ export class DiffusionServerManager extends ServerManager {
   private lastResolvedOptimizations?: Omit<ResolvedDiffusionOptimizations, 'batchSize'>;
   /** True while an offload-calibration sweep is running (server stays 'stopped') */
   private calibrating = false;
+  /**
+   * PID of a backend whose termination could not be confirmed. Sticky: no second
+   * backend is spawned while that process may still hold the GPU.
+   */
+  private unconfirmedBackendPid?: number;
+  /**
+   * Removes the LLM pre-start hook this manager registered (if any).
+   *
+   * Kept (and `protected` rather than `private`) so a subclass or a host that builds
+   * extra managers around one shared `llamaServer` can detach again: every instance
+   * registers its own hook, and each hook releases only its own backend.
+   */
+  protected unregisterPreStartHook?: () => void;
 
   // Time estimates for progress calculation (self-calibrating)
+  /** Cold load: spawn + weight placement, measured only on generations that spawned */
   private modelLoadTime = 2000; // Fixed cost in ms
+  /** Warm load: conditioning only, measured on generations that reused a backend */
+  private warmLoadTime = 300; // Fixed cost in ms
+  /** Load estimate chosen for the generation in flight (cold or warm) */
+  private currentLoadEstimate = 2000;
   private diffusionTimePerStepPerMegapixel = 1000; // Time per step per megapixel in ms
   private vaeTimePerMegapixel = 8000; // Time per megapixel in ms
 
@@ -167,7 +312,6 @@ export class DiffusionServerManager extends ServerManager {
     llamaServer?: LlamaServerManager
   ) {
     super();
-    this.processManager = new ProcessManager();
     this.modelManager = modelManager;
     this.systemInfo = systemInfo;
 
@@ -176,7 +320,19 @@ export class DiffusionServerManager extends ServerManager {
 
     // Create orchestrator if llamaServer is provided (enables automatic resource management)
     if (llamaServer) {
-      this.orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, this, modelManager);
+      const orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, this, modelManager);
+      this.orchestrator = orchestrator;
+
+      // Symmetric orchestration: an LLM start yields the resident backend when both
+      // would not fit. Registered here (not in start()) because a backend can outlive
+      // the wrapper — calibrate() runs with the wrapper stopped.
+      // NOTE: every manager constructed with the same llamaServer registers its own
+      // hook. That is intentional (each one owns its own backend), but it means a host
+      // creating extra DiffusionServerManager instances pays one hook per instance;
+      // the unregister handle is kept so a host can drop them again.
+      this.unregisterPreStartHook = llamaServer.registerPreStartHook((ctx) =>
+        orchestrator.prepareForLLMStart(ctx)
+      );
     }
   }
 
@@ -194,8 +350,9 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Start diffusion HTTP wrapper server
    *
-   * Creates an HTTP server that will spawn stable-diffusion.cpp on-demand
-   * when image generation requests are received.
+   * Brings up the public HTTP wrapper only — the stable-diffusion.cpp backend is
+   * spawned lazily on the first image request, so no VRAM is held by start().
+   * The wrapper binds `127.0.0.1` unless `config.host` says otherwise.
    *
    * @param config - Server configuration
    * @returns Server information
@@ -273,18 +430,22 @@ export class DiffusionServerManager extends ServerManager {
       // 3. Ensure binary is downloaded (pass model info for real functionality testing)
       this.binaryPath = await this.ensureBinary(modelInfo, config.forceValidation);
 
-      // 4. Resolve the port ONCE ('auto' → OS-assigned free port), then check it.
-      // createHTTPServer receives the resolved number — resolving twice would
-      // probe one port and bind another.
+      // 4. Resolve the bind host, then the port ONCE ('auto' → OS-assigned free port)
+      // and check it. createHTTPServer receives the resolved number — resolving twice
+      // would probe one port and bind another.
+      const host = config.host ?? '127.0.0.1';
       const port =
-        config.port === 'auto' ? await findFreePort() : (config.port ?? DEFAULT_PORTS.diffusion);
-      await this.checkPortAvailability(port);
+        config.port === 'auto'
+          ? await findFreePort(host)
+          : (config.port ?? DEFAULT_PORTS.diffusion);
+      // Wildcard binds are probed through a loopback address of the same family
+      await this.checkPortAvailability(port, undefined, normalizeHealthHost(host));
 
       // 5. Record the resolved port in the provisioning log
-      await this.logManager?.write(`Starting diffusion server on port ${port}`, 'info');
+      await this.logManager?.write(`Starting diffusion server on ${host}:${port}`, 'info');
 
       // 6. Create HTTP server
-      await this.createHTTPServer(port);
+      await this.createHTTPServer(port, host);
 
       this._port = port;
       this._startedAt = new Date();
@@ -313,12 +474,16 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Stop diffusion server
    *
-   * Closes HTTP wrapper server and cancels any ongoing generation.
+   * Releases the stable-diffusion.cpp backend (confirmed death), closes the HTTP
+   * wrapper and cancels any ongoing generation. Also releases a backend left behind
+   * by calibrate(), which runs while the wrapper itself is stopped.
    *
    * @throws {ServerError} If stop fails
    */
   async stop(): Promise<void> {
     if (this._status === 'stopped') {
+      // A calibration sweep can leave a backend alive while the wrapper is stopped
+      await this.releaseBackend({ reason: 'stop' });
       return;
     }
 
@@ -329,14 +494,12 @@ export class DiffusionServerManager extends ServerManager {
         await this.logManager.write('Stopping diffusion server...', 'info');
       }
 
-      // Cancel any ongoing generation (incl. halting a batch between images)
-      if (this.activeGeneration) {
-        this.activeGeneration.cancelled = true;
-      }
-      if (this.currentGeneration) {
-        this.currentGeneration.cancel();
-        this.currentGeneration = undefined;
-      }
+      // Cancel any ongoing generation (incl. halting a batch between images).
+      // The claim itself is cleared by its owner's finally block.
+      this.currentGeneration?.cancel();
+
+      // Release the backend and require confirmed death before the wrapper closes
+      await this.releaseBackend({ reason: 'stop' });
 
       // Close HTTP server
       if (this.httpServer) {
@@ -378,14 +541,18 @@ export class DiffusionServerManager extends ServerManager {
    * @returns Generation ID, or undefined when idle
    */
   getActiveGenerationId(): string | undefined {
-    return this.activeGeneration?.id;
+    return this.currentGeneration?.id;
   }
 
   /**
    * Cancel an in-flight async generation by its registry ID
    *
-   * Marks the generation 'cancelled' in the registry, halts the batch loop
-   * (also between images), and kills the running sd-cli process if any.
+   * Marks the generation 'cancelled' in the registry, halts the batch loop (also
+   * between images) and stops the backend job: a still-queued job is cancelled
+   * through the backend's own API, a generating one by killing the backend (upstream
+   * cannot interrupt sampling). The kill is *initiated*, not awaited — this method
+   * resolves as soon as the in-flight generation has been rejected, and the next
+   * spawn waits for the confirmed death.
    * Idempotent: cancelling an already-terminal generation is a no-op.
    *
    * Only generations started through the async HTTP API (or runAsyncGeneration)
@@ -414,13 +581,633 @@ export class DiffusionServerManager extends ServerManager {
     // handlers see the status and never overwrite it
     this.registry.update(id, { status: 'cancelled' });
 
-    if (this.activeGeneration?.id === id) {
-      this.activeGeneration.cancelled = true;
-      this.currentGeneration?.cancel();
-      this.currentGeneration = undefined;
+    if (this.currentGeneration?.id === id) {
+      // Latches cancelRequested and, when a job is already in flight, cancels/kills it
+      this.currentGeneration.cancel();
     }
 
     await this.logManager?.write(`Generation ${id} cancelled`, 'info');
+  }
+
+  /**
+   * Release the internal stable-diffusion.cpp backend process
+   *
+   * Idempotent and safe to call at any time: `'absent'` returns immediately, an
+   * in-progress release is awaited rather than duplicated. The backend state is set to
+   * `'stopping'` BEFORE the kill so the exit handler treats the exit as intended
+   * (no `'crashed'` reporting), and the method resolves after the stop completes. A
+   * termination that could NOT be confirmed is logged, the state still becomes
+   * `'absent'`, and the orphan PID blocks new spawns until it is gone
+   * (`BACKEND_TERMINATION_UNCONFIRMED`).
+   *
+   * An in-progress spawn is aborted rather than waited out, so a `stop()` during a
+   * cold model load returns in milliseconds. When a release is already running, the
+   * higher-ranked reason wins — a `stop()` arriving behind a `'cancel'` release
+   * reports `'stop'`.
+   *
+   * @param options - Release reason (default `'explicit'`) and whether to let an
+   *   in-flight generation finish first (bounded by that generation, not a timer)
+   *
+   * @example
+   * ```typescript
+   * // Free VRAM without stopping the wrapper
+   * await diffusionServer.releaseBackend({ reason: 'explicit' });
+   * ```
+   */
+  async releaseBackend(
+    options: { reason?: DiffusionBackendReleaseReason; waitForInFlight?: boolean } = {}
+  ): Promise<void> {
+    const reason = options.reason ?? 'explicit';
+
+    // NOTE: everything up to the state flip below must stay synchronous on the
+    // no-wait path — cancelImageGeneration() relies on 'stopping' being visible
+    // before it returns, so no respawn can slip past a dying backend.
+    this.disarmIdleTimer();
+
+    if (options.waitForInFlight) {
+      // Deliberately BEFORE the progress teardown: the generation we are waiting for is
+      // still reporting, and killing its synthetic ticker here would freeze its progress
+      // for the rest of its run.
+      const pending = this.currentGeneration?.promise;
+      if (pending) await pending.catch(() => undefined);
+    }
+
+    this.cleanupSyntheticProgress();
+
+    // Abort a spawn in progress instead of waiting out a 120 s cold load. The runner
+    // maps an aborted start to SD_SERVER_START_ABORTED after a confirmed kill.
+    this.backend.startAbort?.abort(
+      new ServerError('stable-diffusion.cpp backend released before it was ready', {
+        code: 'BACKEND_RELEASED_DURING_START',
+        reason,
+      })
+    );
+
+    while (this.backend.state === 'starting' && this.backend.startPromise) {
+      await this.backend.startPromise.catch(() => undefined);
+    }
+
+    if (this.backend.state === 'stopping') {
+      this.upgradeStopReason(reason);
+      await this.backend.stopPromise;
+      return;
+    }
+    if (this.backend.state === 'absent') {
+      return;
+    }
+
+    const handle = this.backend.handle;
+    this.backend.stopReason = reason;
+    this.setBackendState('stopping', reason);
+    const stopPromise = this.finishRelease(handle);
+    this.backend.stopPromise = stopPromise;
+    await stopPromise;
+  }
+
+  /**
+   * Raise the pending release reason when a more important caller joins it
+   * @private
+   */
+  private upgradeStopReason(reason: DiffusionBackendReleaseReason): void {
+    const current = this.backend.stopReason;
+    if (current === undefined || RELEASE_REASON_RANK[reason] > RELEASE_REASON_RANK[current]) {
+      this.backend.stopReason = reason;
+    }
+  }
+
+  /**
+   * Snapshot of the internal stable-diffusion.cpp backend process
+   *
+   * @returns Backend state plus pid/timings/flags while a process is resident
+   *
+   * @example
+   * ```typescript
+   * if (diffusionServer.getBackendInfo().state === 'ready') {
+   *   console.log('the next image skips the model load');
+   * }
+   * ```
+   */
+  getBackendInfo(): DiffusionBackendInfo {
+    const info: DiffusionBackendInfo = { state: this.backend.state };
+    if (this.backend.pid !== undefined) info.pid = this.backend.pid;
+    if (this.backend.startedAt !== undefined) {
+      info.startedAt = new Date(this.backend.startedAt).toISOString();
+    }
+    if (this.backend.loadTimeMs !== undefined) info.loadTimeMs = this.backend.loadTimeMs;
+    if (this.backend.lastUsedAt !== undefined) {
+      info.lastUsedAt = new Date(this.backend.lastUsedAt).toISOString();
+    }
+    if (this.backend.flags) info.flags = { ...this.backend.flags };
+    return info;
+  }
+
+  /**
+   * Resolve the residency policy for one generation
+   *
+   * Precedence: the request's `usageMode` → the server-level
+   * `DiffusionServerConfig.usageMode` (when set and not `'auto'`) → the computed
+   * default, which is `'single'` when the LLM had to be offloaded to make room for
+   * this image (release the VRAM so it can come back) and `'burst'` otherwise (stay
+   * warm for the next image).
+   *
+   * @param requestMode - Per-request policy, if the caller set one
+   * @param llmWasOffloaded - Whether the LLM was offloaded for this generation
+   * @returns The policy {@link settleResidency} should apply
+   * @internal
+   */
+  public resolveUsageMode(
+    requestMode: DiffusionUsageMode | undefined,
+    llmWasOffloaded: boolean
+  ): DiffusionUsageMode {
+    if (requestMode === 'burst' || requestMode === 'single') {
+      return requestMode;
+    }
+
+    const configured = (this._config as DiffusionServerConfig | undefined)?.usageMode;
+    if (configured === 'burst' || configured === 'single') {
+      return configured;
+    }
+
+    return llmWasOffloaded ? 'single' : 'burst';
+  }
+
+  /**
+   * Apply a residency policy once a generation is done
+   *
+   * `'single'` releases the backend (and its VRAM) right away; `'burst'` leaves it
+   * resident and arms the idle timer. Called exactly once per generation by whoever
+   * owns the offload context — the ResourceOrchestrator when one is wired up, and
+   * `generateImage()`/the async HTTP path otherwise. Calibration never settles: it
+   * manages the backend itself.
+   *
+   * @param mode - Residency policy from {@link resolveUsageMode}
+   * @internal
+   */
+  public async settleResidency(mode: DiffusionUsageMode): Promise<void> {
+    if (mode === 'single') {
+      await this.releaseBackend({ reason: 'single' });
+      return;
+    }
+    this.armIdleTimer();
+  }
+
+  /**
+   * Settle residency for a path that owns the (empty) offload context
+   *
+   * Used by the no-orchestrator branches, where no LLM was offloaded. Never throws:
+   * a failed release must not mask the generation's own outcome.
+   *
+   * @param requestMode - The request's `usageMode`, if any
+   * @private
+   */
+  private async settleResidencyWithoutOffload(
+    requestMode: DiffusionUsageMode | undefined
+  ): Promise<void> {
+    try {
+      await this.settleResidency(this.resolveUsageMode(requestMode, false));
+    } catch (error) {
+      debugLog('[Diffusion] residency settle failed:', error);
+    }
+  }
+
+  /**
+   * Transition the backend state machine and announce it
+   * @private
+   */
+  private setBackendState(
+    state: DiffusionBackendState,
+    reason?: DiffusionBackendStatusEvent['reason'],
+    exit?: SdServerExit
+  ): void {
+    const previous = this.backend.state;
+    if (previous === state && reason === undefined) return;
+    this.backend.state = state;
+
+    const event: DiffusionBackendStatusEvent = { state, previous };
+    if (reason !== undefined) event.reason = reason;
+    if (exit) event.exit = { code: exit.code, signal: exit.signal };
+    try {
+      this.emitEvent('backend-status', event);
+    } catch (error) {
+      // A host listener must never be able to derail the state machine
+      debugLog('[Diffusion] backend-status listener threw:', error);
+    }
+  }
+
+  /**
+   * Ensure a backend process with exactly these offload flags is ready
+   *
+   * Reuses a resident backend when the flags match, awaits an in-progress spawn or
+   * release, and respawns when the flags differ (offload flags are launch args).
+   *
+   * @param flags - Resolved offload flags for this generation
+   * @param options - Startup-only cancellation signal
+   * @returns The ready handle, a client bound to it, and whether this call had to
+   *   spawn (the caller's progress model needs cold vs warm)
+   * @throws {ServerError} When the wrapper is stopping/stopped (outside calibration),
+   *   or a previous backend's termination was never confirmed and its PID is alive
+   * @private
+   */
+  private async ensureBackend(
+    flags: ResolvedDiffusionFlags,
+    options: { signal?: AbortSignal } = {}
+  ): Promise<{ handle: SdServerHandle; client: SdServerClient; spawned: boolean }> {
+    let spawned = false;
+
+    // Each iteration makes progress (await a spawn/release, or spawn). The cap only
+    // exists so a pathological state machine surfaces as an error, never as a livelock.
+    for (let attempt = 0; attempt < 8; attempt++) {
+      if (this._status === 'stopping' || (this._status === 'stopped' && !this.calibrating)) {
+        throw new ServerError('Server is not running', {
+          code: 'SERVER_NOT_RUNNING',
+          status: this._status,
+          suggestion: 'Start the server first with start()',
+        });
+      }
+
+      if (this.backend.state === 'starting' && this.backend.startPromise) {
+        spawned = true;
+        await this.backend.startPromise;
+        continue;
+      }
+
+      if (this.backend.state === 'stopping') {
+        // Never spawn a second child while the first one's death is unproven
+        await (this.backend.stopPromise ?? delay(0));
+        continue;
+      }
+
+      if (this.backend.state === 'ready' || this.backend.state === 'busy') {
+        if (
+          this.backend.handle &&
+          this.backend.client &&
+          this.backend.flags &&
+          flagsEqual(this.backend.flags, flags)
+        ) {
+          return { handle: this.backend.handle, client: this.backend.client, spawned };
+        }
+        await this.releaseBackend({ reason: 'flags-changed' });
+        continue;
+      }
+
+      this.assertNoUnconfirmedBackend();
+
+      spawned = true;
+      const startAbort = new AbortController();
+      const signal = options.signal
+        ? AbortSignal.any([options.signal, startAbort.signal])
+        : startAbort.signal;
+      const startPromise = this.spawnBackend(flags, signal);
+      this.backend.startPromise = startPromise;
+      this.backend.startAbort = startAbort;
+      try {
+        await startPromise;
+      } finally {
+        if (this.backend.startPromise === startPromise) {
+          this.backend.startPromise = undefined;
+        }
+        if (this.backend.startAbort === startAbort) {
+          this.backend.startAbort = undefined;
+        }
+      }
+    }
+
+    throw new ServerError('Could not settle the stable-diffusion.cpp backend state', {
+      code: 'BACKEND_STATE_UNSETTLED',
+      state: this.backend.state,
+      suggestion: 'Stop and restart the diffusion server',
+    });
+  }
+
+  /**
+   * Refuse to spawn while a previously killed backend may still be alive
+   *
+   * A `SD_SERVER_TERMINATION_UNCONFIRMED` release leaves a PID behind; starting a
+   * second backend over it would double the VRAM claim. The record is sticky until
+   * the PID is observably gone.
+   * @private
+   */
+  private assertNoUnconfirmedBackend(): void {
+    const pid = this.unconfirmedBackendPid;
+    if (pid === undefined) return;
+
+    if (!this.isProcessAlive(pid)) {
+      this.unconfirmedBackendPid = undefined;
+      return;
+    }
+
+    throw new ServerError(
+      `stable-diffusion.cpp backend termination could not be confirmed (pid ${pid}); refusing to start a second backend`,
+      {
+        code: 'BACKEND_TERMINATION_UNCONFIRMED',
+        pid,
+        suggestion: `End process ${pid} manually, then retry`,
+      }
+    );
+  }
+
+  /**
+   * Liveness probe for a PID (same semantics as ProcessManager.isRunning)
+   * @private
+   */
+  private isProcessAlive(pid: number): boolean {
+    try {
+      // Signal 0 performs the permission/existence check without delivering a signal
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Spawn one backend process with the given flags and wait until it is ready
+   * @private
+   */
+  private async spawnBackend(flags: ResolvedDiffusionFlags, signal?: AbortSignal): Promise<void> {
+    if (!this.currentModelInfo) {
+      throw new ServerError('Model information not available', {
+        suggestion: 'This is an internal error - model should have been loaded',
+      });
+    }
+    if (!this.binaryPath) {
+      throw new ServerError('stable-diffusion.cpp binary is not available', {
+        suggestion: 'This is an internal error - the binary is provisioned by start()',
+      });
+    }
+
+    const serverConfig = (this._config ?? {}) as DiffusionServerConfig;
+    const modelArgs = this.buildBackendModelArgs(this.currentModelInfo);
+    const contextArgs = this.buildDiffusionOptimizationArgs(flags);
+
+    // Published before the first await so a concurrent ensureBackend() awaits this
+    // spawn instead of starting a second one
+    this.setBackendState('starting', 'spawned');
+    // Cold start: the model load belongs to this generation's 'loading' stage. Whatever
+    // the caller assumed when it seeded the progress model, this IS a cold generation —
+    // re-seed with the cold estimate before any loading progress is reported.
+    this.loadStartTime = Date.now();
+    this.currentLoadEstimate = this.modelLoadTime;
+    if (this.progressConfig) this.recalculateTotalEstimatedTime(this.progressConfig);
+    const startedAt = Date.now();
+
+    // Electron-side directory creation keeps the runner Node-safe
+    await ensureDirectory(PATHS.loras);
+
+    void this.logManager
+      ?.write(
+        `Starting sd-server backend: ${this.binaryPath} ${[...modelArgs, ...contextArgs].join(' ')}`,
+        'info'
+      )
+      .catch(() => void 0);
+
+    // Filled in once the child is up, so the tap can drop events from a stale child
+    const tap: { handle?: SdServerHandle } = {};
+
+    let handle: SdServerHandle;
+    try {
+      handle = await startSdServerRunner({
+        binaryPath: this.binaryPath,
+        modelArgs,
+        contextArgs,
+        ...(serverConfig.threads !== undefined ? { threads: serverConfig.threads } : {}),
+        loraDir: PATHS.loras,
+        readyTimeoutMs: serverConfig.startupTimeout ?? DIFFUSION_BACKEND_DEFAULTS.readyTimeoutMs,
+        onStdoutEvent: (event) => {
+          // Before the handle exists these are this spawn's own startup lines;
+          // afterwards, only the resident child may drive the progress model.
+          if (tap.handle !== undefined && this.backend.handle !== tap.handle) return;
+          this.handleBackendStdoutEvent(event);
+        },
+        onLog: (line, stream) => {
+          // Progress bars redraw many times per second and already reach the
+          // progress model as structured events — keep them out of the log file.
+          if (isSdServerProgressBarLine(line)) return;
+          void this.logManager
+            ?.write(line, stream === 'stderr' ? 'warn' : 'info')
+            .catch(() => void 0);
+        },
+        ...(signal ? { signal } : {}),
+      });
+    } catch (error) {
+      this.cleanupSyntheticProgress();
+      // A failed start whose teardown could not be confirmed leaves a live child that
+      // still owns the GPU. Record it exactly as finishRelease() does, so the next
+      // ensureBackend() refuses to spawn a second backend over it.
+      const details =
+        error instanceof GenaiElectronError && error.details && typeof error.details === 'object'
+          ? (error.details as Record<string, unknown>)
+          : undefined;
+      if (details?.code === 'SD_SERVER_TERMINATION_UNCONFIRMED') {
+        this.unconfirmedBackendPid =
+          typeof details.pid === 'number' ? details.pid : this.backend.pid;
+      }
+      // The runner already killed (and confirmed) the child it could not bring up —
+      // 'start-failed', not 'crashed': no working backend ever existed.
+      if (this.backend.state === 'starting') this.setBackendState('absent', 'start-failed');
+      throw error;
+    }
+
+    tap.handle = handle;
+    this.backend.handle = handle;
+    this.backend.client = new SdServerClient(
+      handle.port,
+      handle.host,
+      DIFFUSION_BACKEND_DEFAULTS.jobRequestTimeoutMs
+    );
+    this.backend.flags = { ...flags };
+    this.backend.pid = handle.pid;
+    this.backend.startedAt = startedAt;
+    this.backend.loadTimeMs = handle.loadTimeMs;
+    this.backend.lastUsedAt = undefined;
+
+    // Exact-child exit watcher: an unexpected exit fails the in-flight job and
+    // leaves the wrapper running (the next request simply respawns).
+    void handle.exitPromise
+      .then((exit) => {
+        this.handleBackendExit(handle, exit);
+      })
+      .catch(() => void 0);
+
+    this.setBackendState('ready', 'ready');
+    void this.logManager
+      ?.write(`sd-server backend ready on port ${handle.port} (${handle.loadTimeMs} ms)`, 'info')
+      .catch(() => void 0);
+  }
+
+  /**
+   * Kill the backend and wait for confirmed death, then publish 'absent'
+   *
+   * The reason reported here is read from `backend.stopReason` at the end, so a
+   * higher-ranked release that joined mid-kill is the one the event and the
+   * orchestrator callback see.
+   * @private
+   */
+  private async finishRelease(handle: SdServerHandle | undefined): Promise<void> {
+    this.cleanupSyntheticProgress();
+
+    try {
+      await handle?.stop();
+    } catch (error) {
+      // A stop failure (incl. SD_SERVER_TERMINATION_UNCONFIRMED) must not leave the
+      // manager stuck in 'stopping' — it is logged loudly and the state machine moves
+      // on; the runner already escalated to SIGKILL before giving up.
+      const details =
+        error instanceof GenaiElectronError && error.details && typeof error.details === 'object'
+          ? (error.details as Record<string, unknown>)
+          : undefined;
+      if (details?.code === 'SD_SERVER_TERMINATION_UNCONFIRMED') {
+        // Sticky until the PID is observably gone: a live orphan still owns the GPU
+        this.unconfirmedBackendPid =
+          typeof details.pid === 'number' ? details.pid : this.backend.pid;
+      }
+      void this.logManager
+        ?.write(
+          `Failed to stop the sd-server backend cleanly: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          'error'
+        )
+        .catch(() => void 0);
+      debugLog('[Diffusion] backend stop failed:', error);
+    }
+
+    const reason = this.backend.stopReason ?? 'explicit';
+    this.backend.handle = undefined;
+    this.backend.client = undefined;
+    this.backend.flags = undefined;
+    this.backend.pid = undefined;
+    this.backend.startedAt = undefined;
+    this.backend.loadTimeMs = undefined;
+    this.backend.lastUsedAt = undefined;
+    this.backend.stopPromise = undefined;
+    this.backend.stopReason = undefined;
+    this.setBackendState('absent', reason);
+    this.onBackendReleased(reason);
+  }
+
+  /**
+   * Handle an observed backend exit
+   *
+   * Intentional kills are already accounted for by releaseBackend() (state
+   * 'stopping'). Anything else is a crash: the in-flight job fails, the backend
+   * becomes 'absent' and the wrapper keeps running — 'crashed' as a server event
+   * keeps meaning "the server is down".
+   * @private
+   */
+  private handleBackendExit(handle: SdServerHandle, exit: SdServerExit): void {
+    if (this.backend.handle !== handle) return; // stale child
+    if (this.backend.state === 'stopping') return; // intended kill
+
+    this.cleanupSyntheticProgress();
+    this.disarmIdleTimer();
+    this.backend.handle = undefined;
+    this.backend.client = undefined;
+    this.backend.flags = undefined;
+    this.backend.pid = undefined;
+    this.backend.startedAt = undefined;
+    this.backend.loadTimeMs = undefined;
+    this.backend.lastUsedAt = undefined;
+    this.setBackendState('absent', 'crashed', exit);
+
+    void this.logManager
+      ?.write(
+        `sd-server backend exited unexpectedly (code ${String(exit.code)}, signal ${String(
+          exit.signal
+        )})`,
+        'error'
+      )
+      .catch(() => void 0);
+
+    this.inFlight?.reject(backendExitError(handle, exit));
+    this.onBackendReleased('crashed');
+  }
+
+  /**
+   * Arm the idle timer for a resident backend
+   *
+   * `idleTimeoutMs: 0` disables it entirely (the host owns the release).
+   * Armed only by `settleResidency('burst')`, which owns the residency decision —
+   * a bare `executeImageGeneration()` (calibration, a batch loop between images)
+   * deliberately leaves the backend warm with no timer.
+   * @private
+   */
+  private armIdleTimer(): void {
+    this.disarmIdleTimer();
+    if (this.backend.state !== 'ready') return;
+
+    const serverConfig = (this._config ?? {}) as DiffusionServerConfig;
+    const idleTimeoutMs = serverConfig.idleTimeoutMs ?? DIFFUSION_BACKEND_DEFAULTS.idleTimeoutMs;
+    if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs <= 0) return;
+
+    const timer = setTimeout(() => {
+      this.backend.idleTimer = undefined;
+      void this.releaseBackend({ reason: 'idle-timeout' }).catch((error: unknown) => {
+        debugLog('[Diffusion] idle release failed:', error);
+      });
+    }, idleTimeoutMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.backend.idleTimer = timer;
+  }
+
+  /**
+   * Cancel a pending idle release
+   * @private
+   */
+  private disarmIdleTimer(): void {
+    if (this.backend.idleTimer) {
+      clearTimeout(this.backend.idleTimer);
+      this.backend.idleTimer = undefined;
+    }
+  }
+
+  /**
+   * Hook invoked after the backend is confirmed gone
+   *
+   * Forwards the FINAL (rank-upgraded) release reason to the orchestrator so a
+   * previously offloaded LLM can come back — but only for the reasons that really
+   * mean "the VRAM is free again"; the orchestrator owns that filter.
+   * @private
+   */
+  private onBackendReleased(reason: DiffusionBackendReleaseReason): void {
+    debugLog('[Diffusion] backend released:', reason);
+    try {
+      this.orchestrator?.onDiffusionBackendReleased(reason);
+    } catch (error) {
+      // A throwing callback must never derail the backend state machine
+      debugLog('[Diffusion] orchestrator release callback threw:', error);
+    }
+  }
+
+  /**
+   * Model/component launch arguments for the backend process
+   * @private
+   */
+  private buildBackendModelArgs(modelInfo: ModelInfo): string[] {
+    const args: string[] = [];
+
+    if (modelInfo.components) {
+      if (!modelInfo.components.diffusion_model) {
+        throw new ServerError(
+          'Multi-component model is missing required diffusion_model component',
+          {
+            modelId: modelInfo.id,
+            components: Object.keys(modelInfo.components),
+            suggestion: 'The model metadata appears corrupted. Try re-downloading the model.',
+          }
+        );
+      }
+      for (const role of DIFFUSION_COMPONENT_ORDER) {
+        const component = modelInfo.components[role];
+        if (component) {
+          args.push(DIFFUSION_COMPONENT_FLAGS[role], component.path);
+        }
+      }
+    } else {
+      args.push('-m', modelInfo.path);
+    }
+
+    return args;
   }
 
   /**
@@ -435,6 +1222,11 @@ export class DiffusionServerManager extends ServerManager {
    * Contract:
    * - The server must be STOPPED and is left stopped afterwards; start() throws
    *   while a calibration is in flight.
+   * - config.usageMode selects WHAT is measured (default 'single'): 'single' makes
+   *   every timed sample a cold spawn -> generate -> release cycle (single-shot
+   *   latency), 'burst' launches the backend once per combo and times warm samples.
+   *   The report echoes the mode and the policy version, because timings from the two
+   *   modes are not comparable.
    * - When constructed with a llamaServer, a running LLM is offloaded once for
    *   the whole sweep and restored afterwards. Otherwise stop the LLM yourself
    *   before calibrating.
@@ -500,6 +1292,9 @@ export class DiffusionServerManager extends ServerManager {
       }
     }
     const samples = Math.max(1, Math.floor(config.samples ?? defaults.samples));
+    // What the sweep measures: cold single-shot latency ('single') or warm burst
+    // latency ('burst'). Echoed in the report — the two are not comparable.
+    const usageMode: DiffusionUsageMode = config.usageMode ?? defaults.usageMode;
     const steps = config.generation.steps;
     const cfgScale = config.generation.cfgScale;
     const seed = config.seed ?? defaults.seed;
@@ -523,11 +1318,12 @@ export class DiffusionServerManager extends ServerManager {
     };
     config.signal?.addEventListener('abort', abortListener);
 
-    // Hoisted for the finally block ('restoring-llm'/'done' emits)
+    // Hoisted for the finally block ('restoring-llm'/'done' emits, sampler teardown)
     let emitFn: ((p: DiffusionCalibrationProgress) => void) | undefined;
     let comboCountForProgress = 0;
     let lastOverallPercent = 0;
     let succeeded = false;
+    let vramSampler: CalibrationVramSampler | undefined;
 
     try {
       // --- Setup (phase 'preparing') ---
@@ -629,7 +1425,7 @@ export class DiffusionServerManager extends ServerManager {
             .map((s) => `${s.width}x${s.height}`)
             .join(',')}, combos=${combos.length}${
             skippedCombos.length > 0 ? ` (${skippedCombos.length} skipped: SD3.5-Large)` : ''
-          }, steps=${steps}, samples=${samples}`,
+          }, steps=${steps}, samples=${samples}, usageMode=${usageMode}`,
           'info'
         )
         .catch(() => void 0);
@@ -656,6 +1452,10 @@ export class DiffusionServerManager extends ServerManager {
       await this.orchestrator?.waitForReload();
       await this.orchestrator?.offloadLLM();
 
+      // Machine-wide VRAM sampling for the timed windows (undefined when the platform
+      // exposes no trustworthy VRAM availability — the sweep runs unchanged either way)
+      vramSampler = await this.createCalibrationVramSampler();
+
       // --- Sweep (combo-outer, size-inner; every generation does identical work) ---
       for (let comboIndex = 0; comboIndex < combos.length; comboIndex++) {
         const combo = combos[comboIndex]!;
@@ -666,7 +1466,10 @@ export class DiffusionServerManager extends ServerManager {
           sizeCount: sizes.length,
         };
 
-        // Warmup at the first size (discarded; stabilizes disk cache / first-spawn overhead)
+        // Warmup at the first size. Discarded either way, but for different reasons:
+        // in 'burst' it absorbs the spawn and the lazy weight placement so the timed
+        // samples are warm; in 'single' it primes the OS page cache and the driver so
+        // the timed cold spawns are not the first one on this machine.
         let warmupFailure: { status: 'oom' | 'error'; message: string } | undefined;
         if (config.signal?.aborted) {
           throw this.calibrationAbortError(runs);
@@ -679,6 +1482,14 @@ export class DiffusionServerManager extends ServerManager {
           overallPercent: overallPercent(),
         });
         try {
+          if (usageMode === 'single') {
+            // Cold by construction, and re-check the signal afterwards so an abort
+            // that lands during the release cannot buy a whole extra generation
+            await this.releaseCalibrationBackend();
+            if (config.signal?.aborted) {
+              throw this.calibrationAbortError(runs);
+            }
+          }
           await this.runCalibrationGeneration({
             prompt,
             size: sizes[0]!,
@@ -702,6 +1513,11 @@ export class DiffusionServerManager extends ServerManager {
             throw this.calibrationAbortError(runs);
           }
           warmupFailure = this.classifyCalibrationFailure(error);
+        } finally {
+          // Also on failure: the next attempt must start from no backend at all
+          if (usageMode === 'single') {
+            await this.releaseCalibrationBackend();
+          }
         }
         completedUnits++;
 
@@ -709,6 +1525,7 @@ export class DiffusionServerManager extends ServerManager {
           const size = sizes[sizeIndex]!;
           const samplesMs: number[] = [];
           const snapshots: { loadMs?: number; diffusionMs?: number; decodeMs?: number }[] = [];
+          const vramSamples: CalibrationVramSample[] = [];
           let resolved: CalibrationRun['resolved'];
           let failure: { status: 'oom' | 'error'; message: string } | undefined;
 
@@ -733,30 +1550,54 @@ export class DiffusionServerManager extends ServerManager {
                 overallPercent: overallPercent(),
               });
               try {
-                const result = await this.runCalibrationGeneration({
-                  prompt,
-                  size,
-                  steps,
-                  cfgScale,
-                  seed,
-                  sampler,
-                  combo,
-                  onGenerationProgress: (pct) =>
-                    emit({
-                      phase: 'sampling',
-                      ...baseProgress,
-                      sizeIndex,
-                      size,
-                      sample,
-                      sampleCount: samples,
-                      generationPercent: pct,
-                      overallPercent: overallPercent(pct / 100),
-                    }),
-                });
+                if (usageMode === 'single') {
+                  // Release BEFORE the timed window: the sample must pay for the spawn
+                  // and the weight load, exactly like a one-off production image does
+                  await this.releaseCalibrationBackend();
+                  if (config.signal?.aborted) {
+                    throw this.calibrationAbortError(runs);
+                  }
+                }
+                let result: ImageGenerationResult;
+                await vramSampler?.begin();
+                try {
+                  result = await this.runCalibrationGeneration({
+                    prompt,
+                    size,
+                    steps,
+                    cfgScale,
+                    seed,
+                    sampler,
+                    combo,
+                    onGenerationProgress: (pct) =>
+                      emit({
+                        phase: 'sampling',
+                        ...baseProgress,
+                        sizeIndex,
+                        size,
+                        sample,
+                        sampleCount: samples,
+                        generationPercent: pct,
+                        overallPercent: overallPercent(pct / 100),
+                      }),
+                  });
+                } finally {
+                  // Close the peak window, then settle: 'single' releases the backend
+                  // first (untimed), so its idle figure is what the combo leaves behind;
+                  // 'burst' reads what it keeps resident between images.
+                  await vramSampler?.end();
+                  if (usageMode === 'single') {
+                    await this.releaseCalibrationBackend();
+                  }
+                  await vramSampler?.measureIdle();
+                }
+                // executeImageGeneration() times itself from before ensureBackend(), so
+                // a cold sample's total already includes spawn + weight load
                 samplesMs.push(result.timeTaken);
                 // Snapshot per sample: the stage timestamps are instance
                 // fields reset by the next generation
                 snapshots.push(this.snapshotStageMs());
+                vramSamples.push(vramSampler?.result() ?? {});
                 resolved = this.lastResolvedOptimizations
                   ? { ...this.lastResolvedOptimizations }
                   : undefined;
@@ -802,6 +1643,14 @@ export class DiffusionServerManager extends ServerManager {
             ) {
               run.stageMs = stage;
             }
+            // VRAM comes from the same representative sample as the stage split
+            const vram = vramSamples[bestIdx];
+            if (vram?.vramPeakBytes !== undefined) {
+              run.vramPeakBytes = vram.vramPeakBytes;
+            }
+            if (vram?.vramIdleBytes !== undefined) {
+              run.vramIdleBytes = vram.vramIdleBytes;
+            }
           }
           runs.push(run);
           void this.logManager
@@ -812,6 +1661,12 @@ export class DiffusionServerManager extends ServerManager {
               run.status === 'ok' ? 'info' : 'warn'
             )
             .catch(() => void 0);
+        }
+
+        // 'burst' held one backend for the whole combo — free its VRAM before the next
+        // combo's launch ('single' already released after every generation)
+        if (usageMode === 'burst') {
+          await this.releaseCalibrationBackend();
         }
       }
 
@@ -836,6 +1691,8 @@ export class DiffusionServerManager extends ServerManager {
         cfgScale,
         sampler,
         samples,
+        usageMode,
+        policyVersion: defaults.policyVersion,
         runs,
         recommended,
       };
@@ -847,6 +1704,14 @@ export class DiffusionServerManager extends ServerManager {
       return report;
     } finally {
       config.signal?.removeEventListener('abort', abortListener);
+
+      // First: no sampling timer may outlive the sweep, whatever ended it
+      vramSampler?.dispose();
+
+      // Never leave a backend (and its VRAM) behind: an aborted sweep, or a 'burst'
+      // combo that failed before its release, would otherwise stay resident while the
+      // server is 'stopped'
+      await this.releaseCalibrationBackend();
 
       // Restore instance state (server remains stopped)
       this._config = savedConfig;
@@ -909,6 +1774,68 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
+   * Release the backend between calibration generations
+   *
+   * Never throws: a release that could not be completed is logged, and the sweep
+   * continues (the next `ensureBackend()` refuses to start a second process while a
+   * previous one may still be alive, so a lost backend surfaces as a run failure
+   * rather than as two children fighting over the GPU).
+   *
+   * Reason `'calibration'` is deliberate: the orchestrator ignores it, so these
+   * releases never bring the offloaded LLM back mid-sweep.
+   * @private
+   */
+  private async releaseCalibrationBackend(): Promise<void> {
+    try {
+      await this.releaseBackend({ reason: 'calibration' });
+    } catch (error) {
+      debugLog('[Calibrate] backend release failed:', error);
+    }
+  }
+
+  /**
+   * Build the sweep's VRAM sampler, or undefined when this machine cannot support it
+   *
+   * Gated up front (once per sweep) rather than per sample: macOS has unified memory
+   * and no VRAM availability telemetry, and a platform that reports no `vramAvailable`
+   * would only produce untrusted readings. The adapter reads the GPU exclusively —
+   * host-memory telemetry is not refreshed, since the sweep never compares it.
+   * @private
+   */
+  private async createCalibrationVramSampler(): Promise<CalibrationVramSampler | undefined> {
+    // No explicit platform gate: the `vramAvailable` probe below is the real criterion. macOS
+    // (unified memory) never reports it, so it is excluded by construction — and a platform check
+    // on `process.platform` would be untestable on arm64 macOS runners, where pinning the platform
+    // breaks binary provisioning (`win32-arm64` is not a supported platform key).
+    try {
+      const gpu = await this.systemInfo.getGPUInfo({
+        timeoutMs: CALIBRATION_VRAM_TELEMETRY_TIMEOUT_MS,
+      });
+      if (gpu.vramAvailable === undefined) return undefined;
+      if (gpu.vram === undefined || !Number.isFinite(gpu.vram) || gpu.vram <= 0) return undefined;
+
+      const capture = createTelemetrySnapshotCapture(
+        {
+          // Host memory is never read by this sampler; claiming 'not-required' keeps the
+          // shared adapter's VRAM path (and its trust rules) without paying for a host
+          // telemetry command every second.
+          refreshMemoryTelemetry: async () => 'not-required',
+          getMemoryInfo: () => ({ available: 0 }),
+          getGPUInfo: (options) => this.systemInfo.getGPUInfo(options),
+        },
+        {
+          telemetryTimeoutMs: CALIBRATION_VRAM_TELEMETRY_TIMEOUT_MS,
+          onDiagnostic: (message, error) => debugLog(`[Calibrate] ${message}`, error),
+        }
+      );
+      return new CalibrationVramSampler(capture, gpu.vram, CALIBRATION_VRAM_SAMPLE_INTERVAL_MS);
+    } catch (error) {
+      debugLog('[Calibrate] VRAM sampling unavailable:', error);
+      return undefined;
+    }
+  }
+
+  /**
    * Run one calibration generation with per-combo flag overrides
    * @private
    */
@@ -936,7 +1863,17 @@ export class DiffusionServerManager extends ServerManager {
         }
       },
     };
-    return this.executeImageGeneration(genConfig, params.combo);
+
+    // Calibration owns the busy claim for its own generations, so the sweep's
+    // AbortSignal listener (which calls currentGeneration?.cancel()) can reach them.
+    const claim = this.createGenerationClaim();
+    try {
+      const promise = this.executeImageGeneration(genConfig, params.combo);
+      claim.promise = promise;
+      return await promise;
+    } finally {
+      this.releaseGenerationClaim(claim);
+    }
   }
 
   /**
@@ -960,6 +1897,10 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Classify a failed calibration generation as OOM or generic error
    * (from the error message + captured stderr)
+   *
+   * Two spellings carry the backend output: a failed job and a mid-job exit put it in
+   * `details.stderr`, while a startup failure (a load-time OOM never reaches the job
+   * API at all) comes straight from the runner as `details.stderrTail`.
    * @private
    */
   private classifyCalibrationFailure(error: unknown): {
@@ -969,7 +1910,8 @@ export class DiffusionServerManager extends ServerManager {
     const message = error instanceof Error ? error.message : String(error);
     let stderr = '';
     if (error instanceof GenaiElectronError && error.details && typeof error.details === 'object') {
-      const detailStderr = (error.details as Record<string, unknown>).stderr;
+      const details = error.details as Record<string, unknown>;
+      const detailStderr = details.stderr ?? details.stderrTail;
       if (typeof detailStderr === 'string') {
         stderr = detailStderr;
       }
@@ -982,10 +1924,10 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Generate an image
    *
-   * Spawns stable-diffusion.cpp executable with the provided configuration.
-   * For cancellable generations, use the async HTTP API and
-   * cancelImageGeneration(); direct calls run to completion or error
-   * (or are cancelled by stop()).
+   * Runs the request against the internal stable-diffusion.cpp backend, spawning it
+   * first when no backend with matching offload flags is resident. For cancellable
+   * generations, use the async HTTP API and cancelImageGeneration(); direct calls run
+   * to completion or error (or are cancelled by stop()).
    *
    * @param config - Image generation configuration
    * @returns Generated image result
@@ -1004,15 +1946,35 @@ export class DiffusionServerManager extends ServerManager {
       });
     }
 
-    if (this.orchestrator) {
-      return this.orchestrator.orchestrateImageGeneration(config);
-    } else {
-      return this.executeImageGeneration(config);
+    // Claim the busy gate synchronously (before any await) so two concurrent
+    // callers can never both pass the check above
+    const claim = this.createGenerationClaim();
+    try {
+      if (this.orchestrator) {
+        // The orchestrator owns the offload context, so it settles residency
+        const promise = this.orchestrator.orchestrateImageGeneration(config);
+        claim.promise = promise;
+        return await promise;
+      }
+
+      const promise = this.executeImageGeneration(config);
+      claim.promise = promise;
+      try {
+        return await promise;
+      } finally {
+        // No orchestrator: nothing was offloaded, and this call settles residency
+        await this.settleResidencyWithoutOffload(config.usageMode);
+      }
+    } finally {
+      this.releaseGenerationClaim(claim);
     }
   }
 
   /**
    * Check if server is healthy
+   *
+   * Wrapper-scoped by design: backend residency is not wrapper liveness, so a
+   * 'single'-mode release after every image never flips this to false.
    *
    * @returns True if server is running and HTTP server is available
    */
@@ -1021,16 +1983,65 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
+   * Get the process ID of the internal stable-diffusion.cpp backend
+   *
+   * The public server is an in-process node:http wrapper with no PID of its own, so
+   * this reports the backend process (identical to `getInfo().pid`).
+   *
+   * @returns Backend PID while it is resident, otherwise undefined
+   */
+  override getPid(): number | undefined {
+    return this.backend.pid;
+  }
+
+  /**
    * Get server information with diffusion-specific fields
    *
-   * @returns Server information including busy status
+   * `pid` is the backend process ID while it is resident (the wrapper is in-process
+   * and has no PID of its own).
+   *
+   * @returns Server information including busy status and backend snapshot
    */
   override getInfo(): DiffusionServerInfo {
     const baseInfo = super.getInfo();
+    const backend = this.getBackendInfo();
     return {
       ...baseInfo,
+      pid: backend.pid,
       busy: !!this.currentGeneration,
+      backend,
     } as DiffusionServerInfo;
+  }
+
+  /**
+   * Create and install the busy-gate claim for one generation
+   *
+   * The claim's cancel() latches `cancelRequested` (so a cancel arriving before the
+   * backend job is submitted is not lost) and forwards to the in-flight job when one
+   * already exists.
+   * @private
+   */
+  private createGenerationClaim(id?: string): GenerationClaim {
+    const claim: GenerationClaim = {
+      cancelRequested: false,
+      cancel: () => {
+        claim.cancelRequested = true;
+        this.inFlight?.cancel();
+      },
+    };
+    if (id !== undefined) claim.id = id;
+    this.currentGeneration = claim;
+    return claim;
+  }
+
+  /**
+   * Release the busy gate, but only if this claim still owns it
+   * @private
+   */
+  private releaseGenerationClaim(claim: GenerationClaim): void {
+    if (this.currentGeneration === claim) {
+      this.currentGeneration = undefined;
+    }
   }
 
   /**
@@ -1061,7 +2072,7 @@ export class DiffusionServerManager extends ServerManager {
 
     return this.ensureBinaryHelper(
       'diffusion',
-      'sd-cli',
+      'sd-server',
       BINARY_VERSIONS.diffusionCpp,
       modelInfo?.path,
       forceValidation,
@@ -1074,9 +2085,10 @@ export class DiffusionServerManager extends ServerManager {
    * Create HTTP server with async generation endpoints
    *
    * @param port - Resolved port number to listen on
+   * @param host - Interface to bind (raw, as configured)
    * @private
    */
-  private async createHTTPServer(port: number): Promise<void> {
+  private async createHTTPServer(port: number, host: string): Promise<void> {
     this.httpServer = http.createServer(async (req, res) => {
       // Enable CORS
       res.setHeader('Access-Control-Allow-Origin', '*');
@@ -1093,7 +2105,13 @@ export class DiffusionServerManager extends ServerManager {
         // Health endpoint
         if (req.url === '/health' && req.method === 'GET') {
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ status: 'ok', busy: !!this.currentGeneration }));
+          res.end(
+            JSON.stringify({
+              status: 'ok',
+              busy: !!this.currentGeneration,
+              backend: this.backend.state,
+            })
+          );
           return;
         }
 
@@ -1133,13 +2151,13 @@ export class DiffusionServerManager extends ServerManager {
       }
     });
 
-    // Start listening
+    // Start listening (loopback-only unless the host explicitly widened the bind)
     await new Promise<void>((resolve, reject) => {
-      this.httpServer!.listen(port, () => resolve());
+      this.httpServer!.listen(port, host, () => resolve());
       this.httpServer!.on('error', reject);
     });
 
-    await this.logManager?.write(`HTTP server listening on port ${port}`, 'info');
+    await this.logManager?.write(`HTTP server listening on ${host}:${port}`, 'info');
   }
 
   /**
@@ -1150,12 +2168,38 @@ export class DiffusionServerManager extends ServerManager {
     req: http.IncomingMessage,
     res: http.ServerResponse
   ): Promise<void> {
+    // Refuse while the wrapper is not serving (e.g. stop() already closed the gate)
+    if (this._status !== 'running') {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: {
+            message: 'Server is not running',
+            code: 'SERVER_NOT_RUNNING',
+            suggestion: 'Start the server first with start()',
+          },
+        })
+      );
+      return;
+    }
+
     // Parse request body
     const body = await this.parseRequestBody(req);
-    const imageConfig: ImageGenerationConfig = JSON.parse(body);
+    let imageConfig: ImageGenerationConfig;
+    try {
+      imageConfig = JSON.parse(body) as ImageGenerationConfig;
+    } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { message: 'Malformed JSON request body', code: 'INVALID_REQUEST' },
+        })
+      );
+      return;
+    }
 
     // Validate required fields
-    if (!imageConfig.prompt) {
+    if (!imageConfig || typeof imageConfig !== 'object' || !imageConfig.prompt) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(
         JSON.stringify({
@@ -1178,6 +2222,21 @@ export class DiffusionServerManager extends ServerManager {
       }
     }
 
+    // Validate residency policy
+    if (
+      imageConfig.usageMode !== undefined &&
+      imageConfig.usageMode !== 'burst' &&
+      imageConfig.usageMode !== 'single'
+    ) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          error: { message: "usageMode must be 'burst' or 'single'", code: 'INVALID_REQUEST' },
+        })
+      );
+      return;
+    }
+
     // Check if server is busy
     if (this.currentGeneration) {
       res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -1193,13 +2252,20 @@ export class DiffusionServerManager extends ServerManager {
       return;
     }
 
+    // Claim the busy gate synchronously — BEFORE registry.create() and any await —
+    // so two back-to-back POSTs can never both get past the check above
+    const claim = this.createGenerationClaim();
+
     // Create generation entry in registry
     const id = this.registry.create(imageConfig);
+    claim.id = id;
 
     // Start generation asynchronously (don't await)
-    this.runAsyncGeneration(id, imageConfig).catch((error) => {
-      // Never overwrite a cancellation: the rejection of a killed sd-cli
-      // process lands here after cancelImageGeneration set 'cancelled'
+    const generation = this.runAsyncGeneration(id, imageConfig);
+    claim.promise = generation;
+    generation.catch((error: unknown) => {
+      // Never overwrite a cancellation: the rejection of a killed backend job
+      // lands here after cancelImageGeneration set 'cancelled'
       const state = this.registry.get(id);
       if (!state || state.status === 'cancelled') {
         return;
@@ -1300,13 +2366,14 @@ export class DiffusionServerManager extends ServerManager {
    */
   private async runAsyncGeneration(id: string, config: ImageGenerationConfig): Promise<void> {
     const startTime = Date.now();
+    // The claim was installed synchronously by the POST handler; this call owns it
+    const claim = this.currentGeneration;
 
     // A cancel may have landed between create and this call
     if (this.registry.get(id)?.status === 'cancelled') {
+      if (claim) this.releaseGenerationClaim(claim);
       return;
     }
-
-    this.activeGeneration = { id, cancelled: false };
 
     // Update to in_progress
     this.registry.update(id, { status: 'in_progress' });
@@ -1338,15 +2405,21 @@ export class DiffusionServerManager extends ServerManager {
       const count = config.count || 1;
       let results: ImageGenerationResult[];
 
-      if (count > 1) {
-        // Batch generation (orchestration not yet supported for batch)
-        results = await this.executeBatchGeneration(wrappedConfig);
+      if (this.orchestrator) {
+        // One offload window for the whole request; the orchestrator settles residency
+        results =
+          count > 1
+            ? await this.orchestrator.orchestrateBatchGeneration(wrappedConfig)
+            : [await this.orchestrator.orchestrateImageGeneration(wrappedConfig)];
       } else {
-        // Single image: use orchestrator if available (same logic as public generateImage method)
-        if (this.orchestrator) {
-          results = [await this.orchestrator.orchestrateImageGeneration(wrappedConfig)];
-        } else {
-          results = [await this.executeImageGeneration(wrappedConfig)];
+        // No orchestrator: nothing was offloaded, and this call settles residency once
+        try {
+          results =
+            count > 1
+              ? await this.executeBatchGeneration(wrappedConfig)
+              : [await this.executeImageGeneration(wrappedConfig)];
+        } finally {
+          await this.settleResidencyWithoutOffload(config.usageMode);
         }
       }
 
@@ -1373,23 +2446,68 @@ export class DiffusionServerManager extends ServerManager {
           timeTaken: Date.now() - startTime,
         },
       });
+    } catch (error) {
+      // A cancelled generation is 'cancelled', never 'error' — stop() cancels the
+      // in-flight job without going through cancelImageGeneration(), so this is the
+      // only place that can classify it. The claim flag covers a cancel that landed
+      // before a backend job existed (the failure is then the aborted spawn).
+      // Rethrown so the caller still sees a failure.
+      const state = this.registry.get(id);
+      if (
+        state &&
+        state.status !== 'complete' &&
+        state.status !== 'error' &&
+        state.status !== 'cancelled' &&
+        (claim?.cancelRequested === true || this.mapErrorCode(error) === 'GENERATION_CANCELLED')
+      ) {
+        this.registry.update(id, { status: 'cancelled' });
+      }
+      throw error;
     } finally {
-      this.activeGeneration = undefined;
+      if (claim) this.releaseGenerationClaim(claim);
     }
   }
 
   /**
-   * Map error to error code
+   * Map an error onto the wire error code
+   *
+   * `details.code` wins when present (the backend client/runner carry their
+   * discriminant there); the substring fallbacks keep older paths mapped.
    * @private
    */
   private mapErrorCode(error: unknown): string {
+    const details =
+      error instanceof GenaiElectronError && error.details && typeof error.details === 'object'
+        ? (error.details as Record<string, unknown>)
+        : undefined;
+    const detailCode = typeof details?.code === 'string' ? details.code : undefined;
+
+    if (detailCode !== undefined) {
+      if (detailCode === 'GENERATION_NOT_FOUND') return 'NOT_FOUND';
+      if (detailCode === 'SERVER_NOT_RUNNING') return 'SERVER_NOT_RUNNING';
+      if (detailCode === 'IMAGE_DECODE_FAILED') return 'IO_ERROR';
+      // A full backend queue is a transient "come back later", exactly what the
+      // wrapper's own busy gate reports — not a backend malfunction.
+      if (detailCode === 'BACKEND_QUEUE_FULL') return 'SERVER_BUSY';
+      // A spawn aborted through the startup signal IS the cancellation: the only
+      // thing that aborts it is a cancel that arrived before the backend was ready.
+      if (detailCode === 'SD_SERVER_START_ABORTED') return 'GENERATION_CANCELLED';
+      if (detailCode.startsWith('BACKEND_') || detailCode.startsWith('SD_SERVER_')) {
+        return 'BACKEND_ERROR';
+      }
+    }
+
     if (error instanceof Error) {
       const message = error.message.toLowerCase();
+      // Cancellation travels as a plain Error ('Image generation cancelled')
+      if (message.includes('cancelled')) return 'GENERATION_CANCELLED';
       if (message.includes('server is busy')) return 'SERVER_BUSY';
       if (message.includes('not running')) return 'SERVER_NOT_RUNNING';
       if (message.includes('failed to spawn')) return 'BACKEND_ERROR';
       if (message.includes('exited with code')) return 'BACKEND_ERROR';
+      if (message.includes('job failed')) return 'BACKEND_ERROR';
       if (message.includes('failed to read')) return 'IO_ERROR';
+      if (message.includes('failed to decode')) return 'IO_ERROR';
     }
     return 'UNKNOWN_ERROR';
   }
@@ -1413,10 +2531,13 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
-   * Execute image generation by spawning stable-diffusion.cpp
+   * Execute image generation against the stable-diffusion.cpp backend
    *
    * This is the direct execution method used internally and by ResourceOrchestrator.
-   * External callers should use generateImage() which includes automatic resource management.
+   * External callers should use generateImage() which includes automatic resource
+   * management. Spawns the backend when none with matching flags is resident, submits
+   * one job and polls it to a terminal status while the backend's stdout tap drives
+   * the progress model.
    *
    * @param config - Image generation configuration
    * @param flagOverrides - Per-generation offload-flag overrides (used by calibrate();
@@ -1442,129 +2563,338 @@ export class DiffusionServerManager extends ServerManager {
       seed: config.seed === undefined || config.seed < 0 ? this.generateRandomSeed() : config.seed,
     };
 
-    // Initialize progress tracking
-    this.initializeProgressTracking(normalizedConfig);
+    // Initialize progress tracking (the backend's stdout tap reads progressConfig).
+    // A resident backend means no model load, so the estimate must be the warm one —
+    // otherwise a cold generation after warm ones would over- or under-shoot.
+    const backendResident = this.backend.state === 'ready' || this.backend.state === 'busy';
+    this.initializeProgressTracking(normalizedConfig, backendResident);
+    this.progressConfig = normalizedConfig;
+    this.currentStage = 'loading';
+    this.reportProgress(normalizedConfig);
 
-    // Compute VRAM optimizations (fresh GPU info, respects user overrides)
+    // Compute VRAM optimizations (fresh GPU info, respects user overrides).
+    // These are LAUNCH flags: a change forces the backend to be respawned.
     const optimizations = await this.computeDiffusionOptimizations(flagOverrides);
-
-    // Build command-line arguments
-    const args = this.buildDiffusionArgs(normalizedConfig, this.currentModelInfo, optimizations);
-
-    // Output file path
-    const outputPath = getTempPath(`sd-output-${Date.now()}.png`);
-    args.push('-o', outputPath);
-
-    await this.logManager?.write(`Generating image: ${this.binaryPath} ${args.join(' ')}`, 'info');
-    await this.logManager?.write(
-      `Model info: id=${this.currentModelInfo.id}, components=${this.currentModelInfo.components ? Object.keys(this.currentModelInfo.components).join(',') : 'none'}, path=${this.currentModelInfo.path}`,
-      'info'
-    );
-
-    // Spawn stable-diffusion.cpp
-    let cancelled = false;
-    let pid: number | undefined;
-    const stderrLines: string[] = [];
-    const MAX_STDERR_LINES = 20;
-
-    const generationPromise = new Promise<ImageGenerationResult>((resolve, reject) => {
-      const spawnResult = this.processManager.spawn(this.binaryPath!, args, {
-        onStdout: (data) => {
-          this.processStdoutForProgress(data, normalizedConfig);
-          this.logManager?.write(data, 'info').catch(() => void 0);
-        },
-        onStderr: (data) => {
-          this.logManager?.write(data, 'warn').catch(() => void 0);
-          // Accumulate stderr for error diagnostics (sliding window of last N lines)
-          const lines = data.split('\n').filter((line: string) => line.trim() !== '');
-          for (const line of lines) {
-            stderrLines.push(line);
-          }
-          if (stderrLines.length > MAX_STDERR_LINES) {
-            stderrLines.splice(0, stderrLines.length - MAX_STDERR_LINES);
-          }
-        },
-        onExit: async (code) => {
-          // Clean up synthetic progress interval
-          this.cleanupSyntheticProgress();
-
-          if (cancelled) {
-            reject(new Error('Image generation cancelled'));
-            return;
-          }
-
-          if (code !== 0) {
-            const stderrOutput = stderrLines.length > 0 ? stderrLines.join('\n') : '';
-            const argsStr = args.join(' ');
-            reject(
-              new ServerError(
-                `stable-diffusion.cpp exited with code ${code}${stderrOutput ? `\n${stderrOutput}` : ''}\nArgs: ${argsStr}`,
-                {
-                  exitCode: code,
-                  stderr: stderrOutput || undefined,
-                  args: argsStr,
-                }
-              )
-            );
-            return;
-          }
-
-          // Read generated image
-          try {
-            const imageBuffer = await fs.readFile(outputPath);
-            await deleteFile(outputPath).catch(() => void 0);
-
-            // Update time estimates based on actual generation times
-            this.updateTimeEstimates(normalizedConfig);
-
-            resolve({
-              image: imageBuffer,
-              format: 'png',
-              timeTaken: Date.now() - startTime,
-              seed: normalizedConfig.seed,
-              width: normalizedConfig.width || 512,
-              height: normalizedConfig.height || 512,
-            });
-          } catch (error) {
-            reject(
-              new ServerError('Failed to read generated image', {
-                error: error instanceof Error ? error.message : String(error),
-              })
-            );
-          }
-        },
-        onError: (error) => {
-          this.cleanupSyntheticProgress();
-          reject(
-            new ServerError('Failed to spawn stable-diffusion.cpp', {
-              error: error.message,
-            })
-          );
-        },
-      });
-      pid = spawnResult.pid;
-    });
-
-    // Store cancellation function AFTER promise is created
-    this.currentGeneration = {
-      promise: generationPromise,
-      cancel: () => {
-        cancelled = true;
-        this.cleanupSyntheticProgress();
-        if (pid !== undefined) {
-          this.processManager.kill(pid, 5000).catch(() => void 0);
-        }
-      },
+    const flags: ResolvedDiffusionFlags = {
+      clipOnCpu: optimizations.clipOnCpu,
+      vaeOnCpu: optimizations.vaeOnCpu,
+      offloadToCpu: optimizations.offloadToCpu,
+      diffusionFlashAttention: optimizations.diffusionFlashAttention,
     };
 
+    // A cold spawn can take minutes; a cancel arriving during it must not be parked
+    // until the backend is ready. This gate makes the spawn itself cancellable: the
+    // claim's cancel() reaches it through `inFlight`, and the runner maps the aborted
+    // startup to SD_SERVER_START_ABORTED (wire code GENERATION_CANCELLED).
+    const spawnAbort = new AbortController();
+    const spawnGate: InFlightBackendJob = {
+      cancel: () => {
+        spawnAbort.abort(
+          new ServerError('Image generation cancelled before the backend was ready', {
+            code: 'GENERATION_CANCELLED',
+          })
+        );
+      },
+      // No backend job exists yet, so there is nothing a crash could fail here; the
+      // spawn's own error path reports it.
+      reject: () => undefined,
+    };
+    this.inFlight = spawnGate;
+
+    let handle: SdServerHandle;
+    let client: SdServerClient;
+    let spawned: boolean;
     try {
-      const result = await generationPromise;
-      this.currentGeneration = undefined;
-      return result;
+      // Cold path: 'loading' covers the spawn (loadStartTime is set when it begins)
+      ({ handle, client, spawned } = await this.ensureBackend(flags, {
+        signal: spawnAbort.signal,
+      }));
     } catch (error) {
-      this.currentGeneration = undefined;
+      this.finishProgressTracking(normalizedConfig);
       throw error;
+    } finally {
+      // Identity check: a later generation may already own the slot
+      if (this.inFlight === spawnGate) this.inFlight = undefined;
     }
+
+    // Warm path: the weights are already resident, so 'loading' is only the
+    // pre-sampling (conditioning) work that starts when the job is submitted
+    if (this.loadStartTime === undefined) this.loadStartTime = Date.now();
+
+    const serverConfig = (this._config ?? {}) as DiffusionServerConfig;
+    const request = buildSdServerImageRequest(normalizedConfig, serverConfig.batchSize);
+    void this.logManager
+      ?.write(
+        `Generating image on backend port ${handle.port}: ` +
+          `${normalizedConfig.width ?? 512}x${normalizedConfig.height ?? 512}, ` +
+          `seed=${normalizedConfig.seed}, steps=${normalizedConfig.steps ?? 'default'}`,
+        'info'
+      )
+      .catch(() => void 0);
+
+    this.setBackendState('busy', 'job');
+    this.disarmIdleTimer();
+
+    let cancelled = false;
+    let rejectInFlight!: (error: unknown) => void;
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      rejectInFlight = reject;
+    });
+    // Every use below races this promise (which attaches a handler); this keeps a
+    // never-raced rejection from surfacing as an unhandled rejection.
+    abortPromise.catch(() => undefined);
+
+    let jobId: string | undefined;
+    let jobStatus: SdServerJobStatus = 'queued';
+
+    /** Stop the backend-side job, once its id is known. Safe to call twice. */
+    let jobStopRequested = false;
+    const stopBackendJob = (): void => {
+      if (jobId === undefined || jobStopRequested) return;
+      jobStopRequested = true;
+      if (jobStatus === 'queued') {
+        void this.cancelQueuedJob(client, jobId);
+      } else {
+        // Upstream cannot interrupt sampling (409), so the backend is killed.
+        // Initiated, not awaited: the flip to 'stopping' is synchronous, so no
+        // respawn can slip past the dying child.
+        void this.releaseBackend({ reason: 'cancel' }).catch(() => void 0);
+      }
+    };
+
+    const inFlightJob: InFlightBackendJob = {
+      cancel: () => {
+        if (cancelled) return;
+        cancelled = true;
+        this.cleanupSyntheticProgress();
+        rejectInFlight(new Error('Image generation cancelled'));
+        stopBackendJob();
+      },
+      reject: (error: unknown) => {
+        rejectInFlight(error);
+      },
+    };
+    this.inFlight = inFlightJob;
+
+    try {
+      // Deliberately NOT raced against abortPromise: a cancel landing mid-round-trip
+      // would leave the backend running a job nobody owns. The latch below cancels it
+      // as soon as the id exists.
+      const submitted = await handle.raceWithExit(client.submitImageJob(request));
+      jobId = submitted.id;
+
+      // A cancel that arrived before the job existed is latched on the claim (or,
+      // when it landed during the round-trip, on `cancelled`)
+      if (cancelled || this.currentGeneration?.cancelRequested === true) {
+        inFlightJob.cancel();
+        // Already-cancelled: cancel() short-circuited before the id existed
+        stopBackendJob();
+        throw new Error('Image generation cancelled');
+      }
+
+      const job = await Promise.race([
+        this.pollJobToCompletion(handle, client, jobId, normalizedConfig, (status) => {
+          jobStatus = status;
+        }),
+        abortPromise,
+      ]);
+
+      if (job.status !== 'completed') {
+        throw this.jobFailureError(handle, job);
+      }
+
+      this.completeVaeStage(normalizedConfig);
+
+      const base64 = job.result?.images[0]?.b64_json;
+      if (base64 === undefined || base64 === '') {
+        throw new ServerError('Failed to decode generated image: no image data in job result', {
+          code: 'IMAGE_DECODE_FAILED',
+          jobId,
+          args: handle.args.join(' '),
+        });
+      }
+      const imageBuffer = Buffer.from(base64, 'base64');
+      if (imageBuffer.length === 0) {
+        throw new ServerError('Failed to decode generated image: empty image payload', {
+          code: 'IMAGE_DECODE_FAILED',
+          jobId,
+          args: handle.args.join(' '),
+        });
+      }
+
+      // Update time estimates based on actual generation times
+      this.updateTimeEstimates(normalizedConfig, spawned);
+
+      return {
+        image: imageBuffer,
+        format: 'png',
+        timeTaken: Date.now() - startTime,
+        seed: normalizedConfig.seed,
+        width: normalizedConfig.width || 512,
+        height: normalizedConfig.height || 512,
+      };
+    } catch (error) {
+      // A job the backend may still be working on must not outlive the generation that
+      // owns it: it would hold the GPU with nobody left to read its result. Skipped for
+      // an exited backend (nothing is running) and for a job the backend already
+      // reported terminal (nothing to stop). Best effort — stopBackendJob() is
+      // idempotent and never throws.
+      if (jobId !== undefined && !isTerminalJobStatus(jobStatus) && !isBackendExit(error)) {
+        stopBackendJob();
+      }
+      throw this.toGenerationError(handle, error);
+    } finally {
+      // Identity checks: a later generation may already own these
+      if (this.inFlight === inFlightJob) this.inFlight = undefined;
+      this.finishProgressTracking(normalizedConfig);
+      if (this.backend.state === 'busy') {
+        this.backend.lastUsedAt = Date.now();
+        this.setBackendState('ready', 'job');
+        // Residency (release now vs stay warm under the idle timeout) is NOT decided
+        // here: settleResidency() owns it, called once per generation by whoever owns
+        // the offload context. A batch loop and calibration run through this method
+        // repeatedly and must not arm anything in between.
+      }
+    }
+  }
+
+  /**
+   * Poll one backend job until it reaches a terminal status
+   *
+   * A dropped socket or a slow answer is not a failed image: up to
+   * `DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures - 1` consecutive transient
+   * client failures are retried. Everything else (expired/unknown job, HTTP error,
+   * invalid body, backend exit) fails the generation immediately.
+   * @private
+   */
+  private async pollJobToCompletion(
+    handle: SdServerHandle,
+    client: SdServerClient,
+    jobId: string,
+    config: ImageGenerationConfig,
+    onStatus: (status: SdServerJobStatus) => void
+  ): Promise<SdServerJob> {
+    let transientFailures = 0;
+
+    for (;;) {
+      let job: SdServerJob;
+      try {
+        job = await handle.raceWithExit(client.getJob(jobId));
+        transientFailures = 0;
+      } catch (error) {
+        const details =
+          error instanceof GenaiElectronError && error.details && typeof error.details === 'object'
+            ? (error.details as Record<string, unknown>)
+            : undefined;
+        const code = typeof details?.code === 'string' ? details.code : undefined;
+        if (code === undefined || !TRANSIENT_POLL_ERROR_CODES.has(code)) throw error;
+
+        transientFailures++;
+        if (transientFailures >= DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures) throw error;
+
+        void this.logManager
+          ?.write(
+            `Transient backend poll failure ${transientFailures}/${
+              DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures
+            } for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`,
+            'warn'
+          )
+          .catch(() => void 0);
+        await delay(DIFFUSION_BACKEND_DEFAULTS.jobPollIntervalMs);
+        continue;
+      }
+
+      onStatus(job.status);
+
+      if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
+        return job;
+      }
+
+      // Fallback when the 'decoding' literal never arrives: the last sampling step
+      // was reached while the job is still running, so decoding must be under way.
+      // Identity-checked like every other progress write: a later generation may
+      // already own the tracking state (this poll loop can outlive its own job).
+      if (
+        job.status === 'generating' &&
+        this.progressConfig === config &&
+        this.currentStage === 'diffusion' &&
+        this.diffusionProgress.total > 0 &&
+        this.diffusionProgress.current >= this.diffusionProgress.total
+      ) {
+        this.beginVaeStage(config);
+      }
+
+      await delay(DIFFUSION_BACKEND_DEFAULTS.jobPollIntervalMs);
+    }
+  }
+
+  /**
+   * Cancel a job the backend has not started yet; kill the backend if it did
+   * @private
+   */
+  private async cancelQueuedJob(client: SdServerClient, jobId: string): Promise<void> {
+    try {
+      const result = await client.cancelJob(jobId);
+      if (result.cancelled) return;
+    } catch (error) {
+      debugLog('[Diffusion] backend job cancel failed:', error);
+    }
+    // 409 (already generating) or a failed cancel: killing is the only way out
+    await this.releaseBackend({ reason: 'cancel' }).catch(() => void 0);
+  }
+
+  /**
+   * Build the error for a job that ended in a non-completed status
+   * @private
+   */
+  private jobFailureError(handle: SdServerHandle, job: SdServerJob): Error {
+    if (job.status === 'cancelled') {
+      return new Error('Image generation cancelled');
+    }
+    const backendError = job.error?.message ?? 'unknown backend error';
+    return new ServerError(`stable-diffusion.cpp job failed: ${backendError}`, {
+      code: 'BACKEND_JOB_FAILED',
+      jobId: job.id,
+      backendError,
+      args: handle.args.join(' '),
+      // Kept so classifyCalibrationFailure()/oomPatterns still see the backend output
+      stderr: handle.stderrTail || undefined,
+      stdout: handle.stdoutTail || undefined,
+    });
+  }
+
+  /**
+   * Normalize a generation failure
+   *
+   * The runner reports an exit through its own `SD_SERVER_EXITED` error; re-wrap it so
+   * the message keeps the historical 'exited with code' wording and `details.stderr`
+   * stays where OOM classification looks for it.
+   * @private
+   */
+  private toGenerationError(handle: SdServerHandle, error: unknown): unknown {
+    const details =
+      error instanceof GenaiElectronError && error.details && typeof error.details === 'object'
+        ? (error.details as Record<string, unknown>)
+        : undefined;
+    if (details?.code !== 'SD_SERVER_EXITED') return error;
+
+    return backendExitError(handle, {
+      code: typeof details.exitCode === 'number' ? details.exitCode : null,
+      signal: (details.signal as NodeJS.Signals | null | undefined) ?? null,
+    });
+  }
+
+  /**
+   * Tear down per-generation progress state
+   *
+   * No-op unless the given generation still owns the tracking state: a later
+   * generation must keep its own progressConfig and synthetic interval.
+   * @private
+   */
+  private finishProgressTracking(config: ImageGenerationConfig): void {
+    if (this.progressConfig !== config) return;
+    this.cleanupSyntheticProgress();
+    this.progressConfig = undefined;
   }
 
   /**
@@ -1584,9 +2914,9 @@ export class DiffusionServerManager extends ServerManager {
     const images: ImageGenerationResult[] = [];
 
     for (let i = 0; i < count; i++) {
-      // Honor cancellation between images: currentGeneration is undefined in
-      // this gap, so the flag is the only way a cancel can halt the batch
-      if (this.activeGeneration?.cancelled) {
+      // Honor cancellation between images: no backend job is in flight in this
+      // gap, so the latched claim flag is the only way a cancel can halt the batch
+      if (this.currentGeneration?.cancelRequested === true) {
         throw new Error('Image generation cancelled');
       }
 
@@ -1701,106 +3031,7 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
-   * Build command-line arguments for stable-diffusion.cpp
-   *
-   * @param config - Image generation configuration
-   * @param modelInfo - Model information
-   * @param optimizations - Resolved VRAM optimization flags
-   * @returns Array of command-line arguments
-   * @private
-   */
-  private buildDiffusionArgs(
-    config: ImageGenerationConfig,
-    modelInfo: ModelInfo,
-    optimizations?: ResolvedDiffusionOptimizations
-  ): string[] {
-    const args: string[] = [];
-
-    // Model path(s) — multi-component or single-file
-    if (modelInfo.components) {
-      // Validate that the components map includes the primary diffusion_model
-      if (!modelInfo.components.diffusion_model) {
-        throw new ServerError(
-          'Multi-component model is missing required diffusion_model component',
-          {
-            modelId: modelInfo.id,
-            components: Object.keys(modelInfo.components),
-            suggestion: 'The model metadata appears corrupted. Try re-downloading the model.',
-          }
-        );
-      }
-      for (const role of DIFFUSION_COMPONENT_ORDER) {
-        const component = modelInfo.components[role];
-        if (component) {
-          args.push(DIFFUSION_COMPONENT_FLAGS[role], component.path);
-        }
-      }
-    } else {
-      args.push('-m', modelInfo.path);
-    }
-
-    // Prompt (required)
-    if (config.prompt) {
-      args.push('-p', config.prompt);
-    }
-
-    // Negative prompt (optional)
-    if (config.negativePrompt) {
-      args.push('-n', config.negativePrompt);
-    }
-
-    // Image dimensions
-    if (config.width) {
-      args.push('-W', String(config.width));
-    }
-    if (config.height) {
-      args.push('-H', String(config.height));
-    }
-
-    // Steps
-    if (config.steps) {
-      args.push('--steps', String(config.steps));
-    }
-
-    // CFG scale
-    if (config.cfgScale) {
-      args.push('--cfg-scale', String(config.cfgScale));
-    }
-
-    // Seed (always present after normalization in executeImageGeneration)
-    if (config.seed !== undefined) {
-      args.push('-s', String(config.seed));
-    }
-
-    // Sampler
-    if (config.sampler) {
-      args.push('--sampling-method', config.sampler);
-    }
-
-    // Note: gpuLayers is accepted in DiffusionServerConfig but stable-diffusion.cpp
-    // does not have a --n-gpu-layers flag (that's llama.cpp). GPU offload in sd.cpp
-    // is automatic when built with CUDA/Metal support. The field is kept in the config
-    // for future use and for consistency with the ServerConfig pattern.
-
-    // Threads
-    const serverConfig = this._config as DiffusionServerConfig;
-    if (serverConfig.threads) {
-      args.push('-t', String(serverConfig.threads));
-    }
-
-    // VRAM optimization flags
-    if (optimizations) {
-      args.push(...this.buildDiffusionOptimizationArgs(optimizations));
-      if (optimizations.batchSize !== undefined) {
-        args.push('-b', String(optimizations.batchSize));
-      }
-    }
-
-    return args;
-  }
-
-  /**
-   * Convert resolved production optimization decisions into sd-cli flags.
+   * Convert resolved production optimization decisions into backend launch flags.
    *
    * Kept separate from generation-only settings such as batch size and thread
    * count so binary validation exercises the same backend/offload path without
@@ -1837,17 +3068,22 @@ export class DiffusionServerManager extends ServerManager {
 
   /**
    * Initialize progress tracking for a new generation
+   *
+   * @param config - Normalized generation config
+   * @param warmStart - True when a matching backend is already resident, so the load
+   *   stage is only conditioning; the cold estimate would inflate the denominator
    * @private
    */
-  private initializeProgressTracking(config: ImageGenerationConfig): void {
+  private initializeProgressTracking(config: ImageGenerationConfig, warmStart: boolean): void {
     const width = config.width || 512;
     const height = config.height || 512;
     const steps = config.steps || 20;
     const megapixels = (width * height) / 1_000_000;
 
     // Calculate total estimated time
+    this.currentLoadEstimate = warmStart ? this.warmLoadTime : this.modelLoadTime;
     this.totalEstimatedTime =
-      this.modelLoadTime +
+      this.currentLoadEstimate +
       steps * megapixels * this.diffusionTimePerStepPerMegapixel +
       megapixels * this.vaeTimePerMegapixel;
 
@@ -1879,7 +3115,7 @@ export class DiffusionServerManager extends ServerManager {
     const loadTime =
       this.loadStartTime && this.loadEndTime
         ? this.loadEndTime - this.loadStartTime
-        : this.modelLoadTime;
+        : this.currentLoadEstimate;
 
     const diffusionTime =
       this.diffusionStartTime && this.diffusionEndTime
@@ -1895,85 +3131,102 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
-   * Process stdout data for progress tracking
+   * Feed one structured backend observation into the progress model
+   *
+   * The pinned build reports no progress in the job JSON, so generation progress is
+   * derived from the backend's line-buffered stdout tap (marker literals live in
+   * `SD_SERVER_STDOUT_MARKERS`). No-op when no generation is in flight — the same
+   * backend process outlives individual jobs.
    * @private
    */
-  private processStdoutForProgress(data: string, config: ImageGenerationConfig): void {
-    // Detect stage transitions ('loading tensors from' up to sd.cpp master-504;
-    // 'loading model from' since master-746)
-    if (data.includes('loading tensors from') || data.includes('loading model from')) {
-      this.currentStage = 'loading';
-      this.loadStartTime = Date.now();
-      this.reportProgress(config);
-    } else if (data.includes('generating image:') || data.includes('sampling using')) {
-      if (this.currentStage === 'loading') {
-        this.loadEndTime = Date.now();
+  private handleBackendStdoutEvent(event: SdServerStdoutEvent): void {
+    const config = this.progressConfig;
+    if (!config) return;
+
+    if (event.type === 'marker') {
+      if (event.marker === 'generating') {
+        this.beginDiffusionStage(config);
+      } else if (event.marker === 'decoding') {
+        this.beginVaeStage(config);
+      } else if (event.marker === 'decoded') {
+        this.completeVaeStage(config);
       }
-      this.currentStage = 'diffusion';
-      this.diffusionStartTime = Date.now();
-      this.recalculateTotalEstimatedTime(config);
-      this.reportProgress(config);
-    } else if (data.includes('decoding 1 latents')) {
+      // 'completed'/'listening' carry no progress meaning for the caller
+      return;
+    }
+
+    if (event.type === 'step') {
+      // The first step proves sampling started even when the marker literal drifted
+      if (this.currentStage !== 'diffusion' && this.currentStage !== 'vae') {
+        this.beginDiffusionStage(config);
+      }
       if (this.currentStage === 'diffusion') {
-        this.diffusionEndTime = Date.now();
+        this.diffusionProgress = { current: event.step, total: event.steps };
+        this.reportProgress(config);
       }
-      this.currentStage = 'vae';
-      this.vaeStartTime = Date.now();
-      this.recalculateTotalEstimatedTime(config);
+      return;
+    }
+
+    // Byte bars are weight uploads: loading progress only, never step progress
+    if (this.currentStage === undefined || this.currentStage === 'loading') {
+      this.currentStage = 'loading';
+      this.loadStartTime ??= Date.now();
+      this.loadProgress = { current: event.done, total: event.total };
       this.reportProgress(config);
-      // Start synthetic progress for VAE stage
-      this.startSyntheticVaeProgress(config);
-    } else if (data.includes('decode_first_stage completed')) {
-      this.vaeEndTime = Date.now();
-      this.recalculateTotalEstimatedTime(config);
-      this.cleanupSyntheticProgress();
-      // Report 100% completion with decoding stage
-      if (config.onProgress) {
-        config.onProgress(0, 0, 'decoding', 100);
-      }
     }
+  }
 
-    // Parse step progress bar: "| X/Y - Z.ZZit/s" — the it-rate unit is required
-    // so byte-progress bars ("# X/Y - Z.ZZMB/s", tensor loading) can't register as steps
-    const progressMatch = data.match(/\|\s*(\d+)\/(\d+)\s*-\s*[\d.]+\s*(?:it\/s|s\/it)/);
-    if (progressMatch && progressMatch[1] && progressMatch[2]) {
-      const current = parseInt(progressMatch[1], 10);
-      const total = parseInt(progressMatch[2], 10);
+  /**
+   * Enter the sampling stage (idempotent)
+   * @private
+   */
+  private beginDiffusionStage(config: ImageGenerationConfig): void {
+    if (this.currentStage === 'diffusion' || this.currentStage === 'vae') return;
 
-      if (this.currentStage === 'loading') {
-        this.loadProgress = { current, total };
-        this.reportProgress(config);
-      } else if (this.currentStage === 'diffusion') {
-        this.diffusionProgress = { current, total };
-        this.reportProgress(config);
-      } else if (this.currentStage === undefined) {
-        // If stage not set yet but we're seeing progress bars, assume it's loading
-        // This handles the case where progress bars arrive before stage detection
-        this.currentStage = 'loading';
-        this.loadStartTime = Date.now();
-        this.loadProgress = { current, total };
-        this.reportProgress(config);
-      }
+    // Unconditional: whatever preceded sampling (spawn, weight upload, conditioning)
+    // is the load stage of this generation
+    this.loadEndTime = Date.now();
+    this.currentStage = 'diffusion';
+    this.diffusionStartTime = Date.now();
+    this.recalculateTotalEstimatedTime(config);
+    this.reportProgress(config);
+  }
+
+  /**
+   * Enter the VAE-decode stage (idempotent); reported as the 'decoding' wire token
+   * @private
+   */
+  private beginVaeStage(config: ImageGenerationConfig): void {
+    if (this.currentStage === 'vae') return;
+
+    if (this.currentStage === 'diffusion') {
+      this.diffusionEndTime = Date.now();
+    } else {
+      // Decoding without an observed sampling stage: close the load stage here
+      this.loadEndTime ??= Date.now();
     }
+    this.currentStage = 'vae';
+    this.vaeStartTime = Date.now();
+    this.recalculateTotalEstimatedTime(config);
+    this.reportProgress(config);
+    this.startSyntheticVaeProgress(config);
+  }
 
-    // Byte-progress bar: "|####    | X/Y - Z.ZZMB/s" — printed while loading
-    // model/tensor data (sd.cpp master-746+). Feeds loading progress only;
-    // component reloads mid-generation must never touch step progress.
-    const byteMatch = data.match(/\|\s*(\d+)\/(\d+)\s*-\s*[\d.]+\s*(?:B|KB|MB|GB)\/s/);
-    if (byteMatch && byteMatch[1] && byteMatch[2]) {
-      const current = parseInt(byteMatch[1], 10);
-      const total = parseInt(byteMatch[2], 10);
+  /**
+   * Close the VAE stage and report 100% (idempotent)
+   *
+   * Fired by the 'decoded' marker or by the job reaching `completed`, whichever
+   * lands first.
+   * @private
+   */
+  private completeVaeStage(config: ImageGenerationConfig): void {
+    if (this.vaeEndTime !== undefined) return;
 
-      if (this.currentStage === 'loading') {
-        this.loadProgress = { current, total };
-        this.reportProgress(config);
-      } else if (this.currentStage === undefined) {
-        // Byte bars before any stage marker mean the model is loading
-        this.currentStage = 'loading';
-        this.loadStartTime = Date.now();
-        this.loadProgress = { current, total };
-        this.reportProgress(config);
-      }
+    this.vaeEndTime = Date.now();
+    this.recalculateTotalEstimatedTime(config);
+    this.cleanupSyntheticProgress();
+    if (config.onProgress) {
+      config.onProgress(0, 0, 'decoding', 100);
     }
   }
 
@@ -2021,7 +3274,7 @@ export class DiffusionServerManager extends ServerManager {
     else if (this.currentStage === 'diffusion') {
       const actualLoadTime = this.loadEndTime
         ? this.loadEndTime - (this.loadStartTime || this.generationStartTime)
-        : this.modelLoadTime;
+        : this.currentLoadEstimate;
       const elapsedDiffusion = Date.now() - (this.diffusionStartTime || Date.now());
       elapsedTotal = actualLoadTime + elapsedDiffusion;
     }
@@ -2029,7 +3282,7 @@ export class DiffusionServerManager extends ServerManager {
     else if (this.currentStage === 'vae') {
       const actualLoadTime = this.loadEndTime
         ? this.loadEndTime - (this.loadStartTime || this.generationStartTime)
-        : this.modelLoadTime;
+        : this.currentLoadEstimate;
       const actualDiffusionTime = this.diffusionEndTime
         ? this.diffusionEndTime - (this.diffusionStartTime || Date.now())
         : 0;
@@ -2081,9 +3334,13 @@ export class DiffusionServerManager extends ServerManager {
 
   /**
    * Update time estimates based on actual generation times
+   *
+   * @param config - Normalized generation config
+   * @param spawned - True when this generation had to spawn the backend; its load
+   *   measurement calibrates the COLD estimate, otherwise the warm one
    * @private
    */
-  private updateTimeEstimates(config: ImageGenerationConfig): void {
+  private updateTimeEstimates(config: ImageGenerationConfig, spawned: boolean): void {
     const width = config.width || 512;
     const height = config.height || 512;
     const steps = config.steps || 20;
@@ -2103,7 +3360,8 @@ export class DiffusionServerManager extends ServerManager {
 
     // Direct calibration for stages with known times
     if (actualLoadTime !== undefined) {
-      this.modelLoadTime = actualLoadTime;
+      if (spawned) this.modelLoadTime = actualLoadTime;
+      else this.warmLoadTime = actualLoadTime;
     }
     if (actualDiffusionTime !== undefined) {
       this.diffusionTimePerStepPerMegapixel = actualDiffusionTime / (steps * megapixels);
@@ -2134,11 +3392,217 @@ export class DiffusionServerManager extends ServerManager {
     const inferredTime = Math.max(0, totalActualTime - knownSum - gaps);
 
     if (!hasLoad) {
-      this.modelLoadTime = inferredTime;
+      if (spawned) this.modelLoadTime = inferredTime;
+      else this.warmLoadTime = inferredTime;
     } else if (!hasDiffusion) {
       this.diffusionTimePerStepPerMegapixel = inferredTime / (steps * megapixels);
     } else if (!hasVae) {
       this.vaeTimePerMegapixel = inferredTime / megapixels;
+    }
+  }
+}
+
+/**
+ * Sleep helper for the job poll loop
+ * @internal
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Whether the backend already reported this job as finished (nothing left to stop)
+ * @internal
+ */
+function isTerminalJobStatus(status: SdServerJobStatus): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+/**
+ * Whether a rejection means the backend process itself is gone
+ * @internal
+ */
+function isBackendExit(error: unknown): boolean {
+  if (
+    !(error instanceof GenaiElectronError) ||
+    !error.details ||
+    typeof error.details !== 'object'
+  ) {
+    return false;
+  }
+  return (error.details as Record<string, unknown>).code === 'SD_SERVER_EXITED';
+}
+
+/**
+ * Whether two resolved flag sets describe the same backend process
+ * @internal
+ */
+function flagsEqual(a: ResolvedDiffusionFlags, b: ResolvedDiffusionFlags): boolean {
+  return (
+    a.clipOnCpu === b.clipOnCpu &&
+    a.vaeOnCpu === b.vaeOnCpu &&
+    a.offloadToCpu === b.offloadToCpu &&
+    a.diffusionFlashAttention === b.diffusionFlashAttention
+  );
+}
+
+/**
+ * Error for a backend process that died while a job was in flight.
+ *
+ * The message keeps the historical 'exited with code' wording (mapped to
+ * `BACKEND_ERROR` at the wire) and `details.stderr` keeps OOM classification working.
+ * @internal
+ */
+function backendExitError(handle: SdServerHandle, exit: SdServerExit): ServerError {
+  const stderr = handle.stderrTail || undefined;
+  const args = handle.args.join(' ');
+  return new ServerError(
+    `stable-diffusion.cpp exited with code ${String(exit.code)}${
+      stderr ? `\n${stderr}` : ''
+    }\nArgs: ${args}`,
+    {
+      code: 'SD_SERVER_EXITED',
+      exitCode: exit.code,
+      signal: exit.signal,
+      stderr,
+      stdout: handle.stdoutTail || undefined,
+      args,
+    }
+  );
+}
+
+/**
+ * Machine-wide VRAM sampler for the timed samples of a calibration sweep.
+ *
+ * One instance serves a whole sweep and is reused window by window: {@link begin}
+ * opens a measurement window (immediate reading plus a periodic timer), {@link end}
+ * closes it with a final reading, and {@link measureIdle} takes the single settled
+ * reading after the backend was released (`'single'`) or the job finished (`'burst'`).
+ *
+ * Two invariants make it safe to run inside an expensive sweep:
+ *
+ * - **Never throws into the sweep.** A failed or untrusted reading marks the window
+ *   untrusted and both figures are omitted; a benchmark is never lost to telemetry.
+ * - **Never leaks a timer.** The interval is unref'd and cleared by `end()`/`dispose()`.
+ *
+ * Trust rules are not reimplemented here: the injected capture is the same
+ * {@link createTelemetrySnapshotCapture} adapter the LLM calibration guard uses, so
+ * "VRAM is trusted only when a fresh `getGPUInfo()` supplies a finite non-negative
+ * `vramAvailable`" is stated in exactly one place.
+ * @internal
+ */
+class CalibrationVramSampler {
+  /** Lowest trusted `vramAvailable` observed in the current window */
+  private minAvailableBytes?: number;
+  /** Settled `vramAvailable` from the current window's idle reading */
+  private idleAvailableBytes?: number;
+  /** Cleared by any unusable reading in the current window */
+  private trusted = true;
+  private timer?: NodeJS.Timeout;
+  /** Serializes readings: a telemetry command may outlive one interval tick */
+  private pending = false;
+  /** Identifies the current window so a late reading cannot land in the next one */
+  private windowId = 0;
+
+  constructor(
+    private readonly capture: CaptureResourceSnapshot,
+    private readonly totalBytes: number,
+    private readonly intervalMs: number
+  ) {}
+
+  /** Open a measurement window: reset, read once, then sample periodically */
+  async begin(): Promise<void> {
+    this.disarm();
+    this.windowId++;
+    this.minAvailableBytes = undefined;
+    this.idleAvailableBytes = undefined;
+    this.trusted = true;
+    await this.sample();
+    this.arm();
+  }
+
+  /** Close the window with a final reading and stop sampling */
+  async end(): Promise<void> {
+    this.disarm();
+    await this.sample();
+  }
+
+  /** Take the settled reading the idle figure is computed from */
+  async measureIdle(): Promise<void> {
+    const available = await this.read();
+    if (available === undefined) {
+      this.trusted = false;
+      return;
+    }
+    this.idleAvailableBytes = available;
+  }
+
+  /**
+   * Figures of the window just closed
+   *
+   * All or nothing: the two are read together (peak vs idle of the same combo), so a
+   * window that lost either reading reports neither rather than an unpaired half.
+   */
+  result(): CalibrationVramSample {
+    if (!this.trusted) return {};
+    if (this.minAvailableBytes === undefined || this.idleAvailableBytes === undefined) return {};
+    return {
+      vramPeakBytes: Math.max(0, this.totalBytes - this.minAvailableBytes),
+      vramIdleBytes: Math.max(0, this.totalBytes - this.idleAvailableBytes),
+    };
+  }
+
+  /** Stop sampling for good (idempotent; safe from a `finally`) */
+  dispose(): void {
+    this.disarm();
+    this.windowId++;
+  }
+
+  /** One reading folded into the window's minimum @private */
+  private async sample(): Promise<void> {
+    if (this.pending) return;
+    this.pending = true;
+    const windowId = this.windowId;
+    try {
+      const available = await this.read();
+      if (windowId !== this.windowId) return; // the window closed while this was in flight
+      if (available === undefined) {
+        this.trusted = false;
+        return;
+      }
+      if (this.minAvailableBytes === undefined || available < this.minAvailableBytes) {
+        this.minAvailableBytes = available;
+      }
+    } finally {
+      this.pending = false;
+    }
+  }
+
+  /** Available VRAM in bytes, or undefined when the reading is unusable @private */
+  private async read(): Promise<number | undefined> {
+    try {
+      const snapshot = await this.capture({});
+      return snapshot.vram.trusted ? snapshot.vram.availableBytes : undefined;
+    } catch (error) {
+      debugLog('[Calibrate] VRAM reading failed:', error);
+      return undefined;
+    }
+  }
+
+  /** @private */
+  private arm(): void {
+    const timer = setInterval(() => {
+      void this.sample();
+    }, this.intervalMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.timer = timer;
+  }
+
+  /** @private */
+  private disarm(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = undefined;
     }
   }
 }

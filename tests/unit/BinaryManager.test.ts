@@ -68,6 +68,7 @@ const mockReadFile = jest.fn();
 const mockWriteFile = jest.fn();
 const mockChmod = jest.fn();
 const mockMkdir = jest.fn();
+const mockMkdtemp = jest.fn();
 const mockReaddir = jest.fn();
 const mockCopyFile = jest.fn();
 const mockRename = jest.fn();
@@ -82,12 +83,76 @@ jest.unstable_mockModule('fs', () => ({
     writeFile: mockWriteFile,
     chmod: mockChmod,
     mkdir: mockMkdir,
+    mkdtemp: mockMkdtemp,
     readdir: mockReaddir,
     copyFile: mockCopyFile,
     rename: mockRename,
     rm: mockRm,
   },
 }));
+
+// Mock the sd-server backend seam used by Phase 2 diffusion validation.
+// Validation drives the production runner/client pair, so the tests assert against those
+// module boundaries instead of a raw child process.
+const mockStartSdServerRunner = jest.fn();
+
+jest.unstable_mockModule('../../src/process/sd-server-runner.js', () => ({
+  startSdServerRunner: mockStartSdServerRunner,
+}));
+
+const mockSubmitImageJob = jest.fn();
+const mockGetJob = jest.fn();
+const mockCancelJob = jest.fn();
+const mockCapabilities = jest.fn();
+const mockBuildSdServerImageRequest = jest.fn();
+const sdServerClientArgs: Array<{ port: number; host?: string }> = [];
+
+class MockSdServerClient {
+  submitImageJob = mockSubmitImageJob;
+  getJob = mockGetJob;
+  cancelJob = mockCancelJob;
+  capabilities = mockCapabilities;
+
+  constructor(port: number, host?: string) {
+    sdServerClientArgs.push({ port, host });
+  }
+}
+
+jest.unstable_mockModule('../../src/process/sd-server-client.js', () => ({
+  SdServerClient: MockSdServerClient,
+  buildSdServerImageRequest: mockBuildSdServerImageRequest,
+  SD_SERVER_DEFAULT_REQUEST_TIMEOUT_MS: 5000,
+}));
+
+type SdServerHandleOverrides = {
+  stdoutTail?: string;
+  stderrTail?: string;
+  stopError?: unknown;
+};
+
+/** Every handle handed out by the mocked runner, in creation order. */
+const handles: any[] = [];
+
+/** Minimal stand-in for the `SdServerHandle` the runner resolves with. */
+const createSdServerHandle = (overrides: SdServerHandleOverrides = {}) => {
+  const handle: any = {
+    pid: 4242,
+    port: 51234,
+    host: '127.0.0.1',
+    args: [],
+    loadTimeMs: 25,
+    stdoutTail: overrides.stdoutTail ?? '',
+    stderrTail: overrides.stderrTail ?? '',
+    state: 'running',
+    exitPromise: new Promise(() => undefined),
+    raceWithExit: jest.fn((operation: Promise<unknown>) => operation),
+    stop: jest.fn(async () => {
+      if (overrides.stopError) throw overrides.stopError;
+    }),
+  };
+  handles.push(handle);
+  return handle;
+};
 
 // Mock child_process with spawn
 // Store spawn behavior configuration for tests to control
@@ -214,7 +279,7 @@ jest.unstable_mockModule('../../src/system/gpu-detect.js', () => ({
 
 // Import after mocking
 const { BinaryManager } = await import('../../src/managers/BinaryManager.js');
-const { BinaryError } = await import('../../src/errors/index.js');
+const { BinaryError, ServerError } = await import('../../src/errors/index.js');
 
 // Import spawn to get reference to the mocked function
 const { spawn: mockSpawn } = await import('child_process');
@@ -241,6 +306,34 @@ describe('BinaryManager', () => {
 
   let binaryManager: BinaryManager;
   const mockLogger = jest.fn();
+
+  /** A diffusion-typed manager wired the way DiffusionServerManager wires one. */
+  const createDiffusionManager = (overrides: {
+    testModelPath?: string;
+    testModelArgs?: string[];
+    testOptimizationArgs?: string[];
+    variants?: BinaryVariantConfig[];
+  }) =>
+    new BinaryManager({
+      type: 'diffusion',
+      binaryName: 'sd-server',
+      platformKey: 'win32-x64',
+      variants: overrides.variants ?? [cudaVariant],
+      ...(overrides.testModelPath ? { testModelPath: overrides.testModelPath } : {}),
+      ...(overrides.testModelArgs ? { testModelArgs: overrides.testModelArgs } : {}),
+      testOptimizationArgs: overrides.testOptimizationArgs ?? [
+        '--clip-on-cpu',
+        '--vae-on-cpu',
+        '--offload-to-cpu',
+        '--diffusion-fa',
+      ],
+      log: mockLogger,
+    });
+
+  /** Force provisioning through the variant loop: only the test model is on disk. */
+  const onlyTestModelExists = (testModelPath: string) => {
+    mockFileExists.mockImplementation(async (filePath: string) => filePath === testModelPath);
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -270,10 +363,30 @@ describe('BinaryManager', () => {
     mockWriteFile.mockResolvedValue(undefined);
     mockChmod.mockResolvedValue(undefined);
     mockMkdir.mockResolvedValue(undefined);
+    mockMkdtemp.mockImplementation(async (prefix: string) => `${prefix}test`);
     mockReaddir.mockResolvedValue([]);
     mockCopyFile.mockResolvedValue(undefined);
     mockRename.mockResolvedValue(undefined);
     mockDownload.mockResolvedValue(undefined);
+
+    // sd-server backend seam: ready runner, one job that completes immediately
+    sdServerClientArgs.length = 0;
+    handles.length = 0;
+    mockStartSdServerRunner.mockImplementation(async () => createSdServerHandle());
+    mockBuildSdServerImageRequest.mockImplementation((config: any, batchSize?: number) => ({
+      prompt: config.prompt,
+      width: config.width,
+      height: config.height,
+      seed: config.seed,
+      batch_count: batchSize ?? 1,
+      sample_params: { sample_steps: config.steps, guidance: {} },
+    }));
+    mockSubmitImageJob.mockResolvedValue({ id: 'validation-job' });
+    mockGetJob.mockResolvedValue({
+      id: 'validation-job',
+      status: 'completed',
+      result: { output_format: 'png', images: [{ index: 0, b64_json: 'AAAA' }] },
+    });
 
     // Reset spawn behavior for each test (tests will configure as needed)
     setSpawnResponse({ stdout: 'version 1.0', stderr: '', exitCode: 0 });
@@ -306,6 +419,40 @@ describe('BinaryManager', () => {
       await expect(emptyManager.ensureBinary()).rejects.toThrow(BinaryError);
       await expect(emptyManager.ensureBinary()).rejects.toThrow(
         'No binary variants available for platform: win32-x64'
+      );
+    });
+
+    it('names the missing Intel-macOS prebuilt for a diffusion darwin-x64 install', async () => {
+      const intelMacManager = new BinaryManager({
+        type: 'diffusion',
+        binaryName: 'sd-server',
+        platformKey: 'darwin-x64',
+        variants: [],
+      });
+
+      const error = (await intelMacManager.ensureBinary().then(
+        () => undefined,
+        (caught: unknown) => caught
+      )) as BinaryError | undefined;
+
+      expect(error).toBeInstanceOf(BinaryError);
+      expect(error?.message).toContain('darwin-x64');
+      expect(error?.message).toContain('no Intel-macOS prebuilt');
+      const suggestion = (error?.details as { suggestion?: string } | undefined)?.suggestion ?? '';
+      expect(suggestion).toContain('Apple-silicon');
+      expect(suggestion).toContain('sd-server');
+    });
+
+    it('keeps the generic no-variants message on other platforms', async () => {
+      const linuxManager = new BinaryManager({
+        type: 'diffusion',
+        binaryName: 'sd-server',
+        platformKey: 'linux-x64',
+        variants: [],
+      });
+
+      await expect(linuxManager.ensureBinary()).rejects.toThrow(
+        'No binary variants available for platform: linux-x64'
       );
     });
 
@@ -558,6 +705,155 @@ describe('BinaryManager', () => {
         value: originalPlatform,
         configurable: true,
       });
+    });
+
+    it('restores the POSIX exec bit on a freshly extracted binary before testing it', async () => {
+      // The ZIP worker extracts without permissions and the install-time chmod only
+      // runs AFTER validation passes — so on POSIX a fresh install would fail Phase 1
+      // on every variant unless the extracted file is made executable first.
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+
+      try {
+        await binaryManager.ensureBinary();
+
+        expect(mockChmod).toHaveBeenCalledWith('/mock/extract/llama-server.exe', 0o755);
+        // ...and before the binary is executed for the first time
+        expect(mockChmod.mock.invocationCallOrder[0]).toBeLessThan(
+          (mockSpawn as jest.Mock).mock.invocationCallOrder[0]
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+        });
+      }
+    });
+
+    it('does not chmod a freshly extracted binary on Windows', async () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+      try {
+        await binaryManager.ensureBinary();
+        expect(mockChmod).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+        });
+      }
+    });
+
+    it('restores the POSIX exec bit before re-validating an existing install', async () => {
+      // ZIP extraction drops permissions, and install-time chmod only ever touched the
+      // binary that was primary back then — so a primary-name switch (sd-cli -> sd-server)
+      // must re-validate, not re-download.
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+
+      try {
+        mockFileExists.mockResolvedValue(true);
+        mockReadFile.mockImplementation(async (filePath: string) => {
+          if (String(filePath).includes('.validation.json')) {
+            return JSON.stringify({
+              variant: 'cuda',
+              checksum: 'checksum-of-the-previous-primary',
+              validatedAt: new Date().toISOString(),
+              phase1Passed: true,
+            });
+          }
+          throw new Error('No dependency manifest');
+        });
+        mockCalculateChecksum.mockResolvedValue('abc123');
+
+        const result = await binaryManager.ensureBinary();
+
+        expect(result).toBe('/mock/binaries/llama/llama-server.exe');
+        expect(mockLogger).toHaveBeenCalledWith(
+          'Binary checksum mismatch, re-validating...',
+          'warn'
+        );
+        expect(mockChmod).toHaveBeenCalledWith('/mock/binaries/llama/llama-server.exe', 0o755);
+        // ...and it happens before Phase 1 executes the binary
+        expect(mockChmod.mock.invocationCallOrder[0]).toBeLessThan(
+          (mockSpawn as jest.Mock).mock.invocationCallOrder[0]
+        );
+        // Re-validation, not a re-download
+        expect(mockDownload).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+        });
+      }
+    });
+
+    it('restores the POSIX exec bit on the forced-validation path too', async () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+
+      try {
+        mockFileExists.mockResolvedValue(true);
+        mockCalculateChecksum.mockResolvedValue('abc123');
+
+        await binaryManager.ensureBinary(true);
+
+        expect(mockLogger).toHaveBeenCalledWith(
+          'Force validation requested, re-running tests...',
+          'info'
+        );
+        expect(mockChmod).toHaveBeenCalledWith('/mock/binaries/llama/llama-server.exe', 0o755);
+        expect(mockDownload).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+        });
+      }
+    });
+
+    it('does not chmod an existing install on Windows', async () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+      try {
+        mockFileExists.mockResolvedValue(true);
+        mockCalculateChecksum.mockResolvedValue('abc123');
+
+        await binaryManager.ensureBinary(true);
+
+        expect(mockChmod).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+        });
+      }
+    });
+
+    it('keeps re-validation non-fatal when the exec bit cannot be restored', async () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+
+      try {
+        mockFileExists.mockResolvedValue(true);
+        mockCalculateChecksum.mockResolvedValue('abc123');
+        mockChmod.mockRejectedValueOnce(new Error('EPERM'));
+
+        const result = await binaryManager.ensureBinary(true);
+
+        expect(result).toBe('/mock/binaries/llama/llama-server.exe');
+        expect(mockLogger).toHaveBeenCalledWith(
+          expect.stringContaining('Could not restore executable permission'),
+          'warn'
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+        });
+      }
     });
 
     it('should log messages when logger is provided', async () => {
@@ -1281,6 +1577,63 @@ describe('BinaryManager', () => {
         destination: expect.stringContaining('.cpu.zip'),
         onProgress: expect.any(Function),
       });
+    });
+
+    // Upstream stable-diffusion.cpp publishes no Linux CUDA asset, so an NVIDIA box
+    // silently falls back to Vulkan. Provisioning must say so once.
+    const createLinuxDiffusionManager = () =>
+      new BinaryManager({
+        type: 'diffusion',
+        binaryName: 'sd-server',
+        platformKey: 'linux-x64',
+        variants: [vulkanVariant, cpuVariant],
+        log: mockLogger,
+      });
+
+    it('warns a Linux CUDA machine that stable-diffusion.cpp falls back to Vulkan', async () => {
+      mockDetectGPU.mockResolvedValue({
+        available: true,
+        type: 'nvidia',
+        cuda: true,
+        name: 'NVIDIA RTX 4090',
+      });
+
+      await createLinuxDiffusionManager().ensureBinary();
+
+      const warnings = mockLogger.mock.calls.filter(
+        (call) => call[1] === 'warn' && String(call[0]).includes('No Linux CUDA prebuilt')
+      );
+      expect(warnings).toHaveLength(1);
+      expect(String(warnings[0]?.[0])).toContain('Vulkan variant');
+    });
+
+    it('does not warn about the Vulkan fallback without a CUDA GPU', async () => {
+      mockDetectGPU.mockResolvedValue({ available: true, type: 'amd', rocm: true });
+
+      await createLinuxDiffusionManager().ensureBinary();
+
+      expect(mockLogger).not.toHaveBeenCalledWith(
+        expect.stringContaining('No Linux CUDA prebuilt'),
+        'warn'
+      );
+    });
+
+    it('does not warn about the Vulkan fallback for the llama binary', async () => {
+      mockDetectGPU.mockResolvedValue({ available: true, type: 'nvidia', cuda: true });
+
+      const llamaLinuxManager = new BinaryManager({
+        type: 'llama',
+        binaryName: 'llama-server',
+        platformKey: 'linux-x64',
+        variants: [vulkanVariant, cpuVariant],
+        log: mockLogger,
+      });
+      await llamaLinuxManager.ensureBinary();
+
+      expect(mockLogger).not.toHaveBeenCalledWith(
+        expect.stringContaining('No Linux CUDA prebuilt'),
+        'warn'
+      );
     });
   });
 
@@ -2053,27 +2406,14 @@ describe('BinaryManager', () => {
       // Mock fileExists to return true
       mockFileExists.mockResolvedValue(true);
 
-      // Mock exec to succeed for both phases
+      // Phase 1 (`--help`) still runs through spawn
       setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
 
-      const diffusionManager = new BinaryManager({
-        type: 'diffusion',
-        binaryName: 'sd',
-        platformKey: 'win32-x64',
-        variants: [cudaVariant],
-        testModelPath,
-        testOptimizationArgs: [
-          '--clip-on-cpu',
-          '--vae-on-cpu',
-          '--offload-to-cpu',
-          '--diffusion-fa',
-        ],
-        log: mockLogger,
-      });
+      const diffusionManager = createDiffusionManager({ testModelPath });
 
       await diffusionManager.ensureBinary();
 
-      // Phase 1: Should test sd --help
+      // Phase 1: Should test sd-server --help
       expect(mockLogger).toHaveBeenCalledWith(
         'Phase 1: Testing binary basic validation...',
         'info'
@@ -2083,38 +2423,314 @@ describe('BinaryManager', () => {
         'info'
       );
 
-      // Phase 2: Should test sd with tiny image generation
+      // Phase 2: Should drive a real sd-server backend through the job API
       expect(mockLogger).toHaveBeenCalledWith(
         'Phase 2: Testing GPU functionality with real inference...',
         'info'
       );
       expect(mockLogger).toHaveBeenCalledWith(
-        'Phase 2: ✓ GPU functionality test passed (sd)',
+        'Phase 2: ✓ GPU functionality test passed (sd-server)',
         'info'
       );
 
-      // Should call sd with tiny image generation args (timeout handled internally)
-      expect(mockSpawn).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.arrayContaining([
-          '-m',
-          testModelPath,
-          '--clip-on-cpu',
-          '--vae-on-cpu',
-          '--offload-to-cpu',
-          '--diffusion-fa',
-          '-p',
-          'test',
-          '--width',
-          '64',
-          '--height',
-          '64',
-          '--steps',
-          '1',
-        ]),
+      // Launch args mirror the production runner call, not a CLI argv
+      expect(mockStartSdServerRunner).toHaveBeenCalledTimes(1);
+      expect(mockStartSdServerRunner).toHaveBeenCalledWith(
         expect.objectContaining({
-          stdio: ['ignore', 'pipe', 'pipe'],
+          modelArgs: ['-m', testModelPath],
+          contextArgs: ['--clip-on-cpu', '--vae-on-cpu', '--offload-to-cpu', '--diffusion-fa'],
+          loraDir: expect.stringContaining('genai-electron-sd-validation-'),
+          readyTimeoutMs: 15000,
         })
+      );
+      // The throwaway lora dir is owned by the run and removed afterwards
+      expect(mockRm).toHaveBeenCalledWith(
+        expect.stringContaining('genai-electron-sd-validation-'),
+        { recursive: true, force: true }
+      );
+
+      // One 64x64 single-step job, submitted to the backend's own port
+      expect(mockBuildSdServerImageRequest).toHaveBeenCalledWith({
+        prompt: 'test',
+        width: 64,
+        height: 64,
+        steps: 1,
+        seed: 42,
+      });
+      expect(mockSubmitImageJob).toHaveBeenCalledWith(
+        expect.objectContaining({
+          prompt: 'test',
+          width: 64,
+          height: 64,
+          seed: 42,
+          sample_params: expect.objectContaining({ sample_steps: 1 }),
+        }),
+        undefined
+      );
+      expect(sdServerClientArgs).toEqual([{ port: 51234, host: '127.0.0.1' }]);
+
+      // The backend is always torn down
+      expect(handles).toHaveLength(1);
+      expect(handles[0].stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('uses the pre-built component args and the long budget for multi-component models', async () => {
+      mockFileExists.mockResolvedValue(true);
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+        testModelArgs: [
+          '--diffusion-model',
+          '/mock/models/flux.gguf',
+          '--llm',
+          '/mock/models/qwen.gguf',
+          '--vae',
+          '/mock/models/vae.gguf',
+        ],
+      });
+
+      await diffusionManager.ensureBinary();
+
+      expect(mockStartSdServerRunner).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelArgs: [
+            '--diffusion-model',
+            '/mock/models/flux.gguf',
+            '--llm',
+            '/mock/models/qwen.gguf',
+            '--vae',
+            '/mock/models/vae.gguf',
+          ],
+          readyTimeoutMs: 120000,
+        })
+      );
+    });
+
+    it('fails the variant when the sd-server job reports failed', async () => {
+      // Only the test model exists, so provisioning goes through the variant loop
+      onlyTestModelExists('/mock/models/test-diffusion.safetensors');
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      mockGetJob.mockResolvedValue({
+        id: 'validation-job',
+        status: 'failed',
+        error: { code: 'BACKEND', message: 'sampling failed' },
+      });
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+        variants: [cudaVariant, cpuVariant],
+      });
+
+      await expect(diffusionManager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✗ sd-server job failed: sampling failed',
+        'warn'
+      );
+      expect(mockLogger).toHaveBeenCalledWith(
+        'GPU functionality test failed, variant will be skipped',
+        'warn'
+      );
+      // Both variants were attempted and both backends were stopped
+      expect(handles).toHaveLength(2);
+      for (const handle of handles) expect(handle.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails the variant when the backend output tails carry a GPU diagnostic', async () => {
+      mockFileExists.mockResolvedValue(true);
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      mockStartSdServerRunner.mockImplementation(async () =>
+        createSdServerHandle({
+          stdoutTail: 'sampling using Euler\n',
+          stderrTail: 'ggml_cuda_init: failed to allocate device buffer\n',
+        })
+      );
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+      });
+
+      await expect(diffusionManager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✗ GPU error detected: failed to allocate',
+        'warn'
+      );
+      expect(handles[0].stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails the variant on a GPU diagnostic that the tails already evicted', async () => {
+      mockFileExists.mockResolvedValue(true);
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      // A multi-component load prints for minutes: by the time the job finishes, the
+      // early CUDA error is long gone from the bounded tails
+      mockStartSdServerRunner.mockImplementation(async (options: any) => {
+        const handle = createSdServerHandle({ stdoutTail: 'later chatter\n', stderrTail: '' });
+        options.onLog?.('ggml_cuda_init: failed to allocate device buffer', 'stderr');
+        return handle;
+      });
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+      });
+
+      await expect(diffusionManager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✗ GPU error detected in output: failed to allocate',
+        'warn'
+      );
+      expect(handles[0].stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries transient job-poll failures before failing the variant', async () => {
+      mockFileExists.mockResolvedValue(true);
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      const transient = new ServerError('sd-server /sdcpp/v1/jobs/validation-job timed out', {
+        code: 'BACKEND_REQUEST_TIMEOUT',
+      });
+      mockGetJob
+        .mockRejectedValueOnce(transient)
+        .mockRejectedValueOnce(transient)
+        .mockResolvedValue({
+          id: 'validation-job',
+          status: 'completed',
+          result: { output_format: 'png', images: [{ index: 0, b64_json: 'AAAA' }] },
+        });
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+      });
+
+      await expect(diffusionManager.ensureBinary()).resolves.toBeDefined();
+
+      // A dropped socket is not a broken variant
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✓ GPU functionality test passed (sd-server)',
+        'info'
+      );
+      expect(mockGetJob).toHaveBeenCalledTimes(3);
+    });
+
+    it('fails the variant after three consecutive transient poll failures', async () => {
+      // Only the variant loop runs (no installed binary to re-validate first)
+      onlyTestModelExists('/mock/models/test-diffusion.safetensors');
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      mockGetJob.mockRejectedValue(
+        new ServerError('sd-server /sdcpp/v1/jobs/validation-job request failed', {
+          code: 'BACKEND_REQUEST_FAILED',
+        })
+      );
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+      });
+
+      await expect(diffusionManager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      expect(mockGetJob).toHaveBeenCalledTimes(3);
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Phase 2: ✗ Real functionality test failed'),
+        'warn'
+      );
+    });
+
+    it('stops the backend and reports failure when the runner never becomes ready', async () => {
+      mockFileExists.mockResolvedValue(true);
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      mockStartSdServerRunner.mockImplementation(async () => {
+        throw new ServerError('stable-diffusion.cpp sd-server was not ready within 15000ms', {
+          code: 'SD_SERVER_READY_TIMEOUT',
+          stderrTail: 'boot log',
+        });
+      });
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+      });
+
+      await expect(diffusionManager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Phase 2: ✗ Real functionality test failed'),
+        'warn'
+      );
+      // Tails carried by the runner error are still surfaced
+      expect(mockLogger).toHaveBeenCalledWith(expect.stringContaining('boot log'), 'warn');
+      expect(mockSubmitImageJob).not.toHaveBeenCalled();
+    });
+
+    it('aborts the variant loop when the validation backend termination is unconfirmed', async () => {
+      onlyTestModelExists('/mock/models/test-diffusion.safetensors');
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      mockStartSdServerRunner.mockImplementation(async () =>
+        createSdServerHandle({
+          stopError: new ServerError(
+            'Could not confirm termination of the sd-server process 4242',
+            {
+              code: 'SD_SERVER_TERMINATION_UNCONFIRMED',
+              pid: 4242,
+            }
+          ),
+        })
+      );
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+        variants: [cudaVariant, cpuVariant],
+      });
+
+      await expect(diffusionManager.ensureBinary()).rejects.toMatchObject({
+        details: {
+          code: 'BINARY_VALIDATION_TERMINATION_UNCONFIRMED',
+          pid: 4242,
+        },
+      });
+
+      // The loop stopped at the first variant instead of extracting over a live child
+      expect(mockStartSdServerRunner).toHaveBeenCalledTimes(1);
+      expect(mockDownload).toHaveBeenCalledTimes(1);
+    });
+
+    it('maps an unconfirmed teardown surfaced by a failed start to the same abort', async () => {
+      onlyTestModelExists('/mock/models/test-diffusion.safetensors');
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      mockStartSdServerRunner.mockImplementation(async () => {
+        throw new ServerError('Could not confirm termination of the sd-server process 777', {
+          code: 'SD_SERVER_TERMINATION_UNCONFIRMED',
+          pid: 777,
+        });
+      });
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+        variants: [cudaVariant, cpuVariant],
+      });
+
+      await expect(diffusionManager.ensureBinary()).rejects.toMatchObject({
+        details: {
+          code: 'BINARY_VALIDATION_TERMINATION_UNCONFIRMED',
+          pid: 777,
+        },
+      });
+      expect(mockStartSdServerRunner).toHaveBeenCalledTimes(1);
+    });
+
+    it('searches only for sd-server when extracting a diffusion archive', async () => {
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+
+      const diffusionManager = createDiffusionManager({});
+
+      await diffusionManager.ensureBinary();
+
+      expect(mockExtractBinary).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        ['sd-server.exe', 'sd-server'],
+        expect.any(Function),
+        expect.any(Function),
+        expect.any(Function)
       );
     });
 

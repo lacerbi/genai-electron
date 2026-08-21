@@ -9,8 +9,18 @@
 
 import { Downloader } from '../download/Downloader.js';
 import { PATHS, getBinaryPath } from '../config/paths.js';
-import { type BinaryVariantConfig, type BinaryDependency } from '../config/defaults.js';
+import {
+  DIFFUSION_BACKEND_DEFAULTS,
+  type BinaryVariantConfig,
+  type BinaryDependency,
+} from '../config/defaults.js';
 import { BinaryError } from '../errors/index.js';
+import {
+  buildSdServerImageRequest,
+  SdServerClient,
+  type SdServerJob,
+} from '../process/sd-server-client.js';
+import { startSdServerRunner, type SdServerHandle } from '../process/sd-server-runner.js';
 import type { BinaryProgressEvent } from '../types/index.js';
 import {
   fileExists,
@@ -27,6 +37,7 @@ import {
 } from '../utils/archive-utils.js';
 import { detectGPU } from '../system/gpu-detect.js';
 import path from 'path';
+import os from 'os';
 import { constants as fsConstants, promises as fs } from 'fs';
 import { spawn } from 'child_process';
 
@@ -69,6 +80,21 @@ interface PreparedDependencies {
 
 const VALIDATION_CHILD_TERMINATION_GRACE_MS = 1_000;
 
+/** Prefix of the throwaway `--lora-model-dir` created for one `sd-server` validation run. */
+const SD_SERVER_VALIDATION_LORA_PREFIX = 'genai-electron-sd-validation-';
+
+/** Bytes of each output tail written to the log when a diffusion validation run fails. */
+const VALIDATION_TAIL_LOG_BYTES = 500;
+
+/**
+ * Client `details.code` values a validation job poll retries instead of failing the
+ * variant (same set the production poll loop tolerates).
+ */
+const SD_SERVER_TRANSIENT_POLL_ERROR_CODES: ReadonlySet<string> = new Set([
+  'BACKEND_REQUEST_TIMEOUT',
+  'BACKEND_REQUEST_FAILED',
+]);
+
 function isValidationTerminationFailure(error: unknown): boolean {
   return (
     error instanceof BinaryError &&
@@ -79,13 +105,42 @@ function isValidationTerminationFailure(error: unknown): boolean {
   );
 }
 
+/** Read the `details` bag of a `GenaiElectronError`-shaped rejection, if it has one. */
+function readErrorDetails(error: unknown): Record<string, unknown> | undefined {
+  if (!(error instanceof Error) || !('details' in error)) return undefined;
+  const details = (error as { details?: unknown }).details;
+  return typeof details === 'object' && details !== null
+    ? (details as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Translate a runner `SD_SERVER_TERMINATION_UNCONFIRMED` failure into the
+ * `BinaryError` that {@link isValidationTerminationFailure} recognizes.
+ *
+ * A validation child whose death is unproven must abort the whole variant loop:
+ * downloading the next variant would extract over an installation the orphan may still
+ * hold open (Windows) or still be executing.
+ *
+ * @returns The mapped error, or `undefined` when the failure was something else
+ */
+function toValidationTerminationError(error: unknown): BinaryError | undefined {
+  const details = readErrorDetails(error);
+  if (details?.code !== 'SD_SERVER_TERMINATION_UNCONFIRMED') return undefined;
+  return new BinaryError('Binary validation sd-server child did not exit after termination', {
+    code: 'BINARY_VALIDATION_TERMINATION_UNCONFIRMED',
+    pid: details.pid,
+    cause: error instanceof Error ? error.message : String(error),
+  });
+}
+
 /**
  * Configuration for binary download and management
  */
 export interface BinaryManagerConfig {
   /** Binary type (llama or diffusion) */
   type: 'llama' | 'diffusion';
-  /** Binary name (e.g., 'llama-server', 'sd') */
+  /** Binary name (e.g., 'llama-server', 'sd-server') */
   binaryName: string;
   /** Platform key (e.g., 'win32-x64') */
   platformKey: string;
@@ -285,6 +340,7 @@ export class BinaryManager {
     // Check if any CUDA variants exist
     const hasCudaVariants = variants.some((v) => v.type === 'cuda');
     if (!hasCudaVariants) {
+      await this.warnWhenNoCudaVariantExists();
       return variants;
     }
 
@@ -311,10 +367,46 @@ export class BinaryManager {
   }
 
   /**
+   * Tell a Linux NVIDIA user that the diffusion backend will run on Vulkan
+   *
+   * Upstream stable-diffusion.cpp publishes no Linux CUDA asset, so a CUDA-capable
+   * Linux box silently falls back to the Vulkan variant, whose performance is uneven
+   * across GPUs (leejet/stable-diffusion.cpp#1114). Everything still works — this is a
+   * heads-up, not a failure. Emitted at most once per {@link BinaryManager.ensureBinary}
+   * call, from the branch that runs when no CUDA variant is configured at all.
+   *
+   * @private
+   */
+  private async warnWhenNoCudaVariantExists(): Promise<void> {
+    if (this.config.type !== 'diffusion' || this.config.platformKey !== 'linux-x64') {
+      return;
+    }
+
+    try {
+      const gpu = await detectGPU();
+      if (!gpu.available || gpu.cuda !== true) {
+        return;
+      }
+    } catch {
+      // GPU detection is best-effort here; a failure just means no warning
+      return;
+    }
+
+    this.log(
+      'No Linux CUDA prebuilt for stable-diffusion.cpp; using the Vulkan variant — performance may be lower; build from source for CUDA',
+      'warn'
+    );
+  }
+
+  /**
    * Ensure binary is available, downloading if necessary
    *
    * Tries each variant in priority order until one works.
    * Caches validation results for faster startup next time.
+   *
+   * An already-installed binary that has to be re-validated (checksum mismatch or
+   * `forceValidation`) gets its POSIX exec bit restored first — see
+   * {@link BinaryManager.ensureExecutablePermission}.
    *
    * @param forceValidation - If true, re-run validation tests even if cached validation exists
    * @returns Path to the working binary
@@ -326,6 +418,17 @@ export class BinaryManager {
     let { variants } = this.config;
 
     if (!variants || variants.length === 0) {
+      // stable-diffusion.cpp publishes no Intel-macOS asset, so this is a supported
+      // platform with an unsupported binary — say so instead of "check DESIGN.md".
+      if (type === 'diffusion' && platformKey === 'darwin-x64') {
+        throw new BinaryError(
+          `stable-diffusion.cpp is not available for platform: ${platformKey} — upstream stable-diffusion.cpp publishes no Intel-macOS prebuilt binary`,
+          {
+            platform: platformKey,
+            suggestion: `Use an Apple-silicon Mac or another supported platform, or build stable-diffusion.cpp from source and place \`sd-server\` in the binaries directory (${PATHS.binaries.diffusion})`,
+          }
+        );
+      }
       throw new BinaryError(`No binary variants available for platform: ${platformKey}`, {
         platform: platformKey,
         suggestion: 'Check platform support in DESIGN.md',
@@ -398,7 +501,10 @@ export class BinaryManager {
           this.log('Force validation requested, re-running tests...', 'info');
         }
 
-        // Run validation tests (cache invalid, missing, or forced)
+        // Run validation tests (cache invalid, missing, or forced).
+        // The exec bit is restored first so a POSIX install that was extracted without
+        // permissions re-validates instead of masquerading as a broken binary.
+        await this.ensureExecutablePermission(binaryPath);
         const works = await this.testBinary(binaryPath, signal);
         signal?.throwIfAborted();
         if (works) {
@@ -457,6 +563,36 @@ export class BinaryManager {
       errors: errors.join('; '),
       suggestion: 'Check your GPU drivers are installed, or the system may not support any variant',
     });
+  }
+
+  /**
+   * Restore the POSIX exec bit on a binary that is about to be executed.
+   *
+   * The ZIP worker extracts entries without their original permissions (adm-zip writes
+   * `0o666`), so only the file that was the *primary* binary at install time ever got
+   * `chmod 0o755`. When the primary binary name changes — as it did when the diffusion
+   * path moved from `sd-cli` to `sd-server` — the new primary is already on disk but not
+   * executable, and validation would report "Existing binary not working" and pull the
+   * whole archive down again. Re-applying the mode before re-validation turns that into
+   * a one-time re-validation instead of a re-download.
+   *
+   * The same applies to a freshly extracted candidate: its install-time chmod only runs
+   * once validation has passed, so the exec bit has to be restored before the tests run.
+   *
+   * Failures are logged and ignored: the validation run that follows reports the real
+   * problem with far better diagnostics than a chmod errno.
+   *
+   * @param binaryPath - Installed or freshly extracted binary
+   * @private
+   */
+  private async ensureExecutablePermission(binaryPath: string): Promise<void> {
+    if (process.platform === 'win32') return;
+
+    try {
+      await fs.chmod(binaryPath, 0o755);
+    } catch (error) {
+      this.log(`Could not restore executable permission on ${binaryPath}: ${error}`, 'warn');
+    }
   }
 
   /**
@@ -909,11 +1045,14 @@ export class BinaryManager {
         ...(signal ? { signal } : {}),
       });
 
-      // Determine which binary names to search for based on type
+      // Determine which binary names to search for based on type.
+      // Diffusion looks for `sd-server` only: it is the binary the library actually runs,
+      // and the names are matched exactly, so a loose `sd` entry could latch onto an
+      // unrelated archive file.
       const binaryNamesToSearch =
         this.config.type === 'llama'
           ? ['llama-server.exe', 'llama-server', 'llama-cli.exe', 'llama-cli']
-          : ['sd-cli.exe', 'sd-cli', 'sd.exe', 'sd'];
+          : ['sd-server.exe', 'sd-server'];
 
       // Extract main binary archive to same directory as dependencies
       this.progress({ phase: 'extracting', file: 'binary' });
@@ -933,6 +1072,11 @@ export class BinaryManager {
 
       // Test if binary works (has required drivers, etc.)
       this.progress({ phase: 'testing', file: 'binary' });
+      // The ZIP worker extracts without permissions (adm-zip writes 0o666) and the
+      // install-time chmod below only runs AFTER the tests pass — so on POSIX the
+      // freshly extracted binary is not executable yet and every variant would fail
+      // Phase 1. Restore the exec bit before it is executed for the first time.
+      await this.ensureExecutablePermission(extractedBinaryPath);
       const works = await this.testBinary(extractedBinaryPath, signal);
       signal?.throwIfAborted();
 
@@ -1192,7 +1336,7 @@ export class BinaryManager {
    *
    * Tests that the primary server binary executes correctly.
    * - For llama: llama-server --version
-   * - For diffusion: sd --help
+   * - For diffusion: sd-server --help
    *
    * @param binaryPath - Path to primary binary to test
    * @returns True if basic validation succeeds
@@ -1277,9 +1421,9 @@ export class BinaryManager {
    *
    * Tests actual inference capability to catch GPU/CUDA errors.
    * - For llama: Starts llama-server, sends a completion request, then kills it
-   * - For diffusion: Uses sd for tiny image generation
+   * - For diffusion: Starts sd-server, runs one tiny job through its job API, stops it
    *
-   * @param binaryPath - Path to primary binary (llama-server or sd)
+   * @param binaryPath - Path to primary binary (llama-server or sd-server)
    * @param modelPath - Path to test model
    * @returns True if real inference test succeeds
    * @private
@@ -1294,7 +1438,7 @@ export class BinaryManager {
     if (type === 'llama') {
       return this.runLlamaServerTest(binaryPath, modelPath, signal);
     }
-    return this.runDiffusionTest(binaryPath, modelPath, signal);
+    return this.runSdServerTest(binaryPath, modelPath, signal);
   }
 
   /**
@@ -1473,77 +1617,244 @@ export class BinaryManager {
   }
 
   /**
-   * Run Phase 2 for diffusion: one-shot tiny image generation
+   * Run Phase 2 for diffusion: one tiny image through a real `sd-server` backend
    *
-   * @param binaryPath - Path to sd binary
-   * @param modelPath - Path to test model
-   * @returns True if test succeeds
+   * Exercises the exact production launch path — the same runner, the same argv shape,
+   * and the same native job API the manager uses — so a variant that provisions cleanly
+   * but cannot actually serve an image is rejected here rather than at the first user
+   * request.
+   *
+   * Two budgets of the same size guard the run: spawn→ready, and submit→terminal job.
+   * Both are 120 s when `testModelArgs` is set (multi-component models load several
+   * files) and 15 s otherwise, matching the single budget the `sd-cli` probe used.
+   *
+   * The backend is always stopped, and a stop whose confirmation fails is re-thrown as a
+   * `BinaryError` carrying `BINARY_VALIDATION_TERMINATION_UNCONFIRMED` so the variant
+   * loop aborts instead of extracting the next variant over a live child.
+   *
+   * GPU diagnostics are watched per line as the backend prints them (the bounded tails
+   * can evict an early error during a long multi-component load) and the tails are still
+   * scanned as a backstop.
+   *
+   * @param binaryPath - Path to the `sd-server` binary
+   * @param modelPath - Path to test model (ignored when `testModelArgs` is configured)
+   * @returns True if the job completed with no GPU diagnostics in any observed output
+   * @throws {BinaryError} `details.code` `'BINARY_VALIDATION_TERMINATION_UNCONFIRMED'`
+   *   when the backend's death could not be confirmed
    * @private
    */
-  private async runDiffusionTest(
+  private async runSdServerTest(
     binaryPath: string,
     modelPath: string,
     signal?: AbortSignal
   ): Promise<boolean> {
+    this.log('Phase 2: Testing GPU functionality with real inference...', 'info');
+
+    // Multi-component models (7GB+) need more time to load all components
+    const budgetMs = this.config.testModelArgs ? 120000 : 15000;
+
+    let loraDir: string | undefined;
+    let handle: SdServerHandle | undefined;
+    let outcome: { passed: boolean } | { error: unknown };
+    let terminationError: BinaryError | undefined;
+    // Bar-frame-free output is bounded, so a diagnostic printed during a long model load
+    // can be evicted from the tails before the verdict is computed. Watch every line as
+    // it arrives instead of only scanning what survived.
+    let gpuErrorSeen: string | undefined;
+
     try {
-      this.log('Phase 2: Testing GPU functionality with real inference...', 'info');
+      try {
+        // A library-owned, empty LoRA directory: pointing sd.cpp at the models directory
+        // makes it read model files as LoRAs (leejet/stable-diffusion.cpp#1468).
+        loraDir = await fs.mkdtemp(path.join(os.tmpdir(), SD_SERVER_VALIDATION_LORA_PREFIX));
+        handle = await startSdServerRunner({
+          binaryPath,
+          // Pre-built component args for multi-component models, otherwise default to -m
+          modelArgs: this.config.testModelArgs ?? ['-m', modelPath],
+          contextArgs: this.config.testOptimizationArgs ?? [],
+          loraDir,
+          readyTimeoutMs: budgetMs,
+          onLog: (line) => {
+            gpuErrorSeen ??= this.checkForGpuErrors(line) ?? undefined;
+          },
+          ...(signal ? { signal } : {}),
+        });
+        outcome = { passed: await this.runSdServerValidationJob(handle, budgetMs, signal) };
+      } catch (error) {
+        outcome = { error };
+      }
+    } finally {
+      // Always tear the backend down, then surface an unconfirmed teardown above every
+      // other verdict — a live orphan outranks "this variant did not work".
+      terminationError = await this.stopValidationBackend(handle);
+      if (loraDir !== undefined) {
+        await fs.rm(loraDir, { recursive: true, force: true }).catch(() => void 0);
+      }
+    }
 
-      const tempOutput = path.join(PATHS.binaries[this.config.type], '.test-output.png');
-
-      // Use pre-built model args for multi-component models, otherwise default to -m
-      const modelArgs = this.config.testModelArgs || ['-m', modelPath];
-
-      const testArgs = [
-        ...modelArgs,
-        ...(this.config.testOptimizationArgs ?? []),
-        '-p',
-        'test',
-        '-o',
-        tempOutput,
-        '--width',
-        '64',
-        '--height',
-        '64',
-        '--steps',
-        '1',
-      ];
-
-      // Multi-component models (7GB+) need more time to load all components
-      const timeout = this.config.testModelArgs ? 120000 : 15000;
-      const { stdout, stderr } = await this.spawnWithTimeout(binaryPath, testArgs, timeout, signal);
-
-      const gpuError = this.checkForGpuErrors(`${stdout}\n${stderr}`);
-      if (gpuError) {
-        this.log(`Phase 2: ✗ GPU error detected: ${gpuError}`, 'warn');
+    if (terminationError) throw terminationError;
+    if ('passed' in outcome) {
+      if (gpuErrorSeen) {
+        this.log(`Phase 2: ✗ GPU error detected in output: ${gpuErrorSeen}`, 'warn');
+        this.logBackendOutputTails(this.backendOutputTails(handle), 'Phase 2 job output');
         return false;
       }
+      return outcome.passed;
+    }
 
-      this.log('Phase 2: ✓ GPU functionality test passed (sd)', 'info');
-      return true;
-    } catch (error) {
-      if (isValidationTerminationFailure(error)) throw error;
-      if (signal?.aborted) throw signal.reason ?? error;
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      const errorObj = error as { stdout?: string; stderr?: string };
-      const stdout = errorObj.stdout || '';
-      const stderr = errorObj.stderr || '';
+    const error = outcome.error;
+    const terminationFromStart = toValidationTerminationError(error);
+    if (terminationFromStart) throw terminationFromStart;
+    if (isValidationTerminationFailure(error)) throw error;
+    if (signal?.aborted) throw signal.reason ?? error;
 
-      if (stdout || stderr) {
-        this.log(
-          `Phase 2 output before failure:\nstdout: ${stdout.slice(0, 500)}\nstderr: ${stderr.slice(0, 500)}`,
-          'warn'
-        );
-      }
-
-      const gpuError = this.checkForGpuErrors(`${stdout}\n${stderr}`);
-      if (gpuError) {
-        this.log(`Phase 2: ✗ GPU error detected in output: ${gpuError}`, 'warn');
-        return false;
-      }
-
-      this.log(`Phase 2: ✗ Real functionality test failed: ${errorMsg}`, 'warn');
+    const tails = this.backendOutputTails(handle, error);
+    this.logBackendOutputTails(tails, 'Phase 2 output before failure');
+    const gpuError = gpuErrorSeen ?? this.checkForGpuErrors(`${tails.stdout}\n${tails.stderr}`);
+    if (gpuError) {
+      this.log(`Phase 2: ✗ GPU error detected in output: ${gpuError}`, 'warn');
       return false;
     }
+
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    this.log(`Phase 2: ✗ Real functionality test failed: ${errorMsg}`, 'warn');
+    return false;
+  }
+
+  /**
+   * Submit one 64x64 single-step job to a ready backend and judge the result.
+   *
+   * A dropped socket or a slow answer is not a failed variant: up to
+   * `DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures - 1` consecutive transient
+   * client failures are retried, exactly as the production poll loop does.
+   *
+   * @param handle - Ready `sd-server` handle
+   * @param budgetMs - Maximum submit-to-terminal-status wait
+   * @returns True when the job completed with clean output tails
+   * @private
+   */
+  private async runSdServerValidationJob(
+    handle: SdServerHandle,
+    budgetMs: number,
+    signal?: AbortSignal
+  ): Promise<boolean> {
+    const client = new SdServerClient(handle.port, handle.host);
+    const request = buildSdServerImageRequest({
+      prompt: 'test',
+      width: 64,
+      height: 64,
+      steps: 1,
+      seed: 42,
+    });
+
+    const { id } = await handle.raceWithExit(client.submitImageJob(request, signal));
+    const deadline = Date.now() + budgetMs;
+    let transientFailures = 0;
+
+    for (;;) {
+      signal?.throwIfAborted();
+      let job: SdServerJob;
+      try {
+        job = await handle.raceWithExit(client.getJob(id, signal));
+        transientFailures = 0;
+      } catch (error) {
+        const code = readErrorDetails(error)?.code;
+        if (typeof code !== 'string' || !SD_SERVER_TRANSIENT_POLL_ERROR_CODES.has(code))
+          throw error;
+
+        transientFailures++;
+        if (transientFailures >= DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures) throw error;
+        this.log(
+          `Phase 2: transient poll failure ${transientFailures}/${DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures} for job ${id}`,
+          'warn'
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, DIFFUSION_BACKEND_DEFAULTS.jobPollIntervalMs)
+        );
+        continue;
+      }
+
+      if (job.status === 'completed') break;
+      if (job.status === 'failed' || job.status === 'cancelled') {
+        const reason = job.error?.message ? `: ${job.error.message}` : '';
+        this.log(`Phase 2: ✗ sd-server job ${job.status}${reason}`, 'warn');
+        this.logBackendOutputTails(this.backendOutputTails(handle), 'Phase 2 job output');
+        return false;
+      }
+      if (Date.now() >= deadline) {
+        this.log(`Phase 2: ✗ sd-server job did not finish within ${budgetMs}ms`, 'warn');
+        this.logBackendOutputTails(this.backendOutputTails(handle), 'Phase 2 job output');
+        return false;
+      }
+      await new Promise((resolve) =>
+        setTimeout(resolve, DIFFUSION_BACKEND_DEFAULTS.jobPollIntervalMs)
+      );
+    }
+
+    const tails = this.backendOutputTails(handle);
+    const gpuError = this.checkForGpuErrors(`${tails.stdout}\n${tails.stderr}`);
+    if (gpuError) {
+      this.log(`Phase 2: ✗ GPU error detected: ${gpuError}`, 'warn');
+      this.logBackendOutputTails(tails, 'Phase 2 job output');
+      return false;
+    }
+
+    this.log('Phase 2: ✓ GPU functionality test passed (sd-server)', 'info');
+    return true;
+  }
+
+  /**
+   * Stop a validation backend without letting a stop failure mask the verdict.
+   *
+   * @returns The mapped `BinaryError` when termination could not be confirmed
+   * @private
+   */
+  private async stopValidationBackend(
+    handle: SdServerHandle | undefined
+  ): Promise<BinaryError | undefined> {
+    if (!handle) return undefined;
+
+    try {
+      await handle.stop();
+      return undefined;
+    } catch (error) {
+      const terminationError = toValidationTerminationError(error);
+      if (terminationError) return terminationError;
+      if (isValidationTerminationFailure(error)) return error as BinaryError;
+      this.log(`Phase 2: could not stop the validation backend cleanly: ${error}`, 'warn');
+      return undefined;
+    }
+  }
+
+  /**
+   * Bounded output tails of a validation backend.
+   *
+   * Prefers the live handle; falls back to the tails a runner `ServerError` carries when
+   * the process died (or timed out) before a handle existed.
+   *
+   * @private
+   */
+  private backendOutputTails(
+    handle: SdServerHandle | undefined,
+    error?: unknown
+  ): { stdout: string; stderr: string } {
+    if (handle) return { stdout: handle.stdoutTail, stderr: handle.stderrTail };
+
+    const details = readErrorDetails(error);
+    return {
+      stdout: typeof details?.stdoutTail === 'string' ? details.stdoutTail : '',
+      stderr: typeof details?.stderrTail === 'string' ? details.stderrTail : '',
+    };
+  }
+
+  /** Log truncated backend output tails; no-op when both are empty. @private */
+  private logBackendOutputTails(tails: { stdout: string; stderr: string }, label: string): void {
+    if (!tails.stdout && !tails.stderr) return;
+
+    this.log(
+      `${label}:\nstdout: ${tails.stdout.slice(-VALIDATION_TAIL_LOG_BYTES)}\nstderr: ${tails.stderr.slice(-VALIDATION_TAIL_LOG_BYTES)}`,
+      'warn'
+    );
   }
 
   /**

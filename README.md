@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.24.0 | **Status**: Production Ready - Node-safe llama-server launch
+> **Version**: 0.25.0 | **Status**: Production Ready - Persistent sd-server diffusion backend
 
 Electron-first library for managing local AI model servers (llama.cpp, stable-diffusion.cpp), with
 supported Electron-free subpaths for calibration policy metadata and direct llama-server launch.
@@ -12,9 +12,9 @@ Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstract
 - ✅ **Model management** - Download GGUF models with pinned Hugging Face revisions, persisted provenance, progress tracking, and metadata extraction
 - ✅ **LLM server** - Manage llama-server lifecycle with auto-configuration
 - ✅ **LLM runtime calibration** - Find a best-known start-ready configuration within a host-selected time across one or two comparable context profiles, with explicit evidence/completeness and exact caller-supplied diagnostics
-- ✅ **Image generation** - Local image generation via stable-diffusion.cpp
+- ✅ **Image generation** - Local image generation via a persistent stable-diffusion.cpp `sd-server` backend with single/burst VRAM residency
 - ✅ **Multi-component diffusion models** - Flux 2, SDXL split components with aggregate checksum validation
-- ✅ **Resource orchestration** - Automatic LLM offload/reload when memory constrained
+- ✅ **Resource orchestration** - Symmetric: automatic LLM offload/reload when memory constrained, and a resident diffusion backend yields to an LLM start
 - ✅ **Reliable server lifecycle** - Crash auto-restart, hang watchdog, automatic port selection, occupancy safety, log rotation
 - ✅ **Advanced launch control** - KV-cache quantization, flash-attention control, MoE CPU offload, multi-shard GGUF downloads, image-generation cancellation
 - ✅ **Binary management** - Automatic binary download with GPU variant testing (CUDA→Vulkan→CPU)

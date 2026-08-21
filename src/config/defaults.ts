@@ -3,7 +3,11 @@
  * @module config/defaults
  */
 
-import type { DiffusionComponentRole, DiffusionOffloadCombo } from '../types/index.js';
+import type {
+  DiffusionComponentRole,
+  DiffusionOffloadCombo,
+  DiffusionUsageMode,
+} from '../types/index.js';
 
 /** Stable policy and protocol defaults for LLM runtime calibration. */
 export const LLAMA_CALIBRATION_DEFAULTS = {
@@ -384,6 +388,48 @@ export const DIFFUSION_VRAM_THRESHOLDS = {
 } as const;
 
 /**
+ * Lifecycle defaults for the internal stable-diffusion.cpp `sd-server` backend.
+ *
+ * The public diffusion server is a node:http wrapper; the backend it drives is spawned
+ * lazily on the first image and may stay resident between images (see
+ * {@link DiffusionUsageMode}). These values bound that residency.
+ *
+ * @example
+ * ```typescript
+ * import { DIFFUSION_BACKEND_DEFAULTS } from 'genai-electron';
+ *
+ * // Keep a warm backend for a full minute instead of the default five.
+ * await diffusionServer.start({ modelId: 'flux-2-klein', idleTimeoutMs: 60_000 });
+ * console.log(DIFFUSION_BACKEND_DEFAULTS.idleTimeoutMs); // 300000
+ * ```
+ */
+export const DIFFUSION_BACKEND_DEFAULTS = {
+  /** Idle time before a `'burst'`-resident backend is released (`0` in config = never) */
+  idleTimeoutMs: 300_000,
+  /** Poll interval for `GET /sdcpp/v1/jobs/{id}` while a job is in flight */
+  jobPollIntervalMs: 200,
+  /**
+   * Per-request timeout for the backend job API.
+   *
+   * Deliberately longer than the client's own 5 s default: the backend answers job
+   * requests from the same thread that runs sampling, so a single-threaded build under
+   * load can take seconds to reply. A too-tight timeout would burn the transient-failure
+   * budget below and fail a perfectly healthy generation.
+   */
+  jobRequestTimeoutMs: 10_000,
+  /** Maximum spawn-to-ready wait for the backend process */
+  readyTimeoutMs: DEFAULT_TIMEOUTS.serverStart,
+  /** Grace period between SIGTERM and SIGKILL when releasing the backend */
+  stopTimeoutMs: DEFAULT_TIMEOUTS.serverStop,
+  /**
+   * Consecutive transient job-poll failures (request timeout / transport error) that
+   * end the generation. Below this count the poll loop retries — a dropped socket is
+   * not a failed image.
+   */
+  maxTransientPollFailures: 3,
+} as const;
+
+/**
  * Defaults for DiffusionServerManager.calibrate() (offload-calibration sweeps).
  *
  * The combo set is curated — the full 2^4 flag grid is mostly dominated.
@@ -396,10 +442,34 @@ export const DIFFUSION_CALIBRATION_DEFAULTS: {
   readonly prompt: string;
   /** Runs within this % of the fastest prefer fewer forced flags (robustness tie-break) */
   readonly tieTolerancePct: number;
-  /** Models matching this id/name pattern skip clipOnCpu combos (leejet/stable-diffusion.cpp#1578) */
+  /**
+   * Models matching this id/name pattern skip clipOnCpu combos.
+   *
+   * Workaround for leejet/stable-diffusion.cpp#1578 (SD 3.5 Large crashes with the text
+   * encoder on CPU). It is an upstream-bug filter, not a policy: **re-check it at every pin
+   * bump and remove it once the bug is fixed upstream** — see the checklist in
+   * `docs/dev/UPDATING-BINARIES.md`.
+   */
   readonly sd35LargePattern: RegExp;
   /** stderr/message patterns classifying a failed generation as out-of-memory */
   readonly oomPatterns: readonly RegExp[];
+  /**
+   * Compatibility identifier for persisted calibration reports.
+   *
+   * `'diffusion-offload-v2'` marks reports measured against the resident `sd-server`
+   * backend (per-combo process launches, selectable usage mode). A persisted report
+   * with NO `policyVersion` field predates the migration and is v1 — measured by
+   * spawning `sd-cli` once per image — so its timings are only comparable to
+   * `usageMode: 'single'` results.
+   */
+  readonly policyVersion: 'diffusion-offload-v2';
+  /**
+   * Residency mode a sweep measures when the caller does not choose one.
+   *
+   * `'single'` = cold spawn per timed sample, which mirrors the common production case
+   * and keeps the same semantics `timeTakenMs` had before the migration.
+   */
+  readonly usageMode: DiffusionUsageMode;
 } = {
   // steps/cfgScale/sampler/sizes are NOT defaulted — the caller must pass them
   // (via DiffusionCalibrationConfig.generation / .sizes) so the sweep measures the
@@ -425,6 +495,8 @@ export const DIFFUSION_CALIBRATION_DEFAULTS: {
     /failed to allocate/i,
     /not enough memory/i,
   ],
+  policyVersion: 'diffusion-offload-v2',
+  usageMode: 'single',
 };
 
 /**

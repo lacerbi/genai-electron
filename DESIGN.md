@@ -93,7 +93,7 @@ heavy lifting required to run AI models locally on desktop systems.
 **Key Architecture Points:**
 - **Symmetry**: From genai-lite's perspective, both are HTTP endpoints on localhost
 - **llama-server**: Native HTTP server from llama.cpp (managed by genai-electron)
-- **diffusion wrapper**: HTTP server created by genai-electron that spawns stable-diffusion.cpp executable on demand
+- **diffusion wrapper**: HTTP server created by genai-electron that fronts a persistent stable-diffusion.cpp `sd-server` child, spawned lazily on the first image request (see §7)
 - **Clean separation**: genai-lite has no knowledge of which servers are native vs. wrappers
 
 ### Key Value Propositions
@@ -252,9 +252,10 @@ heavy lifting required to run AI models locally on desktop systems.
    - Clients (genai-lite) connect directly to llama-server's HTTP API
 
 2. **DiffusionServerManager** - Creates HTTP wrapper for stable-diffusion.cpp
-   - stable-diffusion.cpp is a one-shot executable (not a server)
-   - genai-electron creates its own HTTP server (Express/Fastify)
-   - On image generation requests, spawns stable-diffusion.cpp executable
+   - genai-electron creates its own HTTP server (`node:http`) as the public endpoint
+   - Behind it, a persistent stable-diffusion.cpp `sd-server` child is spawned lazily on the first
+     image request and driven through its async job API
+   - The backend may be released after every image (`'single'`) or kept warm (`'burst'`)
    - Returns results via HTTP response
    - Provides same HTTP interface pattern as llama-server for symmetry
 
@@ -397,13 +398,17 @@ This flow demonstrates intelligent resource orchestration when system resources 
        └─► Wait for health check
    └─► diffusionServer.generateImage({ prompt, ... })
        └─► HTTP wrapper receives request
-       └─► Spawns stable-diffusion.cpp executable with prompt and settings
+       └─► Ensures the sd-server backend is up with the resolved offload flags
+           (spawns it if absent or if the flags changed; reuses a warm one otherwise)
+       └─► Submits the prompt and settings as a job to the backend's job API
        └─► Progress callbacks: step 1/30, 2/30, ...
        └─► User can cancel the active/pending async generation via cancelImageGeneration()
-           (or DELETE /v1/images/generations/:id) — kills sd-cli, halts batches between images
+           (or DELETE /v1/images/generations/:id) — cancels a queued job, kills the backend
+           mid-generation, halts batches between images
        └─► Generate image (30-120 seconds)
-       └─► Executable completes, writes image to disk
+       └─► Backend returns the image as base64 in the job result (no temp file)
        └─► Wrapper returns image data via HTTP response
+       └─► Residency settles: backend released ('single') or kept warm ('burst')
    └─► Image generation completes
    └─► diffusionServer.stop() → Shutdown HTTP wrapper → Free 5GB VRAM
 
@@ -543,13 +548,13 @@ Manages the llama-server process lifecycle for LLM inference.
 
 #### DiffusionServer
 
-Manages HTTP wrapper for stable-diffusion.cpp executable.
+Manages the HTTP wrapper in front of the stable-diffusion.cpp `sd-server` backend.
 
-**Implementation Note**: This is genai-electron's internal API. The `start()` method creates an HTTP server wrapper (not spawning stable-diffusion.cpp directly). The wrapper spawns the stable-diffusion.cpp executable on-demand when `generateImage()` is called. This provides a symmetric HTTP interface to genai-lite, matching the pattern used by llama-server.
+**Implementation Note**: This is genai-electron's internal API. The `start()` method creates an HTTP server wrapper and spawns nothing. The wrapper spawns a persistent `sd-server` child on-demand when the first image is requested, then either releases it after the image or keeps it warm, according to the residency policy. This provides a symmetric HTTP interface to genai-lite, matching the pattern used by llama-server.
 
 **Key Capabilities**:
 - Start/stop HTTP wrapper server
-- Generate images from text prompts (spawns executable on-demand)
+- Generate images from text prompts (backend spawned on-demand, optionally kept resident)
 - Progress tracking during generation
 - Configure generation parameters (size, steps, guidance, sampler)
 - Event notifications for lifecycle events
@@ -807,7 +812,7 @@ async function generateImage() {
   });
 
   // Start diffusion server
-  // Note: This creates an HTTP wrapper server, not spawning stable-diffusion.cpp yet
+  // Note: This creates an HTTP wrapper server; no sd-server backend is spawned yet
   const [model] = await modelManager.listModels('diffusion');
   await diffusionServer.start({
     modelId: model.id,
@@ -815,7 +820,7 @@ async function generateImage() {
   });
 
   // Generate an image
-  // Note: The HTTP wrapper spawns stable-diffusion.cpp executable here
+  // Note: The HTTP wrapper spawns (or reuses) the sd-server backend here
   const result = await diffusionServer.generateImage({
     prompt: 'A serene mountain landscape at sunset, 4k, detailed',
     negativePrompt: 'blurry, low quality, distorted',
@@ -1144,6 +1149,10 @@ throw new InsufficientResourcesError(
 
 ### 7. HTTP Wrapper Strategy for stable-diffusion.cpp
 
+> **History note**: the decision record below describes the original one-shot-executable era and
+> is kept for rationale. Since 2026-08-21 the wrapper fronts a persistent `sd-server` child — see
+> **Update (2026-08-21)** at the end of this section for the current process model.
+
 **Problem**: Unlike llama.cpp which provides llama-server (a native HTTP server), stable-diffusion.cpp is a one-shot executable that generates images and exits. This asymmetry could complicate the API if not handled properly.
 
 **Solution**: genai-electron creates an HTTP wrapper server for stable-diffusion.cpp, providing the same HTTP interface pattern as llama-server.
@@ -1219,6 +1228,47 @@ We evaluated existing solutions before deciding on a custom HTTP wrapper:
 - Monitor stable-diffusion.cpp repository for potential native server implementation
 - If a native server is added (similar to llama-server), the abstraction layer design makes it straightforward to switch backends
 - The well-defined HTTP interface ensures minimal disruption when transitioning from wrapper to native server
+
+#### Update (2026-08-21): the native-server trigger fired
+
+Everything above is the original rationale and remains the reason the wrapper exists. The
+"Future Considerations" trigger has since fired: upstream stable-diffusion.cpp ships `sd-server`,
+a native HTTP server with an async job API. Rather than exposing it directly, genai-electron kept
+the wrapper as the public server and moved `sd-server` **behind** it — exactly the backend swap the
+abstraction layer was designed for, and with zero change to the wrapper's HTTP contract, the
+manager's method/event surface, or genai-lite.
+
+What changed (see `docs/dev/plans/PLAN-sd-server-migration.md` for the full migration design):
+
+1. **The backend is a persistent child, not a per-image process.** `DiffusionServerManager` runs a
+   `sd-server` child bound to an ephemeral loopback port and drives it through `/sdcpp/v1/*`
+   (`img_gen` → 202, `jobs/{id}`, `jobs/{id}/cancel`, `capabilities`). Images come back as base64
+   in the job JSON, so no temporary PNG is written. `src/process/sd-server-runner.ts` owns spawn,
+   readiness, the line-buffered stdout tap and confirmed termination;
+   `src/process/sd-server-client.ts` owns the job API. Both are Node-safe (lint-enforced).
+2. **`start()` still spawns nothing.** The wrapper comes up alone; the backend is spawned lazily on
+   the first image, so an LLM may hold the VRAM until then. `stop()` releases the backend (confirmed
+   death) before closing the wrapper.
+3. **Residency is a policy, not an accident.** `'single'` releases the backend right after the
+   image; `'burst'` keeps it warm until `idleTimeoutMs` (default 5 min). The `'auto'` default picks
+   `'single'` when the LLM was offloaded to make room and `'burst'` otherwise. Warm images are
+   ~33–39 % faster than cold ones, which is what makes residency worth a policy at all.
+4. **Orchestration is symmetric.** `ResourceOrchestrator` releases the backend before reloading an
+   offloaded LLM, defers that reload while a `'burst'` backend is resident, and — through a new
+   `LlamaServerManager` pre-start hook — releases a resident backend when an LLM start needs the
+   VRAM.
+5. **Provisioning validates what production runs.** `sd-server` is the primary validated binary;
+   Phase-2 validation launches it through the same runner/client and pushes one 64×64/1-step job
+   through the job API. `sd-cli` is no longer executed by the library.
+6. **Backend crashes are not wrapper crashes.** A dead backend is reported as `'backend-status'`
+   (`reason: 'crashed'`); the wrapper stays `running` and the next request respawns the backend.
+   `'crashed'` keeps its meaning — the public server is down.
+
+Still true from the original design: the wrapper is the public server, the 503-busy gate (no
+queueing) stands, progress is polled rather than streamed, and genai-lite has no knowledge of
+wrapper vs. native server. Still open: the step/stage progress is parsed from `sd-server` stdout
+literals (one table, `SD_SERVER_STDOUT_MARKERS`) because the job JSON carries no progress at the
+pinned commit — when upstream adds progress to the job payload, the tap can be dropped.
 
 ### 8. BinaryManager Pattern (Reusable Binary Management)
 
@@ -1666,7 +1716,7 @@ Standard TypeScript/testing toolchain (exact versions TBD):
 **stable-diffusion.cpp** (downloaded on first run):
 - **What it is**: A lightweight C/C++ implementation of Stable Diffusion, similar in philosophy to llama.cpp
 - **Key features**: Efficient, supports multiple backends (CUDA, Metal, Vulkan), requires minimal resources (~2.3GB RAM for 512x512 generation)
-- **Important note**: Unlike llama.cpp's llama-server, stable-diffusion.cpp does **not** include a built-in HTTP server—it's a one-shot executable
+- **Important note**: the pinned release ships both a one-shot CLI (`sd-cli`) and a native HTTP server (`sd-server`). genai-electron provisions and runs `sd-server` as a private backend behind its own wrapper (see §7 Update 2026-08-21); `sd-cli` is not executed
 - Source: https://github.com/leejet/stable-diffusion.cpp/releases
 - Distribution: Pre-compiled binaries downloaded from GitHub releases
 - Version: Pinned to specific release tag/commit in code

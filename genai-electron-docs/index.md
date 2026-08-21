@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.24.0 (Node-safe llama-server launch)
+> **Version**: 0.25.0 (Persistent sd-server diffusion backend)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron—an Electron-first library for managing local AI model
@@ -28,6 +28,7 @@ calibration policy metadata.
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.24.0 to v0.25.0](migration-0-24-to-0-25.md)** - Persistent `sd-server` diffusion backend with `single`/`burst` residency, symmetric LLM/diffusion orchestration, calibration `usageMode` + `policyVersion`; wrapper binds `127.0.0.1` by default
 - **[Migrating from v0.23.0 to v0.24.0](migration-0-23-to-0-24.md)** - Node-safe direct llama-server launch, optional Electron peer installation, and native-ESM adoption boundary
 - **[Migrating from v0.22.1 to v0.23.0](migration-0-22-1-to-0-23.md)** - Additive byte-level extraction telemetry plus truthful `finalizing` and `installing` phases
 - **[Migrating from v0.22.0 to v0.22.1](migration-0-22-0-to-0-22-1.md)** - Bundler-safe ZIP extraction with no loose `adm-zip` runtime module; remove downstream packaging workarounds
@@ -75,10 +76,10 @@ also launch a caller-provided llama-server binary through `genai-electron/llama-
 - ✅ **LLM server lifecycle** - Start/stop llama-server processes with auto-configuration
 - ✅ **LLM runtime calibration** - Find a best-known start-ready configuration within a host-selected time across one or two comparable context profiles, with explicit evidence/completeness and exact caller-supplied diagnostics
 - ✅ **Reasoning model support** - Automatic detection and configuration for reasoning-capable models (Qwen3, DeepSeek-R1, GPT-OSS)
-- ✅ **Image generation** - Local image generation via stable-diffusion.cpp
+- ✅ **Image generation** - Local image generation via a persistent stable-diffusion.cpp `sd-server` backend behind an HTTP wrapper, with single/burst VRAM residency
 - ✅ **Async image generation API** - HTTP endpoints with polling pattern for non-blocking generation
-- ✅ **Batch generation** - Generate multiple image variations in one request (1-5 images)
-- ✅ **Resource orchestration** - Automatic LLM offload/reload when generating images
+- ✅ **Batch generation** - Generate multiple image variations in one request (1-5 images), inside a single offload window
+- ✅ **Resource orchestration** - Symmetric: automatic LLM offload/reload when generating images, and a resident diffusion backend yields to an LLM start
 - ✅ **Offload calibration** - Benchmark CPU-offload flag combinations on the user's machine and pick the fastest (`diffusionServer.calibrate()`)
 - ✅ **Health monitoring** - Real-time server health checks and status tracking
 - ✅ **Structured logs** - Parse server logs into typed objects for easy filtering and display
@@ -335,16 +336,16 @@ No additional code needed - it just works! See [Resource Orchestration](resource
             └─────────────►│  HTTP wrapper       │
                            │  (port 8081)        │
                            │  [Image generation] │
-                           │    ↓ spawns         │
-                           │  stable-diffusion   │
-                           │  .cpp executable    │
+                           │    ↓ job API        │
+                           │  sd-server          │
+                           │  (resident backend) │
                            └─────────────────────┘
 ```
 
 **Key features**:
 - **LLM inference**: Native llama-server (HTTP server from llama.cpp)
-- **Image generation**: HTTP wrapper created by genai-electron that spawns stable-diffusion.cpp
-- **Resource management**: ResourceOrchestrator automatically offloads LLM when resources are constrained
+- **Image generation**: HTTP wrapper created by genai-electron in front of a `sd-server` child process (stable-diffusion.cpp's own server), spawned lazily at the first image request and driven through its native job API. It can stay resident between images (`'burst'`) or be released with its VRAM right after one (`'single'`)
+- **Resource management**: ResourceOrchestrator automatically offloads the LLM when resources are constrained, releases the diffusion backend before reloading it, and — through a pre-start hook — releases a resident backend when an LLM is about to start
 - **Reasoning support**: llama-server is always launched with `--jinja`; reasoning extraction uses `--reasoning-format` (default `'auto'`, overridable via the `reasoningFormat` option). Reasoning-capable models are still flagged via `supportsReasoning` metadata, but there is no longer any conditional flag injection.
 - **Binary management**: Automatic variant selection with real GPU functionality testing
   - Downloads appropriate binary on first `start()` call (~50-100MB)
@@ -386,6 +387,7 @@ No additional code needed - it just works! See [Resource Orchestration](resource
 - **genai-lite** (≥ 0.9): Lightweight API abstraction layer for AI providers (cloud and local)
   - Repository: https://github.com/lacerbi/genai-lite
   - **Version pairing**: genai-lite ≥ 0.9 pairs with genai-electron ≥ 0.6 — the reasoning request toggle and the `'cancelled'` generation status require that pairing. genai-lite ≥ 0.10 additionally uses genai-electron's `DELETE /v1/images/generations/:id` for request-side image cancellation (`generateImage(request, { signal })`, plus cancel-on-timeout). genai-lite ≥ 0.11 adds a per-request timeout override (`generateImage(request, { timeoutMs })`, default 120 s) and automatic retries for cloud image providers — but it **never auto-retries genai-electron** (a blind retry would start a second GPU generation), so apps that want retry-on-busy behavior against this server must implement it themselves (e.g. on `RATE_LIMIT_EXCEEDED`/`SERVER_BUSY`).
+  - **No genai-lite change was required for the persistent diffusion backend.** The wrapper's HTTP contract stays backward compatible — same `POST`/`GET`/`DELETE` shapes and statuses — so the move from a per-image CLI spawn to a resident `sd-server` backend is invisible to the adapter (verified against genai-lite 0.19.0). What changed is purely additive: an optional `usageMode` request field, a `backend` field on `/health`, `400` instead of `500` for a malformed JSON body or a bad `usageMode`, and `503 SERVER_NOT_RUNNING` while the wrapper is stopping or stopped. The one thing to note is deployment, not code: the wrapper now binds `127.0.0.1` by default, so a genai-lite client on another host needs `host` set explicitly on `diffusionServer.start()`.
 
 **Examples**:
 - `examples/electron-control-panel/` - Full-featured Electron app showcasing all library features
