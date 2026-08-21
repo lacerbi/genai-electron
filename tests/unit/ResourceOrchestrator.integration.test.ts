@@ -161,6 +161,9 @@ type Manager = InstanceType<typeof DiffusionServerManager>;
  */
 class FakeLlamaServer {
   readonly start = jest.fn(async (config: LlamaServerConfig) => {
+    // The real manager rejects a start while it is already running; anything that
+    // "restores" a server that never went down has to fail here, not silently pass.
+    if (this.running) throw new Error('Server is already running');
     this.startConfigs.push(config);
     for (const hook of [...this.hooks]) {
       await hook({ config, reason: 'start' });
@@ -349,6 +352,53 @@ describe('ResourceOrchestrator + DiffusionServerManager (residency)', () => {
     // Exactly the one start the host asked for — 'llm-start' never triggers a reload
     await orchestrator().waitForReload();
     expect(llamaServer.start).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops the deferred reload when the host started the LLM itself', async () => {
+    llamaServer.seedRunning(llmConfig);
+
+    // Burst keeps the backend warm and defers the reload
+    await diffusionServer.generateImage({ prompt: 'a cat', usageMode: 'burst' });
+    expect(diffusionServer.getBackendInfo().state).toBe('ready');
+    expect(orchestrator().getSavedState()).toBeDefined();
+
+    // The host restarts the LLM while both happen to fit, so the pre-start hook keeps
+    // the backend resident
+    mockSystemInfo.detect.mockResolvedValue({
+      cpu: { cores: 8, model: 'Test CPU', architecture: 'x64' },
+      memory: { total: 64 * 1024 ** 3, available: 48 * 1024 ** 3, used: 16 * 1024 ** 3 },
+      gpu: { available: true, type: 'nvidia', vram: 48 * 1024 ** 3 },
+      platform: 'linux',
+      recommendations: {
+        maxModelSize: '70B',
+        recommendedQuantization: ['Q4_K_M'],
+        threads: 7,
+        gpuLayers: 99,
+      },
+    });
+    await llamaServer.start(llmConfig);
+    expect(llamaServer.start).toHaveBeenCalledTimes(1);
+    expect(diffusionServer.getBackendInfo().state).toBe('ready');
+
+    // Releasing the (still warm) backend must NOT start a second LLM over the running one
+    await diffusionServer.releaseBackend({ reason: 'idle-timeout' });
+    await orchestrator().waitForReload();
+
+    expect(llamaServer.start).toHaveBeenCalledTimes(1);
+    expect(orchestrator().getSavedState()).toBeUndefined();
+  });
+
+  it('yields the backend to a raw start config that has no gpuLayers yet', async () => {
+    llamaServer.seedRunning(llmConfig);
+    await diffusionServer.generateImage({ prompt: 'a cat', usageMode: 'burst' });
+    expect(diffusionServer.getBackendInfo().state).toBe('ready');
+
+    // Exactly what a host passes to start(): LlamaServerManager auto-configures
+    // gpuLayers later, so the hook must not read the raw 0 as "costs no VRAM"
+    await llamaServer.start({ modelId: 'llama-2-7b', port: 8080 });
+
+    expect(diffusionServer.getBackendInfo()).toEqual({ state: 'absent' });
+    expect(handles[0]!.stop).toHaveBeenCalledTimes(1);
   });
 
   it("fires the deferred 'burst' reload on the idle timeout", async () => {

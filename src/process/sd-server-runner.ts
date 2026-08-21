@@ -184,7 +184,9 @@ export interface SdServerHandle {
   readonly args: readonly string[];
   /** Spawn-to-ready duration in milliseconds. */
   readonly loadTimeMs: number;
+  /** Bounded tail of complete stdout lines; progress-bar redraw frames are excluded. */
   readonly stdoutTail: string;
+  /** Bounded tail of complete stderr lines; progress-bar redraw frames are excluded. */
   readonly stderrTail: string;
   readonly state: SdServerRunnerState;
   /** Resolves after the process exits. */
@@ -396,6 +398,8 @@ export class SdServerRunner implements SdServerHandle {
   private resolveExit!: (exit: SdServerExit) => void;
   private readonly exitObservedPromise: Promise<SdServerExit>;
   private resolveExitObserved!: (exit: SdServerExit) => void;
+  /** Lazily built once and reused by every raceWithExit() call (see below) */
+  private exitRejection?: Promise<never>;
   private stopPromise?: Promise<void>;
 
   constructor(options: SdServerRunnerOptions, port: number) {
@@ -478,6 +482,26 @@ export class SdServerRunner implements SdServerHandle {
     );
   }
 
+  /**
+   * The one rejection every `raceWithExit()` races against.
+   *
+   * Built lazily and memoized: a job poll calls `raceWithExit()` several times a second,
+   * and a fresh `.then()` per call would attach an unbounded chain of reactions to the
+   * exit promise. The `.catch()` keeps the memoized rejection from being reported as
+   * unhandled when nothing is racing it at the moment the child dies.
+   * @private
+   */
+  private getExitRejection(): Promise<never> {
+    if (!this.exitRejection) {
+      const rejection = this.exitObservedPromise.then((exit) =>
+        Promise.reject(this.exitError(exit))
+      ) as Promise<never>;
+      rejection.catch(() => undefined);
+      this.exitRejection = rejection;
+    }
+    return this.exitRejection;
+  }
+
   /** Race caller work against immediate exact-child exit observation. */
   raceWithExit<T>(operation: Promise<T>): Promise<T> {
     const guarded = operation.then(
@@ -490,10 +514,7 @@ export class SdServerRunner implements SdServerHandle {
         throw error;
       }
     );
-    return Promise.race([
-      guarded,
-      this.exitObservedPromise.then((exit) => Promise.reject(this.exitError(exit))),
-    ]);
+    return Promise.race([guarded, this.getExitRejection()]);
   }
 
   /** Spawn the backend and resolve once it answers `GET /sdcpp/v1/capabilities`. */
@@ -655,12 +676,6 @@ export class SdServerRunner implements SdServerHandle {
    * across chunks keeps every frame intact and attributable.
    */
   private consume(chunk: string, stream: 'stdout' | 'stderr'): void {
-    if (stream === 'stdout') {
-      this.stdout = boundedTail(this.stdout, chunk, this.tailMaxBytes);
-    } else {
-      this.stderr = boundedTail(this.stderr, chunk, this.tailMaxBytes);
-    }
-
     const buffered = (stream === 'stdout' ? this.stdoutLine : this.stderrLine) + chunk;
     const segments = buffered.split(/\r\n|\r|\n/);
     let tail = segments.pop() ?? '';
@@ -683,6 +698,19 @@ export class SdServerRunner implements SdServerHandle {
 
   private handleLine(line: string, stream: 'stdout' | 'stderr'): void {
     if (line.trim() === '') return;
+
+    // Progress bars redraw many times per second; letting them into the bounded tail
+    // would evict the diagnostics the tail exists for (a model-load error, an OOM)
+    // long before anyone reads it. The same information reaches callers as structured
+    // SdServerStdoutEvents.
+    if (!isSdServerProgressBarLine(line)) {
+      if (stream === 'stdout') {
+        this.stdout = boundedTail(this.stdout, `${line}\n`, this.tailMaxBytes);
+      } else {
+        this.stderr = boundedTail(this.stderr, `${line}\n`, this.tailMaxBytes);
+      }
+    }
+
     this.onLog?.(line, stream);
     if (!this.onStdoutEvent) return;
 
@@ -782,10 +810,12 @@ async function startSdServerRunnerInternal(
  * @example
  * ```typescript
  * const handle = await startSdServerRunner({
- *   binaryPath: getBinaryPath('diffusion', 'sd-server'),
+ *   binaryPath: 'C:\\userData\\binaries\\diffusion\\sd-server.exe',
  *   modelArgs: ['-m', modelPath],
  *   contextArgs: ['--offload-to-cpu'],
- *   loraDir: PATHS.loras,
+ *   // Any library-owned, empty directory (the caller resolves it; this module
+ *   // never imports config/paths.js — that would pull in Electron)
+ *   loraDir: 'C:\\userData\\loras',
  *   onStdoutEvent: (event) => {
  *     if (event.type === 'step') console.log(`${event.step}/${event.steps}`);
  *   },

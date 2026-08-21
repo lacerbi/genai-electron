@@ -88,11 +88,28 @@ export default tseslint.config(
           ],
           patterns: [
             {
+              // `electron` itself is covered by `paths` above; this catches the
+              // submodule spellings (`electron/main`, `electron/common`, ...).
+              group: ['electron/*'],
+              message:
+                'src/process/** must stay Node-safe. Pass Electron-derived values in as arguments.',
+            },
+            {
               group: ['**/config/paths.js', '**/config/paths'],
               message:
                 'src/process/** must stay Node-safe. config/paths.js resolves Electron userData at import time — pass resolved paths in as arguments.',
             },
           ],
+        },
+      ],
+      // `no-restricted-imports` only sees static imports; a dynamic import() would
+      // load Electron just as effectively.
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: 'ImportExpression > Literal[value=/^electron(\\/|$)/]',
+          message:
+            'src/process/** must stay Node-safe. Do not import Electron dynamically either — pass Electron-derived values in as arguments.',
         },
       ],
     },

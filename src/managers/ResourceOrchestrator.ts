@@ -19,6 +19,7 @@ import type {
   DiffusionUsageMode,
   ImageGenerationConfig,
   ImageGenerationResult,
+  ModelInfo,
 } from '../types/index.js';
 import { estimateKVBytesPerToken } from '../utils/kv-cache-math.js';
 import { getExpertWeightsBytesWithFallback } from '../utils/model-metadata-helpers.js';
@@ -79,15 +80,26 @@ export class ResourceOrchestrator {
   /**
    * Backend release reasons that may bring a previously offloaded LLM back.
    *
+   * `'cancel'` is in the set because a cancelled generation kills the backend and
+   * then ends: under `'burst'` nothing else would ever release the VRAM, so the LLM
+   * would stay down forever. Double reloads are impossible by construction —
+   * {@link fireAndForgetReload} is the single trigger and every caller checks
+   * `pendingReload` first.
+   *
    * Everything else is deliberately silent: `'single'` reloads through the
-   * orchestration branch that owns the offload context (reloading here too would
-   * double it), `'llm-start'` fires from inside the LLM's own pre-start hook,
-   * `'shutdown'` runs while the app is quitting, `'calibration'` belongs to a sweep
-   * that restores the LLM itself, and `'cancel'`/`'flags-changed'` are followed by
-   * another image on the same offload context.
+   * orchestration branch that owns the offload context, `'llm-start'` fires from
+   * inside the LLM's own pre-start hook, `'shutdown'` runs while the app is quitting,
+   * `'calibration'` belongs to a sweep that restores the LLM itself, and
+   * `'flags-changed'` is immediately followed by another spawn for the same image.
    */
   private static readonly RELOAD_RELEASE_REASONS: ReadonlySet<DiffusionBackendReleaseReason> =
-    new Set<DiffusionBackendReleaseReason>(['idle-timeout', 'explicit', 'crashed', 'stop']);
+    new Set<DiffusionBackendReleaseReason>([
+      'idle-timeout',
+      'explicit',
+      'crashed',
+      'stop',
+      'cancel',
+    ]);
 
   /** Backend states in which a process is holding (or about to hold) VRAM */
   private static readonly RESIDENT_BACKEND_STATES: ReadonlySet<string> = new Set([
@@ -194,10 +206,11 @@ export class ResourceOrchestrator {
   ): Promise<T> {
     // If a previous generation's reload is still in progress, wait for it
     // to finish before potentially offloading again (prevents VRAM contention)
-    if (this.pendingReload) {
+    const inFlightReload = this.pendingReload;
+    if (inFlightReload) {
       debugLog('[Orchestrator] Awaiting pending LLM reload from previous generation...');
-      await this.pendingReload;
-      this.pendingReload = null;
+      await inFlightReload;
+      if (this.pendingReload === inFlightReload) this.pendingReload = null;
     }
 
     // Check if we need to offload LLM
@@ -238,8 +251,23 @@ export class ResourceOrchestrator {
     try {
       return await run();
     } finally {
-      // No offload happened, so the default residency is 'burst'
-      await this.settleResidency(this.diffusionServer.resolveUsageMode(config.usageMode, false));
+      // No offload happened HERE, so the default residency is 'burst'
+      const mode = this.diffusionServer.resolveUsageMode(config.usageMode, false);
+      await this.settleResidency(mode);
+
+      // An EARLIER 'burst' cycle may still be holding a saved LLM state. Releasing the
+      // backend for reason 'single' does not qualify for the callback (it is normally
+      // owned by the offload branch), so this branch has to bring the LLM back itself —
+      // otherwise a burst-then-single sequence would leave the LLM down forever.
+      if (
+        mode === 'single' &&
+        this.savedLLMState &&
+        !this.pendingReload &&
+        !this.diffusionServer.isCalibrating()
+      ) {
+        debugLog('[Orchestrator] Backend released for a single-mode request - reloading LLM');
+        this.fireAndForgetReload();
+      }
     }
   }
 
@@ -249,7 +277,11 @@ export class ResourceOrchestrator {
    * `'single'` releases the backend BEFORE the LLM reload starts, so the two never
    * hold VRAM at the same time. `'burst'` keeps the backend (and the saved LLM state):
    * the reload is deferred until the backend is released for a qualifying reason
-   * (idle timeout, explicit release, crash, or `stop()`).
+   * (idle timeout, explicit release, crash, cancel, or `stop()`).
+   *
+   * The `'single'` reload is skipped when one is already in flight: a cancelled or
+   * crashed generation already released the backend for a qualifying reason, and
+   * {@link onDiffusionBackendReleased} started the reload from there.
    *
    * @param config - The generation's configuration (its `usageMode` is the request hint)
    * @private
@@ -260,9 +292,11 @@ export class ResourceOrchestrator {
 
     await this.settleResidency(mode);
 
-    if (mode === 'single') {
+    if (mode === 'single' && !this.pendingReload) {
       debugLog('[Orchestrator] Backend released, reloading LLM in background...');
       this.fireAndForgetReload();
+    } else if (mode === 'single') {
+      debugLog('[Orchestrator] Backend released - a reload is already in flight');
     } else {
       debugLog('[Orchestrator] Backend stays warm - LLM reload deferred until it is released');
     }
@@ -300,6 +334,15 @@ export class ResourceOrchestrator {
       debugLog('[Orchestrator] Backend released - no reload for reason:', reason);
       return;
     }
+    if (this.llamaServer.isRunning()) {
+      // The host (or the pre-start hook's own caller) already brought the LLM back;
+      // the saved state describes a server that exists again. Starting it a second
+      // time would throw, and keeping the state would make a later release restart
+      // a configuration the host has since replaced.
+      debugLog('[Orchestrator] Backend released - LLM already running, dropping saved state');
+      this.savedLLMState = undefined;
+      return;
+    }
     if (!this.savedLLMState) {
       debugLog('[Orchestrator] Backend released - no saved LLM state to restore');
       return;
@@ -327,13 +370,30 @@ export class ResourceOrchestrator {
    * and the two would not fit together (same 75 % arithmetic as the image path, but
    * estimating the LLM from the configuration it is about to start with).
    *
+   * The hook sees the RAW configuration, before `start()` auto-configures it, so an
+   * omitted `gpuLayers` is resolved the way auto-configuration will resolve it — see
+   * {@link estimateAutoGpuLayers}. An explicit `gpuLayers: 0` is honoured as "CPU-only
+   * LLM" and yields nothing.
+   *
    * The release carries reason `'llm-start'`, which never triggers a reload — the LLM
    * start that caused it is already under way.
    *
    * @param ctx - The start context handed to the hook
+   * @throws {ServerError} `details.code` `'CALIBRATION_IN_PROGRESS'` when an offload
+   *   calibration sweep is running: the sweep owns the backend (and restores the LLM
+   *   itself when it is done), so a manual start must fail loudly instead of racing it.
+   *   The auto-restart path logs and ignores hook errors by design.
    * @internal
    */
   async prepareForLLMStart(ctx: { config: LlamaServerConfig }): Promise<void> {
+    if (this.diffusionServer.isCalibrating()) {
+      throw new ServerError('Cannot start the LLM while diffusion calibration is running', {
+        code: 'CALIBRATION_IN_PROGRESS',
+        suggestion:
+          'Wait for calibrate() to finish (it restores the LLM itself), or abort it via its AbortSignal',
+      });
+    }
+
     const backendState = this.diffusionServer.getBackendInfo().state;
     if (!ResourceOrchestrator.RESIDENT_BACKEND_STATES.has(backendState)) {
       debugLog('[Orchestrator] LLM start - no resident diffusion backend:', backendState);
@@ -425,7 +485,8 @@ export class ResourceOrchestrator {
    * @param configOverride - Estimate this configuration instead of the running
    *   server's. With an override the "is it running?" short-circuit is skipped
    *   entirely: the caller is asking what the LLM WOULD cost, which is exactly the
-   *   question a pre-start hook has to answer.
+   *   question a pre-start hook has to answer, and an omitted `gpuLayers` is resolved
+   *   the way `start()` will resolve it (see {@link estimateAutoGpuLayers}).
    * @returns Resource requirements
    * @private
    */
@@ -450,10 +511,16 @@ export class ResourceOrchestrator {
 
     try {
       const modelInfo = await this.modelManager.getModelInfo(config.modelId);
-      const gpuLayers = config.gpuLayers || 0;
 
       // Get actual layer count from GGUF metadata (or fallback to estimation)
       const totalLayers = await this.modelManager.getModelLayerCount(config.modelId);
+
+      // A RAW start configuration usually has no gpuLayers yet — start() fills it in
+      // from SystemInfo. Taking it at face value would price the LLM at zero VRAM.
+      const gpuLayers =
+        configOverride !== undefined && configOverride.gpuLayers === undefined
+          ? await this.estimateAutoGpuLayers(modelInfo, configOverride, totalLayers)
+          : config.gpuLayers || 0;
 
       // Real KV-cache cost for the configured context (0 without metadata,
       // matching the legacy weights-only estimate)
@@ -508,6 +575,69 @@ export class ResourceOrchestrator {
       // If we can't get model info, return conservative estimate
       debugLog('[Orchestrator] Failed to get LLM model info:', error);
       return { ram: 0, vram: 0 };
+    }
+  }
+
+  /**
+   * GPU layers an LLM start would actually end up using
+   *
+   * `prepareForLLMStart()` is handed the RAW configuration the caller passed to
+   * `start()`, where `gpuLayers` is normally absent — `LlamaServerManager` resolves it
+   * from `SystemInfo.getOptimalConfig()` later, inside `start()` itself. Reading the raw
+   * value would score the LLM at 0 VRAM, the two would always "fit", and the hook would
+   * never yield the diffusion backend.
+   *
+   * Mirrors the auto-configuration by asking the same source, with the same hints. When
+   * that is unavailable, falls back to "everything on the GPU" whenever a GPU with VRAM
+   * is detected — the conservative answer for a fit question.
+   *
+   * @param modelInfo - The LLM model that is about to start
+   * @param config - The raw start configuration (its `gpuLayers` is undefined)
+   * @param totalLayers - Layer count of the model
+   * @returns Layers that would be placed on the GPU
+   * @private
+   */
+  private async estimateAutoGpuLayers(
+    modelInfo: ModelInfo,
+    config: LlamaServerConfig,
+    totalLayers: number
+  ): Promise<number> {
+    try {
+      // Same hint shape LlamaServerManager.autoConfigureIfNeeded() passes: the exact
+      // context size wins, otherwise the context POLICY fields do (mutually exclusive).
+      const usePolicyForSizing = config.contextSize === undefined;
+      const optimal = await this.systemInfo.getOptimalConfig(modelInfo, {
+        contextSize: config.contextSize,
+        minimumContextSize: usePolicyForSizing ? config.minimumContextSize : undefined,
+        preferredContextSize: usePolicyForSizing ? config.preferredContextSize : undefined,
+        maximumContextSize: usePolicyForSizing ? config.maximumContextSize : undefined,
+        parallelRequests: config.parallelRequests,
+        flashAttention: config.flashAttention,
+        cacheTypeK: config.cacheTypeK,
+        cacheTypeV: config.cacheTypeV,
+        cpuMoe: config.cpuMoe,
+        nCpuMoe: config.nCpuMoe,
+        overrideTensors: config.overrideTensors,
+      });
+      if (typeof optimal.gpuLayers === 'number' && Number.isFinite(optimal.gpuLayers)) {
+        debugLog(
+          '[Orchestrator] LLM start - auto gpuLayers from optimal config:',
+          optimal.gpuLayers
+        );
+        return optimal.gpuLayers;
+      }
+    } catch (error) {
+      debugLog('[Orchestrator] LLM start - optimal config unavailable:', error);
+    }
+
+    try {
+      const capabilities = await this.systemInfo.detect();
+      const onGpu = capabilities.gpu.available && !!capabilities.gpu.vram;
+      debugLog('[Orchestrator] LLM start - assuming', onGpu ? 'a full' : 'no', 'GPU offload');
+      return onGpu ? totalLayers : 0;
+    } catch (error) {
+      debugLog('[Orchestrator] LLM start - GPU detection failed:', error);
+      return 0;
     }
   }
 
@@ -657,17 +787,28 @@ export class ResourceOrchestrator {
    * Start LLM reload in the background (fire-and-forget)
    *
    * Stores the reload promise so concurrent orchestration calls
-   * can await it before starting a new offload cycle.
+   * can await it before starting a new offload cycle, and clears that slot again once
+   * this cycle settles — otherwise a completed reload would keep every later
+   * qualifying release from starting a new one.
+   *
+   * The single trigger for an LLM reload: every caller checks `pendingReload` first,
+   * which is what makes "exactly one reload per offload cycle" true even when a cancel
+   * or a crash releases the backend before the orchestration branch settles.
    *
    * @private
    */
   private fireAndForgetReload(): void {
-    this.pendingReload = this.reloadLLM();
+    const reload = this.reloadLLM();
+    this.pendingReload = reload;
     // Safety net: prevent unhandled rejection warnings.
     // reloadLLM() handles all errors internally, but Node.js
     // may still flag the detached promise.
-    // eslint-disable-next-line @typescript-eslint/no-empty-function
-    this.pendingReload.catch(() => {});
+    void reload
+      .catch(() => undefined)
+      .finally(() => {
+        // Identity check: a newer cycle may already own the slot
+        if (this.pendingReload === reload) this.pendingReload = null;
+      });
   }
 
   /**
@@ -724,8 +865,9 @@ export class ResourceOrchestrator {
    * **Residency caveat**: under `'burst'` after an offload the LLM is intentionally
    * still down when this resolves — no reload has been started yet. The deferred
    * reload fires when the diffusion backend is released (idle timeout, an explicit
-   * `releaseBackend()`, a backend crash, or `diffusionServer.stop()`), so a caller
-   * that needs the LLM back right away should release the backend first.
+   * `releaseBackend()`, a backend crash, a cancelled generation, or
+   * `diffusionServer.stop()`), so a caller that needs the LLM back right away should
+   * release the backend first.
    *
    * @example
    * ```typescript
@@ -736,9 +878,10 @@ export class ResourceOrchestrator {
    * ```
    */
   async waitForReload(): Promise<void> {
-    if (this.pendingReload) {
-      await this.pendingReload;
-      this.pendingReload = null;
+    const inFlightReload = this.pendingReload;
+    if (inFlightReload) {
+      await inFlightReload;
+      if (this.pendingReload === inFlightReload) this.pendingReload = null;
     }
   }
 

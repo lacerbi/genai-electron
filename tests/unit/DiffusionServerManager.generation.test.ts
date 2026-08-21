@@ -30,6 +30,7 @@ import {
   mockStartSdServerRunner,
   mockSubmitImageJob,
   resetSdServerMocks,
+  sdServerStartAbortedError,
 } from './helpers/sd-server-mocks.js';
 
 // Mock Electron app
@@ -679,7 +680,7 @@ describe('DiffusionServerManager (generation)', () => {
       }
     });
 
-    it('maps a full backend queue to BACKEND_ERROR', async () => {
+    it('maps a full backend queue to SERVER_BUSY', async () => {
       mockSubmitImageJob.mockRejectedValue(
         new ServerError('sd-server rejected the job: the backend queue is full', {
           code: 'BACKEND_QUEUE_FULL',
@@ -692,8 +693,17 @@ describe('DiffusionServerManager (generation)', () => {
         throw new Error('Should have thrown');
       } catch (error: any) {
         expect(error.details.code).toBe('BACKEND_QUEUE_FULL');
-        expect((diffusionServer as any).mapErrorCode(error)).toBe('BACKEND_ERROR');
+        // "come back later", the same meaning as the wrapper's own busy gate
+        expect((diffusionServer as any).mapErrorCode(error)).toBe('SERVER_BUSY');
       }
+    });
+
+    it('maps an aborted backend spawn to GENERATION_CANCELLED', async () => {
+      const aborted = new ServerError('sd-server startup aborted', {
+        code: 'SD_SERVER_START_ABORTED',
+      });
+
+      expect((diffusionServer as any).mapErrorCode(aborted)).toBe('GENERATION_CANCELLED');
     });
 
     it('surfaces a missing model as an internal ServerError', async () => {
@@ -784,6 +794,69 @@ describe('DiffusionServerManager (generation)', () => {
       expect(mockCancelJob).toHaveBeenCalledWith('job-1');
       expect(registry.get(id).status).toBe('cancelled');
       expect(handles[0]!.stop).not.toHaveBeenCalled();
+    });
+
+    it('aborts a cold spawn instead of waiting for the backend to be ready', async () => {
+      let capturedSignal: AbortSignal | undefined;
+      mockStartSdServerRunner.mockImplementation(async (options: any) => {
+        capturedSignal = options.signal;
+        // A faithful runner: the startup signal is what ends a cold load early
+        await new Promise<never>((_resolve, reject) => {
+          options.signal?.addEventListener('abort', () => reject(sdServerStartAbortedError()), {
+            once: true,
+          });
+        });
+        throw new Error('unreachable');
+      });
+
+      const { id, promise, registry } = startAsync(diffusionServer, { prompt: 'x' });
+      const settled = promise.catch((error: unknown) => error as Error);
+      await flush();
+      expect(capturedSignal).toBeDefined();
+      expect(capturedSignal!.aborted).toBe(false);
+
+      await diffusionServer.cancelImageGeneration(id);
+
+      // The spawn is cancelled where it stands, not after a 120 s model load
+      expect(capturedSignal!.aborted).toBe(true);
+      const error = await settled;
+      expect((error as any).details?.code).toBe('SD_SERVER_START_ABORTED');
+      expect(mockSubmitImageJob).not.toHaveBeenCalled();
+      expect(registry.get(id).status).toBe('cancelled');
+    });
+
+    it('stops a job the backend may still be running when the poll loop gives up', async () => {
+      // Three consecutive transient failures end the generation while the job itself
+      // is still 'generating' on the backend — it must not keep the GPU.
+      mockGetJob
+        .mockImplementationOnce(async () => ({ id: 'job-1', status: 'generating' }) as any)
+        .mockImplementation(async () => {
+          throw new ServerError('sd-server /sdcpp/v1/jobs/job-1 timed out', {
+            code: 'BACKEND_REQUEST_TIMEOUT',
+          });
+        });
+
+      await expect(diffusionServer.executeImageGeneration({ prompt: 'x' })).rejects.toThrow(
+        'timed out'
+      );
+
+      // Generating jobs cannot be cancelled upstream, so the backend is killed
+      expect(handles[0]!.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves the backend alone when the job already failed on its own', async () => {
+      mockGetJob.mockImplementation(
+        async () =>
+          ({ id: 'job-1', status: 'failed', error: { message: 'sampling failed' } }) as any
+      );
+
+      await expect(diffusionServer.executeImageGeneration({ prompt: 'x' })).rejects.toThrow(
+        'job failed'
+      );
+
+      // Nothing is running any more — killing a healthy backend would only cost a reload
+      expect(handles[0]!.stop).not.toHaveBeenCalled();
+      expect(diffusionServer.getBackendInfo().state).toBe('ready');
     });
 
     it('cancels a still-queued job through the backend instead of killing it', async () => {

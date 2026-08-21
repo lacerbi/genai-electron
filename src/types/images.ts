@@ -527,7 +527,7 @@ export interface DiffusionCalibrationGeneration {
   /**
    * Batch size — match production. Maps to `batch_count` in the `sd-server` job request
    * (the historical sd.cpp `-b` flag); the first image of the batch is returned.
-   * Omitted = sd.cpp default.
+   * Omitted → 1 (values below 1 are clamped to 1).
    */
   batchSize?: number;
 }

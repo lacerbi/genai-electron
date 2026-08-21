@@ -202,6 +202,7 @@ const { DiffusionServerManager, pickRecommended } = await import(
   '../../src/managers/DiffusionServerManager.js'
 );
 const { DIFFUSION_CALIBRATION_DEFAULTS } = await import('../../src/config/defaults.js');
+const { ServerError } = await import('../../src/errors/index.js');
 
 /** Script for one generation (by generation index, i.e. submitted job order) */
 interface GenerationScript {
@@ -948,6 +949,32 @@ describe('DiffusionServerManager calibration', () => {
       expect(report.recommended['768x768']).toBeUndefined();
     });
 
+    it('classifies a load-time OOM from a startup failure (details.stderrTail)', async () => {
+      // The backend dies while placing weights: no job is ever submitted, so the only
+      // backend output is the one the RUNNER captured — spelled `stderrTail`, not
+      // `stderr` (which is what a failed job carries).
+      mockStartSdServerRunner.mockImplementationOnce(async () => {
+        throw new ServerError('stable-diffusion.cpp sd-server exited with code 1', {
+          code: 'SD_SERVER_EXITED',
+          exitCode: 1,
+          stderrTail: 'ggml_cuda_host_malloc: CUDA error: out of memory',
+          stdoutTail: '',
+          args: [],
+        });
+      });
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      const calRun = report.runs[0]!;
+      expect(calRun.status).toBe('oom');
+      expect(generationCount()).toBe(0); // it never got as far as a job
+      expect(report.recommended['768x768']).toBeUndefined();
+    });
+
     it('classifies a non-OOM failure as error and keeps successful samplesMs', async () => {
       // Second timed sample (generation index 2: warmup, sample1, sample2) fails generically
       generationScript = (index) =>
@@ -1339,6 +1366,108 @@ describe('DiffusionServerManager calibration', () => {
       expect(report.runs[0]!.vramPeakBytes).toBeUndefined();
       expect(report.runs[0]!.vramIdleBytes).toBeUndefined();
       expect(telemetryReadCount()).toBe(0);
+    });
+
+    /**
+     * The sweep's private sampler, built exactly as calibrate() builds it. Driving it
+     * directly is the only way to observe a single measurement window (a sweep opens
+     * and closes them faster than the 1 s interval).
+     */
+    const buildSampler = async (): Promise<any> =>
+      await (diffusionServer as any).createCalibrationVramSampler();
+
+    it('folds a deeper mid-window interval reading into the peak', async () => {
+      restorePlatform = withPlatform('win32');
+      // gate, window start, the 1 s tick, window end, idle
+      scriptVramReadings([
+        7 * 1024 ** 3,
+        6 * 1024 ** 3,
+        2 * 1024 ** 3, // only the periodic tick ever sees the real peak
+        5 * 1024 ** 3,
+        4 * 1024 ** 3,
+      ]);
+      const sampler = await buildSampler();
+
+      jest.useFakeTimers({
+        doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask', 'Date', 'performance'],
+      });
+      try {
+        await sampler.begin();
+        expect(jest.getTimerCount()).toBe(1); // the 1 s sampling interval is armed
+        await jest.advanceTimersByTimeAsync(1_000);
+        await sampler.end();
+        await sampler.measureIdle();
+        sampler.dispose();
+        expect(jest.getTimerCount()).toBe(0);
+      } finally {
+        sampler.dispose();
+        jest.useRealTimers();
+      }
+
+      expect(sampler.result()).toEqual({
+        vramPeakBytes: GPU_TOTAL_BYTES - 2 * 1024 ** 3,
+        vramIdleBytes: GPU_TOTAL_BYTES - 4 * 1024 ** 3,
+      });
+    });
+
+    it('omits both figures when the window produced no peak reading', async () => {
+      restorePlatform = withPlatform('win32');
+      scriptVramReadings([7 * 1024 ** 3, 6 * 1024 ** 3, 5 * 1024 ** 3, 4 * 1024 ** 3]);
+      const sampler = await buildSampler();
+
+      // A telemetry command from the previous window is still in flight, so this
+      // window's own readings are skipped (they would land in the wrong window)...
+      (sampler as any).pending = true;
+      await sampler.begin();
+      await sampler.end();
+      (sampler as any).pending = false;
+      // ...while the idle reading, which is not gated, does land
+      await sampler.measureIdle();
+      sampler.dispose();
+
+      // An idle figure without its peak is not a measurement — report neither
+      expect(sampler.result()).toEqual({});
+    });
+
+    it('stops sampling when a sweep is aborted mid-window', async () => {
+      restorePlatform = withPlatform('win32');
+      scriptVramReadings([7 * 1024 ** 3, 6 * 1024 ** 3]);
+
+      // Capture the sampler the sweep builds, so the assertion is about ITS timer and
+      // not about whatever else an aborted generation may still have pending
+      let sampler: any;
+      const buildForSweep = (diffusionServer as any).createCalibrationVramSampler.bind(
+        diffusionServer
+      );
+      (diffusionServer as any).createCalibrationVramSampler = async () => {
+        sampler = await buildForSweep();
+        return sampler;
+      };
+
+      const controller = new AbortController();
+      // The first timed sample hangs; the abort lands while its window is open
+      generationScript = (index) => {
+        if (index === 1) {
+          setTimeout(() => controller.abort(), 10);
+          return { hang: true };
+        }
+        return undefined;
+      };
+
+      await expect(
+        runCalibrate(diffusionServer, {
+          modelId: 'sdxl-turbo',
+          samples: 1,
+          combos: [{ label: 'auto' }],
+          signal: controller.signal,
+        })
+      ).rejects.toMatchObject({
+        details: expect.objectContaining({ code: 'CALIBRATION_ABORTED' }),
+      });
+
+      // dispose() runs first in calibrate()'s finally, whatever ended the sweep
+      expect(sampler).toBeDefined();
+      expect((sampler as any).timer).toBeUndefined();
     });
 
     it('leaves no sampling timer behind when the sweep ends', async () => {

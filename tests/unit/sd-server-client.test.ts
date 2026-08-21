@@ -85,6 +85,13 @@ describe('buildSdServerImageRequest', () => {
     expect(body.sample_params.sample_steps).toBe(0);
     expect(body.sample_params.guidance.txt_cfg).toBe(0);
   });
+
+  it('clamps a nonsensical batch size to one image', () => {
+    // batch_count: 0 asks the backend for no images at all; "no batch" means one
+    expect(buildSdServerImageRequest({ prompt: 'x', seed: 1 }, 0).batch_count).toBe(1);
+    expect(buildSdServerImageRequest({ prompt: 'x', seed: 1 }, -3).batch_count).toBe(1);
+    expect(buildSdServerImageRequest({ prompt: 'x', seed: 1 }, 2.7).batch_count).toBe(2);
+  });
 });
 
 describe('SdServerClient', () => {

@@ -15,7 +15,11 @@ import {
   type BinaryDependency,
 } from '../config/defaults.js';
 import { BinaryError } from '../errors/index.js';
-import { buildSdServerImageRequest, SdServerClient } from '../process/sd-server-client.js';
+import {
+  buildSdServerImageRequest,
+  SdServerClient,
+  type SdServerJob,
+} from '../process/sd-server-client.js';
 import { startSdServerRunner, type SdServerHandle } from '../process/sd-server-runner.js';
 import type { BinaryProgressEvent } from '../types/index.js';
 import {
@@ -81,6 +85,15 @@ const SD_SERVER_VALIDATION_LORA_PREFIX = 'genai-electron-sd-validation-';
 
 /** Bytes of each output tail written to the log when a diffusion validation run fails. */
 const VALIDATION_TAIL_LOG_BYTES = 500;
+
+/**
+ * Client `details.code` values a validation job poll retries instead of failing the
+ * variant (same set the production poll loop tolerates).
+ */
+const SD_SERVER_TRANSIENT_POLL_ERROR_CODES: ReadonlySet<string> = new Set([
+  'BACKEND_REQUEST_TIMEOUT',
+  'BACKEND_REQUEST_FAILED',
+]);
 
 function isValidationTerminationFailure(error: unknown): boolean {
   return (
@@ -509,7 +522,7 @@ export class BinaryManager {
   }
 
   /**
-   * Restore the POSIX exec bit on an already-installed primary binary.
+   * Restore the POSIX exec bit on a binary that is about to be executed.
    *
    * The ZIP worker extracts entries without their original permissions (adm-zip writes
    * `0o666`), so only the file that was the *primary* binary at install time ever got
@@ -519,10 +532,13 @@ export class BinaryManager {
    * whole archive down again. Re-applying the mode before re-validation turns that into
    * a one-time re-validation instead of a re-download.
    *
+   * The same applies to a freshly extracted candidate: its install-time chmod only runs
+   * once validation has passed, so the exec bit has to be restored before the tests run.
+   *
    * Failures are logged and ignored: the validation run that follows reports the real
    * problem with far better diagnostics than a chmod errno.
    *
-   * @param binaryPath - Installed primary binary
+   * @param binaryPath - Installed or freshly extracted binary
    * @private
    */
   private async ensureExecutablePermission(binaryPath: string): Promise<void> {
@@ -1012,6 +1028,11 @@ export class BinaryManager {
 
       // Test if binary works (has required drivers, etc.)
       this.progress({ phase: 'testing', file: 'binary' });
+      // The ZIP worker extracts without permissions (adm-zip writes 0o666) and the
+      // install-time chmod below only runs AFTER the tests pass — so on POSIX the
+      // freshly extracted binary is not executable yet and every variant would fail
+      // Phase 1. Restore the exec bit before it is executed for the first time.
+      await this.ensureExecutablePermission(extractedBinaryPath);
       const works = await this.testBinary(extractedBinaryPath, signal);
       signal?.throwIfAborted();
 
@@ -1567,9 +1588,13 @@ export class BinaryManager {
    * `BinaryError` carrying `BINARY_VALIDATION_TERMINATION_UNCONFIRMED` so the variant
    * loop aborts instead of extracting the next variant over a live child.
    *
+   * GPU diagnostics are watched per line as the backend prints them (the bounded tails
+   * can evict an early error during a long multi-component load) and the tails are still
+   * scanned as a backstop.
+   *
    * @param binaryPath - Path to the `sd-server` binary
    * @param modelPath - Path to test model (ignored when `testModelArgs` is configured)
-   * @returns True if the job completed with no GPU diagnostics in the output tails
+   * @returns True if the job completed with no GPU diagnostics in any observed output
    * @throws {BinaryError} `details.code` `'BINARY_VALIDATION_TERMINATION_UNCONFIRMED'`
    *   when the backend's death could not be confirmed
    * @private
@@ -1587,33 +1612,51 @@ export class BinaryManager {
     let loraDir: string | undefined;
     let handle: SdServerHandle | undefined;
     let outcome: { passed: boolean } | { error: unknown };
+    let terminationError: BinaryError | undefined;
+    // Bar-frame-free output is bounded, so a diagnostic printed during a long model load
+    // can be evicted from the tails before the verdict is computed. Watch every line as
+    // it arrives instead of only scanning what survived.
+    let gpuErrorSeen: string | undefined;
 
     try {
-      // A library-owned, empty LoRA directory: pointing sd.cpp at the models directory
-      // makes it read model files as LoRAs (leejet/stable-diffusion.cpp#1468).
-      loraDir = await fs.mkdtemp(path.join(os.tmpdir(), SD_SERVER_VALIDATION_LORA_PREFIX));
-      handle = await startSdServerRunner({
-        binaryPath,
-        // Pre-built component args for multi-component models, otherwise default to -m
-        modelArgs: this.config.testModelArgs ?? ['-m', modelPath],
-        contextArgs: this.config.testOptimizationArgs ?? [],
-        loraDir,
-        readyTimeoutMs: budgetMs,
-        ...(signal ? { signal } : {}),
-      });
-      outcome = { passed: await this.runSdServerValidationJob(handle, budgetMs, signal) };
-    } catch (error) {
-      outcome = { error };
+      try {
+        // A library-owned, empty LoRA directory: pointing sd.cpp at the models directory
+        // makes it read model files as LoRAs (leejet/stable-diffusion.cpp#1468).
+        loraDir = await fs.mkdtemp(path.join(os.tmpdir(), SD_SERVER_VALIDATION_LORA_PREFIX));
+        handle = await startSdServerRunner({
+          binaryPath,
+          // Pre-built component args for multi-component models, otherwise default to -m
+          modelArgs: this.config.testModelArgs ?? ['-m', modelPath],
+          contextArgs: this.config.testOptimizationArgs ?? [],
+          loraDir,
+          readyTimeoutMs: budgetMs,
+          onLog: (line) => {
+            gpuErrorSeen ??= this.checkForGpuErrors(line) ?? undefined;
+          },
+          ...(signal ? { signal } : {}),
+        });
+        outcome = { passed: await this.runSdServerValidationJob(handle, budgetMs, signal) };
+      } catch (error) {
+        outcome = { error };
+      }
+    } finally {
+      // Always tear the backend down, then surface an unconfirmed teardown above every
+      // other verdict — a live orphan outranks "this variant did not work".
+      terminationError = await this.stopValidationBackend(handle);
+      if (loraDir !== undefined) {
+        await fs.rm(loraDir, { recursive: true, force: true }).catch(() => void 0);
+      }
     }
 
-    // Always tear the backend down, then surface an unconfirmed teardown above every
-    // other verdict — a live orphan outranks "this variant did not work".
-    const terminationError = await this.stopValidationBackend(handle);
-    if (loraDir !== undefined) {
-      await fs.rm(loraDir, { recursive: true, force: true }).catch(() => void 0);
-    }
     if (terminationError) throw terminationError;
-    if ('passed' in outcome) return outcome.passed;
+    if ('passed' in outcome) {
+      if (gpuErrorSeen) {
+        this.log(`Phase 2: ✗ GPU error detected in output: ${gpuErrorSeen}`, 'warn');
+        this.logBackendOutputTails(this.backendOutputTails(handle), 'Phase 2 job output');
+        return false;
+      }
+      return outcome.passed;
+    }
 
     const error = outcome.error;
     const terminationFromStart = toValidationTerminationError(error);
@@ -1623,7 +1666,7 @@ export class BinaryManager {
 
     const tails = this.backendOutputTails(handle, error);
     this.logBackendOutputTails(tails, 'Phase 2 output before failure');
-    const gpuError = this.checkForGpuErrors(`${tails.stdout}\n${tails.stderr}`);
+    const gpuError = gpuErrorSeen ?? this.checkForGpuErrors(`${tails.stdout}\n${tails.stderr}`);
     if (gpuError) {
       this.log(`Phase 2: ✗ GPU error detected in output: ${gpuError}`, 'warn');
       return false;
@@ -1636,6 +1679,10 @@ export class BinaryManager {
 
   /**
    * Submit one 64x64 single-step job to a ready backend and judge the result.
+   *
+   * A dropped socket or a slow answer is not a failed variant: up to
+   * `DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures - 1` consecutive transient
+   * client failures are retried, exactly as the production poll loop does.
    *
    * @param handle - Ready `sd-server` handle
    * @param budgetMs - Maximum submit-to-terminal-status wait
@@ -1658,10 +1705,30 @@ export class BinaryManager {
 
     const { id } = await handle.raceWithExit(client.submitImageJob(request, signal));
     const deadline = Date.now() + budgetMs;
+    let transientFailures = 0;
 
     for (;;) {
       signal?.throwIfAborted();
-      const job = await handle.raceWithExit(client.getJob(id, signal));
+      let job: SdServerJob;
+      try {
+        job = await handle.raceWithExit(client.getJob(id, signal));
+        transientFailures = 0;
+      } catch (error) {
+        const code = readErrorDetails(error)?.code;
+        if (typeof code !== 'string' || !SD_SERVER_TRANSIENT_POLL_ERROR_CODES.has(code))
+          throw error;
+
+        transientFailures++;
+        if (transientFailures >= DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures) throw error;
+        this.log(
+          `Phase 2: transient poll failure ${transientFailures}/${DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures} for job ${id}`,
+          'warn'
+        );
+        await new Promise((resolve) =>
+          setTimeout(resolve, DIFFUSION_BACKEND_DEFAULTS.jobPollIntervalMs)
+        );
+        continue;
+      }
 
       if (job.status === 'completed') break;
       if (job.status === 'failed' || job.status === 'cancelled') {

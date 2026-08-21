@@ -99,13 +99,14 @@ A release only brings the LLM back when it really means "the VRAM is free and no
 | `'explicit'` | ✅ | The host called `releaseBackend()` |
 | `'crashed'` | ✅ | The backend is gone either way |
 | `'stop'` | ✅ | `diffusionServer.stop()` |
+| `'cancel'` | ✅ | The cancelled generation killed the backend and then ended — under `'burst'` nothing else would ever release it |
 | `'single'` | ❌ | The orchestration branch above already reloads — reloading here too would double it |
 | `'llm-start'` | ❌ | Fired from inside the LLM's own pre-start hook; that start is already under way |
 | `'shutdown'` | ❌ | The app is quitting; nothing may start after `app.exit(0)` |
 | `'calibration'` | ❌ | A sweep releases between combos and restores the LLM itself |
-| `'cancel'`, `'flags-changed'` | ❌ | Another image on the same offload context follows |
+| `'flags-changed'` | ❌ | The same image immediately respawns the backend with different flags |
 
-Reloads are additionally suppressed while `diffusionServer.isCalibrating()` and while another reload is already in flight.
+Reloads are additionally suppressed while `diffusionServer.isCalibrating()` and while another reload is already in flight — and a release whose LLM is *already running again* (the host started it itself) drops the saved state instead of starting a second server. Exactly one reload happens per offload cycle regardless of which path triggers it.
 
 **Practical consequence:** if you ask for `usageMode: 'burst'` on a machine that needed the offload, plan for the LLM to be down for up to `idleTimeoutMs` (default 5 minutes). Call `diffusionServer.releaseBackend()` when your burst is over — or set a shorter `idleTimeoutMs` — to bring it back sooner.
 
@@ -292,7 +293,7 @@ Waits for any pending background LLM reload to complete. Resolves immediately if
 
 **Returns:** `Promise<void>`
 
-> ⚠️ **Residency caveat:** under `usageMode: 'burst'` after an offload the LLM is *intentionally* still down when this resolves — no reload has been started yet, so there is nothing to wait for. The deferred reload fires when the diffusion backend is released (idle timeout, an explicit `releaseBackend()`, a backend crash, or `diffusionServer.stop()`). A caller that needs the LLM back right away should release the backend first:
+> ⚠️ **Residency caveat:** under `usageMode: 'burst'` after an offload the LLM is *intentionally* still down when this resolves — no reload has been started yet, so there is nothing to wait for. The deferred reload fires when the diffusion backend is released (idle timeout, an explicit `releaseBackend()`, a backend crash, a cancelled generation, or `diffusionServer.stop()`). A caller that needs the LLM back right away should release the backend first:
 >
 > ```typescript
 > await diffusionServer.releaseBackend();   // frees the VRAM, triggers the deferred reload
@@ -356,7 +357,7 @@ These two are part of the managers' wiring rather than an app-facing API, but kn
 | Method | Called by | Effect |
 |---|---|---|
 | `prepareForLLMStart({ config })` | The `LlamaServerManager` pre-start hook the diffusion manager registers | Releases a resident diffusion backend (reason `'llm-start'`) when the LLM about to start would not fit alongside it |
-| `onDiffusionBackendReleased(reason)` | `DiffusionServerManager` after every confirmed backend release | Brings a deferred LLM back for the four qualifying reasons — see [Residency and the Reload Decision](#residency-and-the-reload-decision) |
+| `onDiffusionBackendReleased(reason)` | `DiffusionServerManager` after every confirmed backend release | Brings a deferred LLM back for the five qualifying reasons — see [Residency and the Reload Decision](#residency-and-the-reload-decision) |
 
 ---
 

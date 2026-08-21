@@ -408,6 +408,15 @@ export const DIFFUSION_BACKEND_DEFAULTS = {
   idleTimeoutMs: 300_000,
   /** Poll interval for `GET /sdcpp/v1/jobs/{id}` while a job is in flight */
   jobPollIntervalMs: 200,
+  /**
+   * Per-request timeout for the backend job API.
+   *
+   * Deliberately longer than the client's own 5 s default: the backend answers job
+   * requests from the same thread that runs sampling, so a single-threaded build under
+   * load can take seconds to reply. A too-tight timeout would burn the transient-failure
+   * budget below and fail a perfectly healthy generation.
+   */
+  jobRequestTimeoutMs: 10_000,
   /** Maximum spawn-to-ready wait for the backend process */
   readyTimeoutMs: DEFAULT_TIMEOUTS.serverStart,
   /** Grace period between SIGTERM and SIGKILL when releasing the backend */

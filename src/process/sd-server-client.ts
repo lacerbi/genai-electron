@@ -176,7 +176,8 @@ function isJobStatus(value: unknown): value is SdServerJobStatus {
  * seed before submitting (the resolved seed is reported back to the caller).
  *
  * @param config - Image request with an already-resolved seed
- * @param batchSize - Maps to `batch_count` (default: 1)
+ * @param batchSize - Maps to `batch_count`; omitted, fractional, or below 1 becomes 1
+ *   (the backend rejects `batch_count: 0`, and "no batch" means one image)
  * @returns Body for `POST /sdcpp/v1/img_gen`
  *
  * @example
@@ -203,7 +204,7 @@ export function buildSdServerImageRequest(
   const body: SdServerImageRequest = {
     prompt: config.prompt,
     seed: config.seed,
-    batch_count: batchSize ?? 1,
+    batch_count: Math.max(1, Math.floor(batchSize ?? 1)),
     sample_params: sampleParams,
   };
   if (config.negativePrompt !== undefined) body.negative_prompt = config.negativePrompt;

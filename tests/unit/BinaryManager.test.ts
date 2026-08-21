@@ -673,6 +673,44 @@ describe('BinaryManager', () => {
       });
     });
 
+    it('restores the POSIX exec bit on a freshly extracted binary before testing it', async () => {
+      // The ZIP worker extracts without permissions and the install-time chmod only
+      // runs AFTER validation passes — so on POSIX a fresh install would fail Phase 1
+      // on every variant unless the extracted file is made executable first.
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+
+      try {
+        await binaryManager.ensureBinary();
+
+        expect(mockChmod).toHaveBeenCalledWith('/mock/extract/llama-server.exe', 0o755);
+        // ...and before the binary is executed for the first time
+        expect(mockChmod.mock.invocationCallOrder[0]).toBeLessThan(
+          (mockSpawn as jest.Mock).mock.invocationCallOrder[0]
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+        });
+      }
+    });
+
+    it('does not chmod a freshly extracted binary on Windows', async () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+
+      try {
+        await binaryManager.ensureBinary();
+        expect(mockChmod).not.toHaveBeenCalled();
+      } finally {
+        Object.defineProperty(process, 'platform', {
+          value: originalPlatform,
+          configurable: true,
+        });
+      }
+    });
+
     it('restores the POSIX exec bit before re-validating an existing install', async () => {
       // ZIP extraction drops permissions, and install-time chmod only ever touched the
       // binary that was primary back then — so a primary-name switch (sd-cli -> sd-server)
@@ -2429,6 +2467,82 @@ describe('BinaryManager', () => {
         'warn'
       );
       expect(handles[0].stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('fails the variant on a GPU diagnostic that the tails already evicted', async () => {
+      mockFileExists.mockResolvedValue(true);
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      // A multi-component load prints for minutes: by the time the job finishes, the
+      // early CUDA error is long gone from the bounded tails
+      mockStartSdServerRunner.mockImplementation(async (options: any) => {
+        const handle = createSdServerHandle({ stdoutTail: 'later chatter\n', stderrTail: '' });
+        options.onLog?.('ggml_cuda_init: failed to allocate device buffer', 'stderr');
+        return handle;
+      });
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+      });
+
+      await expect(diffusionManager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✗ GPU error detected in output: failed to allocate',
+        'warn'
+      );
+      expect(handles[0].stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries transient job-poll failures before failing the variant', async () => {
+      mockFileExists.mockResolvedValue(true);
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      const transient = new ServerError('sd-server /sdcpp/v1/jobs/validation-job timed out', {
+        code: 'BACKEND_REQUEST_TIMEOUT',
+      });
+      mockGetJob
+        .mockRejectedValueOnce(transient)
+        .mockRejectedValueOnce(transient)
+        .mockResolvedValue({
+          id: 'validation-job',
+          status: 'completed',
+          result: { output_format: 'png', images: [{ index: 0, b64_json: 'AAAA' }] },
+        });
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+      });
+
+      await expect(diffusionManager.ensureBinary()).resolves.toBeDefined();
+
+      // A dropped socket is not a broken variant
+      expect(mockLogger).toHaveBeenCalledWith(
+        'Phase 2: ✓ GPU functionality test passed (sd-server)',
+        'info'
+      );
+      expect(mockGetJob).toHaveBeenCalledTimes(3);
+    });
+
+    it('fails the variant after three consecutive transient poll failures', async () => {
+      // Only the variant loop runs (no installed binary to re-validate first)
+      onlyTestModelExists('/mock/models/test-diffusion.safetensors');
+      setSpawnResponse({ stdout: '', stderr: '', exitCode: 0 });
+      mockGetJob.mockRejectedValue(
+        new ServerError('sd-server /sdcpp/v1/jobs/validation-job request failed', {
+          code: 'BACKEND_REQUEST_FAILED',
+        })
+      );
+
+      const diffusionManager = createDiffusionManager({
+        testModelPath: '/mock/models/test-diffusion.safetensors',
+      });
+
+      await expect(diffusionManager.ensureBinary()).rejects.toThrow(BinaryError);
+
+      expect(mockGetJob).toHaveBeenCalledTimes(3);
+      expect(mockLogger).toHaveBeenCalledWith(
+        expect.stringContaining('Phase 2: ✗ Real functionality test failed'),
+        'warn'
+      );
     });
 
     it('stops the backend and reports failure when the runner never becomes ready', async () => {

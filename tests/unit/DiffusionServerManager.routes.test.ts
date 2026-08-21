@@ -305,6 +305,9 @@ describe('DiffusionServerManager (HTTP routes)', () => {
   });
 
   afterEach(() => {
+    // Any generation left in flight owns a poll loop; killing its backend makes that
+    // loop reject on its next turn instead of polling into the following test
+    for (const handle of handles) handle.emitExit({ code: 0, signal: null });
     diffusionServer.removeAllListeners();
     mockHttpServer.removeAllListeners();
   });

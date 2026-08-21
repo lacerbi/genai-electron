@@ -139,14 +139,13 @@ describe('electron-lifecycle', () => {
         diffusionServer: mockDiffusionServer as never,
       });
 
-      if (beforeQuitHandler) {
-        await beforeQuitHandler({ preventDefault: jest.fn() });
+      expect(beforeQuitHandler).not.toBeNull();
+      await beforeQuitHandler!({ preventDefault: jest.fn() });
 
-        expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({ reason: 'shutdown' });
-        expect(mockDiffusionServer.releaseBackend.mock.invocationCallOrder[0]).toBeLessThan(
-          mockDiffusionServer.stop.mock.invocationCallOrder[0] as number
-        );
-      }
+      expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({ reason: 'shutdown' });
+      expect(mockDiffusionServer.releaseBackend.mock.invocationCallOrder[0]).toBeLessThan(
+        mockDiffusionServer.stop.mock.invocationCallOrder[0] as number
+      );
     });
 
     it('should release the diffusion backend even when the wrapper is stopped', async () => {
@@ -157,13 +156,12 @@ describe('electron-lifecycle', () => {
         diffusionServer: mockDiffusionServer as never,
       });
 
-      if (beforeQuitHandler) {
-        await beforeQuitHandler({ preventDefault: jest.fn() });
+      expect(beforeQuitHandler).not.toBeNull();
+      await beforeQuitHandler!({ preventDefault: jest.fn() });
 
-        expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({ reason: 'shutdown' });
-        expect(mockDiffusionServer.stop).not.toHaveBeenCalled();
-        expect(mockApp.exit).toHaveBeenCalledWith(0);
-      }
+      expect(mockDiffusionServer.releaseBackend).toHaveBeenCalledWith({ reason: 'shutdown' });
+      expect(mockDiffusionServer.stop).not.toHaveBeenCalled();
+      expect(mockApp.exit).toHaveBeenCalledWith(0);
     });
 
     it("never reloads an offloaded LLM from the quit-time 'shutdown' release", async () => {

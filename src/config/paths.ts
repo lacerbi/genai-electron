@@ -36,7 +36,12 @@ export const PATHS = {
   logs: path.join(BASE_DIR, 'logs'),
   /** Configuration files directory */
   config: path.join(BASE_DIR, 'config'),
-  /** Temporary files directory (for intermediate image generation outputs, etc.) */
+  /**
+   * General scratch directory for short-lived files.
+   *
+   * Image generation no longer writes here: results travel from the `sd-server`
+   * backend as base64 in JSON and are decoded in memory.
+   */
   temp: path.join(BASE_DIR, 'temp'),
   /**
    * LoRA directory handed to stable-diffusion.cpp as `--lora-model-dir`.
@@ -182,15 +187,15 @@ export function getConfigPath(configName: string): string {
 }
 
 /**
- * Get the temp file path
+ * Get a path inside the general scratch directory
  *
- * @param filename - Temporary file name (e.g., "sd-output-12345.png")
+ * @param filename - Temporary file name (e.g., "download-manifest.json")
  * @returns Absolute path to temp file
  *
  * @example
  * ```typescript
- * const tempPath = getTempPath('sd-output-12345.png');
- * // Returns: /path/to/userData/temp/sd-output-12345.png
+ * const tempPath = getTempPath('download-manifest.json');
+ * // Returns: /path/to/userData/temp/download-manifest.json
  * ```
  */
 export function getTempPath(filename: string): string {

@@ -681,7 +681,7 @@ describe('LlamaServerManager', () => {
     });
 
     it('fails the start and resets the status when a hook throws', async () => {
-      llamaServer.registerPreStartHook(async () => {
+      const unregister = llamaServer.registerPreStartHook(async () => {
         throw new ServerError('backend refused to yield', { code: 'HOOK_FAILED' });
       });
 
@@ -698,7 +698,11 @@ describe('LlamaServerManager', () => {
 
       expect(llamaServer.getStatus()).toBe('stopped');
       expect(mockProcessSpawn).not.toHaveBeenCalled();
+
       // A later start() (after unregistering) still works
+      unregister();
+      await expect(llamaServer.start(mockConfig)).resolves.toMatchObject({ status: 'running' });
+      expect(mockProcessSpawn).toHaveBeenCalled();
     });
 
     it('wraps a non-library hook error like any other startup failure', async () => {

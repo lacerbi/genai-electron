@@ -266,8 +266,14 @@ export class DiffusionServerManager extends ServerManager {
    * backend is spawned while that process may still hold the GPU.
    */
   private unconfirmedBackendPid?: number;
-  /** Removes the LLM pre-start hook this manager registered (if any) */
-  private unregisterPreStartHook?: () => void;
+  /**
+   * Removes the LLM pre-start hook this manager registered (if any).
+   *
+   * Kept (and `protected` rather than `private`) so a subclass or a host that builds
+   * extra managers around one shared `llamaServer` can detach again: every instance
+   * registers its own hook, and each hook releases only its own backend.
+   */
+  protected unregisterPreStartHook?: () => void;
 
   // Time estimates for progress calculation (self-calibrating)
   /** Cold load: spawn + weight placement, measured only on generations that spawned */
@@ -320,7 +326,10 @@ export class DiffusionServerManager extends ServerManager {
       // Symmetric orchestration: an LLM start yields the resident backend when both
       // would not fit. Registered here (not in start()) because a backend can outlive
       // the wrapper — calibrate() runs with the wrapper stopped.
-      this.unregisterPreStartHook?.();
+      // NOTE: every manager constructed with the same llamaServer registers its own
+      // hook. That is intentional (each one owns its own backend), but it means a host
+      // creating extra DiffusionServerManager instances pays one hook per instance;
+      // the unregister handle is kept so a host can drop them again.
       this.unregisterPreStartHook = llamaServer.registerPreStartHook((ctx) =>
         orchestrator.prepareForLLMStart(ctx)
       );
@@ -611,12 +620,16 @@ export class DiffusionServerManager extends ServerManager {
     // no-wait path — cancelImageGeneration() relies on 'stopping' being visible
     // before it returns, so no respawn can slip past a dying backend.
     this.disarmIdleTimer();
-    this.cleanupSyntheticProgress();
 
     if (options.waitForInFlight) {
+      // Deliberately BEFORE the progress teardown: the generation we are waiting for is
+      // still reporting, and killing its synthetic ticker here would freeze its progress
+      // for the rest of its run.
       const pending = this.currentGeneration?.promise;
       if (pending) await pending.catch(() => undefined);
     }
+
+    this.cleanupSyntheticProgress();
 
     // Abort a spawn in progress instead of waiting out a 120 s cold load. The runner
     // maps an aborted start to SD_SERVER_START_ABORTED after a confirmed kill.
@@ -975,6 +988,17 @@ export class DiffusionServerManager extends ServerManager {
       });
     } catch (error) {
       this.cleanupSyntheticProgress();
+      // A failed start whose teardown could not be confirmed leaves a live child that
+      // still owns the GPU. Record it exactly as finishRelease() does, so the next
+      // ensureBackend() refuses to spawn a second backend over it.
+      const details =
+        error instanceof GenaiElectronError && error.details && typeof error.details === 'object'
+          ? (error.details as Record<string, unknown>)
+          : undefined;
+      if (details?.code === 'SD_SERVER_TERMINATION_UNCONFIRMED') {
+        this.unconfirmedBackendPid =
+          typeof details.pid === 'number' ? details.pid : this.backend.pid;
+      }
       // The runner already killed (and confirmed) the child it could not bring up —
       // 'start-failed', not 'crashed': no working backend ever existed.
       if (this.backend.state === 'starting') this.setBackendState('absent', 'start-failed');
@@ -983,7 +1007,11 @@ export class DiffusionServerManager extends ServerManager {
 
     tap.handle = handle;
     this.backend.handle = handle;
-    this.backend.client = new SdServerClient(handle.port, handle.host);
+    this.backend.client = new SdServerClient(
+      handle.port,
+      handle.host,
+      DIFFUSION_BACKEND_DEFAULTS.jobRequestTimeoutMs
+    );
     this.backend.flags = { ...flags };
     this.backend.pid = handle.pid;
     this.backend.startedAt = startedAt;
@@ -1864,6 +1892,10 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Classify a failed calibration generation as OOM or generic error
    * (from the error message + captured stderr)
+   *
+   * Two spellings carry the backend output: a failed job and a mid-job exit put it in
+   * `details.stderr`, while a startup failure (a load-time OOM never reaches the job
+   * API at all) comes straight from the runner as `details.stderrTail`.
    * @private
    */
   private classifyCalibrationFailure(error: unknown): {
@@ -1873,7 +1905,8 @@ export class DiffusionServerManager extends ServerManager {
     const message = error instanceof Error ? error.message : String(error);
     let stderr = '';
     if (error instanceof GenaiElectronError && error.details && typeof error.details === 'object') {
-      const detailStderr = (error.details as Record<string, unknown>).stderr;
+      const details = error.details as Record<string, unknown>;
+      const detailStderr = details.stderr ?? details.stderrTail;
       if (typeof detailStderr === 'string') {
         stderr = detailStderr;
       }
@@ -1945,14 +1978,6 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
-   * Get server information with diffusion-specific fields
-   *
-   * `pid` is the backend process ID while it is resident (the wrapper is in-process
-   * and has no PID of its own).
-   *
-   * @returns Server information including busy status and backend snapshot
-   */
-  /**
    * Get the process ID of the internal stable-diffusion.cpp backend
    *
    * The public server is an in-process node:http wrapper with no PID of its own, so
@@ -1964,6 +1989,14 @@ export class DiffusionServerManager extends ServerManager {
     return this.backend.pid;
   }
 
+  /**
+   * Get server information with diffusion-specific fields
+   *
+   * `pid` is the backend process ID while it is resident (the wrapper is in-process
+   * and has no PID of its own).
+   *
+   * @returns Server information including busy status and backend snapshot
+   */
   override getInfo(): DiffusionServerInfo {
     const baseInfo = super.getInfo();
     const backend = this.getBackendInfo();
@@ -2448,6 +2481,12 @@ export class DiffusionServerManager extends ServerManager {
       if (detailCode === 'GENERATION_NOT_FOUND') return 'NOT_FOUND';
       if (detailCode === 'SERVER_NOT_RUNNING') return 'SERVER_NOT_RUNNING';
       if (detailCode === 'IMAGE_DECODE_FAILED') return 'IO_ERROR';
+      // A full backend queue is a transient "come back later", exactly what the
+      // wrapper's own busy gate reports — not a backend malfunction.
+      if (detailCode === 'BACKEND_QUEUE_FULL') return 'SERVER_BUSY';
+      // A spawn aborted through the startup signal IS the cancellation: the only
+      // thing that aborts it is a cancel that arrived before the backend was ready.
+      if (detailCode === 'SD_SERVER_START_ABORTED') return 'GENERATION_CANCELLED';
       if (detailCode.startsWith('BACKEND_') || detailCode.startsWith('SD_SERVER_')) {
         return 'BACKEND_ERROR';
       }
@@ -2538,15 +2577,39 @@ export class DiffusionServerManager extends ServerManager {
       diffusionFlashAttention: optimizations.diffusionFlashAttention,
     };
 
+    // A cold spawn can take minutes; a cancel arriving during it must not be parked
+    // until the backend is ready. This gate makes the spawn itself cancellable: the
+    // claim's cancel() reaches it through `inFlight`, and the runner maps the aborted
+    // startup to SD_SERVER_START_ABORTED (wire code GENERATION_CANCELLED).
+    const spawnAbort = new AbortController();
+    const spawnGate: InFlightBackendJob = {
+      cancel: () => {
+        spawnAbort.abort(
+          new ServerError('Image generation cancelled before the backend was ready', {
+            code: 'GENERATION_CANCELLED',
+          })
+        );
+      },
+      // No backend job exists yet, so there is nothing a crash could fail here; the
+      // spawn's own error path reports it.
+      reject: () => undefined,
+    };
+    this.inFlight = spawnGate;
+
     let handle: SdServerHandle;
     let client: SdServerClient;
     let spawned: boolean;
     try {
       // Cold path: 'loading' covers the spawn (loadStartTime is set when it begins)
-      ({ handle, client, spawned } = await this.ensureBackend(flags));
+      ({ handle, client, spawned } = await this.ensureBackend(flags, {
+        signal: spawnAbort.signal,
+      }));
     } catch (error) {
       this.finishProgressTracking(normalizedConfig);
       throw error;
+    } finally {
+      // Identity check: a later generation may already own the slot
+      if (this.inFlight === spawnGate) this.inFlight = undefined;
     }
 
     // Warm path: the weights are already resident, so 'loading' is only the
@@ -2666,6 +2729,14 @@ export class DiffusionServerManager extends ServerManager {
         height: normalizedConfig.height || 512,
       };
     } catch (error) {
+      // A job the backend may still be working on must not outlive the generation that
+      // owns it: it would hold the GPU with nobody left to read its result. Skipped for
+      // an exited backend (nothing is running) and for a job the backend already
+      // reported terminal (nothing to stop). Best effort — stopBackendJob() is
+      // idempotent and never throws.
+      if (jobId !== undefined && !isTerminalJobStatus(jobStatus) && !isBackendExit(error)) {
+        stopBackendJob();
+      }
       throw this.toGenerationError(handle, error);
     } finally {
       // Identity checks: a later generation may already own these
@@ -2735,9 +2806,12 @@ export class DiffusionServerManager extends ServerManager {
       }
 
       // Fallback when the 'decoding' literal never arrives: the last sampling step
-      // was reached while the job is still running, so decoding must be under way
+      // was reached while the job is still running, so decoding must be under way.
+      // Identity-checked like every other progress write: a later generation may
+      // already own the tracking state (this poll loop can outlive its own job).
       if (
         job.status === 'generating' &&
+        this.progressConfig === config &&
         this.currentStage === 'diffusion' &&
         this.diffusionProgress.total > 0 &&
         this.diffusionProgress.current >= this.diffusionProgress.total
@@ -3332,6 +3406,29 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * Whether the backend already reported this job as finished (nothing left to stop)
+ * @internal
+ */
+function isTerminalJobStatus(status: SdServerJobStatus): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+/**
+ * Whether a rejection means the backend process itself is gone
+ * @internal
+ */
+function isBackendExit(error: unknown): boolean {
+  if (
+    !(error instanceof GenaiElectronError) ||
+    !error.details ||
+    typeof error.details !== 'object'
+  ) {
+    return false;
+  }
+  return (error.details as Record<string, unknown>).code === 'SD_SERVER_EXITED';
+}
+
+/**
  * Whether two resolved flag sets describe the same backend process
  * @internal
  */
@@ -3435,17 +3532,19 @@ class CalibrationVramSampler {
     this.idleAvailableBytes = available;
   }
 
-  /** Figures of the window just closed; both omitted when anything was untrusted */
+  /**
+   * Figures of the window just closed
+   *
+   * All or nothing: the two are read together (peak vs idle of the same combo), so a
+   * window that lost either reading reports neither rather than an unpaired half.
+   */
   result(): CalibrationVramSample {
     if (!this.trusted) return {};
-    const sample: CalibrationVramSample = {};
-    if (this.minAvailableBytes !== undefined) {
-      sample.vramPeakBytes = Math.max(0, this.totalBytes - this.minAvailableBytes);
-    }
-    if (this.idleAvailableBytes !== undefined) {
-      sample.vramIdleBytes = Math.max(0, this.totalBytes - this.idleAvailableBytes);
-    }
-    return sample;
+    if (this.minAvailableBytes === undefined || this.idleAvailableBytes === undefined) return {};
+    return {
+      vramPeakBytes: Math.max(0, this.totalBytes - this.minAvailableBytes),
+      vramIdleBytes: Math.max(0, this.totalBytes - this.idleAvailableBytes),
+    };
   }
 
   /** Stop sampling for good (idempotent; safe from a `finally`) */

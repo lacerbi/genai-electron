@@ -308,6 +308,9 @@ describe('DiffusionServerManager (lifecycle)', () => {
   });
 
   afterEach(() => {
+    // Any generation left in flight owns a poll loop; killing its backend makes that
+    // loop reject on its next turn instead of polling into the following test
+    for (const handle of handles) handle.emitExit({ code: 0, signal: null });
     diffusionServer.removeAllListeners();
     mockHttpServer.removeAllListeners();
   });
@@ -1257,6 +1260,31 @@ describe('DiffusionServerManager (lifecycle)', () => {
       expect((await settled).details.code).toBe('SD_SERVER_START_ABORTED');
       expect(diffusionServer.getStatus()).toBe('stopped');
       expect(diffusionServer.getBackendInfo()).toEqual({ state: 'absent' });
+    });
+
+    it('records the sticky pid when a failed start could not be torn down', async () => {
+      // The runner could not confirm the death of the child it failed to bring up:
+      // that orphan still owns the GPU, so no second backend may go over it.
+      mockStartSdServerRunner.mockImplementationOnce(async () => {
+        throw sdServerTerminationUnconfirmedError(9_931);
+      });
+
+      await expect(diffusionServer.executeImageGeneration({ prompt: 'one' })).rejects.toMatchObject(
+        {
+          details: expect.objectContaining({ code: 'SD_SERVER_TERMINATION_UNCONFIRMED' }),
+        }
+      );
+      expect((diffusionServer as any).unconfirmedBackendPid).toBe(9_931);
+
+      (diffusionServer as any).isProcessAlive = jest.fn(() => true);
+      try {
+        await diffusionServer.executeImageGeneration({ prompt: 'two' });
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error.details.code).toBe('BACKEND_TERMINATION_UNCONFIRMED');
+        expect(error.details.pid).toBe(9_931);
+      }
+      expect(mockStartSdServerRunner).toHaveBeenCalledTimes(1);
     });
   });
 

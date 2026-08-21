@@ -142,7 +142,11 @@ export const llamaServer = new LlamaServerManager();
  * When generateImage() is called, the server automatically manages resources:
  * - If resources are constrained, temporarily offloads the LLM server
  * - Generates the image
- * - Restores the LLM server to its previous state
+ * - Restores the LLM server to its previous state — immediately under the `'single'`
+ *   residency policy (the default once the LLM had to be offloaded). Under `'burst'`
+ *   the stable-diffusion.cpp backend stays warm for the next image and the LLM reload
+ *   is deferred until that backend is released (idle timeout, explicit
+ *   `releaseBackend()`, crash, cancellation, or `stop()`).
  *
  * @example
  * ```typescript

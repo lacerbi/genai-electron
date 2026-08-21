@@ -552,6 +552,26 @@ describe('sd-server stdout tap', () => {
     expect(Buffer.byteLength(handle.stderrTail, 'utf8')).toBeLessThanOrEqual(64);
     await handle.stop();
   });
+
+  it('keeps progress-bar frames out of the tails', async () => {
+    const processManager = new FakeProcessManager();
+    const handle = await startReady(processManager, { tailMaxBytes: 256 });
+
+    processManager.stdout('ggml_cuda_init: found 1 CUDA device\n');
+    // A real 30-step generation redraws this bar hundreds of times; letting it into a
+    // bounded tail would evict the diagnostic above long before anyone reads it
+    for (let step = 1; step <= 40; step++) {
+      processManager.stdout(`  |=====| ${step}/40 - 1.20it/s\r`);
+      processManager.stdout(`  |=====| ${step * 16}/640 - 25.00MB/s\r`);
+    }
+    processManager.stderr('CUDA error: out of memory\n');
+
+    expect(handle.stdoutTail).toContain('found 1 CUDA device');
+    expect(handle.stdoutTail).not.toContain('it/s');
+    expect(handle.stdoutTail).not.toContain('MB/s');
+    expect(handle.stderrTail).toContain('CUDA error: out of memory');
+    await handle.stop();
+  });
 });
 
 describe('sd-server runner lifecycle', () => {
@@ -636,6 +656,23 @@ describe('sd-server runner lifecycle', () => {
         exitCode: 1,
         stderrTail: expect.stringContaining('out of memory'),
       }),
+    });
+    await handle.stop();
+  });
+
+  it('reuses one exit reaction across many raceWithExit calls', async () => {
+    const processManager = new FakeProcessManager();
+    const handle = await startReady(processManager);
+
+    // A job poll calls this several times a second for the life of the backend
+    for (let i = 0; i < 50; i++) {
+      await expect(handle.raceWithExit(Promise.resolve(i))).resolves.toBe(i);
+    }
+
+    processManager.exit(1, null);
+    // An operation that resolves AFTER the exit must still fail
+    await expect(handle.raceWithExit(Promise.resolve('late'))).rejects.toMatchObject({
+      details: expect.objectContaining({ code: 'SD_SERVER_EXITED', exitCode: 1 }),
     });
     await handle.stop();
   });
