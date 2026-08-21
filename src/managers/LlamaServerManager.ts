@@ -34,6 +34,7 @@ import type {
   ServerInfo,
   LlamaServerReadyState,
   LlamaServerConfig,
+  LlamaPreStartHook,
   HealthStatus,
   LlamaCalibrationCombo,
   LlamaCalibrationConfig,
@@ -594,6 +595,8 @@ export class LlamaServerManager extends ServerManager {
   private calibrating = false;
   /** Unsafe process left behind by a failed candidate teardown. */
   private calibrationOrphan?: { pid: number; stderrTail?: string };
+  /** Callbacks run at the top of start(), in registration order */
+  private readonly preStartHooks = new Set<LlamaPreStartHook>();
 
   /**
    * Create a new LlamaServerManager
@@ -613,6 +616,69 @@ export class LlamaServerManager extends ServerManager {
     this.modelManager = modelManager;
     this.systemInfo = systemInfo;
     this.calibrationProbeExecutor = calibrationProbeExecutor;
+  }
+
+  /**
+   * Register a callback that runs before every start()
+   *
+   * Hooks run inside `start()`'s `try`, immediately after the status flips to
+   * `'starting'` and before any port/binary/model work — so the concurrency guard
+   * already rejects re-entrant starts while a hook awaits, and a hook error goes
+   * through the normal startup-failure path (status reset, typed errors preserved).
+   * On the auto-restart path a hook error is logged and ignored (it must not consume
+   * the restart budget).
+   *
+   * Used internally by DiffusionServerManager to let a resident stable-diffusion.cpp
+   * backend yield its VRAM to an LLM that is about to load.
+   *
+   * @param hook - Callback receiving the requested config and why the start happened
+   * @returns Unregister function (idempotent)
+   *
+   * @example
+   * ```typescript
+   * const unregister = llamaServer.registerPreStartHook(async ({ config }) => {
+   *   await freeResourcesFor(config.modelId);
+   * });
+   * ```
+   */
+  registerPreStartHook(hook: LlamaPreStartHook): () => void {
+    this.preStartHooks.add(hook);
+    return () => {
+      this.preStartHooks.delete(hook);
+    };
+  }
+
+  /**
+   * Run every registered pre-start hook in registration order
+   *
+   * @param config - Configuration passed to start()
+   * @throws The hook's error on a manual start; auto-restart errors are swallowed
+   * @private
+   */
+  private async runPreStartHooks(config: LlamaServerConfig): Promise<void> {
+    if (this.preStartHooks.size === 0) return;
+
+    const reason: 'start' | 'auto-restart' = this.isAutoRestarting ? 'auto-restart' : 'start';
+    // Snapshot: a hook may unregister itself (or another) while the loop runs
+    for (const hook of [...this.preStartHooks]) {
+      try {
+        await hook({ config, reason });
+      } catch (error) {
+        if (reason === 'start') {
+          throw error;
+        }
+        // An auto-restart must not be aborted (or have its budget consumed) by a hook
+        debugLog('[LlamaServer] pre-start hook failed during auto-restart:', error);
+        await this.logManager
+          ?.write(
+            `Pre-start hook failed during auto-restart (ignored): ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+            'warn'
+          )
+          .catch(() => void 0);
+      }
+    }
   }
 
   /**
@@ -683,6 +749,13 @@ export class LlamaServerManager extends ServerManager {
     this.setStatus('starting');
 
     try {
+      // Pre-start hooks first: they may free resources (e.g. release the resident
+      // stable-diffusion.cpp backend) for the model about to load. They run with the
+      // status already at 'starting', so a re-entrant start() is rejected while a
+      // hook awaits, and a hook error flows through handleStartupError below.
+      await this.runPreStartHooks(llamaConfig);
+      this.assertStartupAttemptActive(startupGeneration);
+
       // Resolve the port once, up front — every later step (availability check,
       // health polling, CLI args, saved config for restart) uses this value.
       // 'auto' binds port 0 to get an OS-assigned free port.

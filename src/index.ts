@@ -295,6 +295,7 @@ export type {
   ServerInfo,
   LlamaServerReadyState,
   LlamaServerConfig,
+  LlamaPreStartHook,
   ServerEvent,
   ServerEventData,
   BinaryLogEvent,

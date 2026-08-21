@@ -15,6 +15,8 @@ import { ModelManager } from './ModelManager.js';
 import type {
   ServerConfig,
   LlamaServerConfig,
+  DiffusionBackendReleaseReason,
+  DiffusionUsageMode,
   ImageGenerationConfig,
   ImageGenerationResult,
 } from '../types/index.js';
@@ -74,6 +76,26 @@ interface ResourceRequirements {
 export class ResourceOrchestrator {
   private static readonly RELOAD_RETRY_DELAY_MS = 2000;
 
+  /**
+   * Backend release reasons that may bring a previously offloaded LLM back.
+   *
+   * Everything else is deliberately silent: `'single'` reloads through the
+   * orchestration branch that owns the offload context (reloading here too would
+   * double it), `'llm-start'` fires from inside the LLM's own pre-start hook,
+   * `'shutdown'` runs while the app is quitting, `'calibration'` belongs to a sweep
+   * that restores the LLM itself, and `'cancel'`/`'flags-changed'` are followed by
+   * another image on the same offload context.
+   */
+  private static readonly RELOAD_RELEASE_REASONS: ReadonlySet<DiffusionBackendReleaseReason> =
+    new Set<DiffusionBackendReleaseReason>(['idle-timeout', 'explicit', 'crashed', 'stop']);
+
+  /** Backend states in which a process is holding (or about to hold) VRAM */
+  private static readonly RESIDENT_BACKEND_STATES: ReadonlySet<string> = new Set([
+    'starting',
+    'ready',
+    'busy',
+  ]);
+
   private systemInfo: SystemInfo;
   private llamaServer: LlamaServerManager;
   private diffusionServer: DiffusionServerManager;
@@ -123,7 +145,53 @@ export class ResourceOrchestrator {
    */
   async orchestrateImageGeneration(config: ImageGenerationConfig): Promise<ImageGenerationResult> {
     debugLog('[Orchestrator] orchestrateImageGeneration called');
+    return await this.orchestrateGeneration(config, () =>
+      this.diffusionServer.executeImageGeneration(config)
+    );
+  }
 
+  /**
+   * Orchestrate a multi-image (batch) generation with automatic resource management
+   *
+   * Same offload window as {@link orchestrateImageGeneration}, opened once around the
+   * whole batch: the LLM is offloaded at most once and residency is settled once, after
+   * the last image.
+   *
+   * @param config - Image generation configuration (`count` > 1)
+   * @returns One result per generated image
+   *
+   * @example
+   * ```typescript
+   * const results = await orchestrator.orchestrateBatchGeneration({
+   *   prompt: 'A serene mountain landscape',
+   *   count: 3,
+   * });
+   * ```
+   */
+  async orchestrateBatchGeneration(
+    config: ImageGenerationConfig
+  ): Promise<ImageGenerationResult[]> {
+    debugLog('[Orchestrator] orchestrateBatchGeneration called');
+    return await this.orchestrateGeneration(config, () =>
+      this.diffusionServer.executeBatchGeneration(config)
+    );
+  }
+
+  /**
+   * Shared offload window for single and batch generation
+   *
+   * Offloads the LLM when both servers would not fit, runs the generation, and then
+   * settles diffusion residency exactly once — the orchestrator owns that decision
+   * because it owns the offload context.
+   *
+   * @param config - Image generation configuration (its `usageMode` is the request hint)
+   * @param run - The generation to execute inside the window
+   * @private
+   */
+  private async orchestrateGeneration<T>(
+    config: ImageGenerationConfig,
+    run: () => Promise<T>
+  ): Promise<T> {
     // If a previous generation's reload is still in progress, wait for it
     // to finish before potentially offloading again (prevents VRAM contention)
     if (this.pendingReload) {
@@ -144,31 +212,142 @@ export class ResourceOrchestrator {
       // Save LLM state and offload
       await this.offloadLLM();
 
-      let result: ImageGenerationResult;
+      let result: T;
       try {
-        // Generate image directly (bypassing orchestrator to avoid recursion)
+        // Generate directly (bypassing orchestrator to avoid recursion)
         debugLog('[Orchestrator] Generating image with LLM offloaded...');
-        result = await this.diffusionServer.executeImageGeneration(config);
+        result = await run();
       } catch (error) {
-        // Image generation failed — still reload LLM in background, then rethrow
-        debugLog('[Orchestrator] Image generation failed, reloading LLM in background...');
-        this.fireAndForgetReload();
+        // Generation failed — still settle residency and reload, then rethrow
+        debugLog('[Orchestrator] Image generation failed, settling residency...');
+        await this.settleAfterOffload(config);
         throw error;
       }
 
-      // Image ready — return immediately, reload LLM in background
-      debugLog('[Orchestrator] Image ready, reloading LLM in background...');
-      this.fireAndForgetReload();
+      // Image ready — settle residency, then return (the reload runs in background)
+      await this.settleAfterOffload(config);
       return result;
-    } else {
-      if (!needsOffload) {
-        debugLog('[Orchestrator] ✅ Sufficient resources - generating directly without offload');
-      } else {
-        debugLog('[Orchestrator] ✅ LLM not running - generating directly');
-      }
-      // Enough resources, generate directly (bypassing orchestrator to avoid recursion)
-      return await this.diffusionServer.executeImageGeneration(config);
     }
+
+    if (!needsOffload) {
+      debugLog('[Orchestrator] ✅ Sufficient resources - generating directly without offload');
+    } else {
+      debugLog('[Orchestrator] ✅ LLM not running - generating directly');
+    }
+    // Enough resources, generate directly (bypassing orchestrator to avoid recursion)
+    try {
+      return await run();
+    } finally {
+      // No offload happened, so the default residency is 'burst'
+      await this.settleResidency(this.diffusionServer.resolveUsageMode(config.usageMode, false));
+    }
+  }
+
+  /**
+   * Settle diffusion residency for a generation that ran with the LLM offloaded
+   *
+   * `'single'` releases the backend BEFORE the LLM reload starts, so the two never
+   * hold VRAM at the same time. `'burst'` keeps the backend (and the saved LLM state):
+   * the reload is deferred until the backend is released for a qualifying reason
+   * (idle timeout, explicit release, crash, or `stop()`).
+   *
+   * @param config - The generation's configuration (its `usageMode` is the request hint)
+   * @private
+   */
+  private async settleAfterOffload(config: ImageGenerationConfig): Promise<void> {
+    const mode = this.diffusionServer.resolveUsageMode(config.usageMode, true);
+    debugLog('[Orchestrator] Settling residency after offload:', mode);
+
+    await this.settleResidency(mode);
+
+    if (mode === 'single') {
+      debugLog('[Orchestrator] Backend released, reloading LLM in background...');
+      this.fireAndForgetReload();
+    } else {
+      debugLog('[Orchestrator] Backend stays warm - LLM reload deferred until it is released');
+    }
+  }
+
+  /**
+   * Ask the diffusion manager to apply a residency decision
+   *
+   * Never throws: a backend that refuses to die must not keep the LLM offloaded.
+   *
+   * @param mode - Residency policy to apply
+   * @private
+   */
+  private async settleResidency(mode: DiffusionUsageMode): Promise<void> {
+    try {
+      await this.diffusionServer.settleResidency(mode);
+    } catch (error) {
+      console.warn('[Orchestrator] ⚠️ Failed to settle diffusion residency:', error);
+    }
+  }
+
+  /**
+   * React to the diffusion backend becoming absent
+   *
+   * Called by DiffusionServerManager after every confirmed release (with the final,
+   * rank-upgraded reason). Brings a deferred LLM back when — and only when — the
+   * release means "the VRAM is free again and nobody else is about to use it":
+   * see {@link ResourceOrchestrator.RELOAD_RELEASE_REASONS}.
+   *
+   * @param reason - Why the backend was released
+   * @internal
+   */
+  onDiffusionBackendReleased(reason: DiffusionBackendReleaseReason): void {
+    if (!ResourceOrchestrator.RELOAD_RELEASE_REASONS.has(reason)) {
+      debugLog('[Orchestrator] Backend released - no reload for reason:', reason);
+      return;
+    }
+    if (!this.savedLLMState) {
+      debugLog('[Orchestrator] Backend released - no saved LLM state to restore');
+      return;
+    }
+    if (this.pendingReload) {
+      debugLog('[Orchestrator] Backend released - a reload is already in flight');
+      return;
+    }
+    if (this.diffusionServer.isCalibrating()) {
+      // A sweep releases its backend between combos and restores the LLM itself
+      debugLog('[Orchestrator] Backend released - suppressed while calibrating');
+      return;
+    }
+
+    debugLog('[Orchestrator] Backend released - reloading deferred LLM:', reason);
+    this.fireAndForgetReload();
+  }
+
+  /**
+   * Free VRAM for an LLM that is about to start
+   *
+   * Registered as a `LlamaServerManager` pre-start hook, making the orchestrator
+   * symmetric: an image request may offload the LLM, and an LLM start may release a
+   * resident stable-diffusion.cpp backend. No-op unless a backend is actually resident
+   * and the two would not fit together (same 75 % arithmetic as the image path, but
+   * estimating the LLM from the configuration it is about to start with).
+   *
+   * The release carries reason `'llm-start'`, which never triggers a reload — the LLM
+   * start that caused it is already under way.
+   *
+   * @param ctx - The start context handed to the hook
+   * @internal
+   */
+  async prepareForLLMStart(ctx: { config: LlamaServerConfig }): Promise<void> {
+    const backendState = this.diffusionServer.getBackendInfo().state;
+    if (!ResourceOrchestrator.RESIDENT_BACKEND_STATES.has(backendState)) {
+      debugLog('[Orchestrator] LLM start - no resident diffusion backend:', backendState);
+      return;
+    }
+
+    const needsRelease = await this.needsOffloadForImage(ctx.config);
+    if (!needsRelease) {
+      debugLog('[Orchestrator] LLM start - both fit, keeping the diffusion backend resident');
+      return;
+    }
+
+    debugLog('[Orchestrator] ⚠️  LLM start - releasing the diffusion backend to make room');
+    await this.diffusionServer.releaseBackend({ reason: 'llm-start', waitForInFlight: true });
   }
 
   /**
@@ -179,17 +358,19 @@ export class ResourceOrchestrator {
    *
    * Uses 75% threshold to leave headroom for OS and other processes.
    *
+   * @param llmConfigOverride - Estimate the LLM from this configuration instead of the
+   *   running server's (used by {@link prepareForLLMStart}, where the LLM is not up yet)
    * @returns True if offload is needed
    * @private
    */
-  private async needsOffloadForImage(): Promise<boolean> {
+  private async needsOffloadForImage(llmConfigOverride?: LlamaServerConfig): Promise<boolean> {
     debugLog('[Orchestrator] Checking if offload needed...');
 
     const memory = this.systemInfo.getMemoryInfo();
     const capabilities = await this.systemInfo.detect();
 
     // Estimate resource usage
-    const llamaUsage = await this.estimateLLMUsage();
+    const llamaUsage = await this.estimateLLMUsage(llmConfigOverride);
     const diffusionUsage = await this.estimateDiffusionUsage();
 
     // Determine bottleneck resource
@@ -241,16 +422,27 @@ export class ResourceOrchestrator {
    * - VRAM = model_size * gpu_ratio * 1.2
    * where gpu_ratio = gpu_layers / estimated_total_layers
    *
+   * @param configOverride - Estimate this configuration instead of the running
+   *   server's. With an override the "is it running?" short-circuit is skipped
+   *   entirely: the caller is asking what the LLM WOULD cost, which is exactly the
+   *   question a pre-start hook has to answer.
    * @returns Resource requirements
    * @private
    */
-  private async estimateLLMUsage(): Promise<ResourceRequirements> {
-    if (!this.llamaServer.isRunning()) {
-      debugLog('[Orchestrator] LLM not running - usage: 0');
-      return { ram: 0, vram: 0 };
+  private async estimateLLMUsage(
+    configOverride?: LlamaServerConfig
+  ): Promise<ResourceRequirements> {
+    let config: ServerConfig | undefined = configOverride;
+
+    if (!config) {
+      if (!this.llamaServer.isRunning()) {
+        debugLog('[Orchestrator] LLM not running - usage: 0');
+        return { ram: 0, vram: 0 };
+      }
+
+      config = this.llamaServer.getConfig();
     }
 
-    const config = this.llamaServer.getConfig();
     if (!config) {
       debugLog('[Orchestrator] LLM config not found - usage: 0');
       return { ram: 0, vram: 0 };
@@ -528,6 +720,12 @@ export class ResourceOrchestrator {
    * ensure the LLM is fully restored before proceeding.
    *
    * Resolves immediately if no reload is in progress.
+   *
+   * **Residency caveat**: under `'burst'` after an offload the LLM is intentionally
+   * still down when this resolves — no reload has been started yet. The deferred
+   * reload fires when the diffusion backend is released (idle timeout, an explicit
+   * `releaseBackend()`, a backend crash, or `diffusionServer.stop()`), so a caller
+   * that needs the LLM back right away should release the backend first.
    *
    * @example
    * ```typescript

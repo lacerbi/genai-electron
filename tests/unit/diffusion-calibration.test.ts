@@ -1013,6 +1013,8 @@ describe('DiffusionServerManager calibration', () => {
           callOrder.push('llm-start');
           return {};
         }),
+        // The manager registers a pre-start hook so an LLM start can reclaim VRAM
+        registerPreStartHook: jest.fn(() => () => {}),
       };
       const server = new DiffusionServerManager(
         mockModelManager as any,
@@ -1037,8 +1039,37 @@ describe('DiffusionServerManager calibration', () => {
       // done comes after the restore
       expect(phases.indexOf('restoring-llm')).toBeLessThan(phases.indexOf('done'));
       expect(report.runs[0]!.status).toBe('ok');
+      // The sweep owns the LLM state itself; the residency policy stays out of it
+      expect(mockLlamaServer.registerPreStartHook).toHaveBeenCalledTimes(1);
 
       server.removeAllListeners();
+    });
+  });
+
+  describe('residency policy', () => {
+    it('never settles residency (the sweep manages the backend itself)', async () => {
+      const settle = jest.spyOn(diffusionServer, 'settleResidency');
+
+      const report = await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 2,
+        combos: [{ label: 'auto' }, { label: 'clip-gpu', clipOnCpu: false }],
+      });
+
+      expect(report.runs).toHaveLength(2);
+      expect(settle).not.toHaveBeenCalled();
+      settle.mockRestore();
+    });
+
+    it('leaves no idle timer armed behind a sweep', async () => {
+      await runCalibrate(diffusionServer, {
+        modelId: 'sdxl-turbo',
+        samples: 1,
+        combos: [{ label: 'auto' }],
+      });
+
+      expect((diffusionServer as any).backend.idleTimer).toBeUndefined();
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
     });
   });
 

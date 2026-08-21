@@ -42,6 +42,7 @@ export type {
   ServerInfo,
   LlamaServerReadyState,
   LlamaServerConfig,
+  LlamaPreStartHook,
   LlamaServerRuntimeConfig,
   LlamaServerRunnerConfig,
   ResolvedLlamaServerRunnerConfig,

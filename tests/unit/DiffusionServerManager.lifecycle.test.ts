@@ -699,6 +699,8 @@ describe('DiffusionServerManager (lifecycle)', () => {
     it('releases a warm backend once the idle timeout elapses', async () => {
       await diffusionServer.start({ ...explicitFlagsConfig, idleTimeoutMs: 1000 });
       await diffusionServer.executeImageGeneration({ prompt: 'test' });
+      // settleResidency('burst') owns the arming decision (Phase 4)
+      await diffusionServer.settleResidency('burst');
       const events = recordBackendEvents(diffusionServer);
       expect(diffusionServer.getBackendInfo().state).toBe('ready');
 
@@ -715,11 +717,78 @@ describe('DiffusionServerManager (lifecycle)', () => {
     it('never arms the timer when idleTimeoutMs is 0', async () => {
       await diffusionServer.start({ ...explicitFlagsConfig, idleTimeoutMs: 0 });
       await diffusionServer.executeImageGeneration({ prompt: 'test' });
+      await diffusionServer.settleResidency('burst');
 
       await jest.advanceTimersByTimeAsync(10 * 60 * 1000);
 
       expect(handles[0]!.stop).not.toHaveBeenCalled();
       expect(diffusionServer.getBackendInfo().state).toBe('ready');
+    });
+
+    it('is not armed by executeImageGeneration alone', async () => {
+      // A batch loop and calibration run generations back to back; only the owner of
+      // the offload context settles residency, and only that arms the timer.
+      await diffusionServer.start({ ...explicitFlagsConfig, idleTimeoutMs: 1000 });
+      await diffusionServer.executeImageGeneration({ prompt: 'test' });
+
+      await jest.advanceTimersByTimeAsync(10 * 60 * 1000);
+
+      expect(handles[0]!.stop).not.toHaveBeenCalled();
+      expect(diffusionServer.getBackendInfo().state).toBe('ready');
+    });
+  });
+
+  describe('residency policy', () => {
+    beforeEach(async () => {
+      await diffusionServer.start(explicitFlagsConfig);
+    });
+
+    it('resolves request > server config > offload-aware default', async () => {
+      // Server config is 'auto' here (unset), so the computed default applies
+      expect(diffusionServer.resolveUsageMode(undefined, false)).toBe('burst');
+      expect(diffusionServer.resolveUsageMode(undefined, true)).toBe('single');
+      // A request value always wins
+      expect(diffusionServer.resolveUsageMode('burst', true)).toBe('burst');
+      expect(diffusionServer.resolveUsageMode('single', false)).toBe('single');
+
+      // A server-level value sits between the request and the computed default
+      await diffusionServer.stop();
+      await diffusionServer.start({ ...explicitFlagsConfig, usageMode: 'burst' });
+      expect(diffusionServer.resolveUsageMode(undefined, true)).toBe('burst');
+      expect(diffusionServer.resolveUsageMode('single', true)).toBe('single');
+
+      await diffusionServer.stop();
+      await diffusionServer.start({ ...explicitFlagsConfig, usageMode: 'auto' });
+      expect(diffusionServer.resolveUsageMode(undefined, true)).toBe('single');
+    });
+
+    it("releases the backend with reason 'single'", async () => {
+      await diffusionServer.executeImageGeneration({ prompt: 'test' });
+      const events = recordBackendEvents(diffusionServer);
+
+      await diffusionServer.settleResidency('single');
+
+      expect(handles[0]!.stop).toHaveBeenCalledTimes(1);
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
+      expect(events.map((event) => `${event.state}:${event.reason}`)).toEqual([
+        'stopping:single',
+        'absent:single',
+      ]);
+    });
+
+    it("keeps the backend resident under 'burst'", async () => {
+      await diffusionServer.executeImageGeneration({ prompt: 'test' });
+
+      await diffusionServer.settleResidency('burst');
+
+      expect(handles[0]!.stop).not.toHaveBeenCalled();
+      expect(diffusionServer.getBackendInfo().state).toBe('ready');
+    });
+
+    it('is a harmless no-op when no backend is resident', async () => {
+      await expect(diffusionServer.settleResidency('single')).resolves.toBeUndefined();
+      await expect(diffusionServer.settleResidency('burst')).resolves.toBeUndefined();
+      expect(diffusionServer.getBackendInfo()).toEqual({ state: 'absent' });
     });
   });
 
@@ -1312,6 +1381,7 @@ describe('DiffusionServerManager (lifecycle)', () => {
       try {
         await diffusionServer.start(explicitFlagsConfig);
         await diffusionServer.executeImageGeneration({ prompt: 'x' });
+        await diffusionServer.settleResidency('burst');
 
         await jest.advanceTimersByTimeAsync(DIFFUSION_BACKEND_DEFAULTS.idleTimeoutMs - 1000);
         expect(handles[0]!.stop).not.toHaveBeenCalled();

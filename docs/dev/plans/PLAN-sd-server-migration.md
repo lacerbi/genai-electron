@@ -15,7 +15,7 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
 - [x] Phase 2: Binary provisioning (`sd-server` primary, Phase-2 validation via the runner, POSIX chmod) — `1ae88a5`
 - [x] Phase 3: `DiffusionServerManager` rewire (resident backend, same wrapper contract, lifecycle) — interim
       doublecheck (3 Opus reviewers) folded in; 1260/1260
-- [ ] Phase 4: Residency policy + symmetric `ResourceOrchestrator` + LLM pre-start hook
+- [x] Phase 4: Residency policy + symmetric `ResourceOrchestrator` + LLM pre-start hook — 1321/1321
 - [ ] Phase 5: Calibration re-base (`usageMode: 'single' | 'burst'`, `policyVersion`, VRAM fields)
 - [ ] Phase 6: Documentation, PROGRESS "Unreleased", DESIGN/dev-doc updates, example-app touch-ups
 - [ ] Phase 7: Live smoke (main thread, pinned binary) + final `/doublecheck`
@@ -58,10 +58,10 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
         cancellation → `'cancelled'`, plus a shared faithful `raceWithExit` test seam
         (`tests/unit/helpers/sd-server-mocks.ts`) and 51 new tests.
 - Phase 4 — residency + orchestrator
-  - [ ] `resolveUsageMode`/`settleResidency`/callback; settle-once ownership
-  - [ ] orchestrator branches + `onDiffusionBackendReleased(reason)` + `orchestrateBatchGeneration`
-  - [ ] `LlamaServerManager.registerPreStartHook` (after `'starting'`); `prepareForLLMStart`; estimator override
-  - [ ] tests (orchestrator, llama hook, integration-style, lifecycle, idle timeout); commit
+  - [x] `resolveUsageMode`/`settleResidency`/callback; settle-once ownership
+  - [x] orchestrator branches + `onDiffusionBackendReleased(reason)` + `orchestrateBatchGeneration`
+  - [x] `LlamaServerManager.registerPreStartHook` (after `'starting'`); `prepareForLLMStart`; estimator override
+  - [x] tests (orchestrator, llama hook, integration-style, lifecycle, idle timeout); commit pending
 - Phase 5 — calibration
   - [ ] `usageMode` single/burst sweep; `stageMs` semantics; `policyVersion`; VRAM sampling
   - [ ] tests; commit
@@ -539,10 +539,27 @@ batch through the orchestrator, quit-time safety.
   Manager tests: idle timeout fires → `absent` + event.
 
 **Verification**:
-- [ ] Build/lint/test green.
-- [ ] Scenario tests pass: (LLM running, 8 GB) image → offload → generate → release → reload;
-  `usageMode:'burst'` → backend stays, reload deferred, fires on idle timeout/explicit release;
-  LLM start with resident backend → yield (or coexist when both fit).
+- [x] Build/lint/test green.
+  Done 2026-08-21: build 0 errors, `npm run lint` 0 errors (114 pre-existing warnings — no new
+  ones), `npm run format` + `format:check` clean, full suite **1321/1321 across 44 suites**
+  (was 1260/1260 across 43). Per suite: `ResourceOrchestrator.test.ts` 26 → 58 (the 26 originals
+  needed no assertion changes — only the plain-object mock gained
+  `resolveUsageMode`/`settleResidency`/`releaseBackend`/`isCalibrating`/`executeBatchGeneration`/
+  `getBackendInfo`), new `ResourceOrchestrator.integration.test.ts` 5,
+  `LlamaServerManager.test.ts` 110 → 117, `DiffusionServerManager.lifecycle.test.ts` 60 → 65,
+  `DiffusionServerManager.generation.test.ts` 63 → 72, `diffusion-calibration.test.ts` 27 → 29,
+  `electron-lifecycle.test.ts` 15 → 16. Five deliberate mutations each fail the new suites:
+  accepting every release reason in `onDiffusionBackendReleased` (8 failures), reloading before
+  the settle (ordering test), keeping the `isRunning()` short-circuit under an estimator override
+  (4 `prepareForLLMStart` failures), re-arming the idle timer inside `executeImageGeneration`
+  (1 failure), and dropping the no-orchestrator settle (3 failures).
+- [x] Scenario tests pass (unit/integration level; the live runs stay in Phase 7):
+  (LLM running, 8 GB) image → offload → generate → release → reload — exactly one reload, backend
+  killed before `llama-server` restarts; `usageMode:'burst'` → backend stays, reload deferred,
+  fires on idle timeout **and** on an explicit release; LLM start with a resident backend → yield
+  via the pre-start hook (release reason `'llm-start'`, no reload from inside the hook), and
+  coexist untouched when both fit. `electron-lifecycle` quit releases with `'shutdown'` and starts
+  nothing (with the same saved state, a follow-up `'stop'` does reload — the control assertion).
 
 ### Phase 5: Calibration re-base
 **Goal**: `calibrate()` measures the mode the caller selects; default `'single'` (cold per

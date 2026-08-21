@@ -1200,10 +1200,11 @@ describe('DiffusionServerManager (generation)', () => {
       jest.useRealTimers();
     });
 
-    it('arms the idle timer once a generation finishes', async () => {
+    it("arms the idle timer when a generation settles as 'burst'", async () => {
       const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
       await server.start({ ...explicitFlagsConfig, idleTimeoutMs: 1000 });
-      await server.executeImageGeneration({ prompt: 'x' });
+      // generateImage() owns the settle when no orchestrator is wired up
+      await server.generateImage({ prompt: 'x' });
       expect(server.getBackendInfo().state).toBe('ready');
 
       await jest.advanceTimersByTimeAsync(1000);
@@ -1216,7 +1217,7 @@ describe('DiffusionServerManager (generation)', () => {
     it('disarms the idle timer while a job is in flight', async () => {
       const server = new DiffusionServerManager(mockModelManager as any, mockSystemInfo as any);
       await server.start({ ...explicitFlagsConfig, idleTimeoutMs: 1000 });
-      await server.executeImageGeneration({ prompt: 'first' });
+      await server.generateImage({ prompt: 'first' });
 
       holdJobGenerating();
       const second = server.executeImageGeneration({ prompt: 'second' });
@@ -1230,6 +1231,141 @@ describe('DiffusionServerManager (generation)', () => {
       await second;
       expect(server.getBackendInfo().state).toBe('ready');
       server.removeAllListeners();
+    });
+  });
+
+  describe('residency settle ownership', () => {
+    /**
+     * Replace the manager's orchestrator with a fake that runs the generation
+     * directly — the point of these tests is WHO settles, not what the real
+     * ResourceOrchestrator does (that is ResourceOrchestrator.test.ts).
+     */
+    const installFakeOrchestrator = (server: Manager) => {
+      const fake = {
+        orchestrateImageGeneration: jest.fn(async (config: any) =>
+          (server as any).executeImageGeneration(config)
+        ),
+        orchestrateBatchGeneration: jest.fn(async (config: any) =>
+          (server as any).executeBatchGeneration(config)
+        ),
+        onDiffusionBackendReleased: jest.fn(),
+      };
+      (server as any).orchestrator = fake;
+      return fake;
+    };
+
+    it("releases the backend when generateImage() settles as 'single'", async () => {
+      const events = recordBackendEvents(diffusionServer);
+
+      await diffusionServer.generateImage({ prompt: 'x', usageMode: 'single' });
+
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
+      expect(events.map((event) => `${event.state}:${event.reason}`)).toEqual([
+        'starting:spawned',
+        'ready:ready',
+        'busy:job',
+        'ready:job',
+        'stopping:single',
+        'absent:single',
+      ]);
+    });
+
+    it("keeps the backend when generateImage() settles as 'burst'", async () => {
+      await diffusionServer.generateImage({ prompt: 'x', usageMode: 'burst' });
+
+      expect(diffusionServer.getBackendInfo().state).toBe('ready');
+      expect(handles[0]!.stop).not.toHaveBeenCalled();
+    });
+
+    it('settles exactly once for a no-orchestrator batch request', async () => {
+      const settle = jest.spyOn(diffusionServer, 'settleResidency');
+
+      const { promise } = startAsync(diffusionServer, {
+        prompt: 'x',
+        count: 3,
+        usageMode: 'single',
+      });
+      await promise;
+
+      expect(mockSubmitImageJob).toHaveBeenCalledTimes(3);
+      expect(settle).toHaveBeenCalledTimes(1);
+      expect(settle).toHaveBeenCalledWith('single');
+      expect(diffusionServer.getBackendInfo().state).toBe('absent');
+      settle.mockRestore();
+    });
+
+    it('settles even when the generation fails', async () => {
+      const settle = jest.spyOn(diffusionServer, 'settleResidency');
+      mockGetJob.mockResolvedValue({ id: 'job-1', status: 'failed', error: { message: 'boom' } });
+
+      await expect(diffusionServer.generateImage({ prompt: 'x' })).rejects.toThrow('job failed');
+
+      expect(settle).toHaveBeenCalledTimes(1);
+      settle.mockRestore();
+    });
+
+    it('leaves the settle to the orchestrator when one is wired up', async () => {
+      const orchestrator = installFakeOrchestrator(diffusionServer);
+      const settle = jest.spyOn(diffusionServer, 'settleResidency');
+
+      await diffusionServer.generateImage({ prompt: 'x', usageMode: 'single' });
+
+      expect(orchestrator.orchestrateImageGeneration).toHaveBeenCalledTimes(1);
+      expect(settle).not.toHaveBeenCalled();
+      // Not released by the manager: the orchestrator owns that decision
+      expect(diffusionServer.getBackendInfo().state).toBe('ready');
+      settle.mockRestore();
+    });
+
+    it('routes a batch request through orchestrateBatchGeneration', async () => {
+      const orchestrator = installFakeOrchestrator(diffusionServer);
+      const settle = jest.spyOn(diffusionServer, 'settleResidency');
+
+      const { promise } = startAsync(diffusionServer, { prompt: 'x', count: 2 });
+      await promise;
+
+      expect(orchestrator.orchestrateBatchGeneration).toHaveBeenCalledTimes(1);
+      expect(orchestrator.orchestrateImageGeneration).not.toHaveBeenCalled();
+      expect(mockSubmitImageJob).toHaveBeenCalledTimes(2);
+      expect(settle).not.toHaveBeenCalled();
+      settle.mockRestore();
+    });
+
+    it('forwards the final release reason to the orchestrator', async () => {
+      const orchestrator = installFakeOrchestrator(diffusionServer);
+      await diffusionServer.executeImageGeneration({ prompt: 'x' });
+
+      await diffusionServer.releaseBackend({ reason: 'idle-timeout' });
+
+      expect(orchestrator.onDiffusionBackendReleased).toHaveBeenCalledWith('idle-timeout');
+    });
+
+    it('forwards the rank-upgraded reason, not the first one requested', async () => {
+      const orchestrator = installFakeOrchestrator(diffusionServer);
+      await diffusionServer.executeImageGeneration({ prompt: 'x' });
+
+      // A stop() joining an in-progress 'cancel' release reports 'stop'
+      const cancel = diffusionServer.releaseBackend({ reason: 'cancel' });
+      const stop = diffusionServer.releaseBackend({ reason: 'stop' });
+      await Promise.all([cancel, stop]);
+
+      expect(orchestrator.onDiffusionBackendReleased).toHaveBeenCalledTimes(1);
+      expect(orchestrator.onDiffusionBackendReleased).toHaveBeenCalledWith('stop');
+    });
+
+    it('survives a throwing orchestrator callback', async () => {
+      const orchestrator = installFakeOrchestrator(diffusionServer);
+      orchestrator.onDiffusionBackendReleased.mockImplementation(() => {
+        throw new Error('listener exploded');
+      });
+      await diffusionServer.executeImageGeneration({ prompt: 'x' });
+
+      await expect(diffusionServer.releaseBackend({ reason: 'explicit' })).resolves.toBeUndefined();
+
+      expect(diffusionServer.getBackendInfo()).toEqual({ state: 'absent' });
+      // The state machine still works afterwards
+      await diffusionServer.executeImageGeneration({ prompt: 'y' });
+      expect(diffusionServer.getBackendInfo().state).toBe('ready');
     });
   });
 

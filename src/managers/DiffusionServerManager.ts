@@ -61,6 +61,7 @@ import type {
   DiffusionOffloadCombo,
   DiffusionServerConfig,
   DiffusionServerInfo,
+  DiffusionUsageMode,
   ImageGenerationConfig,
   ImageGenerationResult,
   ImageSampler,
@@ -244,6 +245,8 @@ export class DiffusionServerManager extends ServerManager {
    * backend is spawned while that process may still hold the GPU.
    */
   private unconfirmedBackendPid?: number;
+  /** Removes the LLM pre-start hook this manager registered (if any) */
+  private unregisterPreStartHook?: () => void;
 
   // Time estimates for progress calculation (self-calibrating)
   /** Cold load: spawn + weight placement, measured only on generations that spawned */
@@ -290,7 +293,16 @@ export class DiffusionServerManager extends ServerManager {
 
     // Create orchestrator if llamaServer is provided (enables automatic resource management)
     if (llamaServer) {
-      this.orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, this, modelManager);
+      const orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, this, modelManager);
+      this.orchestrator = orchestrator;
+
+      // Symmetric orchestration: an LLM start yields the resident backend when both
+      // would not fit. Registered here (not in start()) because a backend can outlive
+      // the wrapper — calibrate() runs with the wrapper stopped.
+      this.unregisterPreStartHook?.();
+      this.unregisterPreStartHook = llamaServer.registerPreStartHook((ctx) =>
+        orchestrator.prepareForLLMStart(ctx)
+      );
     }
   }
 
@@ -653,6 +665,75 @@ export class DiffusionServerManager extends ServerManager {
   }
 
   /**
+   * Resolve the residency policy for one generation
+   *
+   * Precedence: the request's `usageMode` → the server-level
+   * `DiffusionServerConfig.usageMode` (when set and not `'auto'`) → the computed
+   * default, which is `'single'` when the LLM had to be offloaded to make room for
+   * this image (release the VRAM so it can come back) and `'burst'` otherwise (stay
+   * warm for the next image).
+   *
+   * @param requestMode - Per-request policy, if the caller set one
+   * @param llmWasOffloaded - Whether the LLM was offloaded for this generation
+   * @returns The policy {@link settleResidency} should apply
+   * @internal
+   */
+  public resolveUsageMode(
+    requestMode: DiffusionUsageMode | undefined,
+    llmWasOffloaded: boolean
+  ): DiffusionUsageMode {
+    if (requestMode === 'burst' || requestMode === 'single') {
+      return requestMode;
+    }
+
+    const configured = (this._config as DiffusionServerConfig | undefined)?.usageMode;
+    if (configured === 'burst' || configured === 'single') {
+      return configured;
+    }
+
+    return llmWasOffloaded ? 'single' : 'burst';
+  }
+
+  /**
+   * Apply a residency policy once a generation is done
+   *
+   * `'single'` releases the backend (and its VRAM) right away; `'burst'` leaves it
+   * resident and arms the idle timer. Called exactly once per generation by whoever
+   * owns the offload context — the ResourceOrchestrator when one is wired up, and
+   * `generateImage()`/the async HTTP path otherwise. Calibration never settles: it
+   * manages the backend itself.
+   *
+   * @param mode - Residency policy from {@link resolveUsageMode}
+   * @internal
+   */
+  public async settleResidency(mode: DiffusionUsageMode): Promise<void> {
+    if (mode === 'single') {
+      await this.releaseBackend({ reason: 'single' });
+      return;
+    }
+    this.armIdleTimer();
+  }
+
+  /**
+   * Settle residency for a path that owns the (empty) offload context
+   *
+   * Used by the no-orchestrator branches, where no LLM was offloaded. Never throws:
+   * a failed release must not mask the generation's own outcome.
+   *
+   * @param requestMode - The request's `usageMode`, if any
+   * @private
+   */
+  private async settleResidencyWithoutOffload(
+    requestMode: DiffusionUsageMode | undefined
+  ): Promise<void> {
+    try {
+      await this.settleResidency(this.resolveUsageMode(requestMode, false));
+    } catch (error) {
+      debugLog('[Diffusion] residency settle failed:', error);
+    }
+  }
+
+  /**
    * Transition the backend state machine and announce it
    * @private
    */
@@ -994,8 +1075,9 @@ export class DiffusionServerManager extends ServerManager {
    * Arm the idle timer for a resident backend
    *
    * `idleTimeoutMs: 0` disables it entirely (the host owns the release).
-   * Armed today from executeImageGeneration()'s `finally`; Phase 4's
-   * settleResidency('burst') takes ownership of that decision.
+   * Armed only by `settleResidency('burst')`, which owns the residency decision —
+   * a bare `executeImageGeneration()` (calibration, a batch loop between images)
+   * deliberately leaves the backend warm with no timer.
    * @private
    */
   private armIdleTimer(): void {
@@ -1030,12 +1112,19 @@ export class DiffusionServerManager extends ServerManager {
   /**
    * Hook invoked after the backend is confirmed gone
    *
-   * Phase 4 forwards this to ResourceOrchestrator.onDiffusionBackendReleased(reason)
-   * so a previously offloaded LLM can come back. Deliberately a no-op for now.
+   * Forwards the FINAL (rank-upgraded) release reason to the orchestrator so a
+   * previously offloaded LLM can come back — but only for the reasons that really
+   * mean "the VRAM is free again"; the orchestrator owns that filter.
    * @private
    */
   private onBackendReleased(reason: DiffusionBackendReleaseReason): void {
     debugLog('[Diffusion] backend released:', reason);
+    try {
+      this.orchestrator?.onDiffusionBackendReleased(reason);
+    } catch (error) {
+      // A throwing callback must never derail the backend state machine
+      debugLog('[Diffusion] orchestrator release callback threw:', error);
+    }
   }
 
   /**
@@ -1670,11 +1759,21 @@ export class DiffusionServerManager extends ServerManager {
     // callers can never both pass the check above
     const claim = this.createGenerationClaim();
     try {
-      const promise = this.orchestrator
-        ? this.orchestrator.orchestrateImageGeneration(config)
-        : this.executeImageGeneration(config);
+      if (this.orchestrator) {
+        // The orchestrator owns the offload context, so it settles residency
+        const promise = this.orchestrator.orchestrateImageGeneration(config);
+        claim.promise = promise;
+        return await promise;
+      }
+
+      const promise = this.executeImageGeneration(config);
       claim.promise = promise;
-      return await promise;
+      try {
+        return await promise;
+      } finally {
+        // No orchestrator: nothing was offloaded, and this call settles residency
+        await this.settleResidencyWithoutOffload(config.usageMode);
+      }
     } finally {
       this.releaseGenerationClaim(claim);
     }
@@ -2115,15 +2214,21 @@ export class DiffusionServerManager extends ServerManager {
       const count = config.count || 1;
       let results: ImageGenerationResult[];
 
-      if (count > 1) {
-        // Batch generation (orchestration for batch arrives in Phase 4)
-        results = await this.executeBatchGeneration(wrappedConfig);
+      if (this.orchestrator) {
+        // One offload window for the whole request; the orchestrator settles residency
+        results =
+          count > 1
+            ? await this.orchestrator.orchestrateBatchGeneration(wrappedConfig)
+            : [await this.orchestrator.orchestrateImageGeneration(wrappedConfig)];
       } else {
-        // Single image: use orchestrator if available (same logic as public generateImage method)
-        if (this.orchestrator) {
-          results = [await this.orchestrator.orchestrateImageGeneration(wrappedConfig)];
-        } else {
-          results = [await this.executeImageGeneration(wrappedConfig)];
+        // No orchestrator: nothing was offloaded, and this call settles residency once
+        try {
+          results =
+            count > 1
+              ? await this.executeBatchGeneration(wrappedConfig)
+              : [await this.executeImageGeneration(wrappedConfig)];
+        } finally {
+          await this.settleResidencyWithoutOffload(config.usageMode);
         }
       }
 
@@ -2416,9 +2521,10 @@ export class DiffusionServerManager extends ServerManager {
       if (this.backend.state === 'busy') {
         this.backend.lastUsedAt = Date.now();
         this.setBackendState('ready', 'job');
-        // Phase 3 behaviour: the backend stays warm under the idle timeout.
-        // Phase 4's settleResidency() takes ownership of this decision.
-        this.armIdleTimer();
+        // Residency (release now vs stay warm under the idle timeout) is NOT decided
+        // here: settleResidency() owns it, called once per generation by whoever owns
+        // the offload context. A batch loop and calibration run through this method
+        // repeatedly and must not arm anything in between.
       }
     }
   }

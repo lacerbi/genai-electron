@@ -185,6 +185,7 @@ jest.unstable_mockModule('../../src/config/paths.js', () => ({
 // Import after mocking
 const { LlamaServerManager } = await import('../../src/managers/LlamaServerManager.js');
 const { ResourceOrchestrator } = await import('../../src/managers/ResourceOrchestrator.js');
+const { ServerError } = await import('../../src/errors/index.js');
 
 describe('LlamaServerManager', () => {
   let llamaServer: LlamaServerManager;
@@ -583,6 +584,14 @@ describe('LlamaServerManager', () => {
           width: 512,
           height: 512,
         })),
+        // Residency seam (Phase 4): the orchestrator settles through the manager
+        resolveUsageMode: jest.fn(
+          (requestMode: 'burst' | 'single' | undefined, llmWasOffloaded: boolean) =>
+            requestMode ?? (llmWasOffloaded ? 'single' : 'burst')
+        ),
+        settleResidency: jest.fn(async () => {}),
+        isCalibrating: jest.fn(() => false),
+        getBackendInfo: jest.fn(() => ({ state: 'absent' as const })),
       };
       const orchestrator = new ResourceOrchestrator(
         mockSystemInfo as any,
@@ -612,6 +621,140 @@ describe('LlamaServerManager', () => {
         effectiveContextSize: 4096,
         effectiveParallelRequests: 1,
       });
+    });
+  });
+
+  describe('registerPreStartHook()', () => {
+    it('runs hooks after the status flips to starting and before provisioning', async () => {
+      const observed: { status: string; ctx: any; binaryCalls: number; spawns: number }[] = [];
+      llamaServer.registerPreStartHook(async (ctx) => {
+        observed.push({
+          status: llamaServer.getStatus(),
+          ctx,
+          binaryCalls: mockEnsureLlamaBinary.mock.calls.length,
+          spawns: mockProcessSpawn.mock.calls.length,
+        });
+      });
+
+      await llamaServer.start(mockConfig);
+
+      expect(observed).toHaveLength(1);
+      // The concurrency guard is already armed while the hook awaits
+      expect(observed[0]!.status).toBe('starting');
+      expect(observed[0]!.ctx).toEqual({ config: mockConfig, reason: 'start' });
+      // ...and nothing has been provisioned or spawned yet
+      expect(observed[0]!.binaryCalls).toBe(0);
+      expect(observed[0]!.spawns).toBe(0);
+    });
+
+    it('runs multiple hooks in registration order', async () => {
+      const order: string[] = [];
+      llamaServer.registerPreStartHook(() => {
+        order.push('first');
+      });
+      llamaServer.registerPreStartHook(async () => {
+        order.push('second');
+      });
+
+      await llamaServer.start(mockConfig);
+
+      expect(order).toEqual(['first', 'second']);
+    });
+
+    it('rejects a concurrent start() while a hook is awaiting', async () => {
+      let releaseHook!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseHook = resolve;
+      });
+      llamaServer.registerPreStartHook(async () => {
+        await gate;
+      });
+
+      const first = llamaServer.start(mockConfig);
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(llamaServer.getStatus()).toBe('starting');
+      await expect(llamaServer.start(mockConfig)).rejects.toThrow('already starting');
+
+      releaseHook();
+      await expect(first).resolves.toMatchObject({ status: 'running' });
+    });
+
+    it('fails the start and resets the status when a hook throws', async () => {
+      llamaServer.registerPreStartHook(async () => {
+        throw new ServerError('backend refused to yield', { code: 'HOOK_FAILED' });
+      });
+
+      await expect(llamaServer.start(mockConfig)).rejects.toThrow('backend refused to yield');
+
+      // Typed library errors survive handleStartupError untouched
+      try {
+        await llamaServer.start(mockConfig);
+        throw new Error('Should have thrown');
+      } catch (error: any) {
+        expect(error).toBeInstanceOf(ServerError);
+        expect(error.details.code).toBe('HOOK_FAILED');
+      }
+
+      expect(llamaServer.getStatus()).toBe('stopped');
+      expect(mockProcessSpawn).not.toHaveBeenCalled();
+      // A later start() (after unregistering) still works
+    });
+
+    it('wraps a non-library hook error like any other startup failure', async () => {
+      llamaServer.registerPreStartHook(() => {
+        throw new Error('plain failure');
+      });
+
+      await expect(llamaServer.start(mockConfig)).rejects.toThrow(
+        'Failed to start llama-server: plain failure'
+      );
+      expect(llamaServer.getStatus()).toBe('stopped');
+    });
+
+    it('stops calling a hook after it is unregistered', async () => {
+      const hook = jest.fn();
+      const unregister = llamaServer.registerPreStartHook(hook);
+
+      await llamaServer.start(mockConfig);
+      expect(hook).toHaveBeenCalledTimes(1);
+
+      await llamaServer.stop();
+      unregister();
+      // Idempotent
+      unregister();
+
+      await llamaServer.start(mockConfig);
+      expect(hook).toHaveBeenCalledTimes(1);
+    });
+
+    it('logs and ignores a hook error on the auto-restart path', async () => {
+      jest.useFakeTimers();
+      try {
+        await llamaServer.start({ ...mockConfig, autoRestart: true, maxRestarts: 1 });
+
+        const reasons: string[] = [];
+        llamaServer.registerPreStartHook(({ reason }) => {
+          reasons.push(reason);
+          throw new Error('hook exploded');
+        });
+
+        mockProcess.emit('exit', 1, null);
+        expect(llamaServer.getStatus()).toBe('crashed');
+
+        await jest.advanceTimersByTimeAsync(1000);
+
+        // The restart went through despite the failing hook
+        expect(reasons).toEqual(['auto-restart']);
+        expect(llamaServer.getStatus()).toBe('running');
+        expect(mockProcessSpawn).toHaveBeenCalledTimes(2);
+        expect(mockLogManager.write).toHaveBeenCalledWith(
+          expect.stringContaining('Pre-start hook failed during auto-restart'),
+          'warn'
+        );
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 
