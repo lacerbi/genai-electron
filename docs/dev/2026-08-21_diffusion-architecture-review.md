@@ -151,10 +151,13 @@ fired; it just hasn't been acted on.
   **Proposed API:** an optional usage-mode flag on the generation API — `'burst'` (keep
   sd-server and its loaded model resident after the image, expecting follow-up
   generations) vs `'single'` (release the server and its VRAM immediately after the
-  image). Default derived from orchestration context: `single` when the orchestrator just
-  offloaded an LLM to make room for this generation (hand the VRAM back right away),
-  `burst` otherwise (nothing is waiting on the GPU, so stay warm). Likely shape:
-  per-request override on top of a server-config default.
+  image). When the caller does not set it, the default is computed at generation time from
+  orchestrator state (which it already tracks for its reload logic), not stored config:
+  `single` when the orchestrator just offloaded an LLM to make room for this generation
+  (hand the VRAM back right away), `burst` otherwise (nothing is waiting on the GPU, so
+  stay warm). An explicit caller value always wins — including `burst` in the
+  just-offloaded case, for hosts that know the user is iterating on images and the LLM
+  won't be needed for a while.
 
 ## 4. The model bet: right default, wrong hard-commit
 
