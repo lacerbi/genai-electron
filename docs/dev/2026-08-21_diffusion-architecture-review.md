@@ -148,6 +148,13 @@ fired; it just hasn't been acted on.
   images," which the ResourceOrchestrator dance implicitly relies on. Reasonable middle
   path: keep sd-server warm when no LLM is loaded; stop it entirely (not just offload the
   LLM) when the LLM needs the GPU. This should be an explicit orchestrator mode.
+  **Proposed API:** an optional usage-mode flag on the generation API — `'burst'` (keep
+  sd-server and its loaded model resident after the image, expecting follow-up
+  generations) vs `'single'` (release the server and its VRAM immediately after the
+  image). Default derived from orchestration context: `single` when the orchestrator just
+  offloaded an LLM to make room for this generation (hand the VRAM back right away),
+  `burst` otherwise (nothing is waiting on the GPU, so stay warm). Likely shape:
+  per-request override on top of a server-config default.
 
 ## 4. The model bet: right default, wrong hard-commit
 
@@ -275,8 +282,8 @@ track:
 2. **Design + execute the `sd-cli` → `sd-server` migration** (persistent child managed like
    llama-server; async job API mapped onto the existing
    `POST/GET/DELETE /v1/images/generations` surface; residency policy coordinated with
-   ResourceOrchestrator; calibration re-based on warm generations). Use it as the forcing
-   function for a backend seam.
+   ResourceOrchestrator via the `burst`/`single` usage-mode flag; calibration re-based on
+   warm generations). Use it as the forcing function for a backend seam.
 3. **Introduce per-model generation contracts** (native steps/cfg/sampler/resolution in
    model metadata) and ship **Z-Image Turbo as a first-class second option** (shared Qwen3-4B
    encoder makes it ~one extra DiT file).
