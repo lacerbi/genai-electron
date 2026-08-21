@@ -32,6 +32,16 @@
 
 ## Small fixes (low risk; do in one batch)
 
+- [ ] **Progress percentage can touch 100 % before the image is done** — the self-calibrating
+  estimator (`calculateOverallPercentage` / `updateTimeEstimates` in `DiffusionServerManager`)
+  learns the cold load time from the previous cold generation; a later cold load that is slower
+  than anything seen before (e.g. cold disk cache after a restart) can drive the loading-stage
+  percentage to 100 and it then falls back when sampling starts. Cosmetic only (the displayed
+  `percentage`), pre-existing in spirit (the `sd-cli` estimator had the same class of wart; the
+  v0.25.0 cold/warm split removed the common case). Fix: never report 100 % before the final
+  completion callback (cap in-flight values at 99) and keep the percentage monotonic within a
+  generation; ships as a patch. Surfaced by a timing-flaky unit test on Windows CI after the
+  v0.25.0 merge (test de-flaked in PR #59; the estimator itself is unchanged).
 - [ ] **`--clip-on-cpu` / `--vae-on-cpu` → `--backend te=cpu,vae=cpu`** — deprecated-but-working at
   the pinned build; switch the spelling at the next pin bump (re-run the offload matrix live).
 
