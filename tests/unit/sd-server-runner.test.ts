@@ -491,15 +491,14 @@ describe('sd-server stdout tap', () => {
     const { handle, events } = await tapped(processManager);
 
     processManager.stdout('sd-server listening on: 127.0.0.1:12345\n');
+    processManager.stdout('sampling using Euler method\n'); // printed at job start: NOT a marker
     processManager.stdout('generating image: 1/1 - seed 42\n');
-    processManager.stdout('sampling using Euler method\n');
     processManager.stdout('decoding 1 latents\n');
     processManager.stdout('decode_first_stage completed, taking 0.44s\n');
     processManager.stdout('generate_image completed in 11.20s\n');
 
     expect(events).toEqual([
       { type: 'marker', marker: 'listening' },
-      { type: 'marker', marker: 'generating' },
       { type: 'marker', marker: 'generating' },
       { type: 'marker', marker: 'decoding' },
       { type: 'marker', marker: 'decoded' },

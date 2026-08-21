@@ -54,6 +54,11 @@ const READY_PROBE_TIMEOUT_MS = 2_000;
  * the log wording, update this table (and `docs/dev/UPDATING-BINARIES.md`) — the parser
  * itself needs no change.
  *
+ * Only `generating image:` marks the start of sampling. sd-server prints `sampling using
+ * <method>` at job start, BEFORE conditioning and the lazy weight upload, so mapping it to
+ * `'generating'` would end the loading stage (and `stageMs.loadMs`) almost immediately after
+ * submit; the first `it/s` step event remains the fallback when the literal is missing.
+ *
  * @example
  * ```typescript
  * for (const { literal, marker } of SD_SERVER_STDOUT_MARKERS) {
@@ -63,7 +68,6 @@ const READY_PROBE_TIMEOUT_MS = 2_000;
  */
 export const SD_SERVER_STDOUT_MARKERS = [
   { literal: 'generating image:', marker: 'generating' },
-  { literal: 'sampling using', marker: 'generating' },
   { literal: 'decoding 1 latents', marker: 'decoding' },
   { literal: 'decode_first_stage completed', marker: 'decoded' },
   { literal: 'generate_image completed', marker: 'completed' },

@@ -156,11 +156,16 @@ repository's existing 114 warnings; `npm run format:check` is clean; the full su
 new assertions bite (release-reason filtering, reload ordering, the estimator override, idle-timer
 ownership, the no-orchestrator settle, sampler-interval leaks, the post-release abort re-check, the
 VRAM peak arithmetic, the default calibration mode, and warm reuse in `'single'` mode). Live smoke
-against the pinned `master-782-b290693` binary: S1–S6 passed (wrapper bound to `127.0.0.1`, cold
-and warm timings, cancel, backend kill/respawn, offload/reload ordering, burst deferral); S7–S11
-were being re-run at the time of writing (see Phase 7 of
-`docs/dev/plans/PLAN-sd-server-migration.md`), after which the final `/doublecheck` closes the
-branch.
+against the pinned `master-782-b290693` binary on the reference laptop (RTX 4060 Laptop 8 GB): all
+eleven scenarios passed on the final build — provisioning + `sd-server` Phase-2 validation, wrapper
+bound to `127.0.0.1`, cold ≈ 10–12 s / warm ≈ 6.3–6.9 s at 768², cancel (queued and generating),
+backend `taskkill` → job `error` + respawn, idle timeout, the full LLM cycle (`llm-start` yield in
+0.5 s, offload → generate → `single` release → reload; `burst` deferral; explicit release → reload),
+`stop()` with a resident backend, calibration in both modes (512²: single 7.1/6.3 s, burst
+3.46/2.86 s; VRAM peak 3.2 vs 6.3 GB; `policyVersion`/`usageMode` echoed), re-validation after
+deleting `.validation.json` in 8 s with no download, and a 2048² all-resident job (peak 7885 MiB —
+it fits, so the probe verified cancel-of-a-long-job rather than OOM classification). Details:
+Phase 7 of `docs/dev/plans/PLAN-sd-server-migration.md` and the devlog's post-implementation notes.
 
 Smoke reference (2026-08-21, RTX 4060 Laptop 8 GB, cached `master-746` build, FLUX.2 klein 4B Q4_0,
 768², 4 steps, cfg 1, euler, seed 42): with `--clip-on-cpu --diffusion-fa` spawn→listening 2.4 s,

@@ -381,3 +381,20 @@ neither was visible to the unit tests as they stood:
 - `docs/dev/UPDATING-BINARIES.md` — sd-server marked unused; `master-746` progress-parsing
   breakage
 - `DESIGN.md` — "monitor stable-diffusion.cpp for a potential native server implementation"
+
+**Full-scenario re-run on the fixed build (2026-08-21, same machine, pinned `782`):** S1–S11 all
+passed. The LLM cycle behaved end to end — resident backend → `llamaServer.start()` → `llm-start`
+yield in 0.5 s → LLM up in ~7 s → image request offloads the LLM → backend spawns and generates →
+`'single'` release → LLM reloaded (release visibly precedes the reload) → `usageMode: 'burst'` via
+the Node API keeps the backend and defers the reload → `releaseBackend()` (`explicit`) → LLM
+reloaded. `stop()` with a resident backend released with reason `stop`. Calibration at 512², 2
+samples: `single` offload 7.1 s / all-resident 6.3 s (VRAM peak 3.2 vs 6.3 GB, idle 0.24 GB after
+release); `burst` 3.46 s / 2.86 s warm (idle 0.6 vs 6.2 GB resident) — `policyVersion` and
+`usageMode` echoed, the backend released at sweep end. Re-validation after deleting
+`.validation.json` ran Phase 1 + Phase 2 through `sd-server` in 8 s with no download. The "OOM
+probe" did not OOM: klein at 2048² all-resident fits (peak 7885 of 8188 MiB) and was still sampling
+at 180 s, so it exercised cancel-of-a-long-job instead (`stopping:cancel`, then the `stop` upgrade).
+One more marker-table fix came out of the calibration numbers: `sampling using` is printed by
+`sd-server` at job start, before conditioning and the lazy weight upload, so it no longer counts as
+the `generating` marker (`stageMs.loadMs` now spans spawn → `generating image:`; the first `it/s`
+step event remains the fallback). Deferred items are tracked in `ISSUE-diffusion-followups.md`.

@@ -1,8 +1,12 @@
 # Plan: Persistent `sd-server` backend behind the diffusion HTTP wrapper
 
 Created: 2026-08-21
-Status: IN PROGRESS (approved 2026-08-21; open questions resolved: `idleTimeoutMs` default 300 000 ms;
-example-app touch-ups = comment fixes + backend-state status line only)
+Status: COMPLETE (2026-08-21) — all seven phases landed on `feat/sd-server-backend` (unreleased);
+interim + final `/doublecheck` findings folded in; live smoke S1–S11 passed on the pinned
+`master-782-b290693` binary (see Phase 7 results); gates: build 0 errors, lint 0 errors, format clean,
+1370/1370 tests across 45 suites, example app builds. Deferred items: `ISSUE-diffusion-followups.md`.
+(Approved 2026-08-21; open questions resolved: `idleTimeoutMs` default 300 000 ms; example-app
+touch-ups = comment fixes + backend-state status line only.)
 Source: `docs/dev/2026-08-21_diffusion-architecture-review.md` (§3, §5, §8) + design discussion
 (2026-08-21) + local smoke test (results below) + `/doublecheck` of this plan (3 read-only Opus
 reviewers, 2026-08-21; findings folded in)
@@ -21,9 +25,9 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
       1331/1331 — `b5706c1`
 - [x] Phase 6: Documentation, PROGRESS "Unreleased", DESIGN/dev-doc updates, example-app touch-ups —
       `482367c`; final doc corrections + the queued small-fix batch folded in afterwards
-- [ ] Phase 7: Live smoke (main thread, pinned binary) + final `/doublecheck` — final doublecheck
+- [x] Phase 7: Live smoke (main thread, pinned binary) + final `/doublecheck` — final doublecheck
       fixes landed as `816b0c0`
-- [ ] Flip `Status:` to `COMPLETE (date)` with a short results note
+- [x] Flip `Status:` to `COMPLETE (date)` with a short results note — done 2026-08-21
 
 ## Tracking (live checklist; details in the phase sections below)
 
@@ -95,7 +99,8 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
   - [x] commit (main thread, after `npm run format` + the CI gates and the example-app build)
     — `482367c`
 - Phase 7 — live smoke + doublecheck
-  - [ ] live checklist on pinned binary; `/doublecheck`; status flip
+  - [x] live checklist on pinned binary (S1–S11 passed on the final build; results below);
+        `/doublecheck` (final, 3 reviewers → `816b0c0` + `76fc192`); status flipped
 
 ## Summary
 
@@ -728,6 +733,28 @@ sample) = the common production case and today's report semantics; `'burst'` opt
   `sd-server` surfaces OOM as a failed job or a process exit and confirm classification.
 - `/doublecheck` with read-only Opus reviewers (core impl / API + docs / tests + example) + the
   CI gate in the main thread; fold findings back in; flip `Status:`.
+
+**Live smoke results (2026-08-21, RTX 4060 Laptop 8 GB, pinned `master-782-b290693`, klein 4B
+Q4_0, 768² / 4 steps / cfg 1 / euler unless noted; harness = Electron main-process script reusing
+the example app's `userData`, HTTP path identical to genai-lite's adapter):**
+
+| Step | Result |
+|---|---|
+| S1 provisioning (746 cache → 782 download) + `sd-server` Phase-1/2 validation | ✓ 8.7 min incl. download; validation ~10 s; second run 3.2 s (cached) |
+| S2 cold HTTP generation | ✓ 16.5 s first-ever run (cold page cache), 10.3–12.2 s afterwards; `absent → starting → ready → busy → ready` |
+| S3 warm HTTP generation (burst default) | ✓ 6.3–6.9 s, peak 4249 MiB |
+| S4 cancel mid-generation | ✓ DELETE answered on initiation, `stopping:cancel → absent:cancel`, next request respawns |
+| S5 `taskkill` backend mid-job | ✓ job `error` (`BACKEND_ERROR`), `absent:crashed {code:1}`, wrapper `running`, respawn |
+| S6 idle timeout (5 s) | ✓ `stopping:idle-timeout` after the window |
+| S7 LLM cycle | ✓ `llm-start` yield 0.5 s after `llamaServer.start()` (after the H6 fix; the pre-fix run never yielded); offload → generate 11 s → `single` release → reload (release precedes reload); `usageMode:'burst'` keeps the backend, reload deferred; `releaseBackend()` → `explicit` → reload |
+| S8 `stop()` with resident backend | ✓ `stopping:stop → absent:stop`, VRAM 0 |
+| S9 calibration `single` / `burst` (512², 2 combos × 2 samples) | ✓ single: offload 7.1 s, all-resident 6.3 s, VRAM peak 3.2 / 6.3 GB, idle 0.24 GB; burst: 3.46 / 2.86 s, idle 0.6 / 6.2 GB; `policyVersion` + `usageMode` echoed; backend released |
+| S10 re-validation (`.validation.json` deleted) | ✓ Phase 1 + Phase 2 via `sd-server` in 8 s, no download |
+| S11 "OOM probe" 2048² all-resident | did not OOM (peak 7885 MiB, still sampling at 180 s) → exercised cancel-of-a-long-job (`stopping:cancel` → `stop` upgrade); OOM classification stays unit-tested only |
+
+Follow-up from S9: `sampling using` was dropped from the `generating` marker mapping (sd-server
+prints it at job start, before conditioning/weight upload), so `stageMs.loadMs` now spans spawn →
+`generating image:`.
 
 **Final doublecheck (2026-08-21)** — three read-only Opus reviewers ran in parallel over the whole
 branch:
