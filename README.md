@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.24.0 | **Status**: Production Ready - Node-safe llama-server launch
+> **Version**: 0.25.0 | **Status**: Production Ready - Persistent sd-server diffusion backend
 
 Electron-first library for managing local AI model servers (llama.cpp, stable-diffusion.cpp), with
 supported Electron-free subpaths for calibration policy metadata and direct llama-server launch.

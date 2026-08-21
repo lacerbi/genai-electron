@@ -1,11 +1,11 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.24.0 release candidate — Node-safe llama-server launch
-> (2026-08-18)
+> **Current Status**: v0.25.0 release candidate — Persistent sd-server diffusion backend
+> (2026-08-21)
 
 ---
 
-## Unreleased: Persistent sd-server Diffusion Backend (started 2026-08-21)
+## v0.25.0: Persistent sd-server Diffusion Backend (2026-08-21)
 
 **Backend and process model**
 
@@ -152,7 +152,10 @@
 
 **Validation:** Build passes with 0 TypeScript errors; ESLint reports 0 errors with the
 repository's existing 114 warnings; `npm run format:check` is clean; the full suite passes
-1370/1370 across 45 suites. Deliberate mutations were used at each phase to prove the
+1370/1370 across 45 suites. Release gates (2026-08-21): `npm run prepublishOnly` (clean build +
+1370/1370 across 45 suites), lint 0 errors, `format:check` clean, `npm audit --omit=dev
+--audit-level=high` 0 vulnerabilities, `npm pack --dry-run` → `genai-electron-0.25.0.tgz`, 232
+files, 305.9 kB packed / 1.6 MB unpacked, `git diff --check` clean. Deliberate mutations were used at each phase to prove the
 new assertions bite (release-reason filtering, reload ordering, the estimator override, idle-timer
 ownership, the no-orchestrator settle, sampler-interval leaks, the post-release abort re-check, the
 VRAM peak arithmetic, the default calibration mode, and warm reuse in `'single'` mode). Live smoke
@@ -178,13 +181,15 @@ re-verified against the pinned binary in Phase 7.
 event surface, and every existing config key are preserved. Hosts that relied on the wrapper being
 reachable off-loopback must now set `DiffusionServerConfig.host`. Persisted offload-calibration
 reports without a `policyVersion` were measured under the old one-spawn-per-image model and are
-worth re-measuring. When this work is released it will be a **minor** version per the repository
-release skill (new public methods, config fields, exported types, response fields, and a lifecycle
-event, all backward compatible); the migration guide is written at release time.
+worth re-measuring. This is a **minor** release (new public methods, config fields, exported types,
+response fields, and a lifecycle event, all backward compatible); see
+`genai-electron-docs/migration-0-24-to-0-25.md`. Because this is a pre-1.0 minor, dependency ranges
+such as `^0.24.0` do not admit v0.25.0 — update the range or pin explicitly.
 
-**Release status:** Unreleased, accumulating on `feat/sd-server-backend`. No version bump, migration
-guide, tag, GitHub release, or npm publish is included; those remain deferred until explicit release
-preparation.
+**Release status:** Preparing the single release PR from `feat/sd-server-backend`. Merge, the
+annotated `v0.25.0` tag, the GitHub release, and the maintainer's `npm publish` (guarded by
+`prepublishOnly`) remain pending at the time of writing. Deferred follow-ups are tracked in the root
+`ISSUE-diffusion-followups.md`.
 
 ---
 
