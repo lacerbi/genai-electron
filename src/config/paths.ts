@@ -38,6 +38,14 @@ export const PATHS = {
   config: path.join(BASE_DIR, 'config'),
   /** Temporary files directory (for intermediate image generation outputs, etc.) */
   temp: path.join(BASE_DIR, 'temp'),
+  /**
+   * LoRA directory handed to stable-diffusion.cpp as `--lora-model-dir`.
+   *
+   * Always a library-owned directory (never the model directory): sd.cpp enumerates the
+   * LoRA dir, and pointing it at the models directory would make it try to read model
+   * files as LoRAs (leejet/stable-diffusion.cpp#1468). Normally empty.
+   */
+  loras: path.join(BASE_DIR, 'loras'),
 } as const;
 
 /**
@@ -61,6 +69,7 @@ export async function ensureDirectories(): Promise<void> {
     PATHS.logs,
     PATHS.config,
     PATHS.temp,
+    PATHS.loras,
   ];
 
   await Promise.all(directories.map((dir) => mkdir(dir, { recursive: true })));

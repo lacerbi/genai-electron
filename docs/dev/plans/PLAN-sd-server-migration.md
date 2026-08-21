@@ -23,13 +23,13 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
 ## Tracking (live checklist; details in the phase sections below)
 
 - Phase 1 — backend modules
-  - [ ] types (`images.ts`, `servers.ts` deferred to P3), exports (`types/index.ts`, `index.ts`)
-  - [ ] `DIFFUSION_BACKEND_DEFAULTS`, calibration defaults `policyVersion`/`usageMode` (+ type literal)
-  - [ ] `PATHS.loras` + `ensureDirectories()`
-  - [ ] `src/process/sd-server-client.ts` + tests
-  - [ ] `src/process/sd-server-runner.ts` (DI, tap, confirmed stop) + tests
-  - [ ] ESLint `no-restricted-imports` for `src/process/**`
-  - [ ] build/lint/tests green; commit
+  - [x] types (`images.ts`, `servers.ts` deferred to P3), exports (`types/index.ts`, `index.ts`)
+  - [x] `DIFFUSION_BACKEND_DEFAULTS`, calibration defaults `policyVersion`/`usageMode` (+ type literal)
+  - [x] `PATHS.loras` + `ensureDirectories()`
+  - [x] `src/process/sd-server-client.ts` + tests
+  - [x] `src/process/sd-server-runner.ts` (DI, tap, confirmed stop) + tests
+  - [x] ESLint `no-restricted-imports` for `src/process/**` (in `eslint.config.mjs`)
+  - [ ] build/lint/tests green (done: build 0 errors, lint 0 errors, 1147/1147 tests); commit
 - Phase 2 — provisioning
   - [ ] `ensureBinary` → `'sd-server'`; search names
   - [ ] `runSdServerTest` via runner/client; termination-unconfirmed mapping; drop `.test-output.png`
@@ -268,8 +268,12 @@ provisioning changes yet.
   startup abort.
 
 **Verification**:
-- [ ] `npm run build` 0 errors; new tests green; lint rule rejects an `electron` import in
+- [x] `npm run build` 0 errors; new tests green; lint rule rejects an `electron` import in
   `src/process/` (prove with a throwaway file, then delete it).
+  Done 2026-08-21: build 0 errors, `npm run lint` 0 errors, `npm run format:check` clean,
+  59 new tests (23 client + 36 runner), full suite 1147/1147 across 41 suites; the throwaway
+  `src/process/__lint-probe.ts` produced both expected `no-restricted-imports` errors
+  (`electron`, `../config/paths.js`) and was deleted.
 
 ### Phase 2: Binary provisioning
 **Goal**: `sd-server` is the validated primary binary; Phase-2 validation exercises the production

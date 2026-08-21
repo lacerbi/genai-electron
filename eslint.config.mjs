@@ -70,6 +70,34 @@ export default tseslint.config(
     },
   },
 
+  // Node-safety guard for src/process/**: these modules are reused by the Electron-free
+  // subpath entry points and by binary validation, so they must never pull in the Electron
+  // runtime or the userData-derived path module (paths.ts calls app.getPath at import time).
+  {
+    files: ['src/process/**/*.ts'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: 'electron',
+              message:
+                'src/process/** must stay Node-safe. Pass Electron-derived values in as arguments.',
+            },
+          ],
+          patterns: [
+            {
+              group: ['**/config/paths.js', '**/config/paths'],
+              message:
+                'src/process/** must stay Node-safe. config/paths.js resolves Electron userData at import time — pass resolved paths in as arguments.',
+            },
+          ],
+        },
+      ],
+    },
+  },
+
   // Test files configuration
   {
     files: ['**/*.test.ts', '**/*.spec.ts'],
