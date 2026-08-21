@@ -1061,7 +1061,7 @@ export class DiffusionServerManager extends ServerManager {
 
     return this.ensureBinaryHelper(
       'diffusion',
-      'sd-cli',
+      'sd-server',
       BINARY_VERSIONS.diffusionCpp,
       modelInfo?.path,
       forceValidation,

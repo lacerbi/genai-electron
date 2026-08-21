@@ -29,12 +29,12 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
   - [x] `src/process/sd-server-client.ts` + tests
   - [x] `src/process/sd-server-runner.ts` (DI, tap, confirmed stop) + tests
   - [x] ESLint `no-restricted-imports` for `src/process/**` (in `eslint.config.mjs`)
-  - [ ] build/lint/tests green (done: build 0 errors, lint 0 errors, 1147/1147 tests); commit
+  - [x] build/lint/tests green (build 0 errors, lint 0 errors, 1147/1147 tests); committed `13b8dec`
 - Phase 2 — provisioning
-  - [ ] `ensureBinary` → `'sd-server'`; search names
-  - [ ] `runSdServerTest` via runner/client; termination-unconfirmed mapping; drop `.test-output.png`
-  - [ ] POSIX chmod-before-revalidate
-  - [ ] `BinaryManager.test.ts` adapted; build/lint/tests green; commit
+  - [x] `ensureBinary` → `'sd-server'`; search names
+  - [x] `runSdServerTest` via runner/client; termination-unconfirmed mapping; drop `.test-output.png`
+  - [x] POSIX chmod-before-revalidate
+  - [x] `BinaryManager.test.ts` adapted; build/lint/tests green; commit
   - [ ] live: pinned 782 provisioning + smoke re-run + re-validation (done in P7 if machine busy)
 - Phase 3 — manager rewire
   - [ ] config fields + host bind + `VALID_CONFIG_FIELDS`
@@ -307,7 +307,11 @@ launch path; existing installs re-validate without re-downloading on every platf
   unchanged).
 
 **Verification**:
-- [ ] Build/lint/test green.
+- [x] Build/lint/test green.
+  Done 2026-08-21: build 0 errors, `npm run lint` 0 errors, `npm run format:check` clean,
+  `BinaryManager.test.ts` 86/86 (7 new diffusion/chmod tests), full suite 1154/1154 across
+  41 suites. The job budget reuses the ready budget (120 s multi-component / 15 s otherwise)
+  as a second, independent clock; polling uses `DIFFUSION_BACKEND_DEFAULTS.jobPollIntervalMs`.
 - [ ] Live (laptop; the cached 746 install is superseded by the 782 pin on first `start()`):
   provisioning downloads/validates `782` via `sd-server`; then re-run the smoke script against the
   **pinned binary** to confirm `/sdcpp/v1/*` shapes, 202/409 semantics, and the marker literals

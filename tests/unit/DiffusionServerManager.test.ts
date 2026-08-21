@@ -431,6 +431,8 @@ describe('DiffusionServerManager', () => {
       });
 
       expect(mockBinaryConfigs.at(-1)).toMatchObject({
+        // sd-server is the validated primary binary (sd-cli is no longer executed)
+        binaryName: 'sd-server',
         testOptimizationArgs: ['--clip-on-cpu', '--offload-to-cpu', '--diffusion-fa'],
       });
       expect(mockBinaryConfigs.at(-1).testOptimizationArgs).not.toContain('-t');
