@@ -1697,12 +1697,17 @@ describe('DiffusionServerManager (generation)', () => {
   });
 
   describe('cold vs warm load estimates', () => {
-    /** Cold spawns take ~60 ms and report weight-upload progress while they run. */
-    const installSlowSpawn = (): void => {
+    /**
+     * Cold spawns take `ticks × tickMs` (default ~60 ms) and report weight-upload progress
+     * while they run. Real timers: keep the spawn being MEASURED (first cold run) clearly
+     * longer than the spawn being JUDGED against that measurement (later cold run), or CI
+     * timer jitter alone can push the judged run past the learned estimate.
+     */
+    const installSlowSpawn = (ticks = 3, tickMs = 20): void => {
       mockStartSdServerRunner.mockImplementation(async (options: any) => {
-        for (let i = 1; i <= 3; i++) {
-          await sleep(20);
-          options.onStdoutEvent({ type: 'bytes', done: i * 100, total: 300 });
+        for (let i = 1; i <= ticks; i++) {
+          await sleep(tickMs);
+          options.onStdoutEvent({ type: 'bytes', done: i * 100, total: ticks * 100 });
         }
         const handle = createSdServerHandle();
         handle.launch = options;
@@ -1744,6 +1749,11 @@ describe('DiffusionServerManager (generation)', () => {
       expect(internals.warmLoadTime).toBeLessThan(internals.modelLoadTime);
 
       await diffusionServer.releaseBackend({ reason: 'single' });
+      // The judged cold spawn is ~16 ms against a learned cold estimate of >= ~60 ms, so the
+      // loading percentage has a wide margin even with real-timer jitter on slow CI runners
+      // (with instant fake jobs the learned diffusion/decode estimates are ~0, so the load
+      // estimate IS the denominator — a same-length spawn would sit right at 100 %).
+      installSlowSpawn(2, 8);
       const coldAgain = await runGeneration('cold-again');
 
       // The load stage must never reach 100 %: the denominator still carries the
