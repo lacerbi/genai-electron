@@ -294,12 +294,6 @@ describe('DiffusionServerManager calibration', () => {
     });
   };
 
-  /** Pin process.platform for one test; the returned function restores it */
-  const withPlatform = (platform: string): (() => void) => {
-    const original = Object.getOwnPropertyDescriptor(process, 'platform')!;
-    Object.defineProperty(process, 'platform', { value: platform, configurable: true });
-    return () => Object.defineProperty(process, 'platform', original);
-  };
 
   const GPU_TOTAL_BYTES = 8 * 1024 ** 3;
 
@@ -1268,15 +1262,7 @@ describe('DiffusionServerManager calibration', () => {
   });
 
   describe('VRAM sampling', () => {
-    let restorePlatform: (() => void) | undefined;
-
-    afterEach(() => {
-      restorePlatform?.();
-      restorePlatform = undefined;
-    });
-
     it('reports machine-wide peak and idle VRAM per run when telemetry is trusted', async () => {
-      restorePlatform = withPlatform('win32');
       // gate, window start, window end, idle-after-release (then repeats)
       scriptVramReadings([
         7 * 1024 ** 3,
@@ -1298,7 +1284,6 @@ describe('DiffusionServerManager calibration', () => {
     });
 
     it('measures the burst idle figure right after the job, with the backend resident', async () => {
-      restorePlatform = withPlatform('linux');
       scriptVramReadings([
         7 * 1024 ** 3,
         6 * 1024 ** 3,
@@ -1319,7 +1304,6 @@ describe('DiffusionServerManager calibration', () => {
     });
 
     it('omits both fields when any reading in the window is untrusted', async () => {
-      restorePlatform = withPlatform('win32');
       // The window's first reading has no vramAvailable → nothing is comparable
       scriptVramReadings([7 * 1024 ** 3, undefined, 4 * 1024 ** 3, 5 * 1024 ** 3]);
 
@@ -1336,7 +1320,6 @@ describe('DiffusionServerManager calibration', () => {
     });
 
     it('does not sample at all when the platform reports no VRAM availability', async () => {
-      restorePlatform = withPlatform('linux');
       mockSystemInfo.getGPUInfo.mockResolvedValue({
         available: true,
         type: 'amd',
@@ -1356,9 +1339,15 @@ describe('DiffusionServerManager calibration', () => {
       expect(telemetryReadCount()).toBe(1);
     });
 
-    it('never samples on macOS (unified memory has no VRAM availability)', async () => {
-      restorePlatform = withPlatform('darwin');
-      scriptVramReadings([7 * 1024 ** 3, 2 * 1024 ** 3]);
+    it('never samples on macOS (unified memory reports no VRAM availability)', async () => {
+      // Apple GPUs never carry `vramAvailable` (gpu-detect only sets it for NVIDIA on
+      // Linux/Windows), so the one-time gate probe is the only telemetry read.
+      mockSystemInfo.getGPUInfo.mockResolvedValue({
+        available: true,
+        type: 'apple',
+        name: 'Apple M-series',
+        vram: GPU_TOTAL_BYTES,
+      });
 
       const report = await runCalibrate(diffusionServer, {
         modelId: 'sdxl-turbo',
@@ -1368,7 +1357,7 @@ describe('DiffusionServerManager calibration', () => {
 
       expect(report.runs[0]!.vramPeakBytes).toBeUndefined();
       expect(report.runs[0]!.vramIdleBytes).toBeUndefined();
-      expect(telemetryReadCount()).toBe(0);
+      expect(telemetryReadCount()).toBe(1);
     });
 
     /**
@@ -1380,7 +1369,6 @@ describe('DiffusionServerManager calibration', () => {
       await (diffusionServer as any).createCalibrationVramSampler();
 
     it('folds a deeper mid-window interval reading into the peak', async () => {
-      restorePlatform = withPlatform('win32');
       // gate, window start, the 1 s tick, window end, idle
       scriptVramReadings([
         7 * 1024 ** 3,
@@ -1414,7 +1402,6 @@ describe('DiffusionServerManager calibration', () => {
     });
 
     it('omits both figures when the window produced no peak reading', async () => {
-      restorePlatform = withPlatform('win32');
       scriptVramReadings([7 * 1024 ** 3, 6 * 1024 ** 3, 5 * 1024 ** 3, 4 * 1024 ** 3]);
       const sampler = await buildSampler();
 
@@ -1433,7 +1420,6 @@ describe('DiffusionServerManager calibration', () => {
     });
 
     it('stops sampling when a sweep is aborted mid-window', async () => {
-      restorePlatform = withPlatform('win32');
       scriptVramReadings([7 * 1024 ** 3, 6 * 1024 ** 3]);
 
       // Capture the sampler the sweep builds, so the assertion is about ITS timer and
@@ -1474,7 +1460,6 @@ describe('DiffusionServerManager calibration', () => {
     });
 
     it('leaves no sampling timer behind when the sweep ends', async () => {
-      restorePlatform = withPlatform('win32');
       scriptVramReadings([7 * 1024 ** 3, 6 * 1024 ** 3]);
       // Only setTimeout/setInterval are faked (auto-advanced by real time), so the
       // sweep runs normally while pending timers stay observable

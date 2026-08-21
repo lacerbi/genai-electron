@@ -1803,8 +1803,10 @@ export class DiffusionServerManager extends ServerManager {
    * @private
    */
   private async createCalibrationVramSampler(): Promise<CalibrationVramSampler | undefined> {
-    if (process.platform === 'darwin') return undefined;
-
+    // No explicit platform gate: the `vramAvailable` probe below is the real criterion. macOS
+    // (unified memory) never reports it, so it is excluded by construction — and a platform check
+    // on `process.platform` would be untestable on arm64 macOS runners, where pinning the platform
+    // breaks binary provisioning (`win32-arm64` is not a supported platform key).
     try {
       const gpu = await this.systemInfo.getGPUInfo({
         timeoutMs: CALIBRATION_VRAM_TELEMETRY_TIMEOUT_MS,
