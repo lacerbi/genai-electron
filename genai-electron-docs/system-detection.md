@@ -248,7 +248,7 @@ canRunModel(
 **Parameters**:
 - `modelInfo: ModelInfo` - Model information to check
 - `options?: { checkTotalMemory?: boolean }` - Optional configuration
-  - `checkTotalMemory` - If `true`, checks against total system memory instead of currently available memory. Use this for servers that load models on-demand (e.g., diffusion server). Default: `false` (checks available memory)
+  - `checkTotalMemory` - If `true`, checks against total system memory instead of currently available memory. Use this for servers that load the model on demand rather than at start (e.g., the diffusion server, whose backend is spawned at the first image request). Default: `false` (checks available memory)
   - `gpuLayers` - Number of GPU layers to use for VRAM calculation. If omitted, uses auto-detected value.
   - `totalLayers` - Total model layers (overrides GGUF metadata). If omitted, uses model metadata.
 
@@ -258,7 +258,7 @@ canRunModel(
 
 **When to Use Each Mode**:
 - **Default (available memory)**: For servers that load the model at startup (e.g., LLM server). Ensures there's enough RAM right now.
-- **Total memory mode**: For servers that load models on-demand (e.g., diffusion server). Validates the model will eventually fit, allowing ResourceOrchestrator to free up memory when needed.
+- **Total memory mode**: For servers that load the model on demand (e.g., the diffusion server — `start()` only brings up its HTTP wrapper, and the model is read when the stable-diffusion.cpp backend is spawned at the first image request). Validates the model will eventually fit, allowing ResourceOrchestrator to free up memory before that happens.
 
 **Example (Default - Check Available Memory)**:
 ```typescript
@@ -277,7 +277,7 @@ if (check.possible) {
 }
 ```
 
-**Example (Total Memory - For On-Demand Loading)**:
+**Example (Total Memory - For On-Demand Loading at the First Image)**:
 ```typescript
 const modelInfo = await modelManager.getModelInfo('sdxl-turbo');
 const check = await systemInfo.canRunModel(modelInfo, { checkTotalMemory: true });

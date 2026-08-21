@@ -737,7 +737,7 @@ ipcMain.handle('diffusion:cancel', async () => {
 
 **Key insights**:
 - `getActiveGenerationId()` avoids threading the generation ID back through the renderer — the main process already knows the in-flight ID
-- `cancelImageGeneration()` kills the running sd-cli process and halts batch loops between images
+- `cancelImageGeneration()` stops the backend job — a still-queued job through the backend's job API, a generating one by killing the `sd-server` backend process — and halts batch loops between images
 - Cancelling a generation that is already terminal is a safe no-op
 - With orchestration, the offloaded LLM still reloads in the background after a cancel
 

@@ -5,6 +5,156 @@
 
 ---
 
+## Unreleased: Persistent sd-server Diffusion Backend (started 2026-08-21)
+
+**Backend and process model**
+
+- Replaced the per-image `sd-cli` spawn inside `DiffusionServerManager` with a persistent
+  `sd-server` child driven through stable-diffusion.cpp's native async job API
+  (`POST /sdcpp/v1/img_gen` → 202, `GET /sdcpp/v1/jobs/{id}`, `POST …/cancel`,
+  `GET /sdcpp/v1/capabilities`). The `node:http` wrapper remains the public server and its wire
+  contract, manager methods, and `started`/`stopped`/`crashed`/`binary-log` events are unchanged.
+  The backend is internal and lazily spawned on the first image — `start()` still loads no model
+  and holds no VRAM. No stable-diffusion.cpp pin change (`master-782-b290693` already ships the
+  job API).
+- Added two Node-safe modules: `src/process/sd-server-client.ts` (typed `/sdcpp/v1/*` client plus
+  `buildSdServerImageRequest()`) and `src/process/sd-server-runner.ts` (spawn, capabilities-based
+  readiness, bind-collision retry, line-buffered stdout tap, bounded tails, confirmed
+  termination). An ESLint `no-restricted-imports` override keeps `src/process/**` free of
+  `electron` and `../config/paths.js` imports.
+- Generation progress now comes from the runner's stdout tap instead of per-spawn chunk regexes,
+  driven by one exported literal table (`SD_SERVER_STDOUT_MARKERS`) plus the step/byte bars;
+  `isSdServerProgressBarLine()` keeps bar redraws out of the log file. Images travel as base64 in
+  the job JSON, so no PNG is written to disk.
+
+**Residency policy and resource orchestration**
+
+- Added a residency policy for the backend: `'single'` releases the backend right after the image,
+  `'burst'` keeps it warm until `idleTimeoutMs` elapses. The computed default (`usageMode: 'auto'`)
+  is `'single'` when the LLM had to be offloaded for the image and `'burst'` otherwise; a
+  per-request `usageMode` overrides a server-level one.
+- `ResourceOrchestrator` became symmetric: it releases the diffusion backend **before** reloading
+  an offloaded LLM, defers the reload while a `'burst'` backend stays resident (the reload then
+  fires on the qualifying release — idle timeout, explicit, crash, or stop), routes `count > 1`
+  batches through `orchestrateBatchGeneration()`, and yields a resident backend when an LLM start
+  needs the VRAM via `prepareForLLMStart()`.
+- Added `LlamaServerManager.registerPreStartHook()` (hooks run inside `start()` after
+  `setStatus('starting')`, so the concurrency guard is already armed; hook errors flow through the
+  normal startup-error path, and are logged-and-ignored on the auto-restart path).
+
+**Public API additions**
+
+- `DiffusionServerManager.releaseBackend({ reason, waitForInFlight })`, `getBackendInfo()`,
+  `resolveUsageMode()`, `settleResidency()`, and the `'backend-status'` event
+  (`DiffusionBackendStatusEvent`, reasons include `'spawned'`, `'ready'`, `'job'`, `'crashed'`,
+  `'start-failed'` and every `DiffusionBackendReleaseReason`).
+- `getInfo()` gains `backend: DiffusionBackendInfo`; `/health` gains `backend` (the backend state
+  string). `isHealthy()` stays wrapper-scoped, so a `'single'` release never flips a host's health
+  poll.
+- New config fields on `DiffusionServerConfig`: `host`, `startupTimeout`, `usageMode`,
+  `idleTimeoutMs`; `ImageGenerationConfig` gains `usageMode`. New exported types:
+  `DiffusionUsageMode`, `DiffusionBackendState`, `DiffusionBackendReleaseReason`,
+  `DiffusionBackendInfo`, `DiffusionBackendStatusEvent`; new constant `DIFFUSION_BACKEND_DEFAULTS`
+  (`idleTimeoutMs` 300 000, `jobPollIntervalMs` 200, ready/stop timeouts,
+  `maxTransientPollFailures`). `ServerEvent` declares `'backend-status'` and the already-emitted
+  `'calibration-progress'`.
+- HTTP wrapper: a malformed JSON body is now `400 INVALID_REQUEST`, a POST while the wrapper is not
+  running is `503 SERVER_NOT_RUNNING`, an invalid `usageMode` is `400`, and a cancelled generation
+  reports `GENERATION_CANCELLED` with registry status `cancelled`. The 503 `SERVER_BUSY` gate is
+  unchanged and is now claimed synchronously, so two back-to-back POSTs can never both win.
+
+**Offload calibration**
+
+- `calibrate()` measures the residency mode the caller selects: `DiffusionCalibrationConfig.usageMode`
+  (default `DIFFUSION_CALIBRATION_DEFAULTS.usageMode = 'single'` — a cold spawn per timed sample,
+  matching the common single-shot production case and the pre-migration report semantics);
+  `'burst'` measures warm samples on one launch per combo.
+- Reports echo `usageMode` and carry `policyVersion: 'diffusion-offload-v2'`, plus per-run
+  `vramPeakBytes` / `vramIdleBytes` (machine-wide, ~1 s sampling over the representative sample,
+  omitted when GPU telemetry is untrusted and always on macOS). A stored report with no
+  `policyVersion` is a pre-migration v1 report.
+
+**Binary provisioning**
+
+- `sd-server(.exe)` is now the primary diffusion binary that provisioning locates, chmods, and
+  validates; `sd-cli` is no longer executed by the library. Phase-2 validation runs the production
+  launch path — `startSdServerRunner()` plus one 64×64/1-step job through the job API — and a kill
+  it cannot confirm aborts the variant loop instead of downloading the next variant over a live
+  child. The `.test-output.png` handling is gone.
+- On POSIX, an existing install now `chmod 0o755`s the primary binary **before** re-testing it, so
+  the primary-name switch yields a one-time re-validation instead of a re-download.
+- `<userData>/loras` is created and always passed as `--lora-model-dir` (upstream #1468 insurance);
+  `cwd` is the binary directory and `--color` is never passed.
+
+**Tests and tooling**
+
+- `tests/unit/DiffusionServerManager.test.ts` was replaced by three suites split by concern —
+  `…lifecycle.test.ts`, `…routes.test.ts` (new HTTP-level route coverage), `…generation.test.ts` —
+  over the shared faithful backend seam `tests/unit/helpers/sd-server-mocks.ts`, whose
+  `raceWithExit()` really races observed exit. New `sd-server-client` / `sd-server-runner` suites
+  (pure DI, no timing races) and a new `ResourceOrchestrator.integration.test.ts` exercising a real
+  orchestrator against a fake `LlamaServerManager`.
+
+**Behavior changes**
+
+- The HTTP wrapper binds `127.0.0.1` by default (previously all interfaces). It is unauthenticated
+  and CORS-open, so loopback is the safe default; hosts that relied on remote access must set
+  `host` explicitly.
+- `getInfo().pid` (and `getPid()`) is now the internal backend's PID (the wrapper is in-process and
+  has no PID of its own) and is absent whenever the backend is `'absent'`.
+- Existing installs re-validate the diffusion binary once, without re-downloading, because the
+  primary binary name changed from `sd-cli` to `sd-server`.
+- `stop()` always releases the backend first and resolves only after confirmed death — including a
+  backend left resident by `calibrate()`; `attachAppLifecycle()` releases the backend (reason
+  `'shutdown'`, which starts no LLM) before stopping the servers.
+- Malformed JSON on `POST /v1/images/generations` answers `400` (was `500`); a POST while the
+  wrapper is not running answers `503 SERVER_NOT_RUNNING`; a cancelled generation surfaces
+  `GENERATION_CANCELLED` and registry status `cancelled`.
+- Cancelling a generating job kills the backend, so the next image reloads the model — the same
+  cost as before, when every image reloaded. `DELETE /v1/images/generations/:id` answers on
+  initiation and does not wait for confirmed death.
+- No `userData/temp/sd-output-*.png` files are produced any more (results are base64 in the job
+  response); pre-existing leftovers are not swept.
+- `batchSize` no longer becomes an `-b` argv flag; it maps to `batch_count` in the job request (the
+  first image of the batch is still what is returned). `gpuLayers` remains an accepted no-op.
+- Warm generations report fewer `loading`-stage ticks, because the model is already resident;
+  `CalibrationRun.stageMs.loadMs` now means "sample start → first `generating` marker", where the
+  start is the backend spawn in `'single'` mode and the job submission in `'burst'` mode. Timings
+  are only comparable between reports sharing `usageMode`, which is why reports now carry
+  `policyVersion`.
+- A backend crash is reported as `'backend-status'` (`reason: 'crashed'`), not `'crashed'`: the
+  wrapper stays `running` and the next request respawns the backend.
+
+**Validation:** Build passes with 0 TypeScript errors; ESLint reports 0 errors with the
+repository's existing 114 warnings; `npm run format:check` is clean; the full suite passes
+1331/1331 across 44 suites at `b5706c1`. Deliberate mutations were used at each phase to prove the
+new assertions bite (release-reason filtering, reload ordering, the estimator override, idle-timer
+ownership, the no-orchestrator settle, sampler-interval leaks, the post-release abort re-check, the
+VRAM peak arithmetic, the default calibration mode, and warm reuse in `'single'` mode). Live smoke
+against the pinned `master-782-b290693` binary is **pending** (planned as Phase 7 of
+`docs/dev/plans/PLAN-sd-server-migration.md`), as is the final `/doublecheck`.
+
+Smoke reference (2026-08-21, RTX 4060 Laptop 8 GB, cached `master-746` build, FLUX.2 klein 4B Q4_0,
+768², 4 steps, cfg 1, euler, seed 42): with `--clip-on-cpu --diffusion-fa` spawn→listening 2.4 s,
+cold job 18.4 s, warm 15.3/15.7 s, peak 6597 MiB; with `--offload-to-cpu --diffusion-fa` spawn 0.6 s,
+cold 11.2 s, warm 6.8/6.9 s, peak 4249 MiB, ~503 MiB idle; single-shot `sd-server` ≈ `sd-cli`
+(22.2 s vs 18.4 s cold on the same combo). Burst saves ~33–39 % per image. These numbers are
+re-verified against the pinned binary in Phase 7.
+
+**Migration:** No consumer action is required: the wrapper's HTTP contract, the manager's method and
+event surface, and every existing config key are preserved. Hosts that relied on the wrapper being
+reachable off-loopback must now set `DiffusionServerConfig.host`. Persisted offload-calibration
+reports without a `policyVersion` were measured under the old one-spawn-per-image model and are
+worth re-measuring. When this work is released it will be a **minor** version per the repository
+release skill (new public methods, config fields, exported types, response fields, and a lifecycle
+event, all backward compatible); the migration guide is written at release time.
+
+**Release status:** Unreleased, accumulating on `feat/sd-server-backend`. No version bump, migration
+guide, tag, GitHub release, or npm publish is included; those remain deferred until explicit release
+preparation.
+
+---
+
 ## v0.24.0: Node-Safe llama-server Launch (2026-08-18)
 
 - Added `genai-electron/llama-server-launch`, a sealed Electron-free ESM facade for canonical argv

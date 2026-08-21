@@ -231,7 +231,7 @@ const DiffusionServerControl: React.FC = () => {
       setGenerateError(`Cancel failed: ${(err as Error).message}`);
     }
     // Note: with genai-lite <= 0.9.0 the awaiting generateImage promise only
-    // settles at its own client timeout; the sd-cli process is killed now.
+    // settles at its own client timeout; the resident sd-server backend is killed now.
     setGenerating(false);
     setGenerationProgress(null);
   };
@@ -349,12 +349,16 @@ const DiffusionServerControl: React.FC = () => {
             <label>Health:</label>
             <StatusIndicator status={isHealthy ? 'running' : 'stopped'} label={serverInfo.health} />
           </div>
-          {serverInfo.pid && (
-            <div className="status-item">
-              <label>PID:</label>
-              <span>{serverInfo.pid}</span>
-            </div>
-          )}
+          {/* The wrapper is in-process; the sd-server backend is the thing with a PID.
+              It is spawned on the first image and may be released again right after. */}
+          <div className="status-item">
+            <label>Backend:</label>
+            <span>{serverInfo.backend?.state ?? '—'}</span>
+          </div>
+          <div className="status-item">
+            <label>Backend PID:</label>
+            <span>{serverInfo.pid ?? '—'}</span>
+          </div>
           <div className="status-item">
             <label>Port:</label>
             <span>{serverInfo.port}</span>

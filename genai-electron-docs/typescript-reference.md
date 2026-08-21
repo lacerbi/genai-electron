@@ -521,18 +521,21 @@ LLM-only fields.
 
 ### DiffusionServerInfo
 
-Standalone interface mirroring `ServerInfo` fields (adds `busy`; has no `loadTimeMs`).
+Standalone interface mirroring `ServerInfo` fields (adds `busy` and `backend`; has no `loadTimeMs`).
 
 ```typescript
 interface DiffusionServerInfo {
   status: ServerStatus;
   health: HealthStatus;
-  pid?: number;
+  pid?: number;                      // Internal sd-server backend PID while resident (the
+                                     //   public server is an in-process HTTP wrapper with no
+                                     //   PID of its own); absent when backend is 'absent'
   port: number;
   modelId: string;
   startedAt?: string;
   error?: string;
   busy?: boolean;
+  backend?: DiffusionBackendInfo;    // Internal stable-diffusion.cpp backend snapshot (additive)
 }
 ```
 
@@ -542,16 +545,84 @@ interface DiffusionServerInfo {
 interface DiffusionServerConfig {
   modelId: string;
   port?: number | 'auto';            // Default: 8081; 'auto' picks a free OS port
-  threads?: number;
-  gpuLayers?: number;
+  host?: string;                     // Interface the HTTP wrapper binds to. Default: '127.0.0.1'
+                                     //   (loopback only — the wrapper is unauthenticated and
+                                     //   allows CORS from any origin)
+  startupTimeout?: number;           // Max ms for the BACKEND to go spawn → ready (not start()
+                                     //   itself). Default: DEFAULT_TIMEOUTS.serverStart (120000)
+  usageMode?: DiffusionUsageMode | 'auto'; // Default residency policy. Default: 'auto' → 'single'
+                                     //   when the LLM was offloaded for the image, else 'burst'
+  idleTimeoutMs?: number;            // Idle time before a 'burst'-resident backend is released.
+                                     //   Default: DIFFUSION_BACKEND_DEFAULTS.idleTimeoutMs
+                                     //   (300000); 0 disables the timer
+  threads?: number;                  // CPU threads; passed to the backend as -t at launch
+  gpuLayers?: number;                // Accepted for config-shape compatibility, NOT passed to
+                                     //   sd.cpp (GPU offload is automatic)
   forceValidation?: boolean;
   clipOnCpu?: boolean;               // Offload CLIP text encoder to CPU (--clip-on-cpu). undefined=auto-detect, true=force on, false=force off.
   vaeOnCpu?: boolean;                // Offload VAE decoder to CPU (--vae-on-cpu). undefined=auto-detect, true=force on, false=force off.
-  batchSize?: number;                // Batch size for generation (-b flag). Not auto-detected.
+  batchSize?: number;                // Maps to `batch_count` in the backend job request (the
+                                     //   first image of the batch is returned); omitted → 1.
+                                     //   Not auto-detected.
   offloadToCpu?: boolean;            // Offload model weights to CPU RAM (--offload-to-cpu). undefined=auto-detect, true=force on, false=force off.
   diffusionFlashAttention?: boolean; // Enable flash attention (--diffusion-fa). undefined=auto-detect (enabled for Flux 2), true=force on, false=force off.
 }
 ```
+
+The four offload flags are **launch** arguments of the backend process: a generation that resolves
+to a different set forces a respawn (release reason `'flags-changed'`).
+
+### Diffusion backend types
+
+The public diffusion server is an in-process HTTP wrapper; these describe the internal
+stable-diffusion.cpp `sd-server` child it drives. See
+[Backend Residency](image-generation.md#backend-residency).
+
+```typescript
+type DiffusionUsageMode = 'burst' | 'single';
+
+type DiffusionBackendState = 'absent' | 'starting' | 'ready' | 'busy' | 'stopping';
+
+type DiffusionBackendReleaseReason =
+  | 'single'         // residency policy released it right after the image
+  | 'idle-timeout'   // a 'burst' backend sat idle past idleTimeoutMs
+  | 'explicit'       // releaseBackend() default
+  | 'flags-changed'  // the next generation needs different launch flags
+  | 'cancel'         // a generating job was cancelled (sampling cannot be interrupted)
+  | 'crashed'        // the process exited unexpectedly
+  | 'stop'           // diffusionServer.stop()
+  | 'shutdown'       // attachAppLifecycle() quit path
+  | 'llm-start'      // yielded to an LLM start via the pre-start hook
+  | 'calibration';   // an offload-calibration sweep manages its own backend
+
+interface DiffusionBackendInfo {
+  state: DiffusionBackendState;
+  pid?: number;                      // present once spawned
+  startedAt?: string;                // ISO timestamp of the spawn
+  loadTimeMs?: number;               // spawn → ready duration
+  lastUsedAt?: string;               // ISO timestamp of the last finished job
+  flags?: {                          // the launch flags this process is pinned to
+    clipOnCpu: boolean;
+    vaeOnCpu: boolean;
+    offloadToCpu: boolean;
+    diffusionFlashAttention: boolean;
+  };
+}
+
+// Payload of the 'backend-status' event
+interface DiffusionBackendStatusEvent {
+  state: DiffusionBackendState;
+  previous: DiffusionBackendState;
+  reason?: DiffusionBackendReleaseReason
+    | 'spawned' | 'ready' | 'job'    // forward transitions
+    | 'start-failed';                // a spawn that never became ready (not a crash)
+  exit?: { code: number | null; signal: NodeJS.Signals | null };
+}
+```
+
+`releaseBackend()` takes `{ reason?: DiffusionBackendReleaseReason; waitForInFlight?: boolean }`
+and resolves after confirmed process death; `getBackendInfo(): DiffusionBackendInfo` is the
+synchronous snapshot.
 
 ### LlamaServerConfig
 
@@ -593,8 +664,32 @@ type ServerEvent =
   | 'health-check-ok'
   | 'health-check-failed'
   | 'binary-log'
-  | 'binary-progress';
+  | 'binary-progress'
+  | 'backend-status'        // Diffusion only: DiffusionBackendStatusEvent
+  | 'calibration-progress'; // Diffusion only: DiffusionCalibrationProgress
 ```
+
+`'crashed'` is never emitted by `DiffusionServerManager`: its public server is the in-process HTTP
+wrapper, which survives a backend failure. An unexpected backend exit surfaces as
+`'backend-status'` with `reason: 'crashed'`.
+
+### LlamaPreStartHook
+
+Callback registered through `llamaServer.registerPreStartHook()`; runs inside `start()` right
+after the status flips to `'starting'` and before any port/binary/model work. See
+[registerPreStartHook()](llm-server.md#registerprestarthook).
+
+```typescript
+type LlamaPreStartHook = (ctx: {
+  config: LlamaServerConfig;         // configuration passed to start() (port may still be 'auto')
+  reason: 'start' | 'auto-restart';
+}) => Promise<void> | void;
+
+registerPreStartHook(hook: LlamaPreStartHook): () => void; // returns an unregister function
+```
+
+A hook that throws fails a manual `start()` (status resets to `'stopped'`, typed errors preserved);
+on the auto-restart path the error is logged and ignored.
 
 ### ServerEventData
 
@@ -1448,6 +1543,8 @@ interface ImageGenerationConfig {
   seed?: number;
   sampler?: ImageSampler;
   count?: number;
+  usageMode?: DiffusionUsageMode;    // Residency policy for THIS request; omitted = the server's
+                                     //   DiffusionServerConfig.usageMode decides
   onProgress?: (
     currentStep: number,
     totalSteps: number,
@@ -1545,7 +1642,8 @@ interface DiffusionCalibrationGeneration {
                       //   can flip the winner. Distilled models (Flux Klein, Turbo) run at 1.
   sampler: ImageSampler; // match production (per-step cost varies by sampler)
   threads?: number;   // match production -t (offload is CPU-sensitive); omitted = sd.cpp default
-  batchSize?: number; // match production -b; omitted = sd.cpp default
+  batchSize?: number; // match production; maps to `batch_count` in the backend job request
+                      //   (the historical sd.cpp -b flag). Omitted = 1, sd.cpp's own default
 }
 ```
 
@@ -1558,6 +1656,9 @@ interface DiffusionCalibrationConfig {
   modelId: string;
   sizes: CalibrationSize[];           // your app's real size(s); multiples of 64
   generation: DiffusionCalibrationGeneration; // production params the sweep mirrors
+  usageMode?: DiffusionUsageMode;     // WHAT is measured. default: 'single' (cold spawn per timed
+                                      //   sample); 'burst' = one launch per combo, warm samples.
+                                      //   Timings are only comparable within the same mode.
   combos?: DiffusionOffloadCombo[];   // default: DIFFUSION_CALIBRATION_DEFAULTS.combos
   seed?: number;                      // default: 42 (fixed → identical work per combo)
   prompt?: string;                    // default: neutral built-in prompt (does not affect timing)
@@ -1604,6 +1705,18 @@ interface CalibrationRun {
   status: 'ok' | 'oom' | 'error';
   timeTakenMs?: number;               // median of samplesMs; only when status === 'ok'
   stageMs?: { loadMs?: number; diffusionMs?: number; decodeMs?: number };
+                                      // split of the sample closest to the median. `loadMs` spans
+                                      //   sample start → first 'generating' marker, and "start"
+                                      //   follows the report's usageMode: the backend SPAWN in
+                                      //   'single' (a real model load), the JOB SUBMISSION in
+                                      //   'burst' (conditioning only). diffusionMs/decodeMs are
+                                      //   mode-independent.
+  vramPeakBytes?: number;             // machine-wide vramTotal − min(vramAvailable) over that
+                                      //   sample (~1 s resolution)
+  vramIdleBytes?: number;             // machine-wide vramTotal − vramAvailable once it settled:
+                                      //   after the release in 'single', right after the job in
+                                      //   'burst'. Both VRAM fields are omitted together when GPU
+                                      //   telemetry is unavailable/untrusted, and always on macOS.
   samplesMs?: number[];               // raw totals of successful samples
   error?: string;                     // when status !== 'ok'
 }
@@ -1624,6 +1737,12 @@ interface DiffusionCalibrationReport {
   cfgScale: number;                   // methodology echo
   sampler: ImageSampler;
   samples: number;
+  usageMode: DiffusionUsageMode;      // resolved mode the sweep measured. timeTakenMs,
+                                      //   stageMs.loadMs and the VRAM figures are only comparable
+                                      //   between reports sharing this value
+  policyVersion: 'diffusion-offload-v2'; // compatibility identifier. A stored report with NO
+                                      //   policyVersion is a pre-migration v1 report (one CLI
+                                      //   process per image) — 'single'-comparable at best
   runs: CalibrationRun[];
   recommended: Record<string, DiffusionOffloadCombo>; // keyed "<width>x<height>", e.g. "768x768"
   skippedCombos?: { combo: DiffusionOffloadCombo; reason: string }[];
@@ -2043,9 +2162,26 @@ const DIFFUSION_COMPONENT_ORDER: readonly DiffusionComponentRole[];
 // ['diffusion_model', 'clip_l', 'clip_g', 't5xxl', 'llm', 'llm_vision', 'vae']
 ```
 
+### DIFFUSION_BACKEND_DEFAULTS
+
+Policy defaults for the internal stable-diffusion.cpp backend process (see
+[Backend Residency](image-generation.md#backend-residency)).
+
+```typescript
+const DIFFUSION_BACKEND_DEFAULTS = {
+  idleTimeoutMs: 300_000,             // idle time before a 'burst'-resident backend is released
+                                      //   (DiffusionServerConfig.idleTimeoutMs: 0 = never)
+  jobPollIntervalMs: 200,             // poll interval for GET /sdcpp/v1/jobs/{id}
+  readyTimeoutMs: 120_000,            // DEFAULT_TIMEOUTS.serverStart — max spawn → ready wait
+  stopTimeoutMs: 10_000,              // DEFAULT_TIMEOUTS.serverStop — SIGTERM → SIGKILL grace
+  maxTransientPollFailures: 3,        // consecutive transient job-poll failures that fail the
+                                      //   generation; below this the poll loop retries
+} as const;
+```
+
 ### DIFFUSION_CALIBRATION_DEFAULTS
 
-Defaults for [offload calibration](image-generation.md#offload-calibration): the curated labeled combo set (`auto`, `clip-gpu`, `clip-gpu+offload`, `offload`, `all-resident`, `max-savings`), default samples/seed/prompt, the 5% tie tolerance, the SD3.5-Large id/name pattern, and the OOM stderr patterns. (`sizes`/`steps`/`cfgScale`/`sampler` are intentionally **not** defaulted — the caller supplies them via `sizes` / `generation` so calibration mirrors production.)
+Defaults for [offload calibration](image-generation.md#offload-calibration): the curated labeled combo set (`auto`, `clip-gpu`, `clip-gpu+offload`, `offload`, `all-resident`, `max-savings`), default samples/seed/prompt, the 5% tie tolerance, the SD3.5-Large id/name pattern, the OOM stderr patterns, the default residency mode, and the persisted-report policy identifier. (`sizes`/`steps`/`cfgScale`/`sampler` are intentionally **not** defaulted — the caller supplies them via `sizes` / `generation` so calibration mirrors production.)
 
 ```typescript
 const DIFFUSION_CALIBRATION_DEFAULTS: {
@@ -2056,8 +2192,14 @@ const DIFFUSION_CALIBRATION_DEFAULTS: {
   readonly tieTolerancePct: number;                 // 5
   readonly sd35LargePattern: RegExp;
   readonly oomPatterns: readonly RegExp[];
+  readonly policyVersion: 'diffusion-offload-v2';   // echoed on every report
+  readonly usageMode: DiffusionUsageMode;           // 'single' (cold spawn per timed sample)
 };
 ```
+
+`policyVersion` is the persisted-report compatibility identifier: `'diffusion-offload-v2'` marks
+reports measured against the resident `sd-server` backend. Absent in a stored report = a
+pre-migration v1 report, measured with one CLI process per image.
 
 ---
 
@@ -2071,8 +2213,14 @@ import type {
   ArtifactProvenance,
   ModelInfo,
   ServerStatus,
+  LlamaPreStartHook,
   ImageGenerationConfig,
-  ImageGenerationResult
+  ImageGenerationResult,
+  DiffusionUsageMode,
+  DiffusionBackendState,
+  DiffusionBackendReleaseReason,
+  DiffusionBackendInfo,
+  DiffusionBackendStatusEvent
 } from 'genai-electron';
 ```
 

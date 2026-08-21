@@ -12,7 +12,7 @@ Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstract
 - ✅ **Model management** - Download GGUF models with pinned Hugging Face revisions, persisted provenance, progress tracking, and metadata extraction
 - ✅ **LLM server** - Manage llama-server lifecycle with auto-configuration
 - ✅ **LLM runtime calibration** - Find a best-known start-ready configuration within a host-selected time across one or two comparable context profiles, with explicit evidence/completeness and exact caller-supplied diagnostics
-- ✅ **Image generation** - Local image generation via stable-diffusion.cpp
+- ✅ **Image generation** - Local image generation via a persistent stable-diffusion.cpp `sd-server` backend with single/burst VRAM residency
 - ✅ **Multi-component diffusion models** - Flux 2, SDXL split components with aggregate checksum validation
 - ✅ **Resource orchestration** - Automatic LLM offload/reload when memory constrained
 - ✅ **Reliable server lifecycle** - Crash auto-restart, hang watchdog, automatic port selection, occupancy safety, log rotation

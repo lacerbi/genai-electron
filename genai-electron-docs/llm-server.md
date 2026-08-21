@@ -12,6 +12,7 @@ The `LlamaServerManager` class manages the llama-server process lifecycle for ru
   - [start()](#start)
   - [stop()](#stop)
   - [restart()](#restart)
+  - [registerPreStartHook()](#registerprestarthook)
   - [calibrate()](#runtime-calibration)
 - [Configuration Options](#configuration-options)
 - [Status and Health](#status-and-health)
@@ -160,6 +161,12 @@ await llamaServer.start({
 
 **Note**: `start()` accepts a `LlamaServerConfig`. All of its fields (e.g., `modelAlias`, `continuousBatching`, `cacheTypeK`, `overrideTensors`) are applied as llama-server CLI flags at launch. See [Binary Management](#binary-management) for details on automatic download, variant testing, and validation caching.
 
+**Pre-start hooks**: right after the status flips to `'starting'` — and before any port, binary, or
+model work — `start()` awaits every callback registered through
+[`registerPreStartHook()`](#registerprestarthook). This is how a resident stable-diffusion.cpp
+backend yields its VRAM to an LLM that is about to load. A hook that throws fails the start (status
+resets to `'stopped'`); on the auto-restart path hook errors are logged and ignored.
+
 **Health and capacity verification**: After spawning llama-server, `start()` waits for the health
 endpoint to respond with `ok`. It then requires a compatible `GET /props` response and records
 `default_generation_settings.n_ctx` as the effective per-slot capacity before entering `running`
@@ -211,6 +218,60 @@ restart(): Promise<ServerInfo>
 **Example**:
 ```typescript
 await llamaServer.restart();
+```
+
+---
+
+### registerPreStartHook()
+
+Registers a callback that runs before every `start()`, so another subsystem can free resources for
+the model that is about to load.
+
+**Signature**:
+```typescript
+registerPreStartHook(hook: LlamaPreStartHook): () => void
+
+type LlamaPreStartHook = (ctx: {
+  config: LlamaServerConfig;          // the configuration passed to start()
+  reason: 'start' | 'auto-restart';   // caller-requested vs restarted by the watchdog
+}) => Promise<void> | void;
+```
+
+**Returns**: an idempotent unregister function.
+
+**When hooks run**: inside `start()`'s own error handling, immediately after the status flips to
+`'starting'` and after context-constraint normalization, but **before** any port resolution, binary
+provisioning, or model work. Two consequences follow from that placement:
+
+- The concurrency guard is already armed while a hook awaits, so a re-entrant `start()` is rejected
+  rather than racing.
+- Hooks see the requested configuration, not a resolved one — `config.port` may still be `'auto'`.
+
+Hooks run in registration order, sequentially, each awaited.
+
+**Error semantics**:
+
+| `reason` | A hook throws | Effect |
+|---|---|---|
+| `'start'` | Propagates | `start()` rejects through the normal startup-failure path: status is reset to `'stopped'` and typed library errors (`GenaiElectronError` subclasses) are preserved |
+| `'auto-restart'` | Swallowed | Logged to `llama-server.log` and ignored — a hook must never abort an auto-restart or consume its restart budget |
+
+**Built-in hook**: `DiffusionServerManager` registers one automatically whenever it is constructed
+with a `LlamaServerManager` (the exported `llamaServer` / `diffusionServer` singletons are). It
+releases a resident stable-diffusion.cpp backend when the LLM about to start and that backend would
+not fit together — see
+[LLM Start Yields the Diffusion Backend](resource-orchestration.md#llm-start-yields-the-diffusion-backend).
+Registering your own hooks does not disturb it.
+
+**Example**:
+```typescript
+const unregister = llamaServer.registerPreStartHook(async ({ config, reason }) => {
+  console.log(`llama-server starting (${reason}) with model ${config.modelId}`);
+  await releaseMyOwnGpuWorkload();
+});
+
+// later
+unregister();
 ```
 
 ---
@@ -1158,6 +1219,7 @@ Set `autoRestart: true` to have the manager relaunch the server after an **unexp
 - **Budget**: up to `maxRestarts` consecutive attempts (default: 3). Once the budget is exhausted the server stays `'crashed'`. The counter resets on the next manual `start()`.
 - **Resolved config reuse**: a restart reuses the previously *resolved* configuration, including the concrete port — a server started with `port: 'auto'` keeps the port it was assigned rather than picking a new one.
 - **Intentional stop never restarts**: calling `stop()` cancels any pending restart and is never treated as a crash.
+- **Pre-start hooks still run**, with `reason: 'auto-restart'`, but a hook that throws is logged and ignored so it can neither abort the restart nor consume the budget.
 
 **Event order** for a successful auto-restart is `'crashed'` -> `'ready'` -> `'started'` ->
 `'restarted'`. An explicit `restart()` uses `'stopped'` -> `'ready'` -> `'started'` ->

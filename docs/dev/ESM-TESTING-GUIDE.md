@@ -225,7 +225,9 @@ it('should write logs', async () => {
 
 ### Pattern 4: Mocking EventEmitter-Based Classes
 
-**Use case**: Mocking `ProcessManager` which extends EventEmitter.
+**Use case**: Mocking `ProcessManager` which extends EventEmitter — the seam used by
+`LlamaServerManager.test.ts` (the diffusion suites use Pattern 5 instead: since the 2026-08-21
+backend migration they never see a raw child process).
 
 ```typescript
 import { EventEmitter } from 'events';
@@ -241,7 +243,7 @@ jest.unstable_mockModule('../../src/process/ProcessManager.js', () => ({
   ProcessManager: MockProcessManager,
 }));
 
-const { DiffusionServerManager } = await import('../../src/managers/DiffusionServerManager.js');
+const { LlamaServerManager } = await import('../../src/managers/LlamaServerManager.js');
 
 it('should handle process events', async () => {
   const mockProcess = new EventEmitter() as any;
@@ -253,12 +255,96 @@ it('should handle process events', async () => {
   mockPm.spawn.mockReturnValue(mockProcess);
 
   // Simulate events
-  mockProcess.stdout.emit('data', Buffer.from('step 1/10'));
+  mockProcess.stdout.emit('data', Buffer.from('slot launch'));
 
   // Verify handling
   // ...
 });
 ```
+
+### Pattern 5: A Shared Module Seam (the `sd-server` backend)
+
+**Use case**: several suites drive the same subsystem and the fakes must stay faithful in one
+place. `DiffusionServerManager` reaches its stable-diffusion.cpp backend through exactly two
+modules — `src/process/sd-server-runner.ts` (spawn, stdout tap, confirmed stop) and
+`src/process/sd-server-client.ts` (the `/sdcpp/v1/*` job API) — so all four diffusion suites
+(`DiffusionServerManager.{lifecycle,routes,generation}.test.ts` and
+`diffusion-calibration.test.ts`) mock that pair through **one shared helper**,
+`tests/unit/helpers/sd-server-mocks.ts`.
+
+Two rules make this work:
+
+1. **Import the helper statically, before the dynamic `import()` of the SUT.** A file's static
+   imports are evaluated before its own body, so the helper's `jest.unstable_mockModule()` calls
+   are registered in time. Each test file gets its own module registry, so the `jest.fn()`s are
+   per-file.
+2. **Re-install implementations in `beforeEach`.** `resetMocks: true` (jest.config.js) strips every
+   `jest.fn()` implementation before each test; the helper exports `resetSdServerMocks()` for that.
+
+```typescript
+// 1. Static import — registers the runner/client module mocks
+import {
+  COMPLETED_JOB,
+  handles,
+  mockGetJob,
+  mockStartSdServerRunner,
+  mockSubmitImageJob,
+  resetSdServerMocks,
+} from './helpers/sd-server-mocks.js';
+
+// 2. …other jest.unstable_mockModule() calls (electron, node:http, paths, …)
+
+// 3. Dynamic import of the SUT, after all mocks are registered
+const { DiffusionServerManager } = await import('../../src/managers/DiffusionServerManager.js');
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  resetSdServerMocks();
+});
+```
+
+**Keep the fake faithful.** The helper's `raceWithExit()` really races the operation against the
+observed exit, which is what makes "the poll loop stops when the backend dies" a testable
+statement rather than a hope:
+
+```typescript
+it('fails the in-flight job when the backend dies mid-generation', async () => {
+  mockGetJob.mockImplementation(async () => ({ id: 'job-1', status: 'generating' }));
+  const promise = generate(server); // submits, then polls
+  handles.at(-1)!.emitExit({ code: 1, signal: null }); // observed exit
+  await expect(promise).rejects.toThrow(/exited with code/);
+});
+```
+
+**Drive a fake job instead of a fake stdout stream.** Progress arrives through the tap callback the
+manager handed the runner (`handle.launch.onStdoutEvent`), and job state through `mockGetJob`:
+
+```typescript
+mockSubmitImageJob.mockImplementation(async () => {
+  const handle = handles.at(-1)!;
+  handle.launch.onStdoutEvent({ type: 'marker', marker: 'generating' });
+  handle.launch.onStdoutEvent({ type: 'step', step: 1, steps: 4 });
+  return { id: 'job-1' };
+});
+mockGetJob
+  .mockImplementationOnce(async () => ({ id: 'job-1', status: 'generating' }))
+  .mockImplementation(async () => COMPLETED_JOB);
+```
+
+**Advance the poll loop with `advanceTimersByTimeAsync`.** The manager polls the job every
+`DIFFUSION_BACKEND_DEFAULTS.jobPollIntervalMs` and arms an idle timer for `'burst'` residency, so
+fake timers must be advanced with the *async* variant — the loop awaits between ticks:
+
+```typescript
+jest.useFakeTimers();
+const promise = generate(server);
+await jest.advanceTimersByTimeAsync(1000); // poll ticks + awaited microtasks
+await promise;
+```
+
+Assert launch arguments off the recorded handle (`handles[0].launch.modelArgs` /
+`.contextArgs` / `.threads`) rather than off a spawn mock — that is where the manager's
+argument-building is observable now.
 
 ## File Organization
 
@@ -386,8 +472,18 @@ expect(formatBytes(1024)).toBe('1 KB');
 ### Phase 2 (Image Generation)
 | Module | Status | Tests | Pattern |
 |--------|--------|-------|---------|
-| ResourceOrchestrator.test.ts | ✅ Passing | 17/17 | Class mocking |
-| DiffusionServerManager.test.ts | ✅ Passing | 33/33 | Class + EventEmitter mocking |
+| ResourceOrchestrator.test.ts | ✅ Passing | - | Plain-object manager mocks |
+| ResourceOrchestrator.integration.test.ts | ✅ Passing | - | Real orchestrator + fake LlamaServerManager |
+| DiffusionServerManager.lifecycle.test.ts | ✅ Passing | - | Shared `sd-server` seam (Pattern 5) |
+| DiffusionServerManager.routes.test.ts | ✅ Passing | - | Shared `sd-server` seam + HTTP route calls |
+| DiffusionServerManager.generation.test.ts | ✅ Passing | - | Shared `sd-server` seam + fake timers |
+| diffusion-calibration.test.ts | ✅ Passing | - | Shared `sd-server` seam (launch counts per mode) |
+| sd-server-runner.test.ts | ✅ Passing | - | Pure DI (injected processManager/port/fetch) |
+| sd-server-client.test.ts | ✅ Passing | - | Global `fetch` mocking |
+
+> The three `DiffusionServerManager.*` suites replaced the single
+> `DiffusionServerManager.test.ts` in the 2026-08-21 backend migration; per-suite counts move
+> often, so run `npm test` for current numbers.
 
 ## Running Tests
 

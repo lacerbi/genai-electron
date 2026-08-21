@@ -18,7 +18,9 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
 - [x] Phase 4: Residency policy + symmetric `ResourceOrchestrator` + LLM pre-start hook — 1321/1321
 - [x] Phase 5: Calibration re-base (`usageMode: 'single' | 'burst'`, `policyVersion`, VRAM fields) —
       1331/1331
-- [ ] Phase 6: Documentation, PROGRESS "Unreleased", DESIGN/dev-doc updates, example-app touch-ups
+- [ ] Phase 6: Documentation, PROGRESS "Unreleased", DESIGN/dev-doc updates, example-app touch-ups —
+      dev docs / PROGRESS / DESIGN / AGENTS / example app done 2026-08-21; `genai-electron-docs/**`
+      + `README.md` owned by a parallel agent; commit + gates pending in the main thread
 - [ ] Phase 7: Live smoke (main thread, pinned binary) + final `/doublecheck`
 - [ ] Flip `Status:` to `COMPLETE (date)` with a short results note
 
@@ -67,7 +69,25 @@ guide until the user asks for a release — see `AGENTS.md` release workflow)
   - [x] `usageMode` single/burst sweep; `stageMs` semantics; `policyVersion`; VRAM sampling
   - [x] tests (29 → 39 in `diffusion-calibration.test.ts`); commit pending
 - Phase 6 — docs/housekeeping
-  - [ ] user docs; DESIGN; UPDATING-BINARIES; ESM guide; AGENTS; PROGRESS Unreleased; example app; commit
+  - [ ] user docs (`genai-electron-docs/**`) + `README.md` — parallel agent
+  - [x] `DESIGN.md` (§7 "Update (2026-08-21)" + history note; process-model statements at the
+    architecture bullet, manager list, flow walkthrough, DiffusionServer section, quick-start
+    comments, and the stable-diffusion.cpp binary note)
+  - [x] `docs/dev/UPDATING-BINARIES.md` (`sd-server` primary + `sd-cli` unused, Phase-2 validation
+    through the runner/client + job API, `SD_SERVER_STDOUT_MARKERS` coupling note,
+    re-validation-on-name-switch + POSIX chmod-before-revalidate, manual-test recipe, checklist item)
+  - [x] `docs/dev/ESM-TESTING-GUIDE.md` (Pattern 4 repointed to `LlamaServerManager`; new Pattern 5
+    for the shared `sd-server` seam — static helper import, faithful `raceWithExit`, fake job,
+    `advanceTimersByTimeAsync`, launch-arg assertions; status table rows)
+  - [x] `AGENTS.md` (architecture bullet, `src/process/` Node-safety note, binary strategy,
+    residency + pre-start-hook + calibration Key Exports lines)
+  - [x] `PROGRESS.md` `## Unreleased` section (change list, behavior changes, validation, smoke
+    reference, migration/minor note, release status) — no version bump anywhere
+  - [x] `docs/dev/2026-08-21_diffusion-architecture-review.md` implementation status line
+  - [x] example app (`main/genai-api.ts` crash-note rationale, `main/ipc-handlers.ts` +
+    `renderer/components/DiffusionServerControl.tsx` sd-cli wording, backend-state + "Backend PID"
+    status rows, `ResourceMonitor.tsx` PID relabel)
+  - [ ] commit (main thread, after `npm run format` + the CI gates and the example-app build)
 - Phase 7 — live smoke + doublecheck
   - [ ] live checklist on pinned binary; `/doublecheck`; status flip
 
@@ -680,6 +700,14 @@ sample) = the common production case and today's report semantics; `'burst'` opt
 **Verification**:
 - [ ] `npm run format`, `npm run format:check`, `npm run lint`, `npm run build`, `npm test`,
   `git diff --check` green; `npm --prefix examples/electron-control-panel run build` green.
+  Note (2026-08-21): the dev-doc / PROGRESS / DESIGN / AGENTS / example-app half landed in a
+  parallel agent alongside the `genai-electron-docs/**` + `README.md` half; neither ran the gates.
+  The example app resolves `genai-electron` as `file:../..`, so the root `npm run build` must run
+  BEFORE its build for `DiffusionServerInfo.backend` to type-check in the renderer. Prettier
+  ignores `*.md`; only the two `.tsx`/`.ts` example files need `npm run format`.
+- [x] Documentation content verified against the implementation at `b5706c1` (public method names,
+  `DIFFUSION_BACKEND_DEFAULTS`, `SD_SERVER_STDOUT_MARKERS`, `runSdServerTest`, the wire error codes,
+  and the calibration report fields were all read from `src/` rather than from this plan).
 
 ### Phase 7: Live smoke (main thread, single heavy slot) + `/doublecheck`
 - Against the **pinned 782 binary** on the laptop, via the example app (genai-lite path): start

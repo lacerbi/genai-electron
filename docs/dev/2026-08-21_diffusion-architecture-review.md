@@ -2,6 +2,9 @@
 
 **Date:** 2026-08-21
 **Status:** 📋 REVIEW — findings and recommendations only, no code changes yet
+**Implementation:** §3, §5.1-3 and §5.5, and §8.1-2 implemented via
+`docs/dev/plans/PLAN-sd-server-migration.md` (branch `feat/sd-server-backend`, unreleased);
+§5.4, §5.6-7 and §8.3-7 remain open
 **Scope:** Image-generation path (DiffusionServerManager, ResourceOrchestrator, model/binary
 strategy). LLM path touched only where the two interact.
 **Reference machine:** laptop, 8 GB VRAM NVIDIA GPU, 24 GB RAM — FLUX.2 klein 4B (quantized
