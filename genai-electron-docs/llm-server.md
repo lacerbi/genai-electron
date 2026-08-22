@@ -339,6 +339,14 @@ interface LlamaServerConfig extends ServerConfig {
 
 `KVCacheType` is `'f16' | 'bf16' | 'q8_0' | 'q4_0' | 'q4_1' | 'q5_0' | 'q5_1' | 'iq4_nl'`, and `FlashAttentionSetting` is `boolean | 'on' | 'off' | 'auto'`. See [TypeScript Reference](typescript-reference.md) for the full definitions.
 
+> **Security:** like the diffusion wrapper, this server is **loopback-only and unauthenticated by
+> design** — there is no API-key option, and `host` is the knob for anything else. Binding
+> `0.0.0.0` or `::` exposes an unauthenticated endpoint, so do it only behind deliberate firewall
+> and network controls. The diffusion wrapper's opt-in `allowedOrigins` — and the cross-origin
+> write rejection (`403 INVALID_ORIGIN`) that goes with it — have no equivalent here: genai-electron
+> neither adds headers to nor filters llama-server's own requests. See
+> [Network exposure and security](image-generation.md#network-exposure-and-security).
+
 When `threads`, `gpuLayers`, `contextSize`, or the KV-cache fields are not specified, the library
 auto-configures based on system capabilities and GGUF metadata. Full GPU offload is preferred,
 the context recommendation comes from real KV-cache arithmetic, and **q8_0 KV quantization +

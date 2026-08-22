@@ -546,8 +546,14 @@ interface DiffusionServerConfig {
   modelId: string;
   port?: number | 'auto';            // Default: 8081; 'auto' picks a free OS port
   host?: string;                     // Interface the HTTP wrapper binds to. Default: '127.0.0.1'
-                                     //   (loopback only — the wrapper is unauthenticated and
-                                     //   allows CORS from any origin)
+                                     //   (loopback only — the wrapper is unauthenticated, and
+                                     //   there is no API-key option)
+  allowedOrigins?: string[];         // Browser origins allowed to read from AND write to the
+                                     //   wrapper. Unset/empty (default) = NO Access-Control-*
+                                     //   headers; ['*'] = wildcard; otherwise the request Origin
+                                     //   is echoed on exact match. An uncovered Origin on a
+                                     //   state-changing method (POST/DELETE) gets 403
+                                     //   INVALID_ORIGIN
   startupTimeout?: number;           // Max ms for the BACKEND to go spawn → ready (not start()
                                      //   itself). Default: DEFAULT_TIMEOUTS.serverStart (120000)
   usageMode?: DiffusionUsageMode | 'auto'; // Default residency policy. Default: 'auto' → 'single'
@@ -555,6 +561,10 @@ interface DiffusionServerConfig {
   idleTimeoutMs?: number;            // Idle time before a 'burst'-resident backend is released.
                                      //   Default: DIFFUSION_BACKEND_DEFAULTS.idleTimeoutMs
                                      //   (300000); 0 disables the timer
+  jobActivityTimeoutMs?: number;     // No-activity timeout for an in-flight backend job.
+                                     //   Default: DIFFUSION_BACKEND_DEFAULTS.jobActivityTimeoutMs
+                                     //   (600000); 0 — or any non-positive / non-finite value —
+                                     //   disables the watchdog
   threads?: number;                  // CPU threads; passed to the backend as -t at launch
   gpuLayers?: number;                // Accepted for config-shape compatibility, NOT passed to
                                      //   sd.cpp (GPU offload is automatic)
@@ -571,6 +581,31 @@ interface DiffusionServerConfig {
 
 The four offload flags are **launch** arguments of the backend process: a generation that resolves
 to a different set forces a respawn (release reason `'flags-changed'`).
+
+`allowedOrigins`, the cross-origin write rejection (`403 INVALID_ORIGIN`) and the loopback `Host`
+guard are described in
+[Network exposure and security](image-generation.md#network-exposure-and-security); the wrapper is
+loopback-only and unauthenticated by design, and `host` is the only knob for anything wider.
+
+A generation killed by the `jobActivityTimeoutMs` watchdog rejects with a `ServerError` whose
+`details` carry (see [Stuck jobs](image-generation.md#stuck-jobs-the-activity-watchdog)):
+
+```typescript
+{
+  code: 'BACKEND_JOB_STUCK';
+  jobId: string;                     // backend job id, or '(not yet submitted)'
+  idleMs: number;                    // observed silence when the watchdog fired
+  timeoutMs: number;                 // the budget that was exceeded
+  stage: 'loading' | 'diffusion' | 'decoding';
+  args: string;                      // the backend's launch argv, space-joined
+  backendStderrTail?: string;        // last stderr lines of the killed backend, when any
+  suggestion: string;
+}
+```
+
+The tail is deliberately **not** under `details.stderr`/`details.stderrTail`: those keys drive the
+calibration OOM classifier, and a wedged backend is an error, never an out-of-memory result. The
+wire code stays `BACKEND_ERROR`.
 
 ### Diffusion backend types
 
@@ -590,6 +625,7 @@ type DiffusionBackendReleaseReason =
   | 'flags-changed'  // the next generation needs different launch flags
   | 'cancel'         // a generating job was cancelled (sampling cannot be interrupted)
   | 'crashed'        // the process exited unexpectedly
+  | 'stuck'          // the job produced no activity for jobActivityTimeoutMs (watchdog)
   | 'stop'           // diffusionServer.stop()
   | 'shutdown'       // attachAppLifecycle() quit path
   | 'llm-start'      // yielded to an LLM start via the pre-start hook
@@ -625,6 +661,10 @@ and resolves after the stop completes. Normally that means confirmed process dea
 that cannot be confirmed is logged, the state still becomes `'absent'`, and the orphan PID blocks
 new spawns until it is gone (`BACKEND_TERMINATION_UNCONFIRMED`, wire code `BACKEND_ERROR`).
 `getBackendInfo(): DiffusionBackendInfo` is the synchronous snapshot.
+
+`getOrchestrator(): ResourceOrchestrator | undefined` returns the manager's **live built-in**
+orchestrator (`undefined` only when the manager was constructed without a `LlamaServerManager`) —
+see [Built-in vs custom orchestrator](resource-orchestration.md#built-in-vs-custom-orchestrator).
 
 ### LlamaServerConfig
 
@@ -1548,13 +1588,13 @@ and the public budget resolvers. Adaptive `selected` and `selectionEvidence` are
 interface ImageGenerationConfig {
   prompt: string;
   negativePrompt?: string;
-  width?: number;
-  height?: number;
-  steps?: number;
+  width?: number;                    // NO library default — omitted fields are omitted from the
+  height?: number;                   //   backend request, so stable-diffusion.cpp's own defaults
+  steps?: number;                    //   apply. Send steps/cfgScale/sampler explicitly.
   cfgScale?: number;
-  seed?: number;
+  seed?: number;                     // omitted = random (the resolved seed is reported back)
   sampler?: ImageSampler;
-  count?: number;
+  count?: number;                    // 1-5 on the async HTTP API; default 1
   usageMode?: DiffusionUsageMode;    // Residency policy for THIS request; omitted = the server's
                                      //   DiffusionServerConfig.usageMode decides
   onProgress?: (
@@ -1566,6 +1606,10 @@ interface ImageGenerationConfig {
 }
 ```
 
+The library applies **no** defaults to `width`/`height`/`steps`/`cfgScale`/`sampler` — see the
+note under [`generateImage()`](image-generation.md#generateimageconfig). Callers going through
+genai-lite get genai-lite's defaults for omitted fields, not stable-diffusion.cpp's.
+
 ### ImageGenerationResult
 
 ```typescript
@@ -1574,8 +1618,10 @@ interface ImageGenerationResult {
   format: 'png';
   timeTaken: number;
   seed: number;
-  width: number;
-  height: number;
+  width: number;                     // actual dimensions of the returned PNG (read from its
+  height: number;                    //   header), not an echo of the requested config; only an
+                                     //   unparseable payload falls back — to the requested size,
+                                     //   then 512 when the request omitted one
 }
 ```
 
@@ -1612,8 +1658,10 @@ interface ImageGenerationProgress {
   currentStep: number;
   totalSteps: number;
   stage: ImageGenerationStage;
-  percentage?: number;
-  currentImage?: number;
+  percentage?: number;               // monotonic within one generation and capped at 99 while in
+                                     //   flight; 100 is reported exactly once, by the completion
+                                     //   callback, when the image exists
+  currentImage?: number;             // clamped to <= totalImages
   totalImages?: number;
 }
 ```
@@ -2183,6 +2231,9 @@ Policy defaults for the internal stable-diffusion.cpp backend process (see
 const DIFFUSION_BACKEND_DEFAULTS = {
   idleTimeoutMs: 300_000,             // idle time before a 'burst'-resident backend is released
                                       //   (DiffusionServerConfig.idleTimeoutMs: 0 = never)
+  jobActivityTimeoutMs: 600_000,      // no-activity timeout for an in-flight backend job
+                                      //   (DiffusionServerConfig.jobActivityTimeoutMs: 0, or any
+                                      //   non-positive / non-finite value, = off)
   jobPollIntervalMs: 200,             // poll interval for GET /sdcpp/v1/jobs/{id}
   jobRequestTimeoutMs: 10_000,        // per-request timeout for the backend job API; longer than
                                       //   the client's own 5 s default because the backend answers

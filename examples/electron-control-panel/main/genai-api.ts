@@ -1,10 +1,5 @@
-import {
-  systemInfo,
-  modelManager,
-  llamaServer,
-  diffusionServer,
-  ResourceOrchestrator,
-} from 'genai-electron';
+import { systemInfo, modelManager, llamaServer, diffusionServer } from 'genai-electron';
+import type { ResourceOrchestrator } from 'genai-electron';
 import { BrowserWindow } from 'electron';
 
 /**
@@ -188,13 +183,21 @@ export function sendImageProgress(
 }
 
 /**
- * Create ResourceOrchestrator singleton instance
+ * Access the ResourceOrchestrator that DiffusionServerManager owns.
+ *
+ * This app used to construct its own `new ResourceOrchestrator(...)` here, which was a
+ * split brain: image generation runs genai-lite -> HTTP -> DiffusionServerManager, and the
+ * manager orchestrates through its *built-in* orchestrator. The app's second instance
+ * therefore never recorded an offload, so the offload badge in the UI was always null.
+ *
+ * `diffusionServer.getOrchestrator()` returns the live built-in instance. It is undefined
+ * only for a DiffusionServerManager constructed without a llamaServer; the exported
+ * `diffusionServer` singleton always has one, so this throw is defensive.
  */
-let orchestrator: ResourceOrchestrator | null = null;
-
 export function getOrchestrator(): ResourceOrchestrator {
+  const orchestrator = diffusionServer.getOrchestrator();
   if (!orchestrator) {
-    orchestrator = new ResourceOrchestrator(systemInfo, llamaServer, diffusionServer, modelManager);
+    throw new Error('Resource orchestration unavailable: diffusion server has no LLM server.');
   }
   return orchestrator;
 }

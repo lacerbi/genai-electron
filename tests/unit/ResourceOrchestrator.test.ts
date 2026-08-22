@@ -816,7 +816,7 @@ describe('ResourceOrchestrator', () => {
       mockLlamaServer.isRunning.mockReturnValue(false);
     };
 
-    it.each(['idle-timeout', 'explicit', 'crashed', 'stop', 'cancel'] as const)(
+    it.each(['idle-timeout', 'explicit', 'crashed', 'stop', 'cancel', 'stuck'] as const)(
       "reloads the deferred LLM for reason '%s'",
       async (reason) => {
         await offloadAndDefer();

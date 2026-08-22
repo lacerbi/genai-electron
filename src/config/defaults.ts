@@ -427,6 +427,17 @@ export const DIFFUSION_BACKEND_DEFAULTS = {
    * not a failed image.
    */
   maxTransientPollFailures: 3,
+  /**
+   * No-activity budget for an in-flight backend job (`0` in config = watchdog off).
+   *
+   * Not a total-job timeout: the clock is reset by every sign of life (stdout
+   * progress/markers, log lines, job status or queue-position changes), so a slow
+   * image is never killed for being slow. It bounds the one failure the job API cannot
+   * report — a backend that stays alive and keeps answering `generating` forever,
+   * which would otherwise wedge the busy gate and strand an offloaded LLM. Ten minutes
+   * clears a very slow CPU-offloaded step on modest hardware.
+   */
+  jobActivityTimeoutMs: 600_000,
 } as const;
 
 /**

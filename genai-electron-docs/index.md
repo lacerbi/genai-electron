@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.25.0 (Persistent sd-server diffusion backend)
+> **Version**: 0.26.0 (Diffusion stuck-job watchdog and wrapper access control)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron—an Electron-first library for managing local AI model
@@ -28,6 +28,7 @@ calibration policy metadata.
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.25.0 to v0.26.0](migration-0-25-to-0-26.md)** - Stuck-job watchdog (`jobActivityTimeoutMs`, release reason `'stuck'`), opt-in CORS (`allowedOrigins`) with `INVALID_ORIGIN`/`INVALID_HOST` guards, `getOrchestrator()`, PNG-truthful result dimensions, monotonic progress
 - **[Migrating from v0.24.0 to v0.25.0](migration-0-24-to-0-25.md)** - Persistent `sd-server` diffusion backend with `single`/`burst` residency, symmetric LLM/diffusion orchestration, calibration `usageMode` + `policyVersion`; wrapper binds `127.0.0.1` by default
 - **[Migrating from v0.23.0 to v0.24.0](migration-0-23-to-0-24.md)** - Node-safe direct llama-server launch, optional Electron peer installation, and native-ESM adoption boundary
 - **[Migrating from v0.22.1 to v0.23.0](migration-0-22-1-to-0-23.md)** - Additive byte-level extraction telemetry plus truthful `finalizing` and `installing` phases
@@ -388,6 +389,7 @@ No additional code needed - it just works! See [Resource Orchestration](resource
   - Repository: https://github.com/lacerbi/genai-lite
   - **Version pairing**: genai-lite ≥ 0.9 pairs with genai-electron ≥ 0.6 — the reasoning request toggle and the `'cancelled'` generation status require that pairing. genai-lite ≥ 0.10 additionally uses genai-electron's `DELETE /v1/images/generations/:id` for request-side image cancellation (`generateImage(request, { signal })`, plus cancel-on-timeout). genai-lite ≥ 0.11 adds a per-request timeout override (`generateImage(request, { timeoutMs })`, default 120 s) and automatic retries for cloud image providers — but it **never auto-retries genai-electron** (a blind retry would start a second GPU generation), so apps that want retry-on-busy behavior against this server must implement it themselves (e.g. on `RATE_LIMIT_EXCEEDED`/`SERVER_BUSY`).
   - **No genai-lite change was required for the persistent diffusion backend.** The wrapper's HTTP contract stays backward compatible — same `POST`/`GET`/`DELETE` shapes and statuses — so the move from a per-image CLI spawn to a resident `sd-server` backend is invisible to the adapter (verified against genai-lite 0.19.0). What changed is purely additive: an optional `usageMode` request field, a `backend` field on `/health`, `400` instead of `500` for a malformed JSON body or a bad `usageMode`, and `503 SERVER_NOT_RUNNING` while the wrapper is stopping or stopped. The one thing to note is deployment, not code: the wrapper now binds `127.0.0.1` by default, so a genai-lite client on another host needs `host` set explicitly on `diffusionServer.start()`.
+  - **CORS is now opt-in, and genai-lite is unaffected.** The wrapper sends no `Access-Control-*` headers unless `DiffusionServerConfig.allowedOrigins` lists origins (`['*']` restores the old wildcard). Node-side clients — genai-lite's `ImageService`, `fetch()` from the Electron main process — send no `Origin` header, so nothing changes for them; only a browser context calling the wrapper directly needs `allowedOrigins` — and it needs them for *writes* too, since a `POST`/`DELETE` carrying an uncovered `Origin` is refused with `403 INVALID_ORIGIN` (CORS alone only blocks the browser's read of the response). A loopback-bound wrapper additionally rejects unexpected `Host` headers with `403 INVALID_HOST`. See [Network exposure and security](image-generation.md#network-exposure-and-security).
 
 **Examples**:
 - `examples/electron-control-panel/` - Full-featured Electron app showcasing all library features

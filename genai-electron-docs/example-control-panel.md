@@ -38,7 +38,7 @@ Reference implementation demonstrating genai-electron integration patterns for i
 
 **LLM Server**: Start/stop/restart with auto-config or manual mode, real-time logs, test chat (with reasoning request toggle), health monitoring. The config form exposes the v0.6.0 options: a **flashAttention tri-state** select (`auto` / `on` / `off`) and **KV cache** selects for `cacheTypeK` / `cacheTypeV` (`f16`, `q8_0`, …)
 
-**Diffusion Server**: Start/stop, generate images with full parameter control (prompt, dimensions, steps, samplers), **Cancel** button to abort an in-flight generation, real-time progress, metadata display, preset-matched recommended settings with one-click apply. The status grid adds a **`Backend:`** row (`getInfo().backend?.state` — `absent` / `starting` / `ready` / `busy` / `stopping`) and a **`Backend PID:`** row, because the wrapper is in-process and the `sd-server` child is the thing with a PID: it appears at the first image and may disappear again right after under `'single'` residency
+**Diffusion Server**: Start/stop, generate images with full parameter control (prompt, dimensions, steps, samplers), **Cancel** button to abort an in-flight generation, real-time progress, metadata display, preset-matched recommended settings auto-applied when a matching model is selected (with a one-click **Re-apply** button to restore them after manual edits). The status grid adds a **`Backend:`** row (`getInfo().backend?.state` — `absent` / `starting` / `ready` / `busy` / `stopping`) and a **`Backend PID:`** row, because the wrapper is in-process and the `sd-server` child is the thing with a PID: it appears at the first image and may disappear again right after under `'single'` residency
 
 **Resource Monitor**: Memory polling (2s), GPU/VRAM tracking, server status grid (the diffusion row's PID is labelled **`Backend PID:`** for the same reason), resource orchestration status, event log (20 events), debug tools
 
@@ -467,12 +467,14 @@ useEffect(() => {
 
 **Challenge**: When a model from a preset is selected, suggest optimal generation parameters.
 
-**Solution** (`renderer/components/DiffusionServerControl.tsx:193-324`):
+**Solution** (`renderer/components/DiffusionServerControl.tsx:320-478`):
 ```typescript
 // Match selected model to a preset for recommended settings
 const matchedPreset = MODEL_PRESETS.find((p) => selectedModel.startsWith(p.id));
 
-const applyPresetSettings = (settings: PresetRecommendedSettings) => {
+// useCallback so the auto-apply effect below can depend on it honestly:
+// every setter it closes over is stable, so an empty dep list is correct.
+const applyPresetSettings = useCallback((settings: PresetRecommendedSettings) => {
   setSteps(settings.steps);
   setStepsPreset(String(settings.steps));
   setCfgScale(settings.cfgScale);
@@ -484,13 +486,22 @@ const applyPresetSettings = (settings: PresetRecommendedSettings) => {
     setHeight(settings.height);
     setDimensionPreset(`${settings.width}\u00d7${settings.height}`);
   }
-};
+}, []);
 
-// Hint banner in JSX:
+// Auto-apply on every model selection, including the first one. `matchedPreset` is a
+// stable reference from the module-level MODEL_PRESETS array, so this runs once per
+// selection rather than on every render.
+useEffect(() => {
+  if (matchedPreset?.recommendedSettings) {
+    applyPresetSettings(matchedPreset.recommendedSettings);
+  }
+}, [matchedPreset, applyPresetSettings]);
+
+// Hint banner in JSX (applied automatically; the button re-applies after edits):
 {matchedPreset?.recommendedSettings && (
   <div className="settings-hint">
     <span>
-      {matchedPreset.name} recommended: Steps {matchedPreset.recommendedSettings.steps},
+      Preset {matchedPreset.name}: Steps {matchedPreset.recommendedSettings.steps},
       CFG {matchedPreset.recommendedSettings.cfgScale},
       {matchedPreset.recommendedSettings.sampler} sampler
       {matchedPreset.recommendedSettings.width && matchedPreset.recommendedSettings.height &&
@@ -498,11 +509,13 @@ const applyPresetSettings = (settings: PresetRecommendedSettings) => {
     </span>
     <button type="button" className="apply-preset-btn"
       onClick={() => applyPresetSettings(matchedPreset.recommendedSettings!)}>
-      Apply
+      Re-apply
     </button>
   </div>
 )}
 ```
+
+**Auto-apply on model selection**: because the library applies **no** defaults to `steps`/`cfgScale`/`sampler`/dimensions, leaving the form on generic values would silently hand stable-diffusion.cpp's own defaults to a model tuned for something else (Flux 2 Klein wants 4 steps at `cfgScale: 1`). The effect above therefore applies `matchedPreset.recommendedSettings` as soon as a model matching a preset is selected — a separate effect decides *which* model that is, preferring one the server is already running. When no preset matches, the user's values are left alone; the **Re-apply** button restores the preset after manual edits.
 
 **Key insight**: `applyPresetSettings` updates both actual values AND preset selector states (bidirectional sync), including integer-to-float formatting for CFG scale dropdowns.
 
@@ -612,7 +625,7 @@ ipcMain.handle('server:testMessage', async (_event, message: string, settings?: 
 
 **Challenge**: Use genai-lite's ImageService with genai-electron-managed diffusion server, forward progress updates to renderer.
 
-**Solution** (`main/ipc-handlers.ts:287-327`):
+**Solution** (`main/ipc-handlers.ts:383-452`):
 ```typescript
 ipcMain.handle('diffusion:generate', async (_event, config) => {
   // Create ImageService instance
@@ -630,14 +643,19 @@ ipcMain.handle('diffusion:generate', async (_event, config) => {
     modelId: 'stable-diffusion',
     prompt: config.prompt,
     settings: {
-      width: config.width || 512,
-      height: config.height || 512,
+      // No `|| 512` / `|| 20` / `|| 7.5` / `|| 'euler_a'` fallbacks here. An omitted field would
+      // take genai-lite's own default (1024x1024, 20 steps, CFG 7.5, euler_a), filled in before
+      // the request ever reaches genai-electron — but the Generate form always sends explicit
+      // values, so those defaults never apply. Baking SD-1.5-era numbers into the IPC layer on
+      // top of that would only override what the renderer (and its preset) actually asked for.
+      width: config.width,
+      height: config.height,
       diffusion: {
         negativePrompt: config.negativePrompt,
-        steps: config.steps || 20,
-        cfgScale: config.cfgScale || 7.5,
-        seed: config.seed || -1,
-        sampler: config.sampler || 'euler_a',
+        steps: config.steps,
+        cfgScale: config.cfgScale,
+        seed: config.seed ?? -1,
+        sampler: config.sampler,
 
         // Forward progress to renderer via IPC events
         onProgress: (progress) => {
@@ -660,7 +678,8 @@ ipcMain.handle('diffusion:generate', async (_event, config) => {
 - `genai-electron-images` is special provider (not cloud service)
 - Progress callback forwards updates via `webContents.send()` to renderer
 - Same ImageService API works for both cloud (DALL-E, etc.) and local generation
-- Automatic resource orchestration (LLM offload) happens transparently
+- Automatic resource orchestration (LLM offload) happens transparently; when the app needs to *observe* it (e.g. wait for the LLM to come back), it uses `diffusionServer.getOrchestrator()` rather than constructing a second `ResourceOrchestrator`
+- The renderer always sends explicit `steps`/`cfgScale`/`sampler`/dimensions, so the handler passes them straight through — see [the library's no-defaults rule](image-generation.md#generateimageconfig). On this path genai-lite (0.11) would fill any omitted field with its **own** defaults (1024×1024, 20 steps, CFG 7.5, `euler_a`) before genai-electron ever sees the request; because the form is always explicit, those never apply
 
 ---
 

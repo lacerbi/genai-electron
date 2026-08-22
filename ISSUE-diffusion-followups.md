@@ -30,9 +30,44 @@
   `ResourceOrchestrator`) plus a compile-time check of the new diffusion/hook types.
   `public-types.test.ts` deliberately stays Electron-free and was not extended.
 
+## Implemented in the diffusion hardening batch (2026-08-22, branch `feat/diffusion-hardening`)
+
+Triage of this list on 2026-08-22 (six read-only exploration passes) found nothing strictly
+necessary: the supported genai-lite → wrapper → `sd-server` path works as released. Items 1–3 below
+were the ones closest to "necessary" and shipped together; the decisions behind them are recorded in
+`PROGRESS.md` (Unreleased) and the implementing docs. Everything else in this file stays open.
+
+- [x] **Stuck-job watchdog** — a hung-but-alive backend wedged the busy gate forever (no job-level
+  timeout existed: `jobRequestTimeoutMs` bounds one HTTP call, `maxTransientPollFailures` resets
+  on every successful poll). Now a no-activity timeout (`jobActivityTimeoutMs`, default 600 000;
+  0 or any non-positive / non-finite value = off) cancels, releases the backend with reason
+  `'stuck'`, fails the generation
+  (`BACKEND_ERROR` / `details.code: 'BACKEND_JOB_STUCK'`) and lets the orchestrator reload an
+  offloaded LLM. On by default (unlike llama's opt-in hang watchdog) because the failure is a
+  permanent wedge, not a failed request.
+- [x] **Expose the built-in orchestrator state** — `DiffusionServerManager.getOrchestrator()`
+  returns the live instance (`undefined` without a `LlamaServerManager`); the example app uses it
+  (its offload badge was always `null`: it watched its own split-brain instance).
+- [x] **CORS `*` / no auth on the wrapper** — CORS is opt-in (`allowedOrigins`, default none,
+  `['*']` restores the wildcard); a state-changing method (anything but GET/HEAD/OPTIONS — in
+  practice POST/DELETE) carrying an `Origin` the allowlist does not cover is refused with 403
+  `INVALID_ORIGIN`, because CORS only blocks a browser *read* and a preflight-free cross-origin
+  POST (`Content-Type: text/plain`) would otherwise still start a generation; loopback binds
+  reject a non-localhost / non-IP-literal `Host` with 403 `INVALID_HOST`. `apiKey` deliberately
+  out of scope: genai-lite cannot send one, and the policy is now written down as loopback-only,
+  unauthenticated by design.
+- [x] **Progress percentage cap** — in-flight values ≤ 99, monotonic per generation, 100 only from
+  the completion callback; batch `currentImage` clamped to `totalImages`; `ImageGenerationResult`
+  dimensions read from the PNG header. Docs no longer claim library-side generation defaults (there
+  are none — stable-diffusion.cpp's apply); the example app auto-applies preset settings.
+
+Residual: `parseRequestBody` has no size cap (pre-existing, unauthenticated loopback endpoint) —
+track if it ever matters.
+
 ## Small fixes (low risk; do in one batch)
 
-- [ ] **Progress percentage can touch 100 % before the image is done** — the self-calibrating
+- [x] **Progress percentage can touch 100 % before the image is done** (done 2026-08-22, see
+  above) — the self-calibrating
   estimator (`calculateOverallPercentage` / `updateTimeEstimates` in `DiffusionServerManager`)
   learns the cold load time from the previous cold generation; a later cold load that is slower
   than anything seen before (e.g. cold disk cache after a restart) can drive the loading-stage
@@ -44,6 +79,14 @@
   v0.25.0 merge (test de-flaked in PR #59; the estimator itself is unchanged).
 - [ ] **`--clip-on-cpu` / `--vae-on-cpu` → `--backend te=cpu,vae=cpu`** — deprecated-but-working at
   the pinned build; switch the spelling at the next pin bump (re-run the offload matrix live).
+  Evidence (2026-08-22, from the help strings embedded in the cached `sd-server.exe` whose
+  `.validation.json` reads `master-782-b290693`): `--backend` exists and upstream prescribes
+  exactly `te=cpu` / `vae=cpu` ("deprecated; use --backend te=cpu"); `--offload-to-cpu` and
+  `--diffusion-fa` are NOT deprecated. `--backend` is one option taking one assignment string, so
+  `clipOnCpu && vaeOnCpu` must emit a single merged `--backend te=cpu,vae=cpu` (never the bare
+  `--backend cpu`, which moves everything). Booleans-only public types and reports mean no API or
+  report-format change; keep it on the pin-bump checklist because the merged-string argv needs a
+  live matrix to validate, and a bump forces that session anyway.
 
 ## Orchestration / measurement (real work items)
 
@@ -55,17 +98,28 @@
   85 %) with the orchestrator's 75 % rule.
 - [ ] **Expose `--max-vram` / `--stream-layers`** (devlog §5.4, §8.5) — both exist at the pinned
   build (`sd-server --help`); evaluate on real hardware first, then expose as diffusion config.
+  Confirmed 2026-08-22 from the pinned binary's embedded help: `--max-vram` ("maximum VRAM budget
+  in GiB for graph-cut segmented execution; 0 disables graph splitting; negative auto-detects free
+  VRAM"), `--stream-layers` ("no effect without `--max-vram`"), `--eager-load`, `--auto-fit`
+  ("overrides `--backend` and `--params-backend`" — may delegate the whole offload heuristic to
+  the runtime; the highest-leverage experiment), `--split-mode`, `--list-devices`. There is no
+  `extraArgs` passthrough anywhere (`VALID_CONFIG_FIELDS` rejects unknown fields), and adding one
+  would bypass the flag-precedence contract and be invisible to `calibrate()` — run the evaluation
+  with a standalone `sd-server` driver (recipe in `docs/dev/UPDATING-BINARIES.md` §binary
+  validation), capture the verbatim `--help` into `docs/dev/`, then expose winners as first-class
+  fields (`streamLayers` is cheap to add to `DiffusionOffloadCombo`; `maxVram` config-only).
 - [ ] **`calibrate()` as a binary-bump regression gate** (devlog §6, §8.4) — persist reference
   timings per machine keyed by `policyVersion`/`usageMode`; refuse or flag a bump on a large delta.
-- [ ] **Stuck-job watchdog** — an internal no-activity timeout for a resident backend (today the
-  client's DELETE on its own timeout is the only recovery).
-- [ ] **Expose the built-in orchestrator state** — `DiffusionServerManager` constructs its
-  `ResourceOrchestrator` internally and exposes no accessor, so a host that wants to observe the
-  offload/reload cycle (`getSavedState()`, `waitForReload()`) has to construct its own — a
-  split-brain instance that never receives `onDiffusionBackendReleased()` and whose saved state
-  reflects only its own calls. Decide on a `getOrchestrator()` (or a narrower saved-state /
-  `waitForReload()` accessor on the manager). Documented as a caveat for now
-  ("Built-in vs custom orchestrator" in `resource-orchestration.md`).
+- [x] **Stuck-job watchdog** (done 2026-08-22, see above) — was: no internal no-activity timeout
+  existed for a resident backend, so the client's DELETE on its own timeout was the only recovery.
+- [x] **Expose the built-in orchestrator state** (done 2026-08-22 as `getOrchestrator()`, see
+  above) — was: `DiffusionServerManager` constructed its
+  `ResourceOrchestrator` internally and exposed no accessor, so a host that wanted to observe the
+  offload/reload cycle (`getSavedState()`, `waitForReload()`) had to construct its own — a
+  split-brain instance that never received `onDiffusionBackendReleased()` and whose saved state
+  reflected only its own calls. The decision was a `getOrchestrator()` accessor on the manager
+  rather than a narrower saved-state / `waitForReload()` one; until it landed this was documented
+  as a caveat ("Built-in vs custom orchestrator" in `resource-orchestration.md`).
 
 ## Model / API shape (features)
 
@@ -80,7 +134,8 @@
   503 `SERVER_BUSY` (documented contract, genai-lite maps it to rate-limit and never retries).
 - [ ] **`preload` / `--eager-load` at `start()`** — optional eager backend spawn for hosts that want
   the first image warm.
-- [ ] **CORS `*` / no auth on the wrapper** (devlog §5.1 second half) — bind-only fix shipped;
+- [x] **CORS `*` / no auth on the wrapper** (devlog §5.1 second half; done 2026-08-22, see above —
+  CORS opt-in + Host guard, `apiKey` deliberately not added) — bind-only fix shipped;
   auth/CORS policy is a separate design decision.
 
 ## Tooling

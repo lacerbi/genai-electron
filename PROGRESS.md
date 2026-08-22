@@ -1,7 +1,108 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.25.0 release candidate — Persistent sd-server diffusion backend
-> (2026-08-21)
+> **Current Status**: v0.26.0 release candidate — Diffusion stuck-job watchdog and wrapper
+> access control (2026-08-22)
+
+---
+
+## v0.26.0: Diffusion Stuck-Job Watchdog and Wrapper Access Control (2026-08-22)
+
+Items 1–3 of the 2026-08-22 follow-up triage (`ISSUE-diffusion-followups.md`): a new public
+union member, new config fields, a new manager method, two new wire codes, and one default change.
+
+**Stuck-job watchdog (robustness)**
+
+- A hung-but-alive `sd-server` (job stuck at `generating`, process still answering) used to
+  wedge the wrapper permanently: `jobRequestTimeoutMs` bounds one HTTP call and
+  `maxTransientPollFailures` resets on every successful poll, so the poll loop never ended,
+  every later request got 503 `SERVER_BUSY`, the registry entry was never evicted, and an
+  LLM offloaded for the image never reloaded. Only a client `DELETE` recovered it.
+- New `DiffusionServerConfig.jobActivityTimeoutMs` (default
+  `DIFFUSION_BACKEND_DEFAULTS.jobActivityTimeoutMs` = 600 000; `0` — or any non-positive /
+  non-finite value — disables it): a **no-activity**
+  timeout on the in-flight backend job. Activity is backend stdout progress/log output and a
+  job status or queue-position change — a poll that merely still says `generating` is not.
+  On expiry the library cancels best-effort, releases the backend with the new reason
+  `'stuck'` (`DiffusionBackendReleaseReason`, surfaced as `'backend-status'`), and fails the
+  generation with wire code `BACKEND_ERROR` / `details.code: 'BACKEND_JOB_STUCK'`.
+  `ResourceOrchestrator` treats `'stuck'` like `'crashed'` (an offloaded LLM reloads). Armed
+  during `calibrate()` too (a hung combo is an `'error'`, not `'oom'`).
+
+**Wrapper access control (upgrade-relevant default change)**
+
+- CORS is now **opt-in**. `DiffusionServerConfig.allowedOrigins?: string[]`: unset/empty sends
+  no `Access-Control-*` headers at all (`Vary: Origin` only); entries are matched exactly
+  against the request `Origin` and echoed; `['*']` restores the unconditional wildcard that
+  v0.25 and earlier sent. `OPTIONS` still answers 200, and `Vary: Origin` is
+  sent on every response past the Host guard, whether or not an allowlist is
+  configured. Node/Electron-main clients (genai-lite, `fetch`
+  from the main process, curl) send no `Origin` and are unaffected — only a browser context
+  calling the wrapper directly needs `allowedOrigins`.
+- Cross-origin **writes** are rejected outright: a request that carries an `Origin` the
+  allowlist does not cover **and** uses a state-changing method (anything other than
+  GET/HEAD/OPTIONS — in practice POST and DELETE) is answered with 403 `INVALID_ORIGIN`. CORS
+  alone would not be enough, because it only stops a browser from *reading* a response: a
+  cross-origin "simple" POST (e.g. `Content-Type: text/plain`) needs no preflight and would
+  still have started a GPU generation. GET/HEAD/OPTIONS from a disallowed origin are still
+  answered, just without CORS headers, so the browser blocks the read; `['*']` or an exact
+  entry allows the origin for both reading and writing. Previously any web page open in the
+  user's browser could *read* the loopback wrapper cross-origin and could *trigger*
+  generations with a preflight-free POST; now it can do neither.
+- Host guard: while bound to a loopback address (the default), requests whose `Host` header is
+  not `localhost`/`*.localhost`, an IPv4 literal, or a bracketed IPv6 literal (optional
+  `:port`) are rejected with 403 `INVALID_HOST` (DNS-rebinding protection). An absent `Host`
+  is accepted; a non-loopback bind is unguarded. Policy written down in `image-generation.md`:
+  loopback-only and unauthenticated by design, CORS opt-in, `host` is the knob for anything
+  else; no API-key option on either server.
+
+**Wrong-data fixes**
+
+- `DiffusionServerManager.getOrchestrator(): ResourceOrchestrator | undefined` returns the live
+  built-in orchestrator (the exported `diffusionServer` singleton always has one). A host no
+  longer has to construct a split-brain instance to observe `getSavedState()` /
+  `waitForReload()`; the example app now uses it (its offload badge was always `null` before).
+- `ImageGenerationResult.width/height` are read from the returned PNG's IHDR header, falling
+  back to the requested size (then 512) only when the payload is not a parseable PNG — an
+  omitted size previously reported 512×512 regardless of what was rendered.
+- Async-API batch progress: `currentImage` is clamped to `totalImages` (it read `3 of 2` at
+  100 %).
+- In-flight `ImageGenerationProgress.percentage` is capped at 99 and never decreases within a
+  generation; 100 is reported exactly once, by the completion callback. A stage that overran
+  its learned estimate used to saturate the bar at 100 and fall back at the next transition.
+- Docs corrected: the library applies **no** defaults for `width/height/steps/cfgScale/sampler`
+  (omitted fields fall back to stable-diffusion.cpp's own); callers should always send the
+  model's native values (genai-lite fills its own). The example app now auto-applies a preset's
+  `recommendedSettings` when a matching model is selected and no longer hard-codes 20 steps /
+  cfg 7.5 / `euler_a`.
+
+**Validation:** Build passes with 0 TypeScript errors; ESLint reports 0 errors with the
+repository's existing 114 warnings; `npm run format:check` is clean; the full suite passes
+1421/1421 across 46 suites (17 new watchdog tests in
+`tests/unit/DiffusionServerManager.watchdog.test.ts`, new route tests for CORS / `INVALID_ORIGIN` /
+`INVALID_HOST`, plus result-dimension, `getOrchestrator()`, and progress-cap tests). The batch was
+verified by three independent read-only review passes (watchdog; access control + wrong-data +
+progress; docs + example app) whose findings were applied before commit — notably the
+`INVALID_ORIGIN` write rejection, the 100 % callback moving after the payload checks, and a watchdog
+expiry during the un-raced submit no longer being masked by the kill's exit error. Release gates
+(2026-08-22): `npm run prepublishOnly` (clean build + 1421/1421 across 46 suites), lint 0 errors,
+`format:check` clean, `npm audit --omit=dev --audit-level=high` 0 vulnerabilities, `npm pack
+--dry-run` → `genai-electron-0.26.0.tgz`, 232 files, 309.2 kB packed / 1.6 MB unpacked,
+`git diff --check` clean. The example app's main process typechecks; no live hardware smoke was run
+for this release (no binary pin or spawn-path change).
+
+**Compatibility:** The wrapper's HTTP routes, the manager's method and event surface, and every
+existing config key are preserved; genai-lite and Electron main-process clients send no `Origin`
+and are unaffected by the CORS flip. A browser context that called the wrapper directly must now
+set `allowedOrigins` (`['*']` restores the old wildcard); a custom loopback hostname is rejected by
+the Host guard; exhaustive handling of `DiffusionBackendReleaseReason` needs a `'stuck'` case. This
+is a **minor** release (new config fields, union member, method, and wire codes, all backward
+compatible for the supported path); see `genai-electron-docs/migration-0-25-to-0-26.md`. Because
+this is a pre-1.0 minor, dependency ranges such as `^0.25.0` do not admit v0.26.0 — update the
+range or pin explicitly. Residual, tracked in `ISSUE-diffusion-followups.md`: `parseRequestBody`
+has no size cap; `calibrate()` uses the library-default watchdog timeout (synthetic config).
+
+**Release status:** Preparing the single release PR from `feat/diffusion-hardening`. Merge, the
+annotated `v0.26.0` tag, the GitHub release, and the maintainer's `npm publish` remain.
 
 ---
 

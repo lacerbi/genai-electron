@@ -132,9 +132,11 @@ kept as a recovery copy for the next provisioning run.
 | `SERVER_NOT_RUNNING` | The wrapper is not `'running'` — stopped, stopping, still `'starting'`, or `'crashed'` (503) | Wait for `start()` to resolve; don't POST during `stop()` |
 | `NOT_FOUND` | Generation ID not found | ID invalid or result expired (TTL) |
 | `INVALID_REQUEST` | Invalid parameters | Check prompt, `count` (1-5), `usageMode` (`'burst'`/`'single'`), and that the body is valid JSON |
+| `INVALID_HOST` | Unexpected `Host` header on a loopback-bound wrapper (403) | Reach the wrapper as `127.0.0.1` / `localhost` — see [Requests Rejected With `INVALID_HOST`](#requests-rejected-with-invalid_host) |
+| `INVALID_ORIGIN` | A state-changing request (anything but `GET`/`HEAD`/`OPTIONS`) carries an `Origin` that `allowedOrigins` does not cover (403) | List the origin in `allowedOrigins` — see [Requests Rejected With `INVALID_ORIGIN`](#requests-rejected-with-invalid_origin) |
 | `ALREADY_TERMINAL` | DELETE on a `complete`/`error` generation | Nothing to cancel |
 | `GENERATION_CANCELLED` | Internal classification for a cancelled generation | Expected after DELETE, `cancelImageGeneration()`, or `stop()` mid-image. It **never** reaches a poller as `error.code`: the generation is marked terminal `status: 'cancelled'` with no `error` object at all |
-| `BACKEND_ERROR` | The stable-diffusion.cpp backend failed | Failed job (OOM/CUDA), backend exited or crashed, spawn never became ready, or a prior kill could not be confirmed — see [Backend Crashed](#backend-crashed--backend-status) and [`BACKEND_TERMINATION_UNCONFIRMED`](#backend_termination_unconfirmed--every-image-fails) |
+| `BACKEND_ERROR` | The stable-diffusion.cpp backend failed | Failed job (OOM/CUDA), backend exited or crashed, spawn never became ready, the job went silent (`BACKEND_JOB_STUCK`), or a prior kill could not be confirmed — see [Backend Crashed](#backend-crashed--backend-status), [Generation Hangs](#a-generation-hangs--backend_job_stuck), and [`BACKEND_TERMINATION_UNCONFIRMED`](#backend_termination_unconfirmed--every-image-fails) |
 | `IO_ERROR` | The returned image could not be decoded | The job result carried no usable image payload; check logs |
 | `INTERNAL_ERROR` / `UNKNOWN_ERROR` | Unhandled/unclassified failure | Check `diffusion-server.log` |
 
@@ -211,6 +213,8 @@ await orchestrator.orchestrateImageGeneration({
 });
 ```
 
+On the singleton path you do **not** need to construct one: `diffusionServer` already orchestrates every generation, and `diffusionServer.getOrchestrator()` hands back that live built-in instance to observe (`getSavedState()`, `waitForReload()`). A self-constructed orchestrator is a separate instance whose saved state ignores singleton-driven generations — see [Built-in vs custom orchestrator](resource-orchestration.md#built-in-vs-custom-orchestrator).
+
 ### Context Capacity Contract Errors
 
 **Problem:** `ContextConstraintError` is thrown during sizing or llama-server startup.
@@ -279,7 +283,30 @@ diffusionServer.on('backend-status', ({ state, reason, exit }) => {
 
 If the backend crashes repeatedly, look at `diffusion-server.log` first: the usual causes are VRAM exhaustion (try `offloadToCpu: true` / `clipOnCpu: true`, or a smaller size) and driver-level CUDA failures (re-run with `forceValidation: true` after driver updates).
 
-**Where the stderr tail is.** Over HTTP there is no `details` object — a poller sees only `error.{message, code}`. For a backend **exit** the retained stderr tail is folded into `error.message` itself (`stable-diffusion.cpp exited with code … <tail> Args: …`); for a **failed job** the message carries the backend's own error string. `details.stderr` / `details.stdout` exist only on the `ServerError` thrown in-process (`generateImage()`, and the calibration classifier that reads them to tell OOM from other failures).
+**Where the stderr tail is.** Over HTTP there is no `details` object — a poller sees only `error.{message, code}`. For a backend **exit** the retained stderr tail is folded into `error.message` itself (`stable-diffusion.cpp exited with code … <tail> Args: …`); for a **failed job** the message carries the backend's own error string. `details.stderr` / `details.stdout` exist only on the `ServerError` thrown in-process (`generateImage()`, and the calibration classifier that reads them to tell OOM from other failures). **One deliberate exception:** a stuck job carries its tail as `details.backendStderrTail` instead, precisely so the OOM classifier cannot read a wedged backend as out-of-memory — see [A Generation Hangs](#a-generation-hangs--backend_job_stuck).
+
+### A Generation Hangs / `BACKEND_JOB_STUCK`
+
+**Symptom:** an image sat at the same progress value for a long time and then failed with `error.code: 'BACKEND_ERROR'` (in-process: `ServerError` with `details.code: 'BACKEND_JOB_STUCK'`), and a `'backend-status'` event reported `reason: 'stuck'`.
+
+**Cause:** the `sd-server` backend stopped producing *any* activity for `jobActivityTimeoutMs` (default 10 minutes). The stuck-job watchdog cancels the job best-effort, releases the backend, and fails the generation rather than letting a hung-but-alive backend hold the busy gate forever (which used to mean `503 SERVER_BUSY` for everything else until a client sent a `DELETE`).
+
+Activity means backend stdout progress or log output, a job-status change, or a queue-position change. A poll that keeps answering `generating` with nothing else moving is **not** activity — that is exactly the state being detected.
+
+**What to check:**
+
+- `details.backendStderrTail` on the in-process `ServerError` — the killed backend's last stderr lines, alongside `jobId`, `idleMs`, `timeoutMs`, `stage` (`'loading' | 'diffusion' | 'decoding'`) and `args`. The tail deliberately does **not** live under `details.stderr`: those keys drive calibration's OOM classifier, and a wedged backend must never be reported as out-of-memory.
+- `diffusion-server.log` around the timeout: a driver hang, a swap storm, or an OOM the backend never reported usually leaves a trace.
+- Whether the machine was genuinely still working (huge image, very slow CPU-only path). If a legitimate run needs more than ten minutes between two progress writes, raise the timeout:
+
+```typescript
+await diffusionServer.start({ modelId: 'flux-2-klein', jobActivityTimeoutMs: 1_800_000 }); // 30 min
+await diffusionServer.start({ modelId: 'flux-2-klein', jobActivityTimeoutMs: 0 });         // disable
+```
+
+`0` — or any non-positive / non-finite value — disables the watchdog.
+
+**Recovery is automatic.** The backend is gone (`getBackendInfo().state === 'absent'`), the next request respawns it, and an LLM that had been offloaded for the image is reloaded — the orchestrator treats `'stuck'` exactly like `'crashed'`. Disabling the watchdog (`0`) brings back the old wedge, so prefer raising the value over turning it off.
 
 ### The LLM Didn't Come Back After Generating Images
 
@@ -303,7 +330,14 @@ while (llamaServer.getStatus() !== 'running') {
 - Leave `usageMode` at its `'auto'` default — after an offload it resolves to `'single'`, which releases the backend immediately and reloads the LLM right away.
 - Lower `idleTimeoutMs` (default 300 000 ms) if you want burst mode but a faster automatic return. `idleTimeoutMs: 0` disables the timer entirely, so the LLM then stays down until you release the backend or issue a request that settles `'single'`.
 
-`orchestrator.waitForReload()` is **not** available on the singleton path: `DiffusionServerManager` builds its orchestrator internally and exposes no accessor, and an orchestrator you construct yourself is a different instance that never sees the built-in release callback. Use `waitForReload()` only when your own orchestrator performed the offload. See [Built-in vs custom orchestrator](resource-orchestration.md#built-in-vs-custom-orchestrator) and [Residency and the Reload Decision](resource-orchestration.md#residency-and-the-reload-decision).
+**Or await the reload directly.** `diffusionServer.getOrchestrator()` returns the live built-in orchestrator, so the singleton path can wait for the LLM instead of polling:
+
+```typescript
+await diffusionServer.releaseBackend();
+await diffusionServer.getOrchestrator()?.waitForReload();
+```
+
+Call `waitForReload()` on the orchestrator that actually performed the offload — an instance you constructed yourself is a different object that never sees the built-in release callback. See [Built-in vs custom orchestrator](resource-orchestration.md#built-in-vs-custom-orchestrator) and [Residency and the Reload Decision](resource-orchestration.md#residency-and-the-reload-decision).
 
 ### `BACKEND_TERMINATION_UNCONFIRMED` — Every Image Fails
 
@@ -581,13 +615,62 @@ netstat -ano | findstr :8080
 
 **Cause:** the diffusion HTTP wrapper binds **`127.0.0.1` (loopback only)** by default. Earlier versions bound every interface.
 
-**Solution:** set the bind host explicitly — and only behind deliberate network controls, because the wrapper is unauthenticated and allows CORS from any origin:
+**Solution:** set the bind host explicitly — and only behind deliberate network controls, because the wrapper is unauthenticated and has no API-key option:
 
 ```typescript
 await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081, host: '0.0.0.0' });
 ```
 
 The `sd-server` backend is unaffected either way: it always listens on an ephemeral loopback port that only the wrapper talks to.
+
+### Browser Requests Blocked by CORS
+
+**Problem:** a page in a browser context (a Vite dev server, a renderer with `webSecurity` on) calls `http://127.0.0.1:8081/v1/images/generations` and the browser blocks the response: *"No 'Access-Control-Allow-Origin' header is present"*.
+
+**Cause:** the wrapper no longer sends `Access-Control-*` headers by default — CORS is opt-in. It used to allow every origin. A `POST`/`DELETE` from such an origin does not merely lose the response: it is refused with `403 INVALID_ORIGIN` — see [Requests Rejected With `INVALID_ORIGIN`](#requests-rejected-with-invalid_origin).
+
+**Solution:** list the origins that may call it:
+
+```typescript
+await diffusionServer.start({
+  modelId: 'sdxl-turbo',
+  allowedOrigins: ['http://localhost:5173'],  // exact match, scheme + host + port
+});
+
+// Or restore the old behavior wholesale:
+await diffusionServer.start({ modelId: 'sdxl-turbo', allowedOrigins: ['*'] });
+```
+
+**Not affected:** anything that sends no `Origin` header — genai-lite's `ImageService`, `fetch()` from the Electron main process, curl, other Node clients. If your requests come from the main process (the usual Electron pattern, going through IPC), this error cannot be the cause. See [Network exposure and security](image-generation.md#network-exposure-and-security).
+
+### Requests Rejected With `INVALID_ORIGIN`
+
+**Problem:** the wrapper answers `403` with `{ error: { code: 'INVALID_ORIGIN' } }` on a `POST` or `DELETE`, while `GET /health` from the same page still works (the browser just cannot read it).
+
+**Cause:** a browser page on an origin `allowedOrigins` does not cover tried to *change* something. CORS alone would not stop it — a cross-origin "simple" `POST` (e.g. `Content-Type: text/plain`) needs no preflight, so it would reach the route and start a GPU generation even though the browser then refuses to show the response. The wrapper therefore rejects any state-changing method (anything but `GET`/`HEAD`/`OPTIONS`) that carries an uncovered `Origin`.
+
+**Solution:** list the calling origin — the same knob that fixes the CORS read:
+
+```typescript
+await diffusionServer.start({
+  modelId: 'sdxl-turbo',
+  allowedOrigins: ['http://localhost:5173'],  // allows both reading and writing
+});
+```
+
+**Not affected:** anything that sends no `Origin` header — genai-lite's `ImageService`, `fetch()` from the Electron main process, curl, other Node clients. See [Network exposure and security](image-generation.md#network-exposure-and-security).
+
+### Requests Rejected With `INVALID_HOST`
+
+**Problem:** the wrapper answers `403` with `{ error: { code: 'INVALID_HOST' } }`.
+
+**Cause:** while bound to a loopback address (the default `127.0.0.1`), the wrapper only accepts requests whose `Host` header is `localhost` (including `*.localhost` names, which resolvers pin to loopback), an IPv4 literal, or a bracketed IPv6 literal, each with an optional `:port`. Anything else is a DNS-rebinding attempt or a proxy rewriting the header, and is refused before reaching a route. Requests with no `Host` header at all are allowed. A hosts-file alias such as `http://my-sd.local:8081` pointing at `127.0.0.1` is rejected by design — the guard cannot tell it from a rebound name — so use `localhost`/`127.0.0.1` or bind `host` explicitly.
+
+**Solutions:**
+
+- Address the server as `http://127.0.0.1:8081` (or `http://localhost:8081`) rather than through a hostname that resolves to loopback.
+- If a reverse proxy sits in front of it, have the proxy preserve a loopback `Host` (e.g. `proxy_set_header Host 127.0.0.1:8081;`).
+- If you deliberately serve a hostname, bind a non-loopback interface (`host: '0.0.0.0'`) — the guard applies only to loopback binds. Remember the wrapper is unauthenticated: do this only behind deliberate network controls.
 
 ### "Another llama-server appears to be running" Warning
 

@@ -42,10 +42,15 @@ export interface ImageGenerationProgress {
   /** Current stage of generation */
   stage: ImageGenerationStage;
 
-  /** Overall progress percentage (0-100) */
+  /**
+   * Overall progress percentage (0-100).
+   *
+   * In-flight values never decrease within a generation and stop at 99; 100 is reported
+   * exactly once, by the completion callback, when the image exists.
+   */
   percentage?: number;
 
-  /** Current image being generated (1-indexed, for batch generation) */
+  /** Current image being generated (1-indexed, for batch generation; never above `totalImages`) */
   currentImage?: number;
 
   /** Total images in batch (for batch generation) */
@@ -96,7 +101,13 @@ export interface ImageGenerationConfig {
    */
   usageMode?: DiffusionUsageMode;
 
-  /** Progress callback with stage information */
+  /**
+   * Progress callback with stage information.
+   *
+   * `percentage` never decreases within a generation and stops at 99 while work is in
+   * flight; 100 arrives exactly once, on completion, when the image exists. A cancelled
+   * or failed generation ends without a terminal percentage.
+   */
   onProgress?: (
     currentStep: number,
     totalSteps: number,
@@ -136,9 +147,14 @@ export type DiffusionBackendState = 'absent' | 'starting' | 'ready' | 'busy' | '
  *
  * Consumed by the `'backend-status'` event and by the ResourceOrchestrator, which
  * reloads a previously offloaded LLM only for `'idle-timeout' | 'explicit' |
- * 'crashed' | 'stop'` — the other reasons either reload through a different path
- * (`'single'`) or must not start an LLM at all (`'llm-start'`, `'shutdown'`,
- * `'calibration'`).
+ * 'crashed' | 'stop' | 'cancel' | 'stuck'` — the other reasons either reload through a
+ * different path (`'single'`, `'flags-changed'`) or must not start an LLM at all
+ * (`'llm-start'`, `'shutdown'`, `'calibration'`).
+ *
+ * `'stuck'` is the stuck-job watchdog firing: an in-flight job stopped showing any
+ * sign of life for {@link DiffusionServerConfig.jobActivityTimeoutMs}, so the backend
+ * was killed to free the busy gate and the VRAM (the generation fails with
+ * `details.code: 'BACKEND_JOB_STUCK'`).
  *
  * @example
  * ```typescript
@@ -151,6 +167,7 @@ export type DiffusionBackendReleaseReason =
   | 'explicit'
   | 'flags-changed'
   | 'cancel'
+  | 'stuck'
   | 'crashed'
   | 'stop'
   | 'shutdown'
@@ -244,7 +261,10 @@ export interface ImageGenerationResult {
   /** Seed used (for reproducibility) */
   seed: number;
 
-  /** Image dimensions */
+  /**
+   * Dimensions of the returned image, read from the PNG header (falls back to the
+   * requested size when the payload is not a parseable PNG)
+   */
   width: number;
   height: number;
 }
@@ -262,11 +282,23 @@ export interface DiffusionServerConfig {
   /**
    * Interface the HTTP wrapper binds to (default: `'127.0.0.1'`).
    *
-   * The wrapper is unauthenticated and allows CORS from any origin, so it binds
-   * loopback-only by default. Set `'0.0.0.0'` (or a specific interface) ONLY behind
-   * deliberate network controls.
+   * The wrapper is unauthenticated, so it binds loopback-only by default. Set
+   * `'0.0.0.0'` (or a specific interface) ONLY behind deliberate network controls.
+   * While bound to a loopback address the wrapper also rejects requests whose `Host`
+   * header is not `localhost` or an IP literal (403 `INVALID_HOST`, DNS-rebinding guard).
    */
   host?: string;
+
+  /**
+   * Browser origins allowed to call the wrapper cross-origin (default: none).
+   *
+   * With no entries the wrapper sends no `Access-Control-*` headers at all — only a
+   * browser context calling it directly (a dev page, a renderer with `webSecurity`)
+   * is affected; Node/Electron-main clients such as genai-lite send no `Origin` and are
+   * unaffected. Entries are matched exactly against the request `Origin` and echoed
+   * back; `['*']` restores the wildcard that v0.25 and earlier sent unconditionally.
+   */
+  allowedOrigins?: string[];
 
   /**
    * Maximum wait, in milliseconds, for the internal stable-diffusion.cpp backend to
@@ -294,6 +326,24 @@ export interface DiffusionServerConfig {
    * `releaseBackend()` or `stop()`). Diffusion-only: the LLM server has no idle timer.
    */
   idleTimeoutMs?: number;
+
+  /**
+   * How long an in-flight backend job may show NO sign of life before the library
+   * gives up on it, in milliseconds (default:
+   * `DIFFUSION_BACKEND_DEFAULTS.jobActivityTimeoutMs`, 600 000).
+   *
+   * This is a no-activity watchdog, not a total-job budget: a slow image that keeps
+   * reporting steps never trips it, however long it takes. Activity means a backend
+   * stdout observation (step/byte progress, stage markers), any backend log line, or a
+   * job status / queue-position change — a poll that merely answers `generating` again
+   * is not activity. On expiry the backend job is cancelled best-effort, the backend is
+   * released (`'stuck'`) and the generation fails with `details.code:
+   * 'BACKEND_JOB_STUCK'`, so the busy gate and any offloaded LLM are freed.
+   *
+   * `0` disables the watchdog entirely — a wedged backend then holds the server until
+   * the host intervenes.
+   */
+  jobActivityTimeoutMs?: number;
 
   /** Number of CPU threads (auto-detected if not specified) */
   threads?: number;

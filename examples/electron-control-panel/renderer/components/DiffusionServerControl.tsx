@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Card from './common/Card';
 import StatusIndicator from './common/StatusIndicator';
 import ActionButton from './common/ActionButton';
@@ -25,6 +25,9 @@ const DiffusionServerControl: React.FC = () => {
   const { models, loading: modelsLoading } = useModels('diffusion');
 
   const [selectedModel, setSelectedModel] = useState('');
+  // Flipped the first time the user picks from the model select. Until then the
+  // selection is ours to (re)choose as async data lands; after it, never.
+  const userPickedModel = useRef(false);
   const [startLoading, setStartLoading] = useState(false);
   const [stopLoading, setStopLoading] = useState(false);
 
@@ -72,12 +75,24 @@ const DiffusionServerControl: React.FC = () => {
   // Flags applied from a calibration recommendation, spread into the next start()
   const [appliedFlags, setAppliedFlags] = useState<DiffusionOffloadCombo | null>(null);
 
-  // Set first model as default when models load
+  // Pick the default model: the one the server is already running if that model is
+  // still installed, otherwise the first in the list. `models` and `serverInfo.modelId`
+  // arrive from two independent async sources, so the list can land first — hence this
+  // re-runs on either and corrects an earlier models[0] guess once the running model is
+  // known. It only ever overrides its own guess: once the user touches the select we
+  // leave the choice alone. Getting this right matters because the preset auto-apply
+  // below keys off the selection.
   useEffect(() => {
-    if (models.length > 0 && !selectedModel) {
+    if (models.length === 0 || userPickedModel.current) return;
+    const running = models.find((m) => m.id === serverInfo.modelId);
+    if (running) {
+      // Compare first: this effect re-runs on every `models` identity change, and an
+      // unconditional set of the same id would re-render forever.
+      if (running.id !== selectedModel) setSelectedModel(running.id);
+    } else if (!selectedModel) {
       setSelectedModel(models[0].id);
     }
-  }, [models, selectedModel]);
+  }, [models, selectedModel, serverInfo.modelId]);
 
   // Listen for binary-log events
   useEffect(() => {
@@ -305,7 +320,9 @@ const DiffusionServerControl: React.FC = () => {
   // Match selected model to a preset for recommended settings
   const matchedPreset = MODEL_PRESETS.find((p) => selectedModel.startsWith(p.id));
 
-  const applyPresetSettings = (settings: PresetRecommendedSettings) => {
+  // useCallback so the auto-apply effect below can depend on it honestly:
+  // every setter it closes over is stable, so an empty dep list is correct.
+  const applyPresetSettings = useCallback((settings: PresetRecommendedSettings) => {
     setSteps(settings.steps);
     setStepsPreset(String(settings.steps));
     setCfgScale(settings.cfgScale);
@@ -319,7 +336,21 @@ const DiffusionServerControl: React.FC = () => {
       const dimStr = `${settings.width}\u00d7${settings.height}`;
       setDimensionPreset(dimStr);
     }
-  };
+  }, []);
+
+  // Auto-apply the matched preset's recommended settings whenever the selected model
+  // changes, including the very first selection (a model preselected on mount, or the
+  // one the server is already running). Without this the form kept its SD1.5-era
+  // defaults (20 steps / CFG 7.5 / euler_a), which are wrong and slow for the few-step
+  // models this app ships presets for. When no preset matches we leave the user's
+  // values alone; the Apply button stays for re-applying after manual edits.
+  // `matchedPreset` is a stable reference from the module-level MODEL_PRESETS array,
+  // so this runs once per selection, not on every render.
+  useEffect(() => {
+    if (matchedPreset?.recommendedSettings) {
+      applyPresetSettings(matchedPreset.recommendedSettings);
+    }
+  }, [matchedPreset, applyPresetSettings]);
 
   const isRunning = serverInfo.status === 'running';
   const isBusy = serverInfo.busy || generating;
@@ -406,7 +437,12 @@ const DiffusionServerControl: React.FC = () => {
             <select
               id="diffusion-model"
               value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
+              onChange={(e) => {
+                // Hand ownership of the selection to the user, so a late-arriving
+                // server status can no longer steer it back to the running model.
+                userPickedModel.current = true;
+                setSelectedModel(e.target.value);
+              }}
               disabled={isRunning || startLoading}
               className="model-select"
             >
@@ -420,10 +456,11 @@ const DiffusionServerControl: React.FC = () => {
           )}
         </div>
 
+        {/* Applied automatically on model selection; the button re-applies after edits */}
         {matchedPreset?.recommendedSettings && (
           <div className="settings-hint">
             <span>
-              {matchedPreset.name} recommended: Steps {matchedPreset.recommendedSettings.steps}, CFG{' '}
+              Preset {matchedPreset.name}: Steps {matchedPreset.recommendedSettings.steps}, CFG{' '}
               {matchedPreset.recommendedSettings.cfgScale},{' '}
               {matchedPreset.recommendedSettings.sampler} sampler
               {matchedPreset.recommendedSettings.width &&
@@ -435,7 +472,7 @@ const DiffusionServerControl: React.FC = () => {
               className="apply-preset-btn"
               onClick={() => applyPresetSettings(matchedPreset.recommendedSettings!)}
             >
-              Apply
+              Re-apply
             </button>
           </div>
         )}
