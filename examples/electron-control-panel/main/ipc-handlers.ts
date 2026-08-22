@@ -400,14 +400,21 @@ export function registerIpcHandlers(): void {
         modelId: 'stable-diffusion', // Generic ID for whatever model is loaded
         prompt: config.prompt,
         settings: {
-          width: config.width || 512,
-          height: config.height || 512,
+          // No app-level fallbacks. An omitted field would take genai-lite's own
+          // default (1024×1024, 20 steps, CFG 7.5, euler_a), filled in before the
+          // request ever reaches genai-electron — but the Generate form always sends
+          // explicit values, so those defaults never apply. That is deliberate: the
+          // example must not bake in SD1.5-era numbers either, since neither set fits
+          // the modern few-step models the Models tab offers.
+          width: config.width,
+          height: config.height,
           diffusion: {
             negativePrompt: config.negativePrompt,
-            steps: config.steps || 20,
-            cfgScale: config.cfgScale || 7.5,
-            seed: config.seed || -1,
-            sampler: config.sampler || 'euler_a',
+            steps: config.steps,
+            cfgScale: config.cfgScale,
+            // `??` not `||`: seed 0 is a legitimate fixed seed, not "random"
+            seed: config.seed ?? -1,
+            sampler: config.sampler,
             // Progress callback to send updates to renderer
             onProgress: (progress) => {
               sendImageProgress(

@@ -25,7 +25,7 @@ Automatically manage system resources when running both LLM and image generation
 
 Orchestration is **symmetric**: an image request may offload the LLM, and — through a pre-start hook — an LLM start may release a resident stable-diffusion.cpp backend. Whichever side is about to load asks the other one to make room.
 
-**Note**: When using the singleton `diffusionServer`, orchestration happens automatically - you typically don't need to use `ResourceOrchestrator` directly. This class is primarily for advanced use cases like custom orchestrator instances or programmatic resource status checking. An orchestrator you construct yourself is a *separate* instance from the built-in one and does not participate in its deferred reloads — see [Built-in vs custom orchestrator](#built-in-vs-custom-orchestrator).
+**Note**: When using the singleton `diffusionServer`, orchestration happens automatically - you typically don't need to use `ResourceOrchestrator` directly. This class is primarily for advanced use cases like custom orchestrator instances or programmatic resource status checking. To *observe* the built-in one, use [`diffusionServer.getOrchestrator()`](#diffusionservergetorchestrator); an orchestrator you construct yourself is a *separate* instance and does not participate in the built-in deferred reloads — see [Built-in vs custom orchestrator](#built-in-vs-custom-orchestrator).
 
 **When to use:**
 - Running both llama-server and diffusion server on limited RAM/VRAM
@@ -98,6 +98,7 @@ A release only brings the LLM back when it really means "the VRAM is free and no
 | `'idle-timeout'` | ✅ | The burst is over |
 | `'explicit'` | ✅ | The host called `releaseBackend()` |
 | `'crashed'` | ✅ | The backend is gone either way |
+| `'stuck'` | ✅ | The [activity watchdog](image-generation.md#stuck-jobs-the-activity-watchdog) cut a hung job loose and released the backend — same situation as a crash |
 | `'stop'` | ✅ | `diffusionServer.stop()` |
 | `'cancel'` | ✅ | The cancelled generation killed the backend and then ended — under `'burst'` nothing else would ever release it |
 | `'single'` | ❌ | The orchestration branch above already reloads — reloading here too would double it |
@@ -164,17 +165,40 @@ console.log('Image generated, LLM reloading in background');
 
 Everything described above — deferred reloads, the LLM pre-start hook, `onDiffusionBackendReleased()` — belongs to the **built-in** orchestration: the one a `DiffusionServerManager` constructs internally when it is given a `LlamaServerManager`. The exported `diffusionServer` singleton is wired that way to the exported `llamaServer`.
 
-An orchestrator you construct yourself is a **separate instance**:
+**Reach the built-in one with [`diffusionServer.getOrchestrator()`](#diffusionservergetorchestrator)** — it hands back that live instance, so `getSavedState()` and `waitForReload()` on it describe the offloads you are actually seeing.
 
-- `DiffusionServerManager` has no orchestrator accessor, so there is no way to reach the built-in one; there is no `diffusionServer.orchestrator`.
+An orchestrator you construct yourself is still a **separate instance**:
+
 - Your instance never receives `onDiffusionBackendReleased()` — the manager only calls its own — so it never performs a deferred reload.
 - `getSavedState()` / `waitForReload()` / `clearSavedState()` on your instance reflect **only the offloads your instance performed** (through `orchestrateImageGeneration()` / `orchestrateBatchGeneration()` / `offloadLLM()`).
+- The LLM pre-start hook is registered by the manager for its own orchestrator, not for yours.
 
-Practical rule: use the singleton path and let it manage the LLM for you (observe the result with `llamaServer.getStatus()` / the `'started'` event), **or** drive image generation exclusively through your own `ResourceOrchestrator` — but do not mix a host-constructed orchestrator with singleton-driven generations and expect its saved state to be meaningful.
+Practical rule: use the singleton path and observe it through `getOrchestrator()` (or `llamaServer.getStatus()` / the `'started'` event), **or** drive image generation exclusively through your own `ResourceOrchestrator` — but do not mix a host-constructed orchestrator with singleton-driven generations and expect its saved state to be meaningful.
 
 ---
 
 ## API Reference
+
+### diffusionServer.getOrchestrator()
+
+Not a method *on* `ResourceOrchestrator`, but the way to get one: it returns the **live built-in** orchestrator of a `DiffusionServerManager`.
+
+```typescript
+getOrchestrator(): ResourceOrchestrator | undefined
+```
+
+**Returns:** the instance the manager constructed for itself — the one that performs the offloads, deferred reloads, and the LLM pre-start hook. `undefined` only when the manager was constructed without a `LlamaServerManager` (there is no orchestration to do); on the exported `diffusionServer` singleton it is always defined and wired to the exported `llamaServer`.
+
+```typescript
+import { diffusionServer } from 'genai-electron';
+
+const orchestrator = diffusionServer.getOrchestrator();
+console.log(await orchestrator?.wouldNeedOffload());  // will this image stop the LLM?
+console.log(orchestrator?.getSavedState());           // is an LLM currently offloaded?
+await orchestrator?.waitForReload();                  // await an in-flight reload
+```
+
+Treat it as read-mostly: it is fine to inspect state and await a reload, but driving `offloadLLM()` / `reloadLLM()` on it by hand while the manager is also using it invites two owners for one saved state.
 
 ### Constructor
 
@@ -310,23 +334,23 @@ Waits for any pending background LLM reload to complete. Resolves immediately if
 
 **Returns:** `Promise<void>`
 
-> ⚠️ **Residency caveat:** under `usageMode: 'burst'` after an offload the LLM is *intentionally* still down when this resolves — no reload has been started yet, so there is nothing to wait for. The deferred reload fires when the diffusion backend is released (idle timeout, an explicit `releaseBackend()`, a backend crash, a cancelled generation, or `diffusionServer.stop()`). A caller that needs the LLM back right away should release the backend first:
+> ⚠️ **Residency caveat:** under `usageMode: 'burst'` after an offload the LLM is *intentionally* still down when this resolves — no reload has been started yet, so there is nothing to wait for. The deferred reload fires when the diffusion backend is released (idle timeout, an explicit `releaseBackend()`, a backend crash, a stuck job, a cancelled generation, or `diffusionServer.stop()`). A caller that needs the LLM back right away should release the backend first:
 >
 > ```typescript
-> // Only meaningful when YOU own this orchestrator (see "Built-in vs custom orchestrator")
 > await diffusionServer.releaseBackend();   // frees the VRAM, triggers the deferred reload
 > await orchestrator.waitForReload();       // the release already started it — this awaits it
 > ```
 >
+> Make sure `orchestrator` is the one that performed the offload: on the singleton path that is `diffusionServer.getOrchestrator()`, not an instance you constructed (see [Built-in vs custom orchestrator](#built-in-vs-custom-orchestrator)).
+>
 > **Ordering matters.** `waitForReload()` resolves immediately only when it is called *before* any qualifying release. `releaseBackend()` resolves after the release has been processed, and the deferred reload is registered synchronously inside that processing — so a `waitForReload()` issued *after* it really does wait for `llama-server` to come back up.
 
-**With the singleton path there is no orchestrator to call.** Release the backend and poll the LLM's own status instead:
+**On the singleton path, ask the manager for its orchestrator** — no polling loop needed:
 
 ```typescript
-await diffusionServer.releaseBackend();
-while (llamaServer.getStatus() !== 'running') {
-  await new Promise((r) => setTimeout(r, 500));
-}
+await diffusionServer.releaseBackend();                    // frees the VRAM, starts the reload
+await diffusionServer.getOrchestrator()?.waitForReload();  // …and awaits it
+console.log(diffusionServer.getOrchestrator()?.getSavedState()); // undefined once reloaded
 ```
 
 **Example:**
@@ -386,7 +410,7 @@ These two are part of the managers' wiring rather than an app-facing API, but kn
 | Method | Called by | Effect |
 |---|---|---|
 | `prepareForLLMStart({ config })` | The `LlamaServerManager` pre-start hook the diffusion manager registers | Releases a resident diffusion backend (reason `'llm-start'`) when the LLM about to start would not fit alongside it; throws `CALIBRATION_IN_PROGRESS` while an offload sweep is running |
-| `onDiffusionBackendReleased(reason)` | `DiffusionServerManager` after every confirmed backend release | Brings a deferred LLM back for the five qualifying reasons — see [Residency and the Reload Decision](#residency-and-the-reload-decision) |
+| `onDiffusionBackendReleased(reason)` | `DiffusionServerManager` after every confirmed backend release | Brings a deferred LLM back for the six qualifying reasons — see [Residency and the Reload Decision](#residency-and-the-reload-decision) |
 
 ---
 
@@ -410,7 +434,7 @@ These two are part of the managers' wiring rather than an app-facing API, but kn
 **4. A Burst of Images on the 8GB System**:
    - Request carries `usageMode: 'burst'` → LLM offloaded once, backend spawned once
    - Every follow-up image reuses the warm backend (no model load), and the LLM stays down on purpose
-   - The LLM returns when the backend is released — idle timeout (default 5 min), an explicit `releaseBackend()`, a crash, or `diffusionServer.stop()`
+   - The LLM returns when the backend is released — idle timeout (default 5 min), an explicit `releaseBackend()`, a crash or stuck job, or `diffusionServer.stop()`
 
 **5. Starting the LLM While a Backend Is Warm**:
    - `llamaServer.start()` runs the pre-start hook → both don't fit → backend released with reason `'llm-start'` (an in-flight image is allowed to finish)

@@ -15,6 +15,8 @@ Consequences worth knowing up front:
 - **The backend can stay resident.** After an image it either stays warm (`'burst'` — the next image skips the model load, measured ~33-39% faster on the reference machine) or is torn down together with its VRAM (`'single'`). See [Backend Residency](#backend-residency).
 - **Results never touch disk.** Images travel from the backend as base64 inside the job JSON; there are no temporary PNG files.
 - **A backend crash is not a server crash.** The wrapper keeps serving, the in-flight generation fails with `BACKEND_ERROR`, and the next request respawns the backend — see [Backend crashes](#backend-crashes).
+- **A hung backend does not wedge the wrapper.** A job that stops producing any activity is cut loose by the [stuck-job watchdog](#stuck-jobs-the-activity-watchdog) instead of holding the busy gate forever.
+- **The wrapper is loopback-only and unauthenticated by design.** CORS is opt-in, cross-origin writes are rejected, and a Host guard is on by default — see [Network exposure and security](#network-exposure-and-security).
 
 **Features:** Binary auto-download with variant testing, Node.js API (`generateImage()`), HTTP API (async polling), batch generation (1-5), progress tracking, single/burst backend residency, automatic resource orchestration (works for both APIs).
 
@@ -40,13 +42,15 @@ Starts the HTTP wrapper. Auto-downloads the binary on first run. **No model is l
 | `startupTimeout` | `120000` | Max ms for the **backend** to go spawn → ready (not `start()` itself) |
 | `usageMode` | `'auto'` | Default residency policy: `'auto'` \| `'burst'` \| `'single'` — see [Backend Residency](#backend-residency) |
 | `idleTimeoutMs` | `300000` | How long a `'burst'`-resident backend may idle before it is released; `0` = never |
+| `jobActivityTimeoutMs` | `600000` | No-activity timeout for an in-flight backend job; `0` (or any non-positive / non-finite value) disables the watchdog — see [Stuck jobs](#stuck-jobs-the-activity-watchdog) |
+| `allowedOrigins` | — | Browser origins allowed to read from **and** write to the wrapper. Unset/empty = **no** CORS headers and a `403 INVALID_ORIGIN` on cross-origin `POST`/`DELETE`; `['*']` = wildcard — see [Network exposure and security](#network-exposure-and-security) |
 | `threads` | auto | CPU threads; passed to the backend as `-t` at launch |
 | `gpuLayers` | — | Accepted for config-shape compatibility but **not** passed to sd.cpp — GPU offload is automatic |
 | `forceValidation` | `false` | Re-run binary validation even if a cached result exists |
 | `clipOnCpu`, `vaeOnCpu`, `offloadToCpu`, `diffusionFlashAttention` | auto | Offload flags (see below) — these are **launch** flags, so changing them respawns the backend |
 | `batchSize` | `1` | Maps to `batch_count` in the backend job request |
 
-> **Behavior change:** the wrapper binds **`127.0.0.1` (loopback only)** by default. Earlier versions bound every interface. The wrapper is unauthenticated and allows CORS from any origin, so widen the bind (`host: '0.0.0.0'`) only behind deliberate network controls.
+> **Behavior change:** the wrapper binds **`127.0.0.1` (loopback only)** by default. Earlier versions bound every interface. The wrapper is unauthenticated, so widen the bind (`host: '0.0.0.0'`) only behind deliberate network controls — see [Network exposure and security](#network-exposure-and-security).
 
 ```typescript
 await diffusionServer.start({ modelId: 'sdxl-turbo', port: 8081, threads: 8 });
@@ -63,6 +67,42 @@ await diffusionServer.start({
 ```
 
 **Throws:** `ModelNotFoundError`, `ServerError`, `PortInUseError`, `InsufficientResourcesError`, `BinaryError`
+
+### Network exposure and security
+
+The security model of both managed servers is the same and deliberately small:
+
+**Loopback-only and unauthenticated by design.** The wrapper binds `127.0.0.1` and expects to be reached from the same machine — normally from your Electron main process. There is **no API-key option on either server** (the diffusion wrapper or `llama-server`); `host` is the knob for anything else, and widening it (`host: '0.0.0.0'`) exposes an unauthenticated endpoint, so do it only behind deliberate firewall/network controls. The same applies to `llama-server` — see [LLM Server](llm-server.md).
+
+**CORS is opt-in.** The wrapper sends **no `Access-Control-*` headers** unless you list origins:
+
+```typescript
+// Default: no CORS headers at all — Node/Electron-main clients are unaffected
+await diffusionServer.start({ modelId: 'flux-2-klein' });
+
+// Allow one browser origin (e.g. a Vite dev server) to call the wrapper directly
+await diffusionServer.start({
+  modelId: 'flux-2-klein',
+  allowedOrigins: ['http://localhost:5173'],
+});
+
+// Restore the previous behavior: allow any origin
+await diffusionServer.start({ modelId: 'flux-2-klein', allowedOrigins: ['*'] });
+```
+
+| `allowedOrigins` | What the wrapper sends |
+|---|---|
+| unset or `[]` (**default**) | No `Access-Control-*` headers (`Vary: Origin` is still set) |
+| `['*']` | `Access-Control-Allow-Origin: *` — the pre-change behavior |
+| `['https://app.example', …]` | The request's `Origin` echoed back, **only** on an exact string match |
+
+`OPTIONS` still answers `200` either way; it just carries no CORS headers when the origin is not allowed.
+
+> **Upgrade note:** allowing every origin used to be the default. Node-side clients send no `Origin` header and are unaffected — genai-lite's `ImageService`, `fetch()` from the Electron main process, and `curl` all keep working unchanged. Only a **browser context** talking to the wrapper directly (a Vite dev page, a renderer with `webSecurity` on) needs `allowedOrigins`.
+
+**Cross-origin writes are rejected (`INVALID_ORIGIN`).** CORS alone would not be enough: it only stops a browser from *reading* a response, while a cross-origin "simple" `POST` (e.g. `Content-Type: text/plain`) needs no preflight and would still reach the route and start a GPU generation — Firefox and Safari send it, and only Chrome's Private Network Access happens to block it. So a request that carries an `Origin` header the `allowedOrigins` allowlist does not cover **and** uses a state-changing method (anything other than `GET`, `HEAD`, or `OPTIONS` — in practice `POST` and `DELETE`) is rejected with **`403` / `code: 'INVALID_ORIGIN'`**. `GET`/`HEAD`/`OPTIONS` from a disallowed origin are still answered, just without CORS headers, so the browser blocks the read. Requests with no `Origin` header (genai-lite's `ImageService` in the Electron main process, Node `fetch`, curl) are unaffected, and `allowedOrigins: ['*']` or an exact entry allows that origin for both reading and writing. The net effect: a page on another origin can neither read from nor trigger work on the wrapper.
+
+**Host guard (DNS-rebinding protection).** When the wrapper is bound to a loopback address (the default), a request whose `Host` header is not `localhost` (including `*.localhost` names, which resolvers pin to loopback), an IPv4 literal, or a bracketed IPv6 literal, each with an optional `:port`, is rejected with **`403` / `code: 'INVALID_HOST'`**. This stops a page on an attacker-controlled domain that resolves to `127.0.0.1` from driving your local GPU. Requests with no `Host` header at all are allowed, and there is no guard when `host` is a non-loopback bind (that deployment is your own network's problem to solve).
 
 ### Multi-Component Models
 
@@ -154,6 +194,27 @@ A `'burst'`-resident backend is released automatically after `idleTimeoutMs` (de
 
 Each poll of the backend's job API gets `DIFFUSION_BACKEND_DEFAULTS.jobRequestTimeoutMs` (**10 000 ms**) — deliberately longer than the client's own 5 s default, because the backend answers job requests from the same thread that runs sampling and can take seconds to reply under load. Up to `maxTransientPollFailures` (**3**) consecutive request timeouts or transport errors are retried; past that the generation fails **and the job is stopped**, so a lost job never keeps holding the GPU.
 
+### Stuck jobs (the activity watchdog)
+
+A backend that answers polls but never finishes is worse than one that dies: before the watchdog existed, a hung-but-alive `sd-server` wedged the wrapper's busy gate indefinitely — every further request got `503 SERVER_BUSY`, an offloaded LLM never came back, and only a client `DELETE` broke the deadlock.
+
+Every in-flight backend job is therefore watched for **activity**, not for total duration. The timer is `DiffusionServerConfig.jobActivityTimeoutMs` (default `DIFFUSION_BACKEND_DEFAULTS.jobActivityTimeoutMs` = **600 000 ms = 10 minutes**; `0` — or any non-positive / non-finite value — disables the watchdog), it is armed only around a single generation, and it resets on every sign of life:
+
+| Counts as activity | Does **not** count |
+|---|---|
+| Backend stdout progress (step bar, byte counters, stage markers) | A successful poll that still reports `generating` |
+| Any log line from the backend | Time passing on a long-but-healthy step |
+| A change of job status | |
+| A change of queue position | |
+
+Because a slow step still moves the step bar, the default is generous enough for very large images on slow hardware while still catching a genuine hang. Raise it if your machine legitimately spends more than ten minutes between two progress writes; set `0` (or any non-positive / non-finite value) to opt out entirely.
+
+On expiry the library, in order: logs the timeout, best-effort cancels the backend job, releases the backend with **`reason: 'stuck'`** (a `'backend-status'` event; `'stuck'` is a member of `DiffusionBackendReleaseReason`), and fails the in-flight generation with wire code `BACKEND_ERROR` and `details.code: 'BACKEND_JOB_STUCK'`. Through the async HTTP API the generation lands on `status: 'error'` with `error.code: 'BACKEND_ERROR'`.
+
+`ResourceOrchestrator` treats `'stuck'` exactly like `'crashed'`: an LLM that was offloaded to make room for the image is reloaded, so a hang costs you an image, not your LLM. See [Residency and the Reload Decision](resource-orchestration.md#residency-and-the-reload-decision).
+
+The watchdog is also armed during [offload calibration](#offload-calibration), where the server is stopped and the library default applies — a combo whose generation hangs is recorded as `status: 'error'` (not `'oom'`) and the sweep moves on instead of stalling.
+
 ### releaseBackend(options?)
 
 ```typescript
@@ -202,17 +263,17 @@ diffusionServer.on('backend-status', ({ state, previous, reason, exit }) => {
 });
 ```
 
-`reason` is either a forward transition (`'spawned'`, `'ready'`, `'job'`), a spawn that never became ready (`'start-failed'`), or one of the release reasons: `'single'`, `'idle-timeout'`, `'explicit'`, `'flags-changed'`, `'cancel'`, `'crashed'`, `'stop'`, `'shutdown'`, `'llm-start'`, `'calibration'`.
+`reason` is either a forward transition (`'spawned'`, `'ready'`, `'job'`), a spawn that never became ready (`'start-failed'`), or one of the release reasons: `'single'`, `'idle-timeout'`, `'explicit'`, `'flags-changed'`, `'cancel'`, `'crashed'`, `'stuck'`, `'stop'`, `'shutdown'`, `'llm-start'`, `'calibration'`.
 
 ### Deferred LLM reload under `'burst'`
 
-When the orchestrator offloaded the LLM for an image and the mode resolves to `'burst'`, the backend deliberately stays warm and **the LLM reload is deferred** — it fires when the backend is finally released for a reason that means "the VRAM is free again": `'idle-timeout'`, `'explicit'`, `'crashed'`, `'cancel'`, or `'stop'`. See [Resource Orchestration](resource-orchestration.md#residency-and-the-reload-decision).
+When the orchestrator offloaded the LLM for an image and the mode resolves to `'burst'`, the backend deliberately stays warm and **the LLM reload is deferred** — it fires when the backend is finally released for a reason that means "the VRAM is free again": `'idle-timeout'`, `'explicit'`, `'crashed'`, `'stuck'`, `'cancel'`, or `'stop'`. See [Resource Orchestration](resource-orchestration.md#residency-and-the-reload-decision).
 
 ### Backend crashes
 
 If the backend dies unexpectedly, the in-flight generation fails with wire code `BACKEND_ERROR`, the backend state goes to `'absent'` with a `'backend-status'` event carrying `reason: 'crashed'` and the process `exit` details, and **the wrapper stays `'running'`** — the next request simply respawns the backend. `isHealthy()` is wrapper-scoped by design and is unaffected by backend residency, so a `'single'`-mode release after every image never flips a health poll to `false`.
 
-`DiffusionServerManager` still never emits the `'crashed'` event: that event means "the server is down", which a backend exit is not.
+`DiffusionServerManager` still never emits the `'crashed'` event: that event means "the server is down", which a backend exit is not. A backend that *hangs* instead of dying is handled by the [activity watchdog](#stuck-jobs-the-activity-watchdog) — same failure shape, release reason `'stuck'`.
 
 ---
 
@@ -222,9 +283,13 @@ If the backend dies unexpectedly, the in-flight generation fails with wire code 
 
 Generates a single image on the `sd-server` backend, spawning it first when no backend with matching offload flags is resident. When both LLM and diffusion servers are running, singleton `diffusionServer` automatically offloads/reloads LLM when RAM/VRAM exceeds 75% threshold.
 
-**Config:** `prompt` (required), `negativePrompt`, `width` (512), `height` (512), `steps` (20), `cfgScale` (7.5), `seed` (random), `sampler` ('euler_a'), `count` (1), `usageMode` (see [Backend Residency](#backend-residency)), `onProgress`.
+**Config:** `prompt` (required), `negativePrompt`, `width`, `height`, `steps`, `cfgScale`, `seed` (random when omitted), `sampler`, `count` (1), `usageMode` (see [Backend Residency](#backend-residency)), `onProgress`.
 
-**Returns:** `ImageGenerationResult` - Single image with metadata
+> **The library applies no defaults to `width`/`height`/`steps`/`cfgScale`/`sampler`.** An omitted field is *omitted from the backend request*, so stable-diffusion.cpp's own defaults apply — and those are tuned for classic Stable Diffusion, not for whatever you are running. **Always send `steps`, `cfgScale`, and `sampler` explicitly.** The library ships no model presets at all; the presets live in the example app, whose default model is a guidance-distilled FLUX.2 Klein profile (4 steps, `cfgScale: 1`, `euler`, 768×768) — handing that model sd.cpp's defaults instead produces slow, over-guided, or garbled images. See the example app's model presets ([Preset-Matched Settings](example-control-panel.md#pattern-preset-matched-settings-hint)) for a working per-model settings table.
+>
+> Callers that go through **genai-lite** get *genai-lite's* defaults for any field they omit, not stable-diffusion.cpp's — check genai-lite's own `ImageService` documentation rather than assuming either set.
+
+**Returns:** `ImageGenerationResult` - Single image with metadata. `width`/`height` are the **actual** dimensions of the returned PNG (read from its header), so they stay truthful when the backend rounds, clamps, or defaults a size — they are no longer an echo of the requested config. (Only an unparseable payload falls back — to the requested size, then `512` when the request omitted one.)
 
 **Example:**
 ```typescript
@@ -288,6 +353,22 @@ getActiveGenerationId(): string | undefined
 
 > **genai-lite polling caveat:** genai-lite clients **below v0.9.2** only treat `complete` and `error` as terminal statuses — if a generation is cancelled out-of-band, they keep polling until their own client-side timeout (~120 s). genai-lite ≥ 0.9.2 recognizes `'cancelled'` as terminal and stops immediately (surfacing an abort error). genai-lite ≥ 0.10.0 additionally supports request-side cancellation — `generateImage(request, { signal })` sends this DELETE itself on caller abort (and on its own poll timeout — 120 s by default, per-call configurable via `generateImage(request, { timeoutMs })` since genai-lite 0.11 — freeing the GPU), so out-of-band cancellation is only needed for older clients or non-genai-lite pollers.
 
+### getOrchestrator()
+
+```typescript
+getOrchestrator(): ResourceOrchestrator | undefined
+```
+
+Returns the **live built-in** `ResourceOrchestrator` — the instance this manager constructed for itself, and the one that actually performs the offloads, deferred reloads, and pre-start hook described in [Resource Orchestration](resource-orchestration.md). On the exported `diffusionServer` singleton it is the orchestrator wired to the exported `llamaServer`, so its saved state and reload promise describe the offloads you are actually seeing.
+
+Returns `undefined` only for a `DiffusionServerManager` constructed without a `LlamaServerManager` (there is no orchestration to do). An orchestrator you construct yourself is still a *separate* instance — see [Built-in vs custom orchestrator](resource-orchestration.md#built-in-vs-custom-orchestrator).
+
+```typescript
+await diffusionServer.releaseBackend();                    // frees VRAM, triggers a deferred reload
+await diffusionServer.getOrchestrator()?.waitForReload();  // …and awaits it
+console.log(diffusionServer.getOrchestrator()?.getSavedState());  // undefined once reloaded
+```
+
 ---
 
 ## HTTP API (Async Pattern)
@@ -298,11 +379,15 @@ The HTTP API provides asynchronous image generation with a polling pattern. POST
 
 **Base URL:** `http://127.0.0.1:{port}` (default: http://127.0.0.1:8081). The wrapper binds loopback only unless `host` says otherwise, so this address is also the *only* one that works by default. Use `127.0.0.1` rather than `localhost` — on Windows the `localhost` → IPv6 lookup adds a noticeable per-request penalty.
 
+**Access control applies to every endpoint below.** No `Access-Control-*` headers are sent unless `allowedOrigins` says so; a `POST`/`DELETE` carrying an `Origin` the allowlist does not cover is rejected with `403 INVALID_ORIGIN`; and while the wrapper is bound to loopback a request carrying an unexpected `Host` header is rejected with `403 INVALID_HOST` before it reaches a route. Node-side clients (genai-lite, `fetch` from the main process, curl) send neither header and are unaffected by all three. See [Network exposure and security](#network-exposure-and-security).
+
 ### POST /v1/images/generations
 
 Start an async image generation. Returns immediately with a generation ID.
 
-**Request:** JSON with `prompt` (required), `negativePrompt`, `width` (512), `height` (512), `steps` (20), `cfgScale` (7.5), `seed` (random), `sampler` ('euler_a'), `count` (1-5), `usageMode` (`'burst'` | `'single'`; omitted = the server's policy decides — see [Backend Residency](#backend-residency)).
+**Request:** JSON with `prompt` (required), `negativePrompt`, `width`, `height`, `steps`, `cfgScale`, `seed` (random when omitted), `sampler`, `count` (1-5, default `1`), `usageMode` (`'burst'` | `'single'`; omitted = the server's policy decides — see [Backend Residency](#backend-residency)).
+
+As on the Node.js API, **omitted generation fields fall through to stable-diffusion.cpp's own defaults** — the library has none. Send `steps`, `cfgScale`, and `sampler` explicitly on every request; see the note under [`generateImage()`](#generateimageconfig).
 
 **Response (201 Created):**
 ```typescript
@@ -311,6 +396,7 @@ Start an async image generation. Returns immediately with a generation ID.
 
 **Errors:**
 - `400 Bad Request` — missing `prompt`, `count` outside 1-5, `usageMode` that is neither `'burst'` nor `'single'`, or a malformed JSON body (all `code: 'INVALID_REQUEST'`)
+- `403 Forbidden` — the request carries an `Origin` that `allowedOrigins` does not cover (`code: 'INVALID_ORIGIN'`), or a `Host` header that is not loopback-safe on a loopback bind (`code: 'INVALID_HOST'`)
 - `503 Service Unavailable` — another generation is in flight (`code: 'SERVER_BUSY'`), or the wrapper is not running / is stopping (`code: 'SERVER_NOT_RUNNING'`)
 
 **Example:**
@@ -333,7 +419,7 @@ Poll generation status and retrieve results.
 **Response:** State object with `id`, `status`, `createdAt`, `updatedAt`, plus:
 - `status: 'pending'` - No additional fields
 - `status: 'in_progress'` - `progress: { currentStep, totalSteps, stage, percentage?, currentImage?, totalImages? }`
-- `status: 'complete'` - `result: { images: [{ image, seed, width, height }], format, timeTaken }`
+- `status: 'complete'` - `result: { images: [{ image, seed, width, height }], format, timeTaken }`. Each `width`/`height` is read from the returned PNG, so it is the image's real size rather than an echo of the request
 - `status: 'error'` - `error: { message, code }`
 - `status: 'cancelled'` - Terminal; generation was cancelled (via DELETE, `cancelImageGeneration()`, or a `stop()` that landed mid-image). No `error` object is attached — a cancellation is not a failure
 - `404` - Generation not found or expired
@@ -401,9 +487,11 @@ const { status, busy, backend } = await (await fetch('http://127.0.0.1:8081/heal
 | `SERVER_NOT_RUNNING` | The wrapper is not `'running'` — stopped, stopping, still `'starting'`, or `'crashed'` | POST after `stop()`, or before `start()` resolves (503) |
 | `NOT_FOUND` | Generation ID not found | Invalid ID or expired (TTL) |
 | `INVALID_REQUEST` | Invalid parameters | Missing prompt, invalid `count`/`usageMode`, malformed JSON body |
+| `INVALID_HOST` | The `Host` header is not a loopback-safe name while the wrapper is bound to loopback (403) | A browser page on a domain that resolves to `127.0.0.1` (DNS rebinding) — see [Network exposure and security](#network-exposure-and-security) |
+| `INVALID_ORIGIN` | A state-changing request (anything but `GET`/`HEAD`/`OPTIONS`) carries an `Origin` that `allowedOrigins` does not cover (403) | A browser page on another origin trying to start or cancel a generation — list the origin in `allowedOrigins`, see [Network exposure and security](#network-exposure-and-security) |
 | `ALREADY_TERMINAL` | Generation is already `complete`/`error` | DELETE arriving too late |
 | `GENERATION_CANCELLED` | Internal classification for a cancelled generation | DELETE, `cancelImageGeneration()`, or `stop()` mid-image. It **never** reaches a poller as `error.code`: the generation is marked terminal **`status: 'cancelled'`** with no `error` object. A cancel that aborts a still-loading cold spawn lands here too |
-| `BACKEND_ERROR` | The `sd-server` backend failed the job | Failed job (CUDA/OOM), backend exited or crashed mid-job, spawn never became ready, or a previous kill could not be confirmed (`BACKEND_TERMINATION_UNCONFIRMED`) |
+| `BACKEND_ERROR` | The `sd-server` backend failed the job | Failed job (CUDA/OOM), backend exited or crashed mid-job, spawn never became ready, the job went silent past `jobActivityTimeoutMs` (`BACKEND_JOB_STUCK`), or a previous kill could not be confirmed (`BACKEND_TERMINATION_UNCONFIRMED`) |
 | `IO_ERROR` | The returned image could not be decoded | Empty/absent base64 payload in the job result |
 | `INTERNAL_ERROR` | Unhandled error inside a route | Bug — check `diffusion-server.log` |
 | `UNKNOWN_ERROR` | Unclassified failure | Fallback when nothing else matched |
@@ -436,6 +524,13 @@ Progress is derived from the backend's stdout (step bar plus a small table of st
 
 System adapts time estimates based on hardware: first generation uses defaults, subsequent generations adjust to image size/steps. Cold and warm generations are estimated separately, so a cold image after a run of warm ones does not distort the bar.
 
+### What `percentage` guarantees
+
+Because the numbers are *estimates*, a re-estimate could otherwise make the bar jump backwards or sit at 100% while the image is still being written. Two rules prevent that:
+
+- **Monotonic, and capped at 99 while in flight.** Within one generation, `percentage` never decreases, and no in-flight update ever reports 100. **100 is reported exactly once**, by the completion callback, at a point where the image actually exists. (Trade-off: a badly mis-estimated stage pins the bar at 99 for a while rather than falling back — a stall at 99 is not a hang.)
+- **`currentImage` never exceeds `totalImages`.** For a `count > 1` batch the per-image counter is clamped, so a UI can render `currentImage / totalImages` without defensive arithmetic.
+
 > Not to be confused with [Offload Calibration](#offload-calibration) below — that section is about benchmarking **offload flags**, this one is about progress-bar time estimates.
 
 **Example:**
@@ -453,7 +548,9 @@ const result = await diffusionServer.generateImage({
 
 ### Available Samplers
 
-`euler_a` (default), `euler`, `heun` (slower, better quality), `dpm2`, `dpm++2s_a`, `dpm++2m` (good quality), `dpm++2mv2`, `lcm` (very fast), `er_sde`, `euler_cfg_pp`, `euler_a_cfg_pp` (CFG++ variants).
+`euler_a`, `euler` (what the distilled FLUX.2 Klein profile uses), `heun` (slower, better quality), `dpm2`, `dpm++2s_a`, `dpm++2m` (good quality), `dpm++2mv2`, `lcm` (very fast), `er_sde`, `euler_cfg_pp`, `euler_a_cfg_pp` (CFG++ variants).
+
+There is **no library default** — omitting `sampler` leaves the choice to stable-diffusion.cpp. Pick one per model and send it explicitly.
 
 ---
 
@@ -487,7 +584,7 @@ Sweep cost: `combos × (1 + samples × sizes)` generations. The warmup is **per 
 - The sweep **manages the backend itself** — offload flags are launch arguments, so each combo gets its own process launch — and never settles residency for you.
 - `usageMode` decides whether a timed sample is cold or warm, and the report echoes it along with `policyVersion`; results are only comparable across reports that share both.
 - When the manager is wired for orchestration (the `diffusionServer` singleton is), a running LLM is offloaded **once** for the whole sweep and restored afterwards. Without orchestration wiring, stop the LLM yourself before calibrating.
-- Failing combos are recorded (`status: 'oom' | 'error'`) and never abort the sweep; the `max-savings` fallback combo means something usually succeeds even on very tight VRAM.
+- Failing combos are recorded (`status: 'oom' | 'error'`) and never abort the sweep; the `max-savings` fallback combo means something usually succeeds even on very tight VRAM. The [activity watchdog](#stuck-jobs-the-activity-watchdog) runs here too, so a combo that hangs is recorded as `'error'` (never `'oom'`) once the no-activity timeout expires, instead of stalling the sweep.
 - `recommended` is keyed `"<width>x<height>"` (e.g. `"768x768"`) and holds combos **as requested** — the winner may be the plain auto combo; what auto-detection resolved to is in the winning run's `resolved`. Ties within 5% of the fastest prefer fewer forced flags (robustness).
 
 **Example** (an app that commits to specific illustration sizes):

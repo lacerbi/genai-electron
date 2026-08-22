@@ -895,6 +895,7 @@ describe('DiffusionServerManager (lifecycle)', () => {
         const req = new EventEmitter() as any;
         req.url = '/health';
         req.method = 'GET';
+        req.headers = {};
         const res = { setHeader: jest.fn(), writeHead: jest.fn(), end: jest.fn() } as any;
         requestHandler(req, res);
         return res;

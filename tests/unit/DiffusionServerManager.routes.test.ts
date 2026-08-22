@@ -235,14 +235,20 @@ describe('DiffusionServerManager (HTTP routes)', () => {
   const statusOf = (res: any): number => res.writeHead.mock.calls[0][0] as number;
   const bodyOf = (res: any): any => JSON.parse(res.end.mock.calls[0][0] as string);
 
-  /** Dispatch a request with no body (GET/DELETE/OPTIONS/unknown). */
+  /**
+   * Dispatch a request with no body (GET/DELETE/OPTIONS/unknown). `headers` stands in for
+   * `IncomingMessage.headers` (always an object on a real request); pass `origin` / `host`
+   * to exercise the CORS allowlist and the loopback Host guard.
+   */
   const request = (
     url: string,
-    method: string
+    method: string,
+    headers: Record<string, string> = {}
   ): { res: any; done: Promise<void>; req: EventEmitter } => {
     const req = new EventEmitter() as any;
     req.url = url;
     req.method = method;
+    req.headers = headers;
     const res = createRes();
     const done = Promise.resolve(requestHandler(req, res)) as Promise<void>;
     return { res, done, req };
@@ -255,10 +261,15 @@ describe('DiffusionServerManager (HTTP routes)', () => {
    * `data`/`end` listeners, so two back-to-back calls both parse their body before
    * either continuation runs — that is what proves the busy claim is synchronous.
    */
-  const post = (body: unknown, raw?: string): { res: any; done: Promise<void> } => {
+  const post = (
+    body: unknown,
+    raw?: string,
+    headers: Record<string, string> = {}
+  ): { res: any; done: Promise<void> } => {
     const req = new EventEmitter() as any;
     req.url = '/v1/images/generations';
     req.method = 'POST';
+    req.headers = headers;
     const res = createRes();
     const done = Promise.resolve(requestHandler(req, res)) as Promise<void>;
     req.emit('data', Buffer.from(raw ?? JSON.stringify(body)));
@@ -312,12 +323,52 @@ describe('DiffusionServerManager (HTTP routes)', () => {
     mockHttpServer.removeAllListeners();
   });
 
-  describe('CORS and fallbacks', () => {
-    it('sets the CORS headers on every response', async () => {
-      const { res, done } = request('/health', 'GET');
+  /** Stop and restart the wrapper with a different config; rebinds `requestHandler`. */
+  const restartWith = async (config: DiffusionServerConfig): Promise<void> => {
+    await diffusionServer.stop();
+    // The mocked close() never drops the 'error' listener listen() attached
+    mockHttpServer.removeAllListeners('error');
+    await diffusionServer.start(config);
+    requestHandler = mockCreateServer.mock.calls.at(-1)![0] as RequestHandler;
+  };
+
+  const corsHeadersOf = (res: any): string[] =>
+    (res.setHeader.mock.calls as [string, string][])
+      .map(([name]) => name)
+      .filter((name) => name.startsWith('Access-Control-'));
+
+  describe('CORS (opt-in through allowedOrigins)', () => {
+    it('sends no Access-Control headers by default, even to a browser Origin', async () => {
+      const { res, done } = request('/health', 'GET', { origin: 'https://evil.example' });
       await done;
 
-      expect(res.setHeader).toHaveBeenCalledWith('Access-Control-Allow-Origin', '*');
+      expect(corsHeadersOf(res)).toEqual([]);
+      // The response still varies with Origin (it would, once an allowlist is set)
+      expect(res.setHeader).toHaveBeenCalledWith('Vary', 'Origin');
+      expect(statusOf(res)).toBe(200);
+    });
+
+    it('still answers a preflight with a bare 200, without CORS headers', async () => {
+      const { res, done } = request('/v1/images/generations', 'OPTIONS', {
+        origin: 'https://evil.example',
+      });
+      await done;
+
+      expect(res.writeHead).toHaveBeenCalledWith(200);
+      expect(res.end).toHaveBeenCalledWith();
+      expect(corsHeadersOf(res)).toEqual([]);
+    });
+
+    it('echoes an exactly-listed Origin with the full CORS header set', async () => {
+      await restartWith({ ...mockConfig, allowedOrigins: ['http://localhost:5173'] });
+
+      const { res, done } = request('/health', 'GET', { origin: 'http://localhost:5173' });
+      await done;
+
+      expect(res.setHeader).toHaveBeenCalledWith(
+        'Access-Control-Allow-Origin',
+        'http://localhost:5173'
+      );
       expect(res.setHeader).toHaveBeenCalledWith(
         'Access-Control-Allow-Methods',
         'GET, POST, OPTIONS, DELETE'
@@ -325,14 +376,158 @@ describe('DiffusionServerManager (HTTP routes)', () => {
       expect(res.setHeader).toHaveBeenCalledWith('Access-Control-Allow-Headers', 'Content-Type');
     });
 
-    it('answers a CORS preflight with a bare 200', async () => {
-      const { res, done } = request('/v1/images/generations', 'OPTIONS');
+    it('ignores an Origin that is not listed (exact match, no prefix or wildcard logic)', async () => {
+      await restartWith({ ...mockConfig, allowedOrigins: ['http://localhost:5173'] });
+
+      const { res, done } = request('/health', 'GET', { origin: 'http://localhost:5174' });
       await done;
 
-      expect(res.writeHead).toHaveBeenCalledWith(200);
-      expect(res.end).toHaveBeenCalledWith();
+      expect(corsHeadersOf(res)).toEqual([]);
+      expect(statusOf(res)).toBe(200);
     });
 
+    it("restores the unconditional wildcard with allowedOrigins: ['*'], Origin or not", async () => {
+      await restartWith({ ...mockConfig, allowedOrigins: ['*'] });
+
+      const withOrigin = request('/health', 'GET', { origin: 'https://anything.example' });
+      await withOrigin.done;
+      const withoutOrigin = request('/health', 'GET');
+      await withoutOrigin.done;
+
+      expect(withOrigin.res.setHeader).toHaveBeenCalledWith('Access-Control-Allow-Origin', '*');
+      expect(withoutOrigin.res.setHeader).toHaveBeenCalledWith('Access-Control-Allow-Origin', '*');
+    });
+  });
+
+  describe('Host guard (loopback binds only)', () => {
+    it.each(['localhost', 'localhost:8081', '127.0.0.1:8081', '[::1]:8081', 'app.localhost'])(
+      'accepts Host %s on the default loopback bind',
+      async (host) => {
+        const { res, done } = request('/health', 'GET', { host });
+        await done;
+
+        expect(statusOf(res)).toBe(200);
+      }
+    );
+
+    it('accepts a request without a Host header', async () => {
+      const { res, done } = request('/health', 'GET');
+      await done;
+
+      expect(statusOf(res)).toBe(200);
+    });
+
+    it('rejects a DNS name that could have been rebound with 403 INVALID_HOST', async () => {
+      const { res, done } = request('/health', 'GET', { host: 'attacker.example:8081' });
+      await done;
+
+      expect(res.writeHead).toHaveBeenCalledWith(403, { 'Content-Type': 'application/json' });
+      const body = bodyOf(res);
+      expect(body.error.code).toBe('INVALID_HOST');
+      expect(body.error.message).toContain('attacker.example:8081');
+    });
+
+    it('guards POST and DELETE too, before any route logic runs', async () => {
+      const { res, done } = request('/v1/images/generations/some-id', 'DELETE', {
+        host: 'attacker.example',
+      });
+      await done;
+
+      expect(statusOf(res)).toBe(403);
+      expect(bodyOf(res).error.code).toBe('INVALID_HOST');
+    });
+
+    it('does not guard a deliberately widened bind', async () => {
+      await restartWith({ ...mockConfig, host: '0.0.0.0' });
+
+      const { res, done } = request('/health', 'GET', { host: 'my-workstation.lan:8081' });
+      await done;
+
+      expect(statusOf(res)).toBe(200);
+    });
+
+    it.each([
+      '127.0.0.1.attacker.example',
+      'localhost.attacker.example',
+      '[::1]:abc',
+      'localhost:8081:8081',
+      'attacker.example:8081:8081',
+    ])('rejects the suffix/format confusion %s', async (host) => {
+      const { res, done } = request('/health', 'GET', { host });
+      await done;
+
+      expect(statusOf(res)).toBe(403);
+      expect(bodyOf(res).error.code).toBe('INVALID_HOST');
+    });
+
+    it('treats an empty Host header like an absent one', async () => {
+      const { res, done } = request('/health', 'GET', { host: '' });
+      await done;
+
+      expect(statusOf(res)).toBe(200);
+    });
+  });
+
+  describe('cross-origin writes (INVALID_ORIGIN)', () => {
+    it('refuses a POST carrying an Origin the allowlist does not cover', async () => {
+      // A "simple" cross-origin POST needs no preflight, so CORS alone would not stop it
+      const { res, done } = post({ prompt: 'x' }, undefined, { origin: 'https://evil.example' });
+      await done;
+
+      expect(res.writeHead).toHaveBeenCalledWith(403, { 'Content-Type': 'application/json' });
+      expect(bodyOf(res).error.code).toBe('INVALID_ORIGIN');
+      expect(corsHeadersOf(res)).toEqual([]);
+      // Nothing was claimed: the gate is still free
+      expect(diffusionServer.getActiveGenerationId()).toBeUndefined();
+    });
+
+    it('refuses a DELETE from a disallowed Origin before any route logic runs', async () => {
+      const { res, done } = request('/v1/images/generations/some-id', 'DELETE', {
+        origin: 'https://evil.example',
+      });
+      await done;
+
+      expect(statusOf(res)).toBe(403);
+      expect(bodyOf(res).error.code).toBe('INVALID_ORIGIN');
+    });
+
+    it('still answers a GET from a disallowed Origin (the browser withholds the body)', async () => {
+      const { res, done } = request('/health', 'GET', { origin: 'https://evil.example' });
+      await done;
+
+      expect(statusOf(res)).toBe(200);
+      expect(corsHeadersOf(res)).toEqual([]);
+    });
+
+    it('accepts a POST from a listed Origin', async () => {
+      await restartWith({ ...mockConfig, allowedOrigins: ['http://localhost:5173'] });
+
+      const { res, done } = post({ prompt: 'x' }, undefined, { origin: 'http://localhost:5173' });
+      await done;
+
+      expect(statusOf(res)).toBe(201);
+    });
+
+    it("accepts a POST from any Origin under ['*']", async () => {
+      await restartWith({ ...mockConfig, allowedOrigins: ['*'] });
+
+      const { res, done } = post({ prompt: 'x' }, undefined, {
+        origin: 'https://anything.example',
+      });
+      await done;
+
+      expect(statusOf(res)).toBe(201);
+    });
+
+    it('never touches a request without an Origin (genai-lite, Electron main, curl)', async () => {
+      const { res, done } = post({ prompt: 'x' });
+      await done;
+
+      expect(statusOf(res)).toBe(201);
+    });
+  });
+
+  describe('fallbacks', () => {
     it('returns the NOT_FOUND envelope for unknown routes', async () => {
       const { res, done } = request('/nope', 'GET');
       await done;

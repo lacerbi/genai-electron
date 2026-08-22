@@ -82,7 +82,9 @@ export class ResourceOrchestrator {
    *
    * `'cancel'` is in the set because a cancelled generation kills the backend and
    * then ends: under `'burst'` nothing else would ever release the VRAM, so the LLM
-   * would stay down forever. Double reloads are impossible by construction —
+   * would stay down forever. `'stuck'` is in for the same reason — the watchdog kills
+   * a wedged backend and the generation then fails, so this release is the last event
+   * that can bring the LLM back. Double reloads are impossible by construction —
    * {@link fireAndForgetReload} is the single trigger and every caller checks
    * `pendingReload` first.
    *
@@ -99,6 +101,7 @@ export class ResourceOrchestrator {
       'crashed',
       'stop',
       'cancel',
+      'stuck',
     ]);
 
   /** Backend states in which a process is holding (or about to hold) VRAM */
@@ -277,7 +280,7 @@ export class ResourceOrchestrator {
    * `'single'` releases the backend BEFORE the LLM reload starts, so the two never
    * hold VRAM at the same time. `'burst'` keeps the backend (and the saved LLM state):
    * the reload is deferred until the backend is released for a qualifying reason
-   * (idle timeout, explicit release, crash, cancel, or `stop()`).
+   * (idle timeout, explicit release, crash, a stuck job, cancel, or `stop()`).
    *
    * The `'single'` reload is skipped when one is already in flight: a cancelled or
    * crashed generation already released the backend for a qualifying reason, and

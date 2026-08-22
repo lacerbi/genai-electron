@@ -487,6 +487,182 @@ describe('DiffusionServerManager (generation)', () => {
     });
   });
 
+  describe('result dimensions', () => {
+    /** A PNG signature plus an IHDR chunk header — enough for the dimension parser. */
+    const pngHeader = (width: number, height: number): Buffer => {
+      const buf = Buffer.alloc(33);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buf, 0);
+      buf.writeUInt32BE(13, 8);
+      buf.write('IHDR', 12, 'latin1');
+      buf.writeUInt32BE(width, 16);
+      buf.writeUInt32BE(height, 20);
+      return buf;
+    };
+
+    it('reports the rendered size from the PNG header, not the requested one', async () => {
+      mockGetJob.mockResolvedValue({
+        id: 'job-1',
+        status: 'completed',
+        result: {
+          output_format: 'png',
+          images: [{ index: 0, b64_json: pngHeader(768, 1024).toString('base64') }],
+        },
+      });
+
+      // Omitted size → the backend's own default → only the image can tell us
+      const result = await diffusionServer.executeImageGeneration({ prompt: 'x' });
+
+      expect(result.width).toBe(768);
+      expect(result.height).toBe(1024);
+    });
+
+    it('falls back to the requested size (then 512) when the payload is not a PNG', async () => {
+      // The shared mock answers with a non-PNG payload ('image')
+      const explicit = await diffusionServer.executeImageGeneration({
+        prompt: 'x',
+        width: 640,
+        height: 384,
+      });
+      const omitted = await diffusionServer.executeImageGeneration({ prompt: 'x' });
+
+      expect([explicit.width, explicit.height]).toEqual([640, 384]);
+      expect([omitted.width, omitted.height]).toEqual([512, 512]);
+    });
+  });
+
+  describe('getOrchestrator()', () => {
+    it('is undefined for a manager constructed without an LLM manager', () => {
+      expect(diffusionServer.getOrchestrator()).toBeUndefined();
+    });
+
+    it('returns the live built-in orchestrator — the one that receives backend releases', async () => {
+      const mockLlamaServer: any = {
+        isRunning: jest.fn(() => false),
+        getConfig: jest.fn(() => undefined),
+        stop: jest.fn(async () => {}),
+        start: jest.fn(async () => ({})),
+        registerPreStartHook: jest.fn(() => () => {}),
+      };
+      const server = new DiffusionServerManager(
+        mockModelManager as any,
+        mockSystemInfo as any,
+        mockLlamaServer
+      );
+
+      const orchestrator = server.getOrchestrator();
+      expect(orchestrator).toBeDefined();
+      expect(typeof orchestrator!.getSavedState).toBe('function');
+      expect(typeof orchestrator!.waitForReload).toBe('function');
+
+      // Not a copy: an explicit release of this manager's backend reaches it
+      const released = jest.spyOn(orchestrator!, 'onDiffusionBackendReleased');
+      await server.start(mockConfig);
+      await server.executeImageGeneration({ prompt: 'x' });
+      await server.releaseBackend({ reason: 'explicit' });
+      expect(released).toHaveBeenCalledWith('explicit');
+
+      await server.stop();
+      server.removeAllListeners();
+    });
+  });
+
+  describe('progress percentage cap', () => {
+    const config = { prompt: 'x', width: 512, height: 512, steps: 4 };
+
+    it('caps an overrunning stage at 99 instead of saturating at 100', () => {
+      const internals = diffusionServer as any;
+      internals.initializeProgressTracking(config, false);
+      internals.currentStage = 'loading';
+      // A load ten times longer than the whole estimate
+      internals.loadStartTime = Date.now() - 10 * internals.totalEstimatedTime;
+
+      expect(internals.calculateOverallPercentage()).toBe(99);
+    });
+
+    it('never falls back when a stage transition grows the denominator', () => {
+      const internals = diffusionServer as any;
+      internals.initializeProgressTracking(config, false);
+      internals.currentStage = 'loading';
+      internals.loadStartTime = Date.now() - 10 * internals.totalEstimatedTime;
+      expect(internals.calculateOverallPercentage()).toBe(99);
+
+      // The load closes: the denominator absorbs the overrun and the raw ratio collapses
+      internals.loadEndTime = Date.now();
+      internals.currentStage = 'diffusion';
+      internals.diffusionStartTime = Date.now();
+      internals.recalculateTotalEstimatedTime(config);
+
+      expect(internals.calculateOverallPercentage()).toBe(99);
+    });
+
+    it('resets the high-water mark for the next generation', () => {
+      const internals = diffusionServer as any;
+      internals.initializeProgressTracking(config, false);
+      internals.currentStage = 'loading';
+      internals.loadStartTime = Date.now() - 10 * internals.totalEstimatedTime;
+      internals.calculateOverallPercentage();
+
+      internals.initializeProgressTracking(config, false);
+      internals.currentStage = 'loading';
+      internals.loadStartTime = Date.now();
+
+      expect(internals.calculateOverallPercentage()).toBeLessThan(99);
+    });
+
+    it('reports 100 exactly once, last, even when every stage overruns its estimate', async () => {
+      // Learned estimates of ~0: whatever the real timers do, every stage overruns
+      const internals = diffusionServer as any;
+      internals.modelLoadTime = 1;
+      internals.diffusionTimePerStepPerMegapixel = 0;
+      internals.vaeTimePerMegapixel = 0;
+      emitOnSubmit(
+        [
+          { type: 'bytes', done: 50, total: 100 },
+          { type: 'marker', marker: 'generating' },
+          { type: 'step', step: 2, steps: 4 },
+          { type: 'step', step: 4, steps: 4 },
+          { type: 'marker', marker: 'decoding' },
+          { type: 'marker', marker: 'decoded' },
+        ],
+        3
+      );
+      const reported: number[] = [];
+
+      await diffusionServer.executeImageGeneration({
+        ...config,
+        onProgress: (_s, _t, _stage, percentage) => reported.push(percentage ?? -1),
+      });
+
+      expect(reported.length).toBeGreaterThan(1);
+      expect(reported.at(-1)).toBe(100);
+      expect(reported.filter((value) => value === 100)).toHaveLength(1);
+      expect(reported.slice(0, -1).every((value) => value <= 99)).toBe(true);
+      for (let i = 1; i < reported.length; i++) {
+        expect(reported[i]).toBeGreaterThanOrEqual(reported[i - 1]!);
+      }
+    });
+
+    it('keeps the async batch currentImage within totalImages at 100 %', async () => {
+      emitOnSubmit([
+        { type: 'marker', marker: 'generating' },
+        { type: 'step', step: 4, steps: 4 },
+        { type: 'marker', marker: 'decoded' },
+      ]);
+      const registry = (diffusionServer as any).registry;
+      const update = jest.spyOn(registry, 'update');
+
+      const { promise } = startAsync(diffusionServer, { prompt: 'x', steps: 4, count: 2 });
+      await promise;
+
+      const progress = (update.mock.calls as any[])
+        .map((call) => call[1]?.progress)
+        .filter(Boolean);
+      expect(progress.some((p: any) => p.percentage === 100)).toBe(true);
+      expect(progress.every((p: any) => p.totalImages === 2)).toBe(true);
+      expect(progress.every((p: any) => p.currentImage >= 1 && p.currentImage <= 2)).toBe(true);
+    });
+  });
+
   describe('progress', () => {
     it('walks loading → diffusion → decoding and finishes at 100', async () => {
       emitOnSubmit([

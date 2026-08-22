@@ -123,6 +123,10 @@ const RELEASE_REASON_RANK: Record<DiffusionBackendReleaseReason, number> = {
   calibration: 70,
   'flags-changed': 60,
   'idle-timeout': 50,
+  // Above 'explicit'/'cancel' so the watchdog's own reason survives the cancel-style
+  // release the failing generation's catch path may join it with; below 'stop' and the
+  // other host-driven reasons, which describe a bigger decision than one wedged job.
+  stuck: 45,
   explicit: 40,
   single: 30,
   cancel: 20,
@@ -142,6 +146,18 @@ const TRANSIENT_POLL_ERROR_CODES: ReadonlySet<string> = new Set([
  * @internal
  */
 const CALIBRATION_VRAM_SAMPLE_INTERVAL_MS = 1_000;
+
+/**
+ * Longest gap between two stuck-job watchdog ticks.
+ *
+ * The watchdog polls its own clock instead of rescheduling a timeout on every sign of
+ * life (activity arrives many times per second during sampling). The tick is
+ * `min(this, timeout / 10)`, so the observed overshoot is at most ~10 % of the
+ * configured budget — precise enough for a ten-minute default, cheap enough to leave
+ * armed for a whole job.
+ * @internal
+ */
+const JOB_ACTIVITY_TICK_MAX_MS = 30_000;
 
 /** Per-read bound for one calibration VRAM telemetry capture. @internal */
 const CALIBRATION_VRAM_TELEMETRY_TIMEOUT_MS = 5_000;
@@ -223,9 +239,11 @@ export class DiffusionServerManager extends ServerManager {
     'modelId',
     'port',
     'host',
+    'allowedOrigins',
     'startupTimeout',
     'usageMode',
     'idleTimeoutMs',
+    'jobActivityTimeoutMs',
     'threads',
     'gpuLayers',
     'forceValidation',
@@ -249,6 +267,17 @@ export class DiffusionServerManager extends ServerManager {
   private currentGeneration?: GenerationClaim;
   /** Backend job currently in flight (set by executeImageGeneration only) */
   private inFlight?: InFlightBackendJob;
+  /**
+   * When the backend last showed a sign of life, in epoch milliseconds.
+   *
+   * Written by {@link markBackendActivity} from the stdout tap, the log tap and the
+   * job poll loop; read by the stuck-job watchdog only.
+   */
+  private lastBackendActivityAt = 0;
+  /** Ticking stuck-job watchdog for the in-flight job (see armJobActivityWatchdog) */
+  private jobActivityTimer?: NodeJS.Timeout;
+  /** The job the armed watchdog belongs to; a later generation must not be killed by it */
+  private jobActivityOwner?: InFlightBackendJob;
   /** The one resident backend process, if any */
   private backend: DiffusionBackendRuntime = { state: 'absent' };
   /** Normalized config of the generation whose progress the stdout tap feeds */
@@ -296,6 +325,8 @@ export class DiffusionServerManager extends ServerManager {
   private syntheticProgressInterval?: NodeJS.Timeout;
   private currentStage?: 'loading' | 'diffusion' | 'vae';
   private totalEstimatedTime = 0;
+  /** Highest in-flight percentage reported for the generation in flight (never decreases) */
+  private reportedPercentage = 0;
   private loadProgress = { current: 0, total: 0 };
   private diffusionProgress = { current: 0, total: 0 };
 
@@ -433,7 +464,9 @@ export class DiffusionServerManager extends ServerManager {
       // 4. Resolve the bind host, then the port ONCE ('auto' → OS-assigned free port)
       // and check it. createHTTPServer receives the resolved number — resolving twice
       // would probe one port and bind another.
-      const host = config.host ?? '127.0.0.1';
+      // `||`, not `??`: an empty string would bind every interface (Node's default)
+      // while sidestepping the loopback Host guard.
+      const host = config.host || '127.0.0.1';
       const port =
         config.port === 'auto'
           ? await findFreePort(host)
@@ -699,6 +732,31 @@ export class DiffusionServerManager extends ServerManager {
     }
     if (this.backend.flags) info.flags = { ...this.backend.flags };
     return info;
+  }
+
+  /**
+   * The built-in ResourceOrchestrator — the instance that performs the offload/reload
+   * cycle for every generation routed through this manager (HTTP, async, batch) and
+   * that yields a resident backend to an LLM start.
+   *
+   * Present when the manager was constructed with a `LlamaServerManager` (the exported
+   * `diffusionServer` singleton always is); `undefined` otherwise. Use it to observe the
+   * cycle — `getSavedState()`, `waitForReload()`, `wouldNeedOffload()` — instead of
+   * constructing a second orchestrator, which would be a separate instance that never
+   * receives this manager's backend-release notifications.
+   *
+   * @returns The live built-in orchestrator, or `undefined` without an LLM manager
+   *
+   * @example
+   * ```typescript
+   * const orchestrator = diffusionServer.getOrchestrator();
+   * if (orchestrator?.getSavedState()) {
+   *   await orchestrator.waitForReload();
+   * }
+   * ```
+   */
+  getOrchestrator(): ResourceOrchestrator | undefined {
+    return this.orchestrator;
   }
 
   /**
@@ -977,9 +1035,20 @@ export class DiffusionServerManager extends ServerManager {
           // Before the handle exists these are this spawn's own startup lines;
           // afterwards, only the resident child may drive the progress model.
           if (tap.handle !== undefined && this.backend.handle !== tap.handle) return;
+          // Ahead of the progress model: a byte/step bar is a sign of life even when
+          // no generation is in flight to attribute it to (handleBackendStdoutEvent
+          // returns early without a progressConfig).
+          this.markBackendActivity();
           this.handleBackendStdoutEvent(event);
         },
         onLog: (line, stream) => {
+          // Any complete line from the resident child is a sign of life, including the
+          // progress-bar frames dropped from the log file just below. Trailing lines
+          // flushed by a dying child are still logged but — same guard as
+          // onStdoutEvent — must not reset a newer job's watchdog clock.
+          if (tap.handle === undefined || this.backend.handle === tap.handle) {
+            this.markBackendActivity();
+          }
           // Progress bars redraw many times per second and already reach the
           // progress model as structured events — keep them out of the log file.
           if (isSdServerProgressBarLine(line)) return;
@@ -1159,6 +1228,79 @@ export class DiffusionServerManager extends ServerManager {
       clearTimeout(this.backend.idleTimer);
       this.backend.idleTimer = undefined;
     }
+  }
+
+  /**
+   * Record a sign of life from the backend (resets the stuck-job watchdog)
+   *
+   * Called from the stdout tap (progress bars, stage markers), the log tap (any
+   * complete line) and the job poll loop (a status or queue-position CHANGE). A poll
+   * that answers `generating` again is deliberately NOT activity: that is exactly what
+   * a wedged backend keeps doing.
+   * @private
+   */
+  private markBackendActivity(): void {
+    this.lastBackendActivityAt = Date.now();
+  }
+
+  /**
+   * Arm the stuck-job watchdog for one in-flight backend job
+   *
+   * `jobActivityTimeoutMs: 0` (or a non-finite value) disables it entirely. The timer
+   * ticks rather than being rescheduled per event, because activity arrives many times
+   * per second while sampling; each tick compares the configured budget against
+   * {@link lastBackendActivityAt} and, on expiry, hands `onExpiry` the observed idle
+   * time. Armed and disarmed strictly inside one `executeImageGeneration()` call, so a
+   * batch loop gets one watchdog per image and never one around the batch.
+   *
+   * @param owner - The job this watchdog belongs to (identity guard: a later
+   *   generation owning the slot silences an inherited tick)
+   * @param onExpiry - Invoked once, after the watchdog is disarmed
+   * @private
+   */
+  private armJobActivityWatchdog(
+    owner: InFlightBackendJob,
+    onExpiry: (idleMs: number, timeoutMs: number) => void
+  ): void {
+    this.clearJobActivityTimer();
+
+    const serverConfig = (this._config ?? {}) as DiffusionServerConfig;
+    const timeoutMs =
+      serverConfig.jobActivityTimeoutMs ?? DIFFUSION_BACKEND_DEFAULTS.jobActivityTimeoutMs;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return;
+
+    this.markBackendActivity();
+
+    const tickMs = Math.max(1, Math.min(JOB_ACTIVITY_TICK_MAX_MS, Math.floor(timeoutMs / 10)));
+    const timer = setInterval(() => {
+      if (this.jobActivityOwner !== owner) return;
+      const idleMs = Date.now() - this.lastBackendActivityAt;
+      if (idleMs < timeoutMs) return;
+      this.disarmJobActivityWatchdog(owner);
+      onExpiry(idleMs, timeoutMs);
+    }, tickMs);
+    if (typeof timer.unref === 'function') timer.unref();
+    this.jobActivityTimer = timer;
+    this.jobActivityOwner = owner;
+  }
+
+  /**
+   * Disarm the stuck-job watchdog owned by `owner` (no-op for a foreign owner)
+   * @private
+   */
+  private disarmJobActivityWatchdog(owner: InFlightBackendJob): void {
+    if (this.jobActivityOwner !== owner) return;
+    this.clearJobActivityTimer();
+  }
+
+  /**
+   * Drop whatever stuck-job watchdog is armed
+   * @private
+   */
+  private clearJobActivityTimer(): void {
+    if (this.jobActivityTimer) clearInterval(this.jobActivityTimer);
+    this.jobActivityTimer = undefined;
+    this.jobActivityOwner = undefined;
   }
 
   /**
@@ -2089,19 +2231,75 @@ export class DiffusionServerManager extends ServerManager {
    * @private
    */
   private async createHTTPServer(port: number, host: string): Promise<void> {
+    // DNS-rebinding guard: a page on the public web can resolve its own hostname to
+    // 127.0.0.1 and then talk to a loopback server as "same origin". While bound to
+    // loopback, only Host headers that cannot be a rebound name are accepted. A
+    // deliberately widened bind (`host: '0.0.0.0'`) is the host's call; no guard.
+    const guardHostHeader = isLoopbackBindAddress(host);
+    // Key allowlist only validates names, so a JS caller can still pass a string here;
+    // `String.prototype.includes` would then do substring matching. Arrays only.
+    const configuredOrigins = ((this._config ?? {}) as DiffusionServerConfig).allowedOrigins;
+    const allowedOrigins: readonly string[] = Array.isArray(configuredOrigins)
+      ? configuredOrigins
+      : [];
+
     this.httpServer = http.createServer(async (req, res) => {
-      // Enable CORS
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-
-      if (req.method === 'OPTIONS') {
-        res.writeHead(200);
-        res.end();
-        return;
-      }
-
       try {
+        if (guardHostHeader && !isLoopbackHostHeader(req.headers.host)) {
+          const shown = (req.headers.host ?? '').slice(0, 100);
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: {
+                message: `Rejected Host header "${shown}": the diffusion server is bound to a loopback address and only accepts localhost or IP-literal hosts`,
+                code: 'INVALID_HOST',
+              },
+            })
+          );
+          return;
+        }
+
+        // CORS is opt-in: without `allowedOrigins` the wrapper advertises nothing, so a
+        // browser context cannot READ from it cross-origin. Node/Electron-main clients
+        // send no Origin and are unaffected. The response varies with Origin either way.
+        res.setHeader('Vary', 'Origin');
+        const origin = req.headers.origin;
+        const allowedOrigin = resolveAllowedOrigin(allowedOrigins, origin);
+        if (allowedOrigin !== undefined) {
+          res.setHeader('Access-Control-Allow-Origin', allowedOrigin);
+          res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
+          res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        }
+
+        if (req.method === 'OPTIONS') {
+          res.writeHead(200);
+          res.end();
+          return;
+        }
+
+        // CORS only stops a browser from reading the answer: a "simple" cross-origin
+        // POST (e.g. text/plain) needs no preflight and would still start GPU work. A
+        // state-changing request from an origin the allowlist does not cover is
+        // therefore refused outright. GET/HEAD answered without CORS headers are
+        // harmless — the browser withholds the body.
+        if (
+          origin !== undefined &&
+          allowedOrigin === undefined &&
+          req.method !== 'GET' &&
+          req.method !== 'HEAD'
+        ) {
+          res.writeHead(403, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({
+              error: {
+                message: `Rejected cross-origin ${req.method} from "${origin.slice(0, 100)}": add the origin to DiffusionServerConfig.allowedOrigins to allow browser clients`,
+                code: 'INVALID_ORIGIN',
+              },
+            })
+          );
+          return;
+        }
+
         // Health endpoint
         if (req.url === '/health' && req.method === 'GET') {
           res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2388,9 +2586,11 @@ export class DiffusionServerManager extends ServerManager {
             totalSteps,
             stage,
             percentage,
+            // Folded batch progress reaches 100 only on the last image, so clamp: at
+            // exactly 100 the floor division would otherwise yield count + 1
             currentImage:
               config.count && config.count > 1
-                ? Math.floor((percentage || 0) / (100 / config.count)) + 1
+                ? Math.min(config.count, Math.floor((percentage || 0) / (100 / config.count)) + 1)
                 : undefined,
             totalImages: config.count && config.count > 1 ? config.count : undefined,
           },
@@ -2676,12 +2876,70 @@ export class DiffusionServerManager extends ServerManager {
     };
     this.inFlight = inFlightJob;
 
+    // Stuck-job watchdog. The one failure the job API cannot report is a backend that
+    // stays alive and keeps answering 'generating' forever: without this, the busy gate
+    // stays closed, the registry entry is never finished and an offloaded LLM never
+    // comes back. Armed per generation (never around a batch) and disarmed below.
+    // Kept so the catch below can surface it: an expiry that lands while the submit
+    // round-trip is still in flight (deliberately not raced against abortPromise) would
+    // otherwise be masked by the SD_SERVER_EXITED error the kill produces.
+    let stuckError: ServerError | undefined;
+    this.armJobActivityWatchdog(inFlightJob, (idleMs, timeoutMs) => {
+      const stage = this.currentStage === 'vae' ? 'decoding' : (this.currentStage ?? 'loading');
+      const label = jobId ?? '(not yet submitted)';
+      void this.logManager
+        ?.write(
+          `sd-server backend job ${label} showed no activity for ${idleMs} ms ` +
+            `(limit ${timeoutMs} ms, stage ${stage}) - releasing the backend`,
+          'error'
+        )
+        .catch(() => void 0);
+
+      // Ladder, all best effort: ask the backend to drop the job (the pinned build
+      // answers 409 once it is generating), then kill it. Latching jobStopRequested
+      // keeps this generation's own catch path from asking for a second release.
+      jobStopRequested = true;
+      if (jobId !== undefined) {
+        void client.cancelJob(jobId).catch(() => undefined);
+      }
+      // Initiated, not awaited: the flip to 'stopping' is synchronous, so no respawn
+      // can slip past the dying child.
+      void this.releaseBackend({ reason: 'stuck' }).catch((error: unknown) => {
+        debugLog('[Diffusion] stuck-job release failed:', error);
+      });
+
+      stuckError = new ServerError(
+        `stable-diffusion.cpp backend job ${label} showed no activity for ${idleMs} ms; ` +
+          'the backend was released',
+        {
+          code: 'BACKEND_JOB_STUCK',
+          jobId,
+          idleMs,
+          timeoutMs,
+          stage,
+          args: handle.args.join(' '),
+          // Deliberately NOT the `stderr`/`stderrTail` keys: those drive OOM
+          // classification (classifyCalibrationFailure), and a wedged backend is an
+          // error, never an out-of-memory result.
+          backendStderrTail: handle.stderrTail || undefined,
+          suggestion:
+            'The backend stopped reporting progress and was killed. Retry the image; ' +
+            'raise DiffusionServerConfig.jobActivityTimeoutMs (or set it to 0 to disable ' +
+            'the watchdog) if this hardware legitimately goes that long without output.',
+        }
+      );
+      rejectInFlight(stuckError);
+    });
+
     try {
       // Deliberately NOT raced against abortPromise: a cancel landing mid-round-trip
       // would leave the backend running a job nobody owns. The latch below cancels it
       // as soon as the id exists.
       const submitted = await handle.raceWithExit(client.submitImageJob(request));
       jobId = submitted.id;
+      // The backend answered the submit: a sign of life the watchdog must not miss
+      // when the round-trip itself took a while.
+      this.markBackendActivity();
 
       // A cancel that arrived before the job existed is latched on the claim (or,
       // when it landed during the round-trip, on `cancelled`)
@@ -2703,8 +2961,6 @@ export class DiffusionServerManager extends ServerManager {
         throw this.jobFailureError(handle, job);
       }
 
-      this.completeVaeStage(normalizedConfig);
-
       const base64 = job.result?.images[0]?.b64_json;
       if (base64 === undefined || base64 === '') {
         throw new ServerError('Failed to decode generated image: no image data in job result', {
@@ -2722,16 +2978,37 @@ export class DiffusionServerManager extends ServerManager {
         });
       }
 
+      // Only now: the 100 % callback promises an image that exists, so it must follow
+      // the payload checks above, not the bare 'completed' status.
+      this.completeVaeStage(normalizedConfig);
+
+      // The request never asks for a format, so the pinned build returns PNG; surface a
+      // change rather than silently reporting `format: 'png'` and the requested size.
+      const outputFormat = job.result?.output_format;
+      if (outputFormat !== undefined && outputFormat !== 'png') {
+        await this.logManager?.write(
+          `sd-server returned output_format=${outputFormat}; the result is reported as PNG`,
+          'warn'
+        );
+      }
+
       // Update time estimates based on actual generation times
       this.updateTimeEstimates(normalizedConfig, spawned);
+
+      // Report what was rendered, not what was asked for: an omitted size means the
+      // backend's own default, which only the image itself can tell us.
+      const dimensions = readPngDimensions(imageBuffer) ?? {
+        width: normalizedConfig.width || 512,
+        height: normalizedConfig.height || 512,
+      };
 
       return {
         image: imageBuffer,
         format: 'png',
         timeTaken: Date.now() - startTime,
         seed: normalizedConfig.seed,
-        width: normalizedConfig.width || 512,
-        height: normalizedConfig.height || 512,
+        width: dimensions.width,
+        height: dimensions.height,
       };
     } catch (error) {
       // A job the backend may still be working on must not outlive the generation that
@@ -2742,9 +3019,12 @@ export class DiffusionServerManager extends ServerManager {
       if (jobId !== undefined && !isTerminalJobStatus(jobStatus) && !isBackendExit(error)) {
         stopBackendJob();
       }
-      throw this.toGenerationError(handle, error);
+      // A watchdog expiry during the un-raced submit surfaces as the kill's exit error
+      // here; the stuck error is the one the caller should see.
+      throw this.toGenerationError(handle, stuckError ?? error);
     } finally {
       // Identity checks: a later generation may already own these
+      this.disarmJobActivityWatchdog(inFlightJob);
       if (this.inFlight === inFlightJob) this.inFlight = undefined;
       this.finishProgressTracking(normalizedConfig);
       if (this.backend.state === 'busy') {
@@ -2765,6 +3045,10 @@ export class DiffusionServerManager extends ServerManager {
    * `DIFFUSION_BACKEND_DEFAULTS.maxTransientPollFailures - 1` consecutive transient
    * client failures are retried. Everything else (expired/unknown job, HTTP error,
    * invalid body, backend exit) fails the generation immediately.
+   *
+   * The loop feeds the stuck-job watchdog, but only on a status or queue-position
+   * CHANGE — an answered poll that still says `generating` proves the HTTP thread is
+   * alive, not that the job is progressing.
    * @private
    */
   private async pollJobToCompletion(
@@ -2775,6 +3059,8 @@ export class DiffusionServerManager extends ServerManager {
     onStatus: (status: SdServerJobStatus) => void
   ): Promise<SdServerJob> {
     let transientFailures = 0;
+    let lastStatus: SdServerJobStatus | undefined;
+    let lastQueuePosition: number | undefined;
 
     for (;;) {
       let job: SdServerJob;
@@ -2805,6 +3091,12 @@ export class DiffusionServerManager extends ServerManager {
       }
 
       onStatus(job.status);
+
+      if (job.status !== lastStatus || job.queue_position !== lastQueuePosition) {
+        lastStatus = job.status;
+        lastQueuePosition = job.queue_position;
+        this.markBackendActivity();
+      }
 
       if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
         return job;
@@ -3089,6 +3381,7 @@ export class DiffusionServerManager extends ServerManager {
 
     // Reset tracking variables
     this.generationStartTime = Date.now();
+    this.reportedPercentage = 0;
     this.currentStage = undefined;
     this.loadStartTime = undefined;
     this.loadEndTime = undefined;
@@ -3258,10 +3551,16 @@ export class DiffusionServerManager extends ServerManager {
 
   /**
    * Calculate overall progress percentage
+   *
+   * In-flight values are capped at 99 and never decrease within a generation: a stage
+   * that overruns its learned estimate would otherwise saturate the bar at 100 and fall
+   * back at the next stage transition, when the denominator absorbs the overrun. Only
+   * `completeVaeStage()` reports 100, once the image exists.
    * @private
    */
   private calculateOverallPercentage(): number {
-    if (!this.generationStartTime || this.totalEstimatedTime === 0) return 0;
+    if (!this.generationStartTime) return 0;
+    if (this.totalEstimatedTime <= 0) return this.reportedPercentage;
 
     let elapsedTotal = 0;
 
@@ -3290,7 +3589,9 @@ export class DiffusionServerManager extends ServerManager {
       elapsedTotal = actualLoadTime + actualDiffusionTime + elapsedVae;
     }
 
-    return Math.min(100, Math.round((elapsedTotal / this.totalEstimatedTime) * 100));
+    const raw = Math.min(99, Math.round((elapsedTotal / this.totalEstimatedTime) * 100));
+    this.reportedPercentage = Math.max(this.reportedPercentage, raw);
+    return this.reportedPercentage;
   }
 
   /**
@@ -3400,6 +3701,82 @@ export class DiffusionServerManager extends ServerManager {
       this.vaeTimePerMegapixel = inferredTime / megapixels;
     }
   }
+}
+
+/** PNG file signature — the first eight bytes of every PNG */
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * Read the pixel dimensions from a PNG payload's IHDR chunk
+ *
+ * The signature is followed by the IHDR chunk: a 4-byte length, the `IHDR` tag, then
+ * width and height as big-endian 32-bit integers. Returns `undefined` for anything that
+ * is not a well-formed PNG header so the caller can fall back to the requested size.
+ * @internal
+ */
+function readPngDimensions(image: Buffer): { width: number; height: number } | undefined {
+  if (image.length < 24 || !image.subarray(0, 8).equals(PNG_SIGNATURE)) return undefined;
+  if (image.toString('latin1', 12, 16) !== 'IHDR') return undefined;
+  const width = image.readUInt32BE(16);
+  const height = image.readUInt32BE(20);
+  if (width === 0 || height === 0) return undefined;
+  return { width, height };
+}
+
+/**
+ * Whether a bind address is loopback (`127.0.0.1` — the default — `localhost`, `::1`)
+ *
+ * Not the same question as `normalizeHealthHost()` (health-check.ts): that maps the
+ * wildcards `0.0.0.0` / `::` TO a loopback address because a wildcard bind is reachable
+ * through loopback, whereas here a wildcard is a deliberately widened bind that must stay
+ * unguarded. Do not merge the two.
+ * @internal
+ */
+function isLoopbackBindAddress(host: string): boolean {
+  const normalized = host
+    .trim()
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
+  return (
+    normalized === 'localhost' ||
+    normalized === '::1' ||
+    normalized.startsWith('127.') ||
+    normalized.startsWith('::ffff:127.')
+  );
+}
+
+/**
+ * Host headers that cannot be a rebound DNS name: `localhost` (and `*.localhost`, which
+ * resolvers pin to loopback), an IPv4 literal, or a bracketed IPv6 literal, each with an
+ * optional port.
+ */
+const LOOPBACK_HOST_HEADER =
+  /^(?:(?:[a-z0-9-]+\.)*localhost\.?|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+
+/**
+ * Whether a request's `Host` header is acceptable on a loopback-bound wrapper. An absent
+ * or empty header is accepted: browsers always send a real one, so neither can be a
+ * rebinding attempt.
+ * @internal
+ */
+function isLoopbackHostHeader(hostHeader: string | undefined): boolean {
+  if (!hostHeader) return true;
+  return LOOPBACK_HOST_HEADER.test(hostHeader.trim());
+}
+
+/**
+ * Resolve the `Access-Control-Allow-Origin` value for a request: `'*'` when the allowlist
+ * carries the wildcard, the request origin when it is listed exactly, and `undefined` (no
+ * CORS headers at all) otherwise — including the default empty allowlist.
+ * @internal
+ */
+function resolveAllowedOrigin(
+  allowedOrigins: readonly string[],
+  origin: string | undefined
+): string | undefined {
+  if (allowedOrigins.includes('*')) return '*';
+  if (origin !== undefined && allowedOrigins.includes(origin)) return origin;
+  return undefined;
 }
 
 /**
