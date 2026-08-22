@@ -1,14 +1,14 @@
 # genai-electron Implementation Progress
 
-> **Current Status**: v0.25.0 released — Persistent sd-server diffusion backend
-> (2026-08-21); diffusion hardening batch accumulating unreleased (2026-08-22)
+> **Current Status**: v0.26.0 release candidate — Diffusion stuck-job watchdog and wrapper
+> access control (2026-08-22)
 
 ---
 
-## Unreleased: Diffusion hardening batch (2026-08-22)
+## v0.26.0: Diffusion Stuck-Job Watchdog and Wrapper Access Control (2026-08-22)
 
-Items 1–3 of the 2026-08-22 follow-up triage (`ISSUE-diffusion-followups.md`). Minor-level:
-new public union member, new config fields, and one default change. No version bump yet.
+Items 1–3 of the 2026-08-22 follow-up triage (`ISSUE-diffusion-followups.md`): a new public
+union member, new config fields, a new manager method, two new wire codes, and one default change.
 
 **Stuck-job watchdog (robustness)**
 
@@ -74,6 +74,35 @@ new public union member, new config fields, and one default change. No version b
   model's native values (genai-lite fills its own). The example app now auto-applies a preset's
   `recommendedSettings` when a matching model is selected and no longer hard-codes 20 steps /
   cfg 7.5 / `euler_a`.
+
+**Validation:** Build passes with 0 TypeScript errors; ESLint reports 0 errors with the
+repository's existing 114 warnings; `npm run format:check` is clean; the full suite passes
+1421/1421 across 46 suites (17 new watchdog tests in
+`tests/unit/DiffusionServerManager.watchdog.test.ts`, new route tests for CORS / `INVALID_ORIGIN` /
+`INVALID_HOST`, plus result-dimension, `getOrchestrator()`, and progress-cap tests). The batch was
+verified by three independent read-only review passes (watchdog; access control + wrong-data +
+progress; docs + example app) whose findings were applied before commit — notably the
+`INVALID_ORIGIN` write rejection, the 100 % callback moving after the payload checks, and a watchdog
+expiry during the un-raced submit no longer being masked by the kill's exit error. Release gates
+(2026-08-22): `npm run prepublishOnly` (clean build + 1421/1421 across 46 suites), lint 0 errors,
+`format:check` clean, `npm audit --omit=dev --audit-level=high` 0 vulnerabilities, `npm pack
+--dry-run` → `genai-electron-0.26.0.tgz`, 232 files, 309.2 kB packed / 1.6 MB unpacked,
+`git diff --check` clean. The example app's main process typechecks; no live hardware smoke was run
+for this release (no binary pin or spawn-path change).
+
+**Compatibility:** The wrapper's HTTP routes, the manager's method and event surface, and every
+existing config key are preserved; genai-lite and Electron main-process clients send no `Origin`
+and are unaffected by the CORS flip. A browser context that called the wrapper directly must now
+set `allowedOrigins` (`['*']` restores the old wildcard); a custom loopback hostname is rejected by
+the Host guard; exhaustive handling of `DiffusionBackendReleaseReason` needs a `'stuck'` case. This
+is a **minor** release (new config fields, union member, method, and wire codes, all backward
+compatible for the supported path); see `genai-electron-docs/migration-0-25-to-0-26.md`. Because
+this is a pre-1.0 minor, dependency ranges such as `^0.25.0` do not admit v0.26.0 — update the
+range or pin explicitly. Residual, tracked in `ISSUE-diffusion-followups.md`: `parseRequestBody`
+has no size cap; `calibrate()` uses the library-default watchdog timeout (synthetic config).
+
+**Release status:** Preparing the single release PR from `feat/diffusion-hardening`. Merge, the
+annotated `v0.26.0` tag, the GitHub release, and the maintainer's `npm publish` remain.
 
 ---
 

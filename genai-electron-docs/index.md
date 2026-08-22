@@ -1,6 +1,6 @@
 # genai-electron Documentation
 
-> **Version**: 0.25.0 (Persistent sd-server diffusion backend)
+> **Version**: 0.26.0 (Diffusion stuck-job watchdog and wrapper access control)
 > **Status**: Production Ready - LLM & Image Generation
 
 Complete documentation for genai-electron—an Electron-first library for managing local AI model
@@ -28,6 +28,7 @@ calibration policy metadata.
 - **[Troubleshooting](troubleshooting.md)** - Common issues, error codes, FAQ
 
 ### Migration
+- **[Migrating from v0.25.0 to v0.26.0](migration-0-25-to-0-26.md)** - Stuck-job watchdog (`jobActivityTimeoutMs`, release reason `'stuck'`), opt-in CORS (`allowedOrigins`) with `INVALID_ORIGIN`/`INVALID_HOST` guards, `getOrchestrator()`, PNG-truthful result dimensions, monotonic progress
 - **[Migrating from v0.24.0 to v0.25.0](migration-0-24-to-0-25.md)** - Persistent `sd-server` diffusion backend with `single`/`burst` residency, symmetric LLM/diffusion orchestration, calibration `usageMode` + `policyVersion`; wrapper binds `127.0.0.1` by default
 - **[Migrating from v0.23.0 to v0.24.0](migration-0-23-to-0-24.md)** - Node-safe direct llama-server launch, optional Electron peer installation, and native-ESM adoption boundary
 - **[Migrating from v0.22.1 to v0.23.0](migration-0-22-1-to-0-23.md)** - Additive byte-level extraction telemetry plus truthful `finalizing` and `installing` phases

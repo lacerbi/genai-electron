@@ -1,6 +1,6 @@
 # genai-electron
 
-> **Version**: 0.25.0 | **Status**: Production Ready - Persistent sd-server diffusion backend
+> **Version**: 0.26.0 | **Status**: Production Ready - Diffusion stuck-job watchdog and wrapper access control
 
 Electron-first library for managing local AI model servers (llama.cpp, stable-diffusion.cpp), with
 supported Electron-free subpaths for calibration policy metadata and direct llama-server launch.
@@ -15,7 +15,7 @@ Complements [genai-lite](https://github.com/lacerbi/genai-lite) for API abstract
 - ✅ **Image generation** - Local image generation via a persistent stable-diffusion.cpp `sd-server` backend with single/burst VRAM residency
 - ✅ **Multi-component diffusion models** - Flux 2, SDXL split components with aggregate checksum validation
 - ✅ **Resource orchestration** - Symmetric: automatic LLM offload/reload when memory constrained, and a resident diffusion backend yields to an LLM start
-- ✅ **Reliable server lifecycle** - Crash auto-restart, hang watchdog, automatic port selection, occupancy safety, log rotation
+- ✅ **Reliable server lifecycle** - Crash auto-restart, hang and stuck-job watchdogs, automatic port selection, occupancy safety, log rotation
 - ✅ **Advanced launch control** - KV-cache quantization, flash-attention control, MoE CPU offload, multi-shard GGUF downloads, image-generation cancellation
 - ✅ **Binary management** - Automatic binary download with GPU variant testing (CUDA→Vulkan→CPU)
 - ✅ **TypeScript-first** - Full type safety, minimal runtime dependencies
